@@ -1045,7 +1045,7 @@ impl HostCoordinator {
                         let f = if let (Some(request), Some(observation)) =
                             (click.as_ref(), write_observation.as_ref())
                         {
-                            observation.click_facts(
+                            observation.click_result_facts(
                                 &state,
                                 bound.owner(),
                                 bound.target(),
@@ -1065,7 +1065,7 @@ impl HostCoordinator {
                             if click.is_none()
                                 && let Some(observation) = write_observation.as_ref()
                             {
-                                observation.validate_delivery(&state)?;
+                                let f = observation.write_result_facts(&state)?;
                                 if receipt.evidence != CuaEvidence::Acknowledged {
                                     return Ok(());
                                 }
@@ -1139,6 +1139,14 @@ impl HostCoordinator {
                         }
                         Ok(())
                     });
+                    if write_observation.is_some() {
+                        crate::providers::cua::trace_write_settlement(
+                            receipt.evidence,
+                            result.is_ok(),
+                            audit.is_ok(),
+                            delivery.is_ok(),
+                        );
+                    }
                     drop(state);
                     drop(guard);
                     let response = result.map_err(CoordinatorError::from).and_then(|snapshot| {

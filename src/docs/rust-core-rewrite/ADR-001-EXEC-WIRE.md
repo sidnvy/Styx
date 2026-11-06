@@ -30,3 +30,22 @@ The final Rust↔Rust candidate must pass the strong contract. Passing the legac
 4. Complete Rust Gateway transport/registry/auth and Rust↔Rust tests, then migration through signed versioned payloads.
 
 Required negative controls include spoofed owner metadata, registry generation substituted for HostGeneration, stale connection/owner token, duplicate start/write, changed payload, ambiguous ACK, queued read before start, transport resume without executor respawn, raw/decoded mode mixing, fake v2 WebSocket echo, and silent downgrade. Effects and cleanup must be observed independently. No live profile or signed artifact was changed to make this decision.
+
+## Native output pagination correction, 2026-11-04
+
+The pinned Windows Codex executor returns whole output chunks: a `process/read` with `maxBytes:1500` returned a valid 1544-byte chunk. This is a batching hint, not a native frame limit. The adapter retains the existing hard wire-frame bound, sequence/base64 checks, owner checks and independent process-exit/output-drain facts.
+
+Decoded consumers retain each validated native page under its original RPC memory reservation and deliver bounded byte slices through the same incremental UTF-8 decoder. They advance the native cursor only after retaining the validated page, never issue a second native read while bytes remain, and require an empty closed page to prove drain. Two retained pages leave one original RPC slot for control/cleanup. Saturation refuses a decoded read before dispatch, with its cursor unchanged; unknown reads still prohibit replay. Revoked-owner cleanup discards and zeroizes the original retained bytes. Raw-page mode preserves the upstream page and cursor without splitting or re-encoding it. Cancellation and cleanup apply the hard frame bound rather than the batching hint.
+
+Contract regressions are separate from signed Gateway/Host native acceptance. Original failed reads and their independent one-time effects remain evidence; they are never retried to validate this correction.
+
+
+## Native terminal-output retention correction, 2026-11-04
+
+The pinned `codex-cli 0.163.0` removes exited native process read records after 30 seconds ([upstream local_process.rs](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/exec-server/src/local_process.rs#L94)). A real Windows diagnostic delivered a normal output chunk and exit/closed notifications, then returned `unknown process id` when a new terminal-page read followed 32 seconds later. The original Styx failure and its independent one-time file effect remain unmodified; neither that command nor its uncertain read is replayed.
+
+Decoded delivery can also use a complete, contiguous `process/output` → `process/exited` → `process/closed` event prefix from the same already registered process and the same original stdio reader. Sequence, stream, canonical base64, exit/close identity and prior exit-code agreement are checked. This is retained executor DATA, never owner, policy, action or recovery authority. Current Core read admission and post-read delivery admission remain unchanged; prior unknown start/input/cursor outcomes stay unknown.
+
+The event cache uses only the unused 2MiB in the existing 16MiB peer reservation, including a conservative per-chunk metadata charge. Registration remains bounded by the original process-observation limit. Decoded bytes keep their reservation during bounded UTF-8 delivery and are zeroized on drop. No release or delivered drain is reported while bytes remain. Missing, malformed, duplicate, out-of-sequence or over-budget events disable this proof; the original strict native-page path remains available and its failures stay uncertain. Raw reads disable the event cache and preserve original upstream pages/cursors. An incomplete stream, a native missing-record error by itself, or a timeout never proves EOF.
+
+Thus native page mode still requires an empty closed page; a complete original native event stream is an independent terminal proof. No process is respawned, no mutation is replayed and no standard executor is replaced. Contract tests are separate from final same-source Windows/Linux native acceptance, including an intentional delay beyond the native retention period.

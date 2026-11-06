@@ -386,11 +386,13 @@ impl HostApp {
     }
 }
 
+#[cfg(test)]
+pub(super) static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     struct Fixture {
         top: PathBuf,
         parent: PathBuf,
@@ -438,7 +440,7 @@ mod tests {
     }
     #[tokio::test]
     async fn maintenance_requires_same_live_owner_ticket_and_final_normal_quit() {
-        let _serial = SERIAL.lock().await;
+        let _serial = TEST_SERIAL.lock().await;
         let f = Fixture::new();
         let mut app = f.app().await;
         let prepared = app
@@ -514,7 +516,7 @@ mod tests {
     }
     #[tokio::test]
     async fn replaced_original_app_root_cannot_finish_or_cancel_pending_maintenance() {
-        let _serial = SERIAL.lock().await;
+        let _serial = TEST_SERIAL.lock().await;
         let f = Fixture::new();
         let mut app = f.app().await;
         let prepared = app
@@ -544,7 +546,7 @@ mod tests {
     }
     #[tokio::test]
     async fn install_root_cannot_contain_preserved_app_state() {
-        let _serial = SERIAL.lock().await;
+        let _serial = TEST_SERIAL.lock().await;
         let f = Fixture::new();
         let mut app = f.app().await;
         let mut input: Value = serde_json::from_str(f.prepare(&"5".repeat(32)).get()).unwrap();

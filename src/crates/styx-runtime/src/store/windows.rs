@@ -27,6 +27,17 @@ pub(super) struct Root {
     path: PathBuf,
     identity: RootIdentity,
 }
+/// Borrowed read port inside one validated original directory operation. This
+/// does not cache trust across operations; the original ancestor HANDLEs remain
+/// held, and every member keeps the ordinary ACL/streams/file-ID/bytes checks.
+pub(super) struct ReadBatch<'a> {
+    root: &'a Root,
+}
+impl ReadBatch<'_> {
+    pub(super) fn read_raw(&self, relative: &Path, max_bytes: usize) -> Result<RawFile> {
+        self.root.read_raw_member(relative, max_bytes)
+    }
+}
 fn component(name: &OsStr) -> Result<()> {
     let text = name.to_str().ok_or(StoreError::InvalidRelativePath)?;
     let stem = text.split('.').next().unwrap_or("").to_ascii_uppercase();
@@ -577,8 +588,20 @@ impl Root {
         self.validate_root()?;
         result
     }
-    pub(super) fn read_raw(&self, relative: &Path, max_bytes: usize) -> Result<RawFile> {
+    /// Revalidate this exact retained directory/ancestor chain before and after
+    /// a bounded synchronous read operation, including a refused member read.
+    /// A borrowed port cannot authorize writes, recover transactions or escape
+    /// as a new trusted root. Directory changes fail the final validation.
+    pub(super) fn with_read_batch<T>(&self, read: impl FnOnce(&ReadBatch<'_>) -> T) -> Result<T> {
         self.validate_root()?;
+        let result = read(&ReadBatch { root: self });
+        self.validate_root()?;
+        Ok(result)
+    }
+    pub(super) fn read_raw(&self, relative: &Path, max_bytes: usize) -> Result<RawFile> {
+        self.with_read_batch(|batch| batch.read_raw(relative, max_bytes))?
+    }
+    fn read_raw_member(&self, relative: &Path, max_bytes: usize) -> Result<RawFile> {
         let opened = self.open_relative(relative, false, false, false)?;
         let before = private_facts(&opened.file, false)?;
         ffi::require_no_streams(&opened.path)?;
@@ -602,7 +625,6 @@ impl Root {
         {
             return Err(StoreError::Changed);
         }
-        self.validate_root()?;
         Ok(RawFile {
             relative_path: relative.to_owned(),
             sha256: sha256(&bytes),

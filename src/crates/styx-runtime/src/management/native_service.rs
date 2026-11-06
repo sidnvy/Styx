@@ -59,11 +59,6 @@ fn os(error: crate::platform::linux::native_service::ServiceError) -> NativeMana
 }
 /// No mutation retry. A lost caller detaches the ONE owned operation. Unknown
 /// retains its original scope/utility custody and budget until process teardown.
-/// systemd reports a unit whose process exited with an error as `failed`;
-/// like `inactive`, nothing of it is running.
-fn not_running(active: &str) -> bool {
-    matches!(active, "inactive" | "failed")
-}
 pub async fn manage(
     state_dir: &Path,
     action: ServiceAction,
@@ -207,14 +202,12 @@ pub async fn manage(
             } else if original.manager != NativeManager::PersistentService || !before.installed {
                 return Err(NativeManagementError::new(ErrorKind::Conflict));
             }
-            if action == ServiceAction::Start
-                && (original.run != NativeRunDesired::Stopped || !not_running(&before.active))
-            {
+            if action == ServiceAction::Start && !before.start_allowed(original.run) {
                 return Err(NativeManagementError::new(ErrorKind::Conflict));
             }
             if action == ServiceAction::Uninstall
                 && (original.run != NativeRunDesired::Stopped
-                    || !not_running(&before.active)
+                    || !before.stopped_for_mutation()
                     || before.enabled != Some(false))
             {
                 return Err(NativeManagementError::new(ErrorKind::Conflict));
@@ -391,6 +384,37 @@ pub async fn manage(
                 ServiceAction::Status => unreachable!(),
             }
             .map_err(os)?;
+            // Type=exec/Active only proves process creation. Wait for this exact
+            // original Gateway to load and answer through its authenticated owner.
+            if action == ServiceAction::Start && matches!(component, NativeComponent::Gateway) {
+                let until = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+                loop {
+                    let current = definition.inspect().await.map_err(os)?;
+                    if current.main_pid != observed.main_pid
+                        || current.invocation_id != observed.invocation_id
+                        || current.active != "active"
+                    {
+                        return Err(NativeManagementError::new(ErrorKind::Unknown));
+                    }
+                    let answer = tokio::time::timeout_at(
+                        until,
+                        crate::management::service_control::query(&path, id.clone()),
+                    )
+                    .await;
+                    if let Ok(Ok(answer)) = answer
+                        && answer.transaction_id == id
+                        && answer.revision == expected + 1
+                        && answer.status == "committed"
+                        && answer.state_scope == "transaction_target"
+                    {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= until {
+                        return Err(NativeManagementError::new(ErrorKind::Unknown));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
             let final_state = definition.state().map_err(os)?;
             if final_state
                 .last_transaction

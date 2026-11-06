@@ -33,7 +33,7 @@ fn evidence(capability: CapabilityId) -> crate::session::ProviderEvidence {
         recovery: Recovery::None,
     }
 }
-async fn fixture() -> (State, OwnerLease, ResourceTarget) {
+async fn fixture_for_pid(pid: u32) -> (State, OwnerLease, ResourceTarget) {
     let facts = AdmissionFacts {
         device_id: context().device_id,
         grant_revision: 1,
@@ -139,7 +139,6 @@ async fn fixture() -> (State, OwnerLease, ResourceTarget) {
         operation_id: open.id,
         payload_digest: open.payload_digest,
     };
-    let pid = std::process::id();
     // Query projection has fewer returned elements than the complete walk.
     let read = CallToolResult::structured(
         json!({"pid":pid,"window_id":42,"elements_complete":true,"truncated":false,"element_count":2,"total_element_count":2,"returned_element_count":1,"snapshot_id":"s00000001","tree_markdown":"native text","elements":[{"element_index":1,"element_token":"s00000001:1","role":"button","depth":0,"name":"Confirm"}]}),
@@ -175,6 +174,9 @@ async fn fixture() -> (State, OwnerLease, ResourceTarget) {
     .unwrap();
     (state, owner, resource)
 }
+async fn fixture() -> (State, OwnerLease, ResourceTarget) {
+    fixture_for_pid(std::process::id()).await
+}
 fn click(token: &str) -> CuaAction {
     CuaAction::new(
         "click".into(),
@@ -198,9 +200,28 @@ fn prepare(
 }
 #[tokio::test]
 async fn desktop_click_fresh_token_dispatches_once_and_unknown_is_never_replayed() {
-    for unknown in [false, true] {
+    for (unknown, defaults) in [
+        (false, json!({})),
+        (true, json!({})),
+        (false, json!({"button":"left"})),
+        (true, json!({"button":"left"})),
+        (false, json!({"delivery_mode":"background"})),
+        (true, json!({"delivery_mode":"background"})),
+        (false, json!({"button":"left","delivery_mode":"background"})),
+        (true, json!({"button":"left","delivery_mode":"background"})),
+    ] {
         let (mut state, owner, resource) = fixture().await;
-        let (action, context) = prepare(&state, &owner, &resource, &click("s00000002:1")).unwrap();
+        let mut arguments = json!({"element_token":"s00000002:1"})
+            .as_object()
+            .unwrap()
+            .clone();
+        arguments.extend(defaults.as_object().unwrap().clone());
+        let request = CuaAction::new("click".into(), arguments).unwrap();
+        assert_eq!(
+            request.to_operation_payload().unwrap(),
+            click("s00000002:1").to_operation_payload().unwrap()
+        );
+        let (action, context) = prepare(&state, &owner, &resource, &request).unwrap();
         assert_eq!(
             action.click_request().unwrap().unwrap().element_token,
             "s00000001:1"
@@ -484,6 +505,20 @@ async fn desktop_click_requires_current_os_evidence_and_latest_owned_window_read
     )
     .unwrap();
     assert!(pixel.click_request().is_err());
+    for unsupported in [
+        json!({"button":"right"}),
+        json!({"button":"middle"}),
+        json!({"delivery_mode":"foreground"}),
+    ] {
+        let mut arguments = json!({"element_token":"s00000003:1"})
+            .as_object()
+            .unwrap()
+            .clone();
+        arguments.extend(unsupported.as_object().unwrap().clone());
+        let request = CuaAction::new("click".into(), arguments).unwrap();
+        assert!(request.click_request().is_err());
+        assert!(prepare(&state, &owner, &resource, &request).is_err());
+    }
 }
 
 #[tokio::test]
@@ -510,7 +545,7 @@ async fn desktop_set_value_retains_its_read_binding_across_permission_refresh() 
     context.capability = CapabilityId::DesktopAccessibility;
     context.session = Some(binding);
     context.observation = Some(observation);
-    validate_dispatch(
+    let facts = validate_dispatch(
         &state,
         &owner,
         &resource,
@@ -519,4 +554,176 @@ async fn desktop_set_value_retains_its_read_binding_across_permission_refresh() 
         MonotonicMillis(1),
     )
     .unwrap();
+    let action = state
+        .ledger
+        .prepare_desktop_accessibility_write_attempt(
+            &owner,
+            resource,
+            context.clone(),
+            translated.to_operation_payload().unwrap(),
+            MonotonicMillis(1),
+        )
+        .unwrap();
+    let DispatchDisposition::ExecuteOnce(_permit) = state
+        .ledger
+        .dispatch(
+            &owner,
+            &action.id,
+            action.payload_digest,
+            &facts,
+            MonotonicMillis(1),
+        )
+        .unwrap()
+    else {
+        panic!("expected one write permit");
+    };
+    let retained = state
+        .desktop
+        .as_mut()
+        .unwrap()
+        .ax_observation
+        .take()
+        .unwrap();
+    // The native write ACK is a synthetic result here; test the real result
+    // authorization path after a fresh permission observation, not OS effects.
+    state
+        .ledger
+        .record_action_result(&action.id, ActionResult::Acknowledged, MonotonicMillis(2))
+        .unwrap();
+    let binding = desktop(&state).unwrap().binding.clone();
+    state
+        .sessions
+        .provider(
+            &binding,
+            evidence(CapabilityId::DesktopAccessibility),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+    let refreshed =
+        super::super::desktop_read::acquisition_facts(&state, CapabilityId::DesktopAccessibility)
+            .unwrap();
+    assert_ne!(refreshed.current_observation, context.observation);
+    assert!(
+        state
+            .ledger
+            .authorize_desktop_accessibility_write_result(
+                &owner,
+                &action.id,
+                action.payload_digest,
+                &refreshed,
+                MonotonicMillis(2),
+            )
+            .is_err()
+    );
+    let delivery = retained.write_result_facts(&state).unwrap();
+    state
+        .ledger
+        .authorize_desktop_accessibility_write_result(
+            &owner,
+            &action.id,
+            action.payload_digest,
+            &delivery,
+            MonotonicMillis(2),
+        )
+        .unwrap();
+    let mut denied = evidence(CapabilityId::DesktopAccessibility);
+    denied.authorization = Authorization::Denied;
+    state
+        .sessions
+        .provider(&binding, denied, Duration::from_secs(60))
+        .unwrap();
+    let delivery = retained.write_result_facts(&state).unwrap();
+    assert!(
+        state
+            .ledger
+            .authorize_desktop_accessibility_write_result(
+                &owner,
+                &action.id,
+                action.payload_digest,
+                &delivery,
+                MonotonicMillis(2),
+            )
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn desktop_click_receipt_survives_original_target_exit_but_cannot_authorize_input() {
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("60")
+        .spawn()
+        .unwrap();
+    let (mut state, owner, resource) = fixture_for_pid(child.id()).await;
+    let (action, context) = prepare(&state, &owner, &resource, &click("s00000002:1")).unwrap();
+    let request = action.click_request().unwrap().unwrap();
+    let retained = state
+        .desktop
+        .as_mut()
+        .unwrap()
+        .ax_observation
+        .take()
+        .unwrap();
+    retained
+        .click_facts(
+            &state,
+            &owner,
+            &resource,
+            &context,
+            &request,
+            MonotonicMillis(1),
+        )
+        .unwrap();
+    // Exact owned process exits. A result has no reason to inspect a replacement PID.
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(
+        retained
+            .click_facts(
+                &state,
+                &owner,
+                &resource,
+                &context,
+                &request,
+                MonotonicMillis(2)
+            )
+            .is_err()
+    );
+    retained
+        .click_result_facts(
+            &state,
+            &owner,
+            &resource,
+            &context,
+            &request,
+            MonotonicMillis(2),
+        )
+        .unwrap();
+    let mut wrong = action.click_request().unwrap().unwrap();
+    wrong.window_id = Some(43);
+    assert!(
+        retained
+            .click_result_facts(
+                &state,
+                &owner,
+                &resource,
+                &context,
+                &wrong,
+                MonotonicMillis(2)
+            )
+            .is_err()
+    );
+    state.facts.grant_revision += 1;
+    assert!(
+        retained
+            .click_result_facts(
+                &state,
+                &owner,
+                &resource,
+                &context,
+                &request,
+                MonotonicMillis(2)
+            )
+            .is_err()
+    );
+    assert!(prepare(&state, &owner, &resource, &click("s00000002:1")).is_err());
 }

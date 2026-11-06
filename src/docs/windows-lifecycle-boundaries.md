@@ -53,3 +53,59 @@ and [interactive services](https://learn.microsoft.com/en-us/windows/win32/servi
 
 These are implementation boundaries. Same-user read-only task observation tests
 do not establish unattended boot or service installation acceptance.
+
+## Local App exit
+
+The current-user native App exposes a local owner endpoint. The bundled
+`native/bin/styx.exe quit --state-dir <outer-App-state> --json` and tray **Quit
+Styx** call the same retained shutdown job. `styx app status` reads that owner
+without contacting a Gateway. The state directory is the outer App directory,
+not its nested `native-rust-host-v1/profile`.
+
+The pipe is scoped by the current SID and the actual private profile directory's
+volume/file identity. Only the original package's CLI is accepted; kernel peer
+identity, package image and original process birth are checked. Two bounded pipe
+instances allow status while Quit drains. A second App for the same profile is
+refused before another UI/Core starts. Other profiles and independent services
+are not adopted or stopped.
+
+When a Core exists, a successful Quit requires original Core admission, stdin
+EOF, joined stdout and stderr, observed Core exit 0 and observed App exit 0. Normal Quit uses retained
+shutdown custody, with no timed force-kill. Proven pre-dispatch busy states can be
+reported and explicitly tried again. A slow shutdown retains the original job; a client timeout reports `unknown`
+and never replays the request. If admission fails, the same owner closes only its
+stdin, joins its original read and waits for Core's existing EOF cleanup. Once
+exit is actually observed the App may close with a nonzero, unclean result; a
+missing admission response is never promoted to clean success.
+An already exited abnormal Core no longer traps the UI: the App can exit while
+reporting `unclean_exit`/nonzero status. This does not certify worker cleanup.
+Endpoint absence on an older App is `unavailable`, not proof it has exited.
+The next-login preference, identity, pairing and original journals are retained.
+
+Run `node --test src/host/windows/quit-lifecycle-native.test.mjs` on Windows for
+real process/pipe/WinForms custody regressions. Its test-only Core constructor is
+compiled with `STYX_QUIT_TEST` into a separate harness; the App builder never
+defines it. These fixtures cover active owned workers, disconnected component
+state, long drains, busy refusal, abnormal/early Core exit, lost replies, and
+same-profile reservation. They do not establish signed Host execution, remote
+Computer Use, or acceptance against an unavailable production Gateway.
+
+## 2026-11-04 design correction
+
+Ordinary App Quit and bundled local `quit` judge local exit after the original Core, native work, stdout/stderr and event tasks have actually joined. Gateway availability is not an exit prerequisite. Core's `scope=local_app` ticket is not remote cleanup proof: a missing remote drain remains Unknown in the cleanup object and in a private immutable `app-local-exit-<ticket>.json` observation beside the profile container. No old result is cleared or action replayed. Maintenance/update handoff retains its strict full-settlement check.
+
+Status is observed once per second through the same Core, at most one observation in flight. Mutations and shutdown pause observation; mutation revisions reject stale responses. Observing status does not reconnect a Paused profile or execute tools. The original Host retries only temporary initial network availability failures; credential and certificate refusals remain refusals.
+
+Ordinary Core cleanup sends EOF and concurrently drains both original pipes before waiting for exit. It has no timed force-kill path. An unknown RPC result still reports failure and is not sent again. A long cleanup remains owned while the UI awaits it asynchronously.
+
+The bootstrap hashes the original CLI once while its original non-writable/non-deletable file handle remains held. Each new bootstrap lifetime authenticates again; native signed-payload and manifest checks remain in place. Real Windows file-lock negatives and native process/WinForms scenarios must accompany this change.
+
+## Coherent startup observations (2026-11-04)
+
+An actual signed candidate painted in 494 ms but answered the App's initial Core read only after about 46.5 seconds. A separate original Core measured 32.0 seconds for open plus plain status and 7.8 seconds for startupStatus; Host admission/executor startup followed separately. These observations are a failed performance qualification, not evidence that the UI should skip verification.
+
+Native enrollment inspection now reads its fixed five-phase prefix as one bounded read-only batch under the original configuration writer. Complete C07, material and phase validation brackets capture; each captured file must also match its original pin, and the canonical state digest must stay unchanged. Replacement during capture returns no prefix. State and its original seed are observed together instead of repeating the same full state read to return borrowed immutable seed bytes. These returned bytes remain DATA; network/append boundaries retain their original complete validation and unknown outcomes are never retried.
+
+The App reuses its original formal verified release for the desktop-intent snapshot through the existing full retained-selection/member revalidation port. It does not reuse a receipt, accept a new path or weaken desktop source checks. Automatic resume observes Running and schedules the original strict Host admission without writing Running again; only an explicit Connect changes that intent. A newer Stopped state must therefore remain stopped. Native performance and effects still require measurement on the resulting candidate.
+
+Explicit startup self-tests keep the first fixed-name receipt and create a unique, exclusively opened receipt for each later run. A repeat measurement must preserve the earlier bytes; these diagnostic files never authorize a runtime or replace platform acceptance.

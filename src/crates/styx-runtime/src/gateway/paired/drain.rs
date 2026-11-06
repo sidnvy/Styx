@@ -76,7 +76,6 @@ impl RelayHandle {
                     .current_binding_entry(binding, true)
                     .is_ok_and(|current| Arc::ptr_eq(&current, entry))
                 {
-                    *binding.revoked.lock().map_err(|_| RelayError::Unknown)? = true;
                     cohort.push(binding.clone());
                 }
             }
@@ -88,13 +87,22 @@ impl RelayHandle {
         let acceptance = Arc::new(AtomicU8::new(0));
         let observed_acceptance = acceptance.clone();
         let job = tokio::spawn(async move {
-            // Fencing is synchronous and grants no authority. Read-only Core
-            // authentication runs in the original owned job under its original
-            // deadline, keeping the socket reader available for all replies.
-            let mut complete = matches!(
-                tokio::time::timeout_at(until, relay.control_lane(&original)).await,
-                Ok(Ok(_))
-            );
+            // New sends/deliveries were fenced synchronously above. A reply
+            // already authorized by this socket must reach its original caller
+            // before this local drain revokes that binding. Otherwise the next
+            // WS control frame can overtake the awakened result consumer.
+            let mut receipts_complete = true;
+            for binding in &cohort {
+                receipts_complete &=
+                    revoke_after_receipts(binding.revoked.as_ref(), &binding.receipts, until).await;
+            }
+            // Explicit owner/enrollment revocation is independent of this wait.
+            // Authentication and cleanup keep the original deadline and socket.
+            let mut complete = receipts_complete
+                && matches!(
+                    tokio::time::timeout_at(until, relay.control_lane(&original)).await,
+                    Ok(Ok(_))
+                );
             if complete {
                 for binding in cohort {
                     if !relay.settle_binding(&binding, until, Some(&original)).await {
@@ -269,5 +277,64 @@ impl RelayHandle {
                 self.inner.shutdown_failed.store(true, Ordering::Release);
             }
         }
+    }
+}
+
+/// No new authority: the transport admission gate is already closed. A bounded
+/// handoff only lets an already authorized result pass its existing final checks.
+async fn revoke_after_receipts(
+    revoked: &Mutex<bool>,
+    receipts: &tokio::sync::RwLock<()>,
+    until: tokio::time::Instant,
+) -> bool {
+    let handoff = tokio::time::timeout_at(until, receipts.write()).await;
+    let complete = handoff.is_ok();
+    let Ok(mut revoked) = revoked.lock() else {
+        return false;
+    };
+    *revoked = true;
+    complete
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+    #[tokio::test]
+    async fn local_drain_cannot_overtake_an_authorized_result_consumer() {
+        let receipts = tokio::sync::RwLock::new(());
+        let revoked = Mutex::new(false);
+        let original_call = receipts.read().await;
+        let drain = revoke_after_receipts(
+            &revoked,
+            &receipts,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        );
+        tokio::pin!(drain);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut drain)
+                .await
+                .is_err()
+        );
+        assert!(
+            !*revoked.lock().unwrap(),
+            "original result retains its final authorization check"
+        );
+        assert!(
+            receipts.try_read().is_err(),
+            "queued drain refuses a new call"
+        );
+        drop(original_call);
+        assert!(drain.await);
+        assert!(*revoked.lock().unwrap());
+    }
+    #[tokio::test]
+    async fn expired_handoff_and_explicit_revocation_never_restore_authority() {
+        let receipts = tokio::sync::RwLock::new(());
+        let revoked = Mutex::new(false);
+        let _original_call = receipts.read().await;
+        // Explicit revocation remains immediate while the original call exists.
+        *revoked.lock().unwrap() = true;
+        assert!(!revoke_after_receipts(&revoked, &receipts, tokio::time::Instant::now()).await);
+        assert!(*revoked.lock().unwrap());
     }
 }

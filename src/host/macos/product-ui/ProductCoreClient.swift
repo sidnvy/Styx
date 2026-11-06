@@ -17,7 +17,7 @@ enum ProductNativeDiagnostics {
     }
     static func lifecycle(_ stage: LifecycleStage, operation: String? = nil, id: Int? = nil, ok: Bool? = nil) {
         guard CommandLine.arguments.contains("--native-diagnostics") else { return }
-        let operations: Set<String> = ["startupStatus", "status", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "retireRole", "appLifecycle", "appLogin", "appLoginResult", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService", "prepareAppMaintenance", "appMaintenanceStatus", "cancelAppMaintenance"]
+        let operations: Set<String> = ["pluginRead", "pluginSave", "pluginExport", "startupStatus", "status", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "retireRole", "appLifecycle", "appLogin", "appLoginResult", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService", "prepareAppMaintenance", "appMaintenanceStatus", "cancelAppMaintenance"]
         if let operation { guard operations.contains(operation) else { return } }
         var message = "lifecycle stage=" + stage.rawValue
         if let operation { message += " operation=" + operation }
@@ -178,6 +178,7 @@ final class ProductCoreClient {
                 return result
             }
             #endif
+            if route == "plugin" { return try await native("pluginRead") }
             guard route == "status" || route == "native-status" else { throw ProductCoreError.rejected }; return try await native("status")
         }
         guard Self.reads.contains(route) else { throw ProductCoreError.rejected }
@@ -186,6 +187,7 @@ final class ProductCoreClient {
     func write(_ route: String, _ body: [String: ProductJSON]) async throws -> ProductJSON {
         if isNativeHost {
             switch route {
+            case "plugin/profile": return try await native("pluginSave", body)
             case "pairing-link/inspect": return try await native("inspectJoin", body)
             case "foreground": return try await native("connect")
             case "foreground/stop": return try await native("disconnect")
@@ -233,6 +235,12 @@ final class ProductCoreClient {
     // ZIP export shares the owning App's loopback session and CSRF boundary.
     // The route and filename are fixed; no URL/path comes from web content.
     func exportPlugin() async throws -> Data {
+        if isNativeHost {
+            let result = try await native("pluginExport", ["authorize": .bool(true)])
+            guard let encoded = result["archiveBase64"].string, encoded.count <= 1400000,
+                  let bytes = Data(base64Encoded: encoded), bytes.starts(with: [0x50, 0x4b, 0x03, 0x04]) else { throw ProductCoreError.invalidResponse }
+            return bytes
+        }
         guard csrf != nil else { throw ProductCoreError.rejected }
         let data = try await response("plugin/export", body: .object(["authorize": .bool(true)]), mimeType: "application/zip")
         guard data.starts(with: [0x50, 0x4b, 0x03, 0x04]) else { throw ProductCoreError.invalidResponse }

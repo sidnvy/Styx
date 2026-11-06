@@ -27,3 +27,41 @@ Meaningful Core scenarios cover once-only, ordinary execution remaining refused,
 ## Exact window capture extension
 
 The AX-only slice passed its actual owned GTK read/refusal/Exec journey at fc470e6. A second fixed purpose, `DesktopWindowCaptureReadAcquisition`, now applies the same Core acquisition/delivery rules only to an exact PID/window screenshot with AX disabled and explicit bounded image dimension/deadline. It never permits the whole desktop, file output, implicit targets, AX, pointer or keyboard. Both purposes revalidate their own immutable branch in the native adapter. PNG/schema projection is only a protocol check: actual acceptance requires independently calculated pixels in the owned fixture and confirmed original cleanup. Full-frame/AX+capture combinations and input remain closed. No descriptor is promoted to Granted by either read.
+
+## macOS descriptive rows without input references
+
+Native macOS can return a complete window tree containing an object whose
+`AXUIElementDestroyed` subscription is unsupported, even while the window and
+editable/button objects support the required notifications. Such a row remains
+explicitly `read_only:true` and carries no `element_token`. Core validates its
+index/shape/counts and preserves its descriptive data, but never inserts it in
+the native-token map or assigns a Host input alias. A token on a read-only row,
+invalid flag type or duplicate index is contradictory and refused. Native
+editable-target acquisition also refuses that original read-only object.
+Required window subscriptions and all input-target lifetime checks still fail
+closed. Other subscription failures still fence the original observer.
+
+The pinned Mac capture-only format has explicit native frame validity, point
+bounds/backing scale and exact PNG dimensions, plus an empty zero-element
+Markdown placeholder. The adapter validates this specific shape and geometry,
+then projects only the exact image and target. It discards the placeholder and
+all native snapshot/capture references; this read never authorizes input.
+Protocol/reference PASS remains distinct from installed Gateway acceptance.
+
+
+## macOS exact element click capability evidence
+
+The pinned mature Mac `click` element route performs AX actions and can restore
+key-window state. The original authenticated daemon's fresh Accessibility
+permission and successful current window probe therefore provide its Pointer
+and WindowsControl capability evidence. Leaving both permanently unavailable
+incorrectly rejects an exact observed element before native dispatch, even
+when AX text input and window capture work.
+
+This registration does not supply target authority. Host still requires the
+same owner/resource/process/window, a fresh complete AX observation and native
+token, every grant, and the final source refresh before one dispatch. All other
+mutating routes without an exact Host click/write binding remain refused;
+Keyboard remains unavailable. Missing native permission or current window
+probe cannot authorize the click. Original not-dispatched receipts are retained,
+and actual independent button effects remain required for acceptance.

@@ -227,3 +227,105 @@ fn unsent_join_move_preserves_private_root_and_refuses_backup_collision() {
     );
     fs::remove_dir_all(parent).unwrap();
 }
+
+// Small real private-FS regressions. Opaque bytes prove store custody only.
+struct PrefixFixture(PathBuf);
+impl PrefixFixture {
+    fn new() -> Self {
+        let path =
+            std::env::temp_dir().join(format!("styx-native-prefix-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        Self(path)
+    }
+    fn store(&self) -> NativeHostJoinStore {
+        let parent = PrivateRoot::open(&self.0).unwrap();
+        let root = fresh(&parent, "host");
+        let s = state(&root);
+        root.initialize_host_pending(DEPLOYMENT, &s, material(), NOW)
+            .unwrap_or_else(|failure| panic!("opaque store fixture: {:?}", failure.error()))
+    }
+}
+impl Drop for PrefixFixture {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+const PREFIX_PHASES: [&[u8]; 5] = [
+    b"dispatch",
+    b"reply",
+    b"credential_012345678901234567890123456789",
+    b"confirm",
+    b"ready",
+];
+#[test]
+fn coherent_prefix_keeps_partial_absence_and_complete_original_bytes() {
+    let f = PrefixFixture::new();
+    let mut store = f.store();
+    for (count, next) in NativeHostJoinFile::ALL
+        .into_iter()
+        .zip(PREFIX_PHASES)
+        .map(Some)
+        .chain(std::iter::once(None))
+        .enumerate()
+    {
+        let prefix = store.read_prefix().unwrap();
+        for (index, observed) in prefix.iter().enumerate() {
+            assert_eq!(
+                observed.as_deref().map(Vec::as_slice),
+                (index < count).then_some(PREFIX_PHASES[index])
+            );
+        }
+        let (canonical, seed) = store.readstate_and_seed().unwrap();
+        assert_eq!(canonical.state().revision, 0);
+        assert_eq!(seed, SEED_BYTES);
+        if let Some((file, raw)) = next {
+            store.append(file, raw).unwrap();
+        }
+    }
+}
+#[test]
+fn changed_phase_material_or_journal_during_prefix_never_delivers_captured_bytes() {
+    for fault in [
+        "same_content_phase_replacement",
+        "credential_changed",
+        "identity_changed",
+        "namespace_replaced",
+    ] {
+        let f = PrefixFixture::new();
+        let mut store = f.store();
+        for (file, bytes) in NativeHostJoinFile::ALL.into_iter().zip(PREFIX_PHASES) {
+            store.append(file, bytes).unwrap();
+        }
+        let root = f.0.join("host");
+        let result = store.read_prefix_inner(|| {
+            match fault {
+                "same_content_phase_replacement" => {
+                    let path = root.join(NativeHostJoinFile::Ready.path());
+                    fs::rename(&path, root.join("original-ready-retained")).unwrap();
+                    fs::write(&path, PREFIX_PHASES[4]).unwrap();
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+                }
+                "credential_changed" => {
+                    fs::write(root.join(NativeHostJoinFile::Credential.path()), b"changed").unwrap()
+                }
+                "identity_changed" => {
+                    fs::write(root.join("host-identity.pem"), b"changed").unwrap()
+                }
+                "namespace_replaced" => {
+                    let path = root.join(".styx-management-journal-v1");
+                    fs::rename(&path, root.join("original-namespace-retained")).unwrap();
+                    fs::create_dir(&path).unwrap();
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            Ok(())
+        });
+        assert!(matches!(result, Err(JournalError::Unknown)), "{fault}");
+        assert!(
+            store.read_prefix().is_err(),
+            "{fault}: no cached prefix admission"
+        );
+    }
+}

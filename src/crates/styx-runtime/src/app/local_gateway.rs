@@ -307,6 +307,9 @@ impl LocalGateway {
         Ok(result)
     }
     pub fn is_fenced(&self) -> bool {
+        self.local_exit_fenced() || self.cleanup.as_ref().is_some_and(|c| !c.is_complete())
+    }
+    pub fn local_exit_fenced(&self) -> bool {
         self.failed
             || self.retained.is_some()
             || self.startup_failure.is_some()
@@ -319,16 +322,23 @@ impl LocalGateway {
         json!({"origin":self.origin,"lan":self.lan,"running":self.running.as_ref().is_some_and(|r| !r.worker.is_finished()),"listening":*self.observed.borrow(),"admission_fenced":self.is_fenced(),"cleanup":self.cleanup})
     }
     pub async fn settle(&mut self) -> Result<(), AppError> {
+        self.settle_for(false).await
+    }
+    pub(super) async fn settle_for(&mut self, local_exit: bool) -> Result<(), AppError> {
         if let Some(role) = self.running.take() {
             role.cancel.cancel();
             let outcome = role.worker.await;
             let events = role.events.await;
             match outcome {
                 Ok(Ok(outcome)) => {
+                    let locally_joined = outcome.local_stop_complete()
+                        && events.is_ok()
+                        && !outcome.worker_failure_observed
+                        && !outcome.listener_error_observed;
                     let complete = outcome.is_complete() && events.is_ok();
                     self.cleanup = Some(outcome);
-                    if !complete {
-                        self.failed = true;
+                    if !complete && !(local_exit && locally_joined) {
+                        self.failed |= !locally_joined;
                         return Err(AppError("app_gateway_cleanup_unknown"));
                     }
                 }
@@ -343,6 +353,11 @@ impl LocalGateway {
                     return Err(AppError("app_gateway_cleanup_unknown"));
                 }
             }
+        }
+        if self.local_exit_fenced()
+            || (!local_exit && self.cleanup.as_ref().is_some_and(|c| !c.is_complete()))
+        {
+            return Err(AppError("app_gateway_cleanup_unknown"));
         }
         Ok(())
     }
@@ -714,12 +729,8 @@ mod continuation_tests {
 
     #[tokio::test]
     async fn local_setup_invalid_lan_refused_before_any_setup_write() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(3)
-            .unwrap()
-            .join("target")
-            .join(format!("styx-app-lan-refusal-{}", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("styx-app-lan-refusal-{}", uuid::Uuid::new_v4()));
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&path)

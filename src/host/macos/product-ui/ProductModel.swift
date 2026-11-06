@@ -321,6 +321,8 @@ enum ProductRestorationPolicy {
     @Published var tunnelID = ""
     @Published var runtimeKey = ""
     @Published var pluginMode = "create"
+    @Published var pluginIdentity = "styx"
+    @Published var pluginLongDescription = ""
     @Published var pluginName = "Styx"
     @Published var pluginDescription = productText("连接你的电脑", "Connect your computers")
     @Published var accountLabel = ""
@@ -588,6 +590,7 @@ enum ProductRestorationPolicy {
                     publish(\.pluginMode, plugin["selection"]["mode"].string ?? "create")
                     publish(\.pluginName, plugin["presentation"]["displayName"].string ?? "Styx")
                     publish(\.pluginDescription, plugin["presentation"]["shortDescription"].string ?? productText("连接你的电脑", "Connect your computers"))
+                    publish(\.pluginLongDescription, plugin["presentation"]["longDescription"].string ?? "")
                     publish(\.accountLabel, plugin["selection"]["accountLabel"].string ?? "")
                     publish(\.pluginURL, plugin["selection"]["pluginUrl"].string ?? "")
                     publish(\.pluginIcon, plugin["presentation"]["icon"])

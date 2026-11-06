@@ -210,7 +210,32 @@ struct ProductSettingsView: View {
     }
     private var chat: some View {
         VStack(alignment: .leading, spacing: 16) {
-            if model.joined {
+            if model.nativeHost {
+                Text(productText("ChatGPT 中的 Styx", "Styx in ChatGPT")).font(.headline)
+                Text(productText("如果这台电脑加入了其他管理电脑，请复用那里的 Styx 连接。新 Tunnel 请在管理电脑终端运行 styx setup 配置；此 App 尚不能编辑原生 Tunnel 设置。", "If this computer joined another hub, reuse that hub’s Styx connection. Configure a new Tunnel by running styx setup on the hub; this App cannot yet edit native Tunnel settings."))
+                Text(productText("等待 Tunnel 就绪后，在目标 ChatGPT 账号打开 Plugins → Add → Add custom MCP server。填写名称，通过 Choose icon 上传下方图标，Connection 选择 Tunnel，粘贴 setup 显示的 Tunnel ID，Authentication 选择 No authentication。运行密钥只保存在 Styx。", "When the tunnel is ready, open Plugins → Add → Add custom MCP server in the intended ChatGPT account. Enter a name, upload the icon below with Choose icon, select Connection: Tunnel, paste the Tunnel ID from setup, and select Authentication: No authentication. Keep the runtime key only in Styx."))
+                Button(productText("保存 Styx 上传图标…", "Save Styx upload icon…")) { model.saveBrandIcon() }.accessibilityIdentifier("styx-native-custom-mcp-save-icon")
+                Text(productText("复用已有连接，不要删除正式插件。创建并连接后刷新已安装详情页，检查 Styx Logo，再选择 Try in chat 并发送 List my Styx computers。Custom MCP 不会安装 ZIP 中的技能。", "Reuse an existing connection; do not delete a production plugin. After creating and connecting, refresh the installed details and check the Styx logo. Choose Try in chat and send: List my Styx computers. Custom MCP does not install the ZIP’s skills."))
+                Button(productText("打开 ChatGPT Plugins", "Open ChatGPT Plugins")) { model.openOfficial("https://chatgpt.com/plugins") }
+                DisclosureGroup(productText("高级：旧版 ZIP 导出", "Advanced: legacy ZIP export")) {
+                    ProductPluginCompatibilityNote()
+                if model.nativeSupportsOperation("pluginRead") {
+                    Text(productText("预览并导出这台管理电脑的插件名称、描述和图标。保存后在 ChatGPT 更新已有插件。", "Preview and export this hub’s plugin name, descriptions and icon. Then update the existing plugin in ChatGPT."))
+                    Button(productText("名称、图标与插件 ZIP…", "Name, icon and plugin ZIP…")) {
+                        model.perform {
+                            let current = try await model.client.read("plugin")["plugin"]
+                            model.plugin = current
+                            model.pluginIdentity = current["selection"]["pluginId"].string ?? "styx"
+                            model.pluginName = current["presentation"]["displayName"].string ?? "Styx"
+                            model.pluginDescription = current["presentation"]["shortDescription"].string ?? ""
+                            model.pluginLongDescription = current["presentation"]["longDescription"].string ?? ""
+                            model.pluginIcon = current["presentation"]["icon"]
+                            editPackage = true
+                        }
+                    }.disabled(model.busy)
+                }
+                }
+            } else if model.joined {
                 Label(productText("聊天连接由管理电脑管理", "Chat is managed on the main computer"), systemImage: "globe")
             } else {
                 GroupBox {
@@ -344,23 +369,37 @@ struct ProductPackageEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var description = ""
+    @State private var longDescription = ""
     @State private var priorIcon: ProductJSON = .null
     @State private var exported = false
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        ScrollView { VStack(alignment: .leading, spacing: 16) {
             Text(productText("名称、图标与插件 ZIP", "Name, icon and plugin ZIP")).font(.headline)
             VStack(alignment: .leading, spacing: 5) { Text(productText("名称", "Name")).font(.caption); TextField("Styx", text: $name) }
             VStack(alignment: .leading, spacing: 5) {
                 Text(productText("简短介绍", "Short description")).font(.caption)
                 TextField(productText("显示在插件列表中的介绍", "Description shown in the plugin list"), text: $description)
-                if description.count > 30 { Text(productText("最多 30 个字符。", "Use up to 30 characters.")).font(.caption).foregroundStyle(.red) }
+                if description.unicodeScalars.count > 30 { Text(productText("最多 30 个字符。", "Use up to 30 characters.")).font(.caption).foregroundStyle(.red) }
             }
             HStack {
                 if let data = model.pluginIcon["dataBase64"].string.flatMap({ Data(base64Encoded: $0) }), let image = NSImage(data: data) {
-                    Image(nsImage: image).resizable().scaledToFit().frame(width: 40, height: 40)
-                } else { ProductBrand(size: 40) }
+                    Image(nsImage: image).resizable().scaledToFit().frame(width: 96, height: 96)
+                } else { ProductBrand(size: 96) }
                 Text(productText("插件图标", "Plugin icon")); Spacer()
                 Button(productText("选择图片", "Choose image")) { model.selectIcon() }
+            }
+            Button(productText("恢复 Styx 默认图标", "Restore Styx logo")) { model.pluginIcon = .null; model.preparePluginDraft(); model.observePluginDraftEdit() }
+            HStack {
+                if let data = model.pluginIcon["dataBase64"].string.flatMap({ Data(base64Encoded: $0) }), let image = NSImage(data: data) {
+                    Image(nsImage: image).resizable().scaledToFit().frame(width: 24, height: 24)
+                }
+                Text(productText("大图与小图使用同一张图片", "The large and small icons use the same image")).font(.caption)
+            }
+            Text(productText("完整描述", "Full description"))
+            TextEditor(text: $longDescription).frame(height: 78)
+            if model.nativeHost {
+                TextField(productText("插件身份", "Plugin identity"), text: $model.pluginIdentity).disabled(model.plugin["profileSaved"].bool)
+                Text(productText("更新已有插件时，请保留其身份；更改显示名称不会更改此身份。", "Keep the existing plugin identity when updating. Changing the display name does not change its identity.")).font(.caption)
             }
             Text(productText("PNG · 正方形 · 48–1024 像素 · 不超过 256 KB", "Square PNG · 48–1024 pixels · up to 256 KB")).font(.caption).foregroundStyle(.secondary)
             Text(productText("ZIP 包含技能和展示信息，但安装后图标可能被替换。推荐返回连接指引，使用 Custom MCP 并单独上传图标。", "The ZIP contains skills and presentation metadata, but its icon may be replaced after installation. Use the Custom MCP connection guide and upload the icon separately.")).font(.caption).foregroundStyle(.secondary)
@@ -382,6 +421,8 @@ struct ProductPackageEditor: View {
                     if !exported {
                         model.pluginName = model.plugin["presentation"]["displayName"].string ?? "Styx"
                         model.pluginDescription = model.plugin["presentation"]["shortDescription"].string ?? productText("连接你的电脑", "Connect your computers")
+                        model.pluginLongDescription = model.plugin["presentation"]["longDescription"].string ?? ""
+                        model.pluginIdentity = model.plugin["selection"]["pluginId"].string ?? "styx"
                         model.pluginIcon = model.plugin["presentation"]["icon"]
                         model.observePluginDraftEdit()
                     }
@@ -390,13 +431,13 @@ struct ProductPackageEditor: View {
                 Spacer()
                 if model.busy { ProgressView().controlSize(.small) }
                 Button(productText("导出 ZIP", "Export ZIP")) {
-                    model.pluginName = name; model.pluginDescription = description; model.observePluginDraftEdit()
+                    model.pluginName = name; model.pluginDescription = description; model.pluginLongDescription = longDescription; model.observePluginDraftEdit()
                     model.exportPluginPackage()
                 }.buttonStyle(.borderedProminent)
-                    .disabled(model.busy || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.count > 64 || description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || description.count > 30 || model.connectionTunnelID.isEmpty)
+                    .disabled(model.busy || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.unicodeScalars.count > 64 || description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || description.unicodeScalars.count > 30 || longDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || longDescription.unicodeScalars.count > 2000 || model.connectionTunnelID.isEmpty)
             }
-        }.textFieldStyle(.roundedBorder).padding(24).frame(width: 484)
-            .onAppear { name = model.pluginName; description = model.pluginDescription; priorIcon = model.pluginIcon; model.preparePluginDraft() }
+        }.textFieldStyle(.roundedBorder).padding(24) }.frame(width: 520, height: 720)
+            .onAppear { name = model.pluginName; description = model.pluginDescription; longDescription = model.pluginLongDescription.isEmpty ? model.plugin["presentation"]["longDescription"].string ?? "" : model.pluginLongDescription; priorIcon = model.pluginIcon; model.preparePluginDraft() }
             .onChange(of: model.exportCompletionID) { _ in exported = model.exportedPluginURL != nil }
             .interactiveDismissDisabled(model.busy)
     }

@@ -205,27 +205,33 @@ async fn prepare_computer(
     host: &OwnedExecHost,
     custody: &computer_startup::DeferredComputer,
 ) -> Result<Option<Arc<dyn crate::host::protocol::computer::ComputerBootstrap>>, ForegroundError> {
-    let retained = admitted.clone();
-    let enabled =
-        tokio::task::spawn_blocking(move || retained.profile.pin_cua_driver().map(|p| p.is_some()))
-            .await
-            .map_err(|_| ForegroundError("profile_reader_failed"))??;
+    let enabled = custody
+        .read_before_source(Duration::from_secs(30), || {
+            let retained = admitted.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    retained.profile.pin_cua_driver().map(|p| p.is_some())
+                })
+                .await
+                .map_err(|_| ForegroundError("profile_reader_failed"))?
+                .map_err(ForegroundError::from)
+            }
+        })
+        .await?;
     if !enabled {
         return Ok(None);
     }
     #[cfg(target_os = "linux")]
     let source = {
-        // Zero candidates is normal on a headless Host; multiple candidates are
-        // ambiguous. Never pick the first desktop or inherit stale SSH/tmux env.
-        let snapshot = super::discover_desktop_candidates().await?;
-        if snapshot.candidates.len() != 1 {
-            return Err(ForegroundError("desktop_selection_required"));
-        }
-        crate::host::coordinator::DesktopSource::start(
-            snapshot.candidates.into_iter().next().expect("exactly one"),
-        )
-        .await
-        .map_err(|e| ForegroundError(e.code()))?
+        // A login service may precede the graphical session. Wait only for an
+        // empty candidate set, before acquiring the sole original source.
+        // Ambiguity and discovery errors never select or retry another desktop.
+        let candidate = custody
+            .desktop_candidate(Duration::from_secs(30), super::discover_desktop_candidates)
+            .await?;
+        crate::host::coordinator::DesktopSource::start(candidate)
+            .await
+            .map_err(|e| ForegroundError(e.code()))?
     };
     #[cfg(target_os = "windows")]
     let source = crate::host::coordinator::DesktopSource::start()
@@ -287,13 +293,38 @@ async fn prepare_computer(
     host: &OwnedExecHost,
     custody: &computer_startup::DeferredComputer,
 ) -> Result<Option<Arc<dyn crate::host::protocol::computer::ComputerBootstrap>>, ForegroundError> {
-    let retained = admitted.clone();
-    let enabled = tokio::task::spawn_blocking(move || retained.profile.computer_enabled())
-        .await
-        .map_err(|_| ForegroundError("profile_reader_failed"))??;
+    let enabled = custody
+        .read_before_source(Duration::from_secs(30), || {
+            let retained = admitted.clone();
+            async move {
+                tokio::task::spawn_blocking(move || retained.profile.computer_enabled())
+                    .await
+                    .map_err(|_| ForegroundError("profile_reader_failed"))?
+                    .map_err(ForegroundError::from)
+            }
+        })
+        .await?;
     if !enabled {
         return Ok(None);
     }
+    // The App needs this Core's configured intent before publishing its Cua
+    // descriptor. Wait only for absent publication, before retaining any source.
+    // Invalid hints, dead owners, signature/peer failures and an acquired source
+    // are never retried or replaced. Exec and lifecycle remain independently live.
+    custody
+        .read_before_source(Duration::from_secs(30), || async {
+            use crate::providers::cua::macos_source::{BindingError, MacSourceCandidate};
+            tokio::task::spawn_blocking(MacSourceCandidate::check_discovery_presence)
+                .await
+                .map_err(|_| ForegroundError("computer_bootstrap_failed"))?
+                .map_err(|error| {
+                    ForegroundError(match error {
+                        BindingError::NotPublished => "desktop_session_not_ready",
+                        _ => "desktop_source_unavailable",
+                    })
+                })
+        })
+        .await?;
     let source = crate::host::coordinator::DesktopSource::start()
         .await
         .map_err(|e| ForegroundError(e.code()))?;
@@ -448,6 +479,64 @@ async fn connect(
         LinkError::Deadline => ForegroundError("gateway_transport_deadline"),
         _ => ForegroundError("gateway_transport_refused"),
     })
+}
+fn retain_transport_outcome(
+    previous: Option<crate::host::protocol::wire::TransportDrainOutcome>,
+    current: crate::host::protocol::wire::TransportDrainOutcome,
+) -> crate::host::protocol::wire::TransportDrainOutcome {
+    use crate::host::protocol::wire::TransportDrainOutcome::{Complete, Unknown, Unsupported};
+    match (previous, current) {
+        (Some(Unknown), _) | (_, Unknown) => Unknown,
+        (Some(Unsupported), _) | (_, Unsupported) => Unsupported,
+        _ => Complete,
+    }
+}
+
+#[cfg(test)]
+mod connection_recovery_tests {
+    use super::*;
+    use crate::host::protocol::wire::TransportDrainOutcome::{Complete, Unknown, Unsupported};
+    #[test]
+    fn successful_new_link_cannot_clear_an_old_missing_receipt() {
+        assert_eq!(retain_transport_outcome(Some(Unknown), Complete), Unknown);
+        assert_eq!(retain_transport_outcome(Some(Complete), Unknown), Unknown);
+        assert_eq!(
+            retain_transport_outcome(Some(Unsupported), Complete),
+            Unsupported
+        );
+        assert_eq!(retain_transport_outcome(None, Complete), Complete);
+        assert_eq!(retain_transport_outcome(Some(Complete), Complete), Complete);
+    }
+    #[test]
+    fn temporary_network_wait_is_not_authorization_to_retry_rejected_credentials_or_tls() {
+        for code in [
+            "gateway_connect_failed",
+            "gateway_connect_timeout",
+            "gateway_wss_unavailable",
+        ] {
+            assert!(retryable_connect_error(code));
+        }
+        for code in [
+            "gateway_wss_admission_refused",
+            "gateway_tls_handshake_rejected",
+            "gateway_wss_request_rejected",
+            "gateway_leaf_pin_mismatch",
+        ] {
+            assert!(!retryable_connect_error(code));
+        }
+    }
+}
+
+fn retryable_connect_error(code: &str) -> bool {
+    matches!(
+        code,
+        "gateway_connect_timeout"
+            | "gateway_connect_failed"
+            | "gateway_tls_timeout"
+            | "gateway_transport_deadline"
+            | "gateway_wss_unavailable"
+            | crate::gateway::paired::CAPACITY_ERROR_CODE
+    )
 }
 fn facts(device: &DeviceId) -> AdmissionFacts {
     // These are bootstrap-local facts after the original credential's strict
@@ -860,19 +949,49 @@ async fn run_owned(
     // No remote transport exists until after the local signed inputs, executor
     // and optional providers are ready. Local failure still settles this host.
     let mut remote_transport_drain = None;
+    let mut settled_transports = None;
     match session {
         Ok(session) => {
-            let connection: ConnectionGeneration = uuid::Uuid::new_v4()
-                .to_string()
-                .try_into()
-                .expect("UUID identity");
-            let initial = if cancel.is_cancelled() {
-                Ok(None)
-            } else {
+            let initial = loop {
+                if cancel.is_cancelled() {
+                    break Ok(None);
+                }
+                let connection: ConnectionGeneration = uuid::Uuid::new_v4()
+                    .to_string()
+                    .try_into()
+                    .expect("UUID identity");
                 event(&events, &cancel, "connecting", &device, Some(&connection));
-                tokio::select! {
-                    _=cancel.cancelled()=>Ok(None),
-                    result=connect(&admitted.profile,connection,host.link_budget())=>result.map(Some),
+                let attempt = tokio::select! {
+                    _=cancel.cancelled()=>break Ok(None),
+                    result=connect(&admitted.profile,connection,host.link_budget())=>result,
+                };
+                match attempt {
+                    Ok(link) => break Ok(Some(link)),
+                    Err(error) if retryable_connect_error(error.code()) => {
+                        // No protocol/business request has been dispatched. Reuse
+                        // this original Host; each authenticated link has a fresh
+                        // generation. Never retry a native action or weaken TLS.
+                        event_with_reason(
+                            &events,
+                            &cancel,
+                            "disconnected",
+                            &device,
+                            None,
+                            Some(error.code()),
+                        );
+                        tokio::select! {
+                            _=cancel.cancelled()=>break Ok(None),
+                            _=tokio::time::sleep(Duration::from_secs(2))=>{},
+                        }
+                        if let Err(error) = validate(&admitted).await {
+                            match error.code() {
+                                "native_service_configuration_pending" => continue,
+                                "native_service_stop_requested" => break Ok(None),
+                                _ => break Err(error),
+                            }
+                        }
+                    }
+                    Err(error) => break Err(error),
                 }
             };
             match initial {
@@ -956,12 +1075,15 @@ async fn run_owned(
                                 }
                             }
                         };
+                        if mode == HostWireMode::PairedV3 {
+                            let observed = result.as_ref().ok().copied().flatten().unwrap_or(
+                                crate::host::protocol::wire::TransportDrainOutcome::Unknown,
+                            );
+                            let retained = retain_transport_outcome(settled_transports, observed);
+                            settled_transports = Some(retained);
+                            remote_transport_drain = Some(retained);
+                        }
                         let disconnected = if cancel.is_cancelled() {
-                            if mode == HostWireMode::PairedV3 {
-                                remote_transport_drain = Some(result.ok().flatten().unwrap_or(
-                                    crate::host::protocol::wire::TransportDrainOutcome::Unknown,
-                                ));
-                            }
                             false
                         } else {
                             event(

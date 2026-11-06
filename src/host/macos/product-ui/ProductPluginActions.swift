@@ -23,7 +23,7 @@ enum ProductPluginWorkflow {
 
 extension ProductModel {
     func observePluginDraftEdit() {
-        pluginDraftEdited = pluginName != plugin["presentation"]["displayName"].string
+        pluginDraftEdited = (!pluginLongDescription.isEmpty && pluginLongDescription != plugin["presentation"]["longDescription"].string) || pluginName != plugin["presentation"]["displayName"].string
             || pluginDescription != plugin["presentation"]["shortDescription"].string
             || pluginIcon != plugin["presentation"]["icon"]
     }
@@ -71,8 +71,12 @@ extension ProductModel {
                    let bytes = try? Data(contentsOf: path), bytes.count <= 256 * 1024 {
                     icon = .object(["mimeType": .string("image/png"), "dataBase64": .string(bytes.base64EncodedString())])
                 }
-                let long = plugin["presentation"]["longDescription"].string ?? productText("通过 Styx 连接你的电脑，使用 CLI、Browser Automation 和 Computer Use。", "Connect your computers with Styx for CLI, Browser Automation and Computer Use.")
-                plugin = try await client.write("plugin/profile", ["authorize": .bool(true), "presentation": .object(["displayName": .string(pluginName), "shortDescription": .string(pluginDescription), "longDescription": .string(long), "icon": icon]), "selection": current["selection"]])["plugin"]
+                let long = !pluginLongDescription.isEmpty ? pluginLongDescription : plugin["presentation"]["longDescription"].string ?? productText("通过 Styx 连接你的电脑，使用 CLI、Browser Automation 和 Computer Use。", "Connect your computers with Styx for CLI, Browser Automation and Computer Use.")
+                var selection = current["selection"]
+                if nativeHost && !current["profileSaved"].bool {
+                    selection = .object(["mode": .string("update"), "accountLabel": .string(""), "pluginUrl": .string(""), "revision": current["selection"]["revision"], "pluginId": .string(pluginIdentity)])
+                }
+                plugin = try await client.write("plugin/profile", ["authorize": .bool(true), "presentation": .object(["displayName": .string(pluginName), "shortDescription": .string(pluginDescription), "longDescription": .string(long), "icon": icon]), "selection": selection])["plugin"]
                 pluginMode = current["selection"]["mode"].string ?? "create"; pluginDraftEdited = false
             }
             let archive = try await client.exportPlugin()

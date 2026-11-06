@@ -10,6 +10,10 @@ use std::{
 use tokio_util::sync::CancellationToken;
 #[path = "computers.rs"]
 mod computers;
+#[path = "install.rs"]
+mod install;
+#[path = "plugin_command.rs"]
+mod plugin_command;
 #[path = "plugin_package.rs"]
 mod plugin_package;
 #[path = "setup.rs"]
@@ -45,7 +49,85 @@ enum ComputersCommand {
     },
 }
 #[derive(Subcommand)]
+enum PluginCommand {
+    /// Show the saved identity, presentation and icon fingerprint.
+    Show,
+    /// Edit plugin details; an existing identity is retained.
+    Configure {
+        #[arg(long)]
+        display_name: Option<String>,
+        #[arg(long)]
+        short_description: Option<String>,
+        #[arg(long)]
+        long_description: Option<String>,
+        #[arg(long, conflicts_with = "default_icon")]
+        icon_file: Option<PathBuf>,
+        #[arg(long)]
+        default_icon: bool,
+        /// For first creation, use the identity of the existing plugin to update.
+        #[arg(long)]
+        plugin_id: Option<String>,
+        #[arg(long)]
+        preview_file: Option<PathBuf>,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Export the saved details and this hub's verified connection, without uploading.
+    Export {
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        preview_file: Option<PathBuf>,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+#[derive(Subcommand)]
+enum LocalAppCommand {
+    Status {
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+#[derive(Subcommand)]
 enum Command {
+    /// Quit the current user's native Windows App through its original owner.
+    Quit {
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read the local native Windows App owner without contacting a Gateway.
+    App {
+        #[command(subcommand)]
+        command: LocalAppCommand,
+    },
+    /// Install a verified Linux CLI into your private bin directory.
+    Install {
+        #[arg(long)]
+        payload_dir: PathBuf,
+        #[arg(long)]
+        publisher_file: PathBuf,
+        #[arg(long)]
+        expected_publisher: String,
+        #[arg(long)]
+        bin_dir: Option<PathBuf>,
+        #[arg(long)]
+        authorize: bool,
+    },
+    /// Configure or export this hub's plugin name, descriptions and icon.
+    Plugin {
+        #[arg(long, global = true, conflicts_with = "gateway_state_dir")]
+        root: Option<PathBuf>,
+        /// Owner-only Gateway profile for a Gateway installed without styx setup.
+        #[arg(long, global = true)]
+        gateway_state_dir: Option<PathBuf>,
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
     /// Guided first-run setup; noninteractive use requires a private answers file.
     Setup {
         #[arg(long)]
@@ -667,12 +749,16 @@ fn setup_result(result: Result<(), setup::Failure>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(failure) => {
-            eprintln!(
-                "{}",
-                serde_json::json!({"schema":1,"error":failure.code,"outcome":if failure.exit == 4 {"unknown"} else {"stopped"},"operations_replayed":false})
-            );
-            if let Some(hint) = failure.hint() {
-                eprintln!("{hint}");
+            if setup_prompt::enhanced() {
+                setup_prompt::failure(failure.code, failure.hint(), failure.exit == 4);
+            } else {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"schema":1,"error":failure.code,"outcome":if failure.exit == 4 {"unknown"} else {"stopped"},"operations_replayed":false})
+                );
+                if let Some(hint) = failure.hint() {
+                    eprintln!("{hint}");
+                }
             }
             if failure.exit == 4 {
                 eprintln!(
@@ -1092,9 +1178,87 @@ async fn stop_signal() -> io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
+async fn local_app(
+    state_dir: Option<PathBuf>,
+    operation: styx_runtime::app_control::Operation,
+    json: bool,
+) -> ExitCode {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (state_dir, operation, json);
+        error("local_app_control_windows_only")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let path = match state_dir.or_else(|| {
+            std::env::var_os("LOCALAPPDATA")
+                .map(|p| PathBuf::from(p).join("StyxPreview/WindowsFirst"))
+        }) {
+            Some(path) => path,
+            None => return error("app_control_state_dir_required"),
+        };
+        match styx_runtime::app_control::request(&path, operation).await {
+            Ok(report) => {
+                let code = report.exit_code();
+                if json {
+                    if write_json(&report).is_err() {
+                        return error("output_unavailable");
+                    }
+                } else {
+                    eprintln!(
+                        "Styx App: {}{}",
+                        report.status,
+                        report
+                            .code
+                            .as_ref()
+                            .map(|s| format!(" ({s})"))
+                            .unwrap_or_default()
+                    );
+                }
+                ExitCode::from(code)
+            }
+            Err(err) => error(err.0),
+        }
+    }
+}
+
 pub(crate) async fn run(cli: Cli) -> ExitCode {
     use styx_runtime::foreground::{self, HostWireMode};
     match cli.command {
+        Command::Quit { state_dir, json } => {
+            local_app(state_dir, styx_runtime::app_control::Operation::Quit, json).await
+        }
+        Command::App {
+            command: LocalAppCommand::Status { state_dir, json },
+        } => {
+            local_app(
+                state_dir,
+                styx_runtime::app_control::Operation::Status,
+                json,
+            )
+            .await
+        }
+        Command::Install {
+            payload_dir,
+            publisher_file,
+            expected_publisher,
+            bin_dir,
+            authorize,
+        } => setup_result(
+            install::run(
+                payload_dir,
+                publisher_file,
+                expected_publisher,
+                bin_dir,
+                authorize,
+            )
+            .await,
+        ),
+        Command::Plugin {
+            root,
+            gateway_state_dir,
+            command,
+        } => setup_result(plugin_command::run(root, gateway_state_dir, command).await),
         Command::Setup {
             root,
             answers,

@@ -96,6 +96,7 @@ impl HostApp {
         self.inspected_join = None;
         self.native_computer_requested = None;
         self.native_runtime = None;
+        self.startup_profile = None;
         self.cleanup = None;
         self.quit_ticket = None;
         self.resume_local_available = false;

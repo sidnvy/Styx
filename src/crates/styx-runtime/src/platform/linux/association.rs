@@ -276,6 +276,40 @@ impl WindowReadEvidence {
 struct ReadWorkspace {
     id: i64,
 }
+// Hyprland may represent an unassigned special workspace with explicit empty
+// metadata and no ID. Keep that absence distinct from an observed workspace ID.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ReadSpecialWorkspace {
+    Assigned(ReadWorkspace),
+    Unassigned(EmptySpecialWorkspace),
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptySpecialWorkspace {
+    address: String,
+    #[serde(rename = "type")]
+    kind: String,
+    name: String,
+}
+impl ReadSpecialWorkspace {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Assigned(workspace) => {
+                let _ = workspace.id;
+                Ok(())
+            }
+            Self::Unassigned(workspace)
+                if workspace.address.is_empty()
+                    && workspace.kind.is_empty()
+                    && workspace.name.is_empty() =>
+            {
+                Ok(())
+            }
+            Self::Unassigned(_) => Err(AssociationError::Untrusted),
+        }
+    }
+}
 #[derive(Deserialize)]
 struct ReadMonitor {
     id: i64,
@@ -286,7 +320,7 @@ struct ReadMonitor {
     #[serde(rename = "activeWorkspace")]
     active_workspace: ReadWorkspace,
     #[serde(rename = "specialWorkspace")]
-    special_workspace: ReadWorkspace,
+    special_workspace: ReadSpecialWorkspace,
 }
 #[derive(Deserialize)]
 struct ReadClient {
@@ -325,7 +359,8 @@ fn decode_window_reply(query: WindowQuery, bytes: &[u8]) -> Result<QueryReadEvid
                     return Err(AssociationError::Untrusted);
                 }
                 // Typed workspace IDs are observed, not interpreted as grants.
-                let _ = (m.active_workspace.id, m.special_workspace.id);
+                let _ = m.active_workspace.id;
+                m.special_workspace.validate()?;
             }
             monitors.len()
         }
@@ -893,10 +928,36 @@ const SOURCES: [(&str, &str); 6] = [
         "b135a2ebe7c591213e75e9860077afedbc8a9ac5baa9604312c629cdb837bb4a",
     ),
 ];
+// Audited Arch package source bundles. The five shell/unit files below are
+// byte-identical across these releases; only main.py changed. Both 0.27.x
+// archives were checked against the Arch signing key and installed file hashes.
+// This remains a fixed compatibility allowlist, never a root-owned-file bypass.
+const SUPPORTED_UWSM_MAIN: [(&str, &str); 3] = [
+    ("0.26.6", SOURCES[0].1),
+    (
+        "0.27.0",
+        "349f77c961efb64713992416d678ddd6986c0b698a0db2090ac1f184268944cb",
+    ),
+    (
+        "0.27.1",
+        "7dd6363244c101c7a0e7641684e29b6a13905e98f9fc3a4c81421e536a976c72",
+    ),
+];
+fn source_hash_supported(path: &str, digest: &str) -> bool {
+    if path == SOURCES[0].0 {
+        return SUPPORTED_UWSM_MAIN
+            .iter()
+            .any(|(_, expected)| *expected == digest);
+    }
+    SOURCES
+        .iter()
+        .skip(1)
+        .any(|(expected_path, expected)| *expected_path == path && *expected == digest)
+}
 fn sources() -> Result<Vec<SourceFact>> {
     SOURCES
         .iter()
-        .map(|(path, expected)| {
+        .map(|(path, _)| {
             let file = File::from(
                 open(
                     Path::new(path),
@@ -911,7 +972,7 @@ fn sources() -> Result<Vec<SourceFact>> {
             }
             let bytes = limited(file, 1024 * 1024)?;
             let digest = Sha256Digest::of_bytes(&bytes);
-            if digest.to_hex() != *expected {
+            if !source_hash_supported(path, &digest.to_hex()) {
                 return Err(AssociationError::Unsupported);
             }
             Ok(SourceFact {
@@ -1367,7 +1428,50 @@ impl LinuxAssociationLease {
     /// Compare fresh original-owned-worker observations without rebinding or
     /// granting authority. Window response content is intentionally excluded.
     pub(crate) fn same_source(&self, other: &Self) -> bool {
-        self.facts.same_source(&other.facts)
+        let unchanged = self.facts.same_source(&other.facts);
+        if !unchanged {
+            eprintln!(
+                "{}",
+                serde_json::json!({"schema":1,
+                "event":"styx_desktop_source_comparison", "same_source":false,
+                "changed_fields":self.source_change_fields(other)})
+            );
+        }
+        unchanged
+    }
+    /// Read-only diagnostics: fixed field names, never observed values.
+    fn source_change_fields(&self, other: &Self) -> Vec<&'static str> {
+        let mut changed = Vec::new();
+        macro_rules! check {
+            ($($field:ident),+ $(,)?) => { $(
+                if self.facts.$field != other.facts.$field {
+                    changed.push(stringify!($field));
+                }
+            )+ };
+        }
+        check!(
+            schema,
+            boot,
+            uid,
+            candidate,
+            login_owner,
+            manager_owner,
+            manager_process,
+            leader,
+            anchor,
+            anchor_argv,
+            bind,
+            envelope,
+            wm,
+            wm_env,
+            bind_process,
+            wm_main,
+            wayland,
+            hyprland,
+            hyprland_events,
+            sources
+        );
+        changed
     }
 
     /// ONLY root's private original-owned-worker completion may call this.
@@ -1508,7 +1612,7 @@ impl LinuxAssociationLease {
             agent_instance,
             protocol_version: 1,
             provenance:
-                "kernel/logind+UWSM0.26.6 exact lifecycle bridge; owned per-session Rust Desktop supervisor required".into(),
+                "kernel/logind+fixed audited UWSM source bundle and exact lifecycle bridge; owned per-session Rust Desktop supervisor required".into(),
         })
     }
 }

@@ -477,6 +477,8 @@ mod platform {
         origin: String,
         not_before_unix: i64,
         not_after_unix: i64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        renew_endpoint: bool,
         files: BTreeMap<String, Sha256Digest>,
     }
     fn secret() -> Result<Zeroizing<Vec<u8>>, BootstrapError> {
@@ -578,6 +580,7 @@ mod platform {
                 origin: origin.clone(),
                 not_before_unix: leaf.not_before_unix,
                 not_after_unix: leaf.not_after_unix,
+                renew_endpoint: true,
                 files: NAMES
                     .iter()
                     .zip(public)
@@ -766,6 +769,9 @@ mod platform {
             for raw in &self.inputs {
                 reobserve(&self.root, raw)?;
             }
+            self.tls
+                .renew_endpoint()
+                .map_err(|_| BootstrapError::new("fresh_gateway_leaf_renewal_failed", 3))?;
             Ok(())
         }
         fn validate_original_state(&self) -> Result<(), BootstrapError> {
@@ -916,7 +922,7 @@ mod platform {
             || ready.origin != origin
             || ready.deployment_raw_sha256 != Sha256Digest::of_bytes(deployment.bytes())
             || clock < ready.not_before_unix
-            || clock >= ready.not_after_unix
+            || (!ready.renew_endpoint && clock >= ready.not_after_unix)
             || ready.files.len() != NAMES.len()
             || NAMES.iter().any(|n| !ready.files.contains_key(*n))
         {
@@ -1096,14 +1102,26 @@ mod platform {
             let ca_pin = tls::TrustAnchorPin::from_certificate_der(&anchors[0]);
             let key = tls::PrivateKeyPem::from_protected_reader_bytes(inputs[5].bytes().to_vec())
                 .map_err(|_| bad())?;
-            let tls = Arc::new(
+            let tls = Arc::new(if ready.renew_endpoint {
+                // Bootstrap files remain immutable evidence. Only a fresh
+                // deployment's explicit policy admits CA-signed runtime leaves.
+                GatewayServerTls::renewing(
+                    inputs[2].bytes().to_vec(),
+                    tls::PrivateKeyPem::from_protected_reader_bytes(inputs[3].bytes().to_vec())
+                        .map_err(|_| bad())?,
+                    ca_pin.clone(),
+                    origin.clone(),
+                    endpoints.lan_addresses.iter().map(|a| a.ip()).collect(),
+                )
+                .map_err(|_| bad())?
+            } else {
                 GatewayServerTls::from_pem(
                     chain.bytes(),
                     &key,
                     GatewayLeafPin::from_certificate_der(&certs[0]),
                 )
-                .map_err(|_| bad())?,
-            );
+                .map_err(|_| bad())?
+            });
             let admin_token = Zeroizing::new(inputs[6].bytes().to_vec());
             let model_token = Zeroizing::new(inputs[7].bytes().to_vec());
             Ok((

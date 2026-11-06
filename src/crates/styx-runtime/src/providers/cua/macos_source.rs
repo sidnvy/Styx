@@ -2,7 +2,7 @@
 //! Uses the separate fixed read-only SignedAppMembers factory in signed-app-pin/.
 //! All filesystem/Security calls run on the caller's existing blocking boundary.
 
-use crate::store::{PrivateRoot, ProcessIdentity, SignedAppMember, SignedAppMembers};
+use crate::store::{PrivateRoot, ProcessIdentity, SignedAppMember, SignedAppMembers, StoreError};
 use core_foundation::{base::TCFType, data::CFData};
 use nix::{
     sys::socket::{
@@ -42,6 +42,8 @@ const ORIGINAL_CERT: &str = "cb50cee601419f28b43756f4fc8aefdbf60abae2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum BindingError {
+    #[error("fixed Mac desktop source not yet published")]
+    NotPublished,
     #[error("fixed Mac desktop source unavailable")]
     Unavailable,
     #[error("fixed Mac native observation protocol incomplete or refused")]
@@ -120,10 +122,18 @@ struct Hint {
     // socket, TCC booleans and acceptance strings are deliberately not parsed.
     // None of those fields is an authenticated platform observation.
 }
+fn missing_publication(error: StoreError) -> BindingError {
+    match error {
+        StoreError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            BindingError::NotPublished
+        }
+        _ => BindingError::Unavailable,
+    }
+}
 fn hint(root: &PrivateRoot) -> Result<Hint> {
     let raw = root
         .read_raw("connection.json", 16 * 1024)
-        .map_err(|_| BindingError::Unavailable)?;
+        .map_err(missing_publication)?;
     let value: Hint = serde_json::from_slice(raw.bytes()).map_err(|_| BindingError::InvalidHint)?;
     if value.schema != 1
         || value.bundle_id != "app.styx.host"
@@ -159,7 +169,8 @@ fn socket_identity(path: &Path, uid: u32) -> Result<SocketIdentity> {
     // Fixed locator only. PrivateRoot read before/after detects ancestry
     // replacement; the actual connected peer is independently authenticated.
     // This path observation alone is never used to authorize a connection.
-    let metadata = fs::symlink_metadata(path).map_err(|_| BindingError::Unavailable)?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| missing_publication(StoreError::Io(error)))?;
     if !metadata.file_type().is_socket()
         || metadata.uid() != uid
         || metadata.mode() & 0o7077 != 0
@@ -197,7 +208,7 @@ impl MacSourceCandidate {
             return Err(BindingError::Peer);
         }
         let directory = PathBuf::from(format!("/private/tmp/styx-cua-{uid}"));
-        let root = PrivateRoot::open(&directory).map_err(|_| BindingError::Unavailable)?;
+        let root = PrivateRoot::open(&directory).map_err(missing_publication)?;
         let original = hint(&root)?;
         birth(original.owner_pid, uid)?;
         birth(original.daemon_pid, uid)?;
@@ -498,4 +509,78 @@ fn verify_guest(
         return Err(BindingError::Signature);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod installed_source_tests {
+    use super::*;
+
+    // Opt-in native diagnostic only: authenticate the installed original source,
+    // read native facts, then close these original FDs. No session or input.
+    #[tokio::test]
+    #[ignore = "requires the owner-authorized installed Mac App and live original Cua"]
+    async fn installed_source_binding_read_only() {
+        assert_eq!(
+            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
+            Ok("read-only")
+        );
+        MacSourceCandidate::check_discovery_presence().expect("discovery_presence");
+        eprintln!("MAC_SOURCE_READ_ONLY discovery_presence=PASS");
+        let images = MacAppImages::open_fixed().expect("fixed_signed_App_images");
+        eprintln!("MAC_SOURCE_READ_ONLY fixed_signed_App_images=PASS");
+        let candidate = MacSourceCandidate::discover(images).expect("original_candidate");
+        eprintln!("MAC_SOURCE_READ_ONLY original_candidate=PASS");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let connected = candidate
+            .connect(deadline)
+            .await
+            .expect("original_socket_connect");
+        let mut bound = connected
+            .finish_binding()
+            .expect("kernel_peer_and_original_images");
+        eprintln!("MAC_SOURCE_READ_ONLY kernel_peer_and_original_images=PASS");
+        let facts = bound
+            .observe_native(deadline.into_std())
+            .expect("original_FD_native_protocol");
+        assert!(
+            facts.observed_unlocked(),
+            "original_native_console_unlocked"
+        );
+        eprintln!("MAC_SOURCE_READ_ONLY original_FD_native_console=PASS");
+    }
+    #[tokio::test]
+    #[ignore = "requires the owner-authorized installed Mac App and live original Cua"]
+    async fn installed_source_windows_read_only() {
+        assert_eq!(
+            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
+            Ok("read-only")
+        );
+        let source = super::super::macos::MacProxySource::discover(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect("original_source_discovery");
+        let original = source.clone();
+        let observation = tokio::task::spawn_blocking(move || {
+            original.observe_with_windows(
+                std::time::Instant::now() + std::time::Duration::from_secs(15),
+            )
+        })
+        .await
+        .expect("original_read_task_joined");
+        // Settle the same original read control even if its observation failed.
+        let drain = tokio::task::spawn_blocking(move || {
+            source
+                .drain_source_probe(std::time::Instant::now() + std::time::Duration::from_secs(10))
+        })
+        .await
+        .expect("original_drain_task_joined");
+        assert_eq!(drain, Ok(true), "original_read_probe_drain");
+        let (facts, windows) = observation.expect("original_FD_window_read");
+        assert!(facts.observed_unlocked());
+        eprintln!(
+            "MAC_SOURCE_READ_ONLY window_read_count={} original_probe_drain=PASS",
+            windows.count
+        );
+    }
 }

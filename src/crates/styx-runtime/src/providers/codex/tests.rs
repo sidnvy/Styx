@@ -470,6 +470,8 @@ fn fixture_adapter(
             cursor: None,
             gaps: 0,
             decoder: OutputDecoder::default(),
+            pending_output: None,
+            output_closed: false,
             drained: false,
             input_unknown: None,
             last_exit: None,
@@ -849,7 +851,7 @@ async fn raw_pages_preserve_failure_extensions_and_cancelled_read_mode() {
     let mut auth = authority();
     let (_, id, _) = auth.issue(spec(&std::env::temp_dir(), "unused", false));
     let (adapter, handle, server) = fixture_adapter(auth.owner.clone(), id);
-    let native = json!({"chunks":[],"nextSeq":1,"exited":false,"closed":false,"failure":{"code":"native_failure"},"extension":{"kept":true}});
+    let native = json!({"chunks":[{"seq":1,"stream":"stdout","chunk":STANDARD.encode("whole upstream chunk larger than one-byte hint")}],"nextSeq":2,"exited":false,"closed":false,"failure":{"code":"native_failure"},"extension":{"kept":true}});
     let expected = native.clone();
     let worker = tokio::spawn(async move {
         let (r, mut w) = tokio::io::split(server);
@@ -1703,4 +1705,206 @@ async fn archival_strict_not_sent_related_unknown_uuid_and_negative_bundle_batch
         assert!(cleanup.stderr_task_reaped);
         assert!(adapter.rpc.observation(&handle.process_id).is_none());
     }
+}
+
+#[tokio::test]
+async fn whole_native_chunk_larger_than_hint_is_buffered_and_delivered_once() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let mut auth = authority();
+    let (_, id, _) = auth.issue(spec(&std::env::temp_dir(), "unused", false));
+    let owner = auth.owner.clone();
+    let (adapter, handle, server) = fixture_adapter(owner.clone(), id);
+    let expected = format!("{}🙂尾{}", "a".repeat(1544), "z".repeat(43));
+    let data = expected.clone();
+    let expected = expected + "second native page";
+    let process = handle.process_id.clone();
+    let worker = tokio::spawn(async move {
+        let (r, mut w) = tokio::io::split(server);
+        let mut lines = BufReader::new(r).lines();
+        let q: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(q["method"], "process/read");
+        assert_eq!(q["params"]["afterSeq"], Value::Null);
+        let hint = q["params"]["maxBytes"].as_u64().unwrap() as usize;
+        assert!(data.len() > hint);
+        w.write_all(format!("{}\n",json!({"method":"process/exited","params":{"processId":process,"seq":3,"exitCode":0}})).as_bytes()).await.unwrap();
+        w.write_all(
+            format!(
+                "{}\n",
+                json!({"method":"process/closed","params":{"processId":process,"seq":4}})
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        // Exact upstream shape: closed/exited with a whole output chunk larger
+        // than maxBytes, while nextSeq still points before terminal events.
+        w.write_all(format!("{}\n",json!({"id":q["id"],"result":{"chunks":[{"seq":1,"stream":"stdout","chunk":STANDARD.encode(data.as_bytes())}],"nextSeq":2,"exited":true,"exitCode":0,"closed":true,"failure":null}})).as_bytes()).await.unwrap();
+        let q: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(q["method"], "process/read");
+        assert_eq!(q["params"]["afterSeq"], 1);
+        w.write_all(format!("{}\n",json!({"id":q["id"],"result":{"chunks":[{"seq":2,"stream":"stdout","chunk":STANDARD.encode("second native page")}],"nextSeq":3,"exited":true,"exitCode":0,"closed":true,"failure":null}})).as_bytes()).await.unwrap();
+        let q: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(q["params"]["afterSeq"], 2);
+        w.write_all(format!("{}\n",json!({"id":q["id"],"result":{"chunks":[],"nextSeq":5,"exited":true,"exitCode":0,"closed":true,"failure":null}})).as_bytes()).await.unwrap();
+    });
+    let mut output = String::new();
+    let mut calls = 0;
+    loop {
+        let page = adapter
+            .read(&owner, &handle, 7, Duration::ZERO)
+            .await
+            .unwrap();
+        calls += 1;
+        let text: String = page.chunks.iter().map(|c| c.text.as_str()).collect();
+        assert!(text.len() <= 7 * 4 + 4);
+        output.push_str(&text);
+        assert_eq!(page.exit_code, Some(0));
+        if page.drain == OutputDrain::Drained {
+            break;
+        }
+        assert!(calls < expected.len());
+    }
+    assert_eq!(output, expected);
+    assert!(calls > 2);
+    worker.await.unwrap();
+}
+
+#[tokio::test]
+async fn retained_read_pages_leave_a_control_rpc_slot_and_refuse_before_another_read() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let mut auth = authority();
+    let (_, id, _) = auth.issue(spec(&std::env::temp_dir(), "unused", false));
+    let owner = auth.owner.clone();
+    let (adapter, handle, server) = fixture_adapter(owner.clone(), id);
+    let worker = tokio::spawn(async move {
+        let (r, mut w) = tokio::io::split(server);
+        let mut lines = BufReader::new(r).lines();
+        for expected in ["process/read", "process/read", "process/terminate"] {
+            let q: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(q["method"], expected);
+            w.write_all(format!("{}\n", json!({"id":q["id"],"result":{}})).as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let a = adapter.rpc.reserve_read_buffer().unwrap();
+    let b = adapter.rpc.reserve_read_buffer().unwrap();
+    let first = adapter
+        .rpc
+        .request_budgeted("process/read", json!({}))
+        .await
+        .unwrap();
+    let second = adapter
+        .rpc
+        .request_budgeted("process/read", json!({}))
+        .await
+        .unwrap();
+    assert!(matches!(
+        adapter.read(&owner, &handle, 10, Duration::ZERO).await,
+        Err(ExecError::Capacity)
+    ));
+    // The saturated output cache must not prevent an original cleanup control.
+    adapter
+        .rpc
+        .request("process/terminate", json!({}))
+        .await
+        .unwrap();
+    drop((first, second, a, b));
+    worker.await.unwrap();
+}
+
+#[tokio::test]
+async fn complete_native_events_retain_delayed_output_without_replaying_an_expired_read() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let mut auth = authority();
+    let (_, id, _) = auth.issue(spec(&std::env::temp_dir(), "unused", false));
+    let owner = auth.owner.clone();
+    let (adapter, handle, server) = fixture_adapter(owner.clone(), id);
+    let process = handle.process_id.clone();
+    let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let tail = "尾🙂";
+    let worker = tokio::spawn(async move {
+        let (r, mut w) = tokio::io::split(server);
+        let mut lines = BufReader::new(r).lines();
+        w.write_all(format!("{}\n",json!({"method":"process/output","params":{"processId":process,"seq":1,"stream":"stdout","chunk":STANDARD.encode("abc")}})).as_bytes()).await.unwrap();
+        let q: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(q["method"], "process/read");
+        w.write_all(format!("{}\n",json!({"id":q["id"],"result":{"chunks":[{"seq":1,"stream":"stdout","chunk":STANDARD.encode("abc")}],"nextSeq":2,"exited":false,"exitCode":null,"closed":false,"failure":null}})).as_bytes()).await.unwrap();
+        complete_rx.await.unwrap();
+        for event in [
+            json!({"method":"process/output","params":{"processId":process,"seq":2,"stream":"stdout","chunk":STANDARD.encode(tail)}}),
+            json!({"method":"process/exited","params":{"processId":process,"seq":3,"exitCode":0}}),
+            json!({"method":"process/closed","params":{"processId":process,"seq":4}}),
+        ] {
+            w.write_all(format!("{event}\n").as_bytes()).await.unwrap();
+        }
+        // Native read retention may already have expired. Any second read would
+        // lose the original outcome; the complete pushed prefix supplies it.
+        tokio::select! {
+            _=done_rx=>{},
+            q=lines.next_line()=>panic!("unexpected native read after complete original events: {q:?}"),
+        }
+    });
+    let first = adapter
+        .read(&owner, &handle, 2, Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(first.chunks[0].text, "ab");
+    assert_eq!(first.drain, OutputDrain::Open);
+    let second = adapter
+        .read(&owner, &handle, 2, Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(second.chunks[0].text, "c");
+    complete_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while adapter
+            .rpc
+            .observation(&handle.process_id)
+            .unwrap()
+            .closed
+            .is_none()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let partial = adapter
+        .read(&owner, &handle, 1, Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(partial.drain, OutputDrain::Open);
+    assert_eq!(
+        adapter.retire(&owner, &handle).await.unwrap_err(),
+        ExecError::ResourceUnsettled
+    );
+    let mut rest: String = partial.chunks.into_iter().map(|c| c.text).collect();
+    let mut drained = false;
+    for _ in 0..16 {
+        let page = adapter
+            .read(&owner, &handle, 1, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(page.exit_code, Some(0));
+        for c in page.chunks {
+            rest.push_str(&c.text);
+        }
+        if page.drain == OutputDrain::Drained {
+            drained = true;
+            break;
+        }
+    }
+    assert!(drained);
+    assert_eq!(rest, tail);
+    let again = adapter
+        .read(&owner, &handle, 1, Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(again.chunks.is_empty());
+    assert_eq!(again.exit_code, Some(0));
+    done_tx.send(()).unwrap();
+    worker.await.unwrap();
 }

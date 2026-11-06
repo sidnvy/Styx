@@ -361,7 +361,7 @@ impl NativeRootBinding {
         })
     }
 }
-fn same_identity(root: &RootIdentity, marker: &NativeRootMarker) -> bool {
+pub(super) fn same_identity(root: &RootIdentity, marker: &NativeRootMarker) -> bool {
     match root {
         RootIdentity::Linux { device, inode, uid } => {
             marker.root_identity

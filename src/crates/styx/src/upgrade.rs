@@ -380,13 +380,15 @@ mod linux {
         roles: &[Original],
         mut step: impl AsyncFnMut(Role, ServiceAction) -> Result<()>,
     ) -> Result<()> {
+        // Commit the original enablement before starting the service. Starting
+        // first races the Host's initial profile read with a configuration write.
         // Plan order is gateway, host. Stopped and disabled roles stay that way.
         for original in roles {
             if original.installed {
                 for (action, wanted) in [
                     (ServiceAction::Install, true),
-                    (ServiceAction::Start, original.running),
                     (ServiceAction::Enable, original.enabled),
+                    (ServiceAction::Start, original.running),
                 ] {
                     if wanted {
                         step(original.role, action).await?;
@@ -874,8 +876,8 @@ mod linux {
                 effects,
                 [
                     "gateway-install",
-                    "gateway-start",
                     "gateway-enable",
+                    "gateway-start",
                     "host-install"
                 ]
             );

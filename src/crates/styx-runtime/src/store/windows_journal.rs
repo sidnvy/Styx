@@ -77,32 +77,41 @@ pub(in crate::store) fn scan(
         return Err(JournalError::InvalidInput);
     }
     let root = protected(dir)?;
-    let mut files = Vec::new();
-    let mut total_bytes = 0usize;
-    // The original and independently reopened directory/ancestors deny delete
-    // sharing. Enumeration is lazy and bounded, not an unbounded walk/collect.
-    let iterator = std::fs::read_dir(root.journal_path()).map_err(unknown)?;
-    for entry in iterator {
-        let entry = entry.map_err(unknown)?;
-        if files.len() >= budget.max_files {
-            return Err(JournalError::BudgetExceeded);
+    root.with_read_batch(|batch| {
+        let mut files = Vec::new();
+        let mut total_bytes = 0usize;
+        // The original namespace and all ancestors remain pinned without delete
+        // sharing throughout this bounded scan. Validate their full chain once
+        // on entry/exit rather than reopening it for every small journal member.
+        let iterator = std::fs::read_dir(root.journal_path()).map_err(unknown)?;
+        for entry in iterator {
+            let entry = entry.map_err(unknown)?;
+            if files.len() >= budget.max_files {
+                return Err(JournalError::BudgetExceeded);
+            }
+            let name = entry.file_name().into_string().map_err(unknown)?;
+            let remaining = budget
+                .max_bytes
+                .checked_sub(total_bytes)
+                .ok_or(JournalError::BudgetExceeded)?;
+            let raw = batch
+                .read_raw(Path::new(&name), budget.max_file_bytes.min(remaining))
+                .map_err(|error| match error {
+                    StoreError::TooLarge => JournalError::BudgetExceeded,
+                    _ => JournalError::Unknown,
+                })?;
+            let bytes = raw.bytes;
+            total_bytes = total_bytes
+                .checked_add(bytes.len())
+                .ok_or(JournalError::BudgetExceeded)?;
+            files.push(ObservedJournalFile { name, bytes });
         }
-        let name = entry.file_name().into_string().map_err(unknown)?;
-        let remaining = budget
-            .max_bytes
-            .checked_sub(total_bytes)
-            .ok_or(JournalError::BudgetExceeded)?;
-        let bytes = read_at(&root, &name, budget.max_file_bytes.min(remaining))?
-            .ok_or(JournalError::Unknown)?;
-        total_bytes = total_bytes
-            .checked_add(bytes.len())
-            .ok_or(JournalError::BudgetExceeded)?;
-        files.push(ObservedJournalFile { name, bytes });
-    }
-    root.validate_root().map_err(unknown)?;
-    files.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(JournalObservation { files, total_bytes })
+        files.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(JournalObservation { files, total_bytes })
+    })
+    .map_err(unknown)?
 }
+
 pub(in crate::store) fn immutable(
     dir: &File,
     name: &str,

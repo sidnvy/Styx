@@ -48,7 +48,7 @@ Name: "{userstartup}\Styx"; Filename: "{app}\versions\{#PackageHash}\StyxPreview
 Type: files; Name: "{userstartup}\Styx.lnk"; Check: OwnedStartupUnchanged
 
 [Code]
-var StartupOwned, NativeMaintenanceAttempted: Boolean; StartupHash, StartupArgs: String;
+var StartupOwned, NativeMaintenanceAttempted, NativeVerificationFailed: Boolean; StartupHash, StartupArgs: String;
 function NativeAttributes(Name: String): Cardinal;
   external 'GetFileAttributesW@kernel32.dll stdcall';
 function StartupPath: String;
@@ -143,12 +143,20 @@ begin
   else if Code <> 0 then Result := 'Setup could not confirm that Styx has stopped. No program files have been changed. Close Styx and retry.';
 end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
+var Code: Integer;
 begin
   if CompareText(ExpandConstant('{app}'), InstallRoot) <> 0 then begin
     Result := 'Use the standard per-user Styx installation folder.';
     exit;
   end;
   ExtractTemporaryFile('StyxInstallGate.exe');
+  if '{#NativePackage}' = '1' then begin
+    if not Exec(ExpandConstant('{tmp}\StyxInstallGate.exe'), 'check-native-user', '', SW_HIDE, ewWaitUntilTerminated, Code) then Code := 2;
+    if Code <> 0 then begin
+      Result := 'Run Styx Setup from your normal logged-in desktop without administrator privileges. No program files were changed.';
+      exit;
+    end;
+  end;
   // SetupMutex is held here. Recheck AppMutex to close the startup race.
   Result := CheckIdle(ExpandConstant('{tmp}\StyxInstallGate.exe'), 'upgrade');
   if Result = '' then CaptureOwnedStartup(ExpandConstant('{tmp}\StyxInstallGate.exe'));
@@ -172,8 +180,16 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var Code: Integer; Candidate: String;
 begin
   if (CurStep = ssPostInstall) and ('{#NativePackage}' = '1') then begin
+    NativeVerificationFailed := True;
     Candidate := InstallRoot + '\versions\{#PackageHash}';
     if not Exec(ExpandConstant('{app}\.installer\StyxInstallGate.exe'), 'verify-native "' + Candidate + '" "{#PackageHash}"', '', SW_HIDE, ewWaitUntilTerminated, Code) then Code := 2;
     if Code <> 0 then RaiseException('Native package verification did not complete. Do not open this candidate; original device settings have not been changed.');
+    NativeVerificationFailed := False;
   end;
+end;
+
+// Silent post-install verification failures must not appear successful.
+function GetCustomSetupExitCode: Integer;
+begin
+  if NativeVerificationFailed then Result := 2 else Result := 0;
 end;

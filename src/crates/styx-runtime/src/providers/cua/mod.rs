@@ -259,12 +259,49 @@ impl CuaAction {
         // list; the markdown view carries native tokens and is always removed.
         // A default (markdown) read would therefore return nothing actionable.
         if name == "get_window_state"
+            && arguments.get("include_accessibility_tree") != Some(&Value::Bool(false))
             && matches!(
                 arguments.get("tree_format").and_then(Value::as_str),
                 None | Some("markdown")
             )
         {
             arguments.insert("tree_format".into(), Value::String("elements".into()));
+        }
+        if name == "get_window_state" {
+            if arguments.get("include_accessibility_tree") == Some(&Value::Bool(false))
+                && arguments.get("include_screenshot") != Some(&Value::Bool(false))
+            {
+                arguments
+                    .entry("include_screenshot")
+                    .or_insert(Value::Bool(true));
+                for (key, default) in [("max_image_dimension", 1024), ("timeout_ms", 1000)] {
+                    arguments.entry(key).or_insert(Value::from(default));
+                }
+            } else if arguments.get("include_screenshot") == Some(&Value::Bool(false))
+                && arguments.get("include_accessibility_tree") != Some(&Value::Bool(false))
+            {
+                arguments
+                    .entry("include_accessibility_tree")
+                    .or_insert(Value::Bool(true));
+                for (key, default) in [
+                    ("max_elements", 250),
+                    ("max_depth", 25),
+                    ("timeout_ms", 1000),
+                ] {
+                    arguments.entry(key).or_insert(Value::from(default));
+                }
+            }
+        }
+        if name == "click" && arguments.contains_key("element_token") {
+            // The public native schema permits explicit defaults. Canonicalize
+            // only defaults here. The exact-target contract separately admits
+            // the explicit Windows foreground context-menu gesture; unsupported
+            // gestures and extra target shapes still fail before any dispatch.
+            for (key, default) in [("button", "left"), ("delivery_mode", "background")] {
+                if arguments.get(key).and_then(Value::as_str) == Some(default) {
+                    arguments.remove(key);
+                }
+            }
         }
         let value = Self { name, arguments };
         value.validate()?;
@@ -445,6 +482,25 @@ impl CuaCleanup {
     pub fn complete(&self) -> bool {
         self.worker_exited && self.io_joined && self.physical_settlement_confirmed()
     }
+}
+pub(crate) fn trace_write_settlement(
+    evidence: CuaEvidence,
+    ledger: bool,
+    audit: bool,
+    delivery: bool,
+) {
+    if std::env::var_os("STYX_CUA_DIAGNOSTICS").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return;
+    }
+    use std::io::Write as _;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "{}",
+        serde_json::json!({
+            "event":"styx_cua_write_settlement", "native_acknowledged":matches!(evidence,CuaEvidence::Acknowledged),
+            "native_unknown":matches!(evidence,CuaEvidence::Unknown), "ledger_recorded":ledger,"audit_recorded":audit,"delivery_admitted":delivery
+        })
+    );
 }
 pub struct CuaIoBudget {
     _partition: OwnedSemaphorePermit,
@@ -1109,10 +1165,14 @@ impl CuaActionSlot {
             Err(error) => return refused("write_request", error),
         };
         let write_attempt = permit.purpose() == OperationPurpose::DesktopAccessibilityWriteAttempt;
-        if write_attempt != write_request.is_some()
-            || (write_attempt && (!self.live.ax_once_available || write_gate.is_none()))
-        {
+        if write_attempt != write_request.is_some() || (write_attempt && write_gate.is_none()) {
             return refused("write_contract", CuaError::PermissionDenied);
+        }
+        if write_attempt && !self.live.ax_once_available {
+            // A stock read/click worker lacks the two required native once-only
+            // ports. This is a package capability gap, not an OS denial. Never
+            // fall back to raw keyboard input or a second unbound native call.
+            return refused("write_extension_missing", CuaError::Unsupported);
         }
         if permit.purpose() != OperationPurpose::Execute
             && !write_attempt

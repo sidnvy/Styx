@@ -329,6 +329,16 @@ impl<'a> HostProtocol<'a> {
             .and_then(|entry| entry.lease.clone())
             .ok_or(ErrorCategory::Unauthorized)
     }
+    /// Existing pending handlers only. Withdrawing new admission is not owner
+    /// revocation: their original result may still leave this same connection.
+    fn receipt_owner(&self, reference: &OwnerRef) -> Result<OwnerLease, ErrorCategory> {
+        let registry = self.owners.lock().expect("owner registry");
+        registry
+            .owners
+            .get(&(reference.owner_id.clone(), reference.owner_epoch.clone()))
+            .and_then(|entry| entry.lease.clone())
+            .ok_or(ErrorCategory::Unauthorized)
+    }
     fn fence_transport_stop(&self) -> Result<(), ProtocolError> {
         let mut registry = self.owners.lock().expect("owner registry");
         registry.stopping = true;
@@ -914,29 +924,57 @@ impl<'a> HostProtocol<'a> {
         let mut stop_requested = false;
         let mut outstanding_drain: Option<RequestId> = None;
         let mut drain_deadline: Option<tokio::time::Instant> = None;
+        let mut result_deadline: Option<tokio::time::Instant> = None;
         let mut completed_drain = None;
         let mut pending: FuturesUnordered<
             futures_util::future::BoxFuture<'_, (RequestId, Option<OwnerRef>, Reply)>,
         > = FuturesUnordered::new();
         loop {
+            // Finish already admitted result delivery before sending the existing
+            // drain control, which revokes these exact bindings on the Gateway.
+            // A fixed grace bounds this wait; it never re-polls an input action.
+            if stop_requested
+                && outstanding_drain.is_none()
+                && (pending.is_empty()
+                    || result_deadline.is_some_and(|d| tokio::time::Instant::now() >= d))
+            {
+                self.fence_transport_stop()?;
+                result_deadline = None;
+                let id: RequestId = format!("host-drain-{}", uuid::Uuid::new_v4())
+                    .try_into()
+                    .map_err(|_| ProtocolError::InvalidFrame)?;
+                drain_deadline = Some(
+                    tokio::time::Instant::now()
+                        + Duration::from_millis(u64::from(TRANSPORT_DRAIN_TIMEOUT_MS)),
+                );
+                let frame = HostControl::TransportDrainV1 {
+                    drain_id: id.clone(),
+                    connection_generation: generation.clone(),
+                    host_generation: self.profile.host_generation.clone(),
+                    timeout_ms: TRANSPORT_DRAIN_TIMEOUT_MS,
+                };
+                outstanding_drain = Some(id);
+                let text =
+                    serde_json::to_string(&frame).map_err(|_| ProtocolError::ResponseLost)?;
+                sender
+                    .send_text(text, Duration::from_secs(5))
+                    .await
+                    .map_err(|_| ProtocolError::ResponseLost)?;
+            }
             let (request_id, reply) = tokio::select! {
                 biased;
                 _ = stop.cancelled(), if !stop_requested => {
                     stop_requested = true;
-                    self.fence_transport_stop()?;
                     if !self.paired || !negotiated || !drain_enabled {
+                        self.fence_transport_stop()?;
                         return Ok(Some(TransportDrainOutcome::Unsupported));
                     }
-                    let id: RequestId = format!("host-drain-{}", uuid::Uuid::new_v4()).try_into()
-                        .map_err(|_| ProtocolError::InvalidFrame)?;
-                    drain_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(u64::from(TRANSPORT_DRAIN_TIMEOUT_MS)));
-                    let frame = HostControl::TransportDrainV1 {
-                        drain_id: id.clone(), connection_generation: generation.clone(),
-                        host_generation: self.profile.host_generation.clone(), timeout_ms: TRANSPORT_DRAIN_TIMEOUT_MS,
-                    };
-                    outstanding_drain = Some(id);
-                    let text = serde_json::to_string(&frame).map_err(|_| ProtocolError::ResponseLost)?;
-                    sender.send_text(text, Duration::from_secs(5)).await.map_err(|_| ProtocolError::ResponseLost)?;
+                    self.owners.lock().expect("owner registry").stopping = true;
+                    result_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(5));
+                    continue;
+                }
+                _ = tokio::time::sleep_until(result_deadline.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86400))), if result_deadline.is_some() => {
+                    // Re-enter the single original fencing/drain path above.
                     continue;
                 }
                 _ = tokio::time::sleep_until(drain_deadline.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86400))), if drain_deadline.is_some() => {
@@ -945,7 +983,7 @@ impl<'a> HostProtocol<'a> {
                 finished = pending.next(), if !pending.is_empty() => {
                     let Some((id, owner, mut reply)) = finished else { continue; };
                     // A revoked owner may not receive an in-flight result.
-                    if owner.as_ref().is_some_and(|owner| self.owner(owner).is_err()) {
+                    if owner.as_ref().is_some_and(|owner| self.receipt_owner(owner).is_err()) {
                         reply = Reply::Error { category: ErrorCategory::Unauthorized, certainty: ExecutionCertainty::Unknown, cursor_may_be_consumed: true };
                     }
                     (id, reply)
@@ -1088,6 +1126,11 @@ fn coordinator_error(error: CoordinatorError, read: bool) -> Reply {
         CoordinatorError::ReadDeadline => {
             (ErrorCategory::OperationTimeout, ExecutionCertainty::Unknown)
         }
+        CoordinatorError::Executor(crate::providers::codex::ExecError::Capacity) if read => {
+            // A decoded read buffer is reserved before any native request or
+            // cursor advance. A saturated caller may wait without poisoning it.
+            (ErrorCategory::Busy, ExecutionCertainty::NotDispatched)
+        }
         CoordinatorError::ResponseLost | CoordinatorError::Executor(_) => {
             (ErrorCategory::ResultUnknown, ExecutionCertainty::Unknown)
         }
@@ -1118,7 +1161,7 @@ fn coordinator_error(error: CoordinatorError, read: bool) -> Reply {
     Reply::Error {
         category,
         certainty,
-        cursor_may_be_consumed: read,
+        cursor_may_be_consumed: read && certainty != ExecutionCertainty::NotDispatched,
     }
 }
 struct BoundedJson(Vec<u8>, usize);

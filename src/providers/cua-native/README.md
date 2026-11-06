@@ -102,3 +102,16 @@ shutdown boundary; an async waiter disappearing does not prove cancellation.
 Windows runtime wiring is integrated, but private once-write admission remains
 disabled pending native build and effect verification. A Linux build of the
 combined sources does not compile the Windows platform module or prove UIA.
+
+### Per-object macOS notification support
+
+Required original-window subscriptions remain mandatory. If only a descendant
+object reports native notification-unsupported (-25207), the complete snapshot
+may retain its descriptive row as `read_only:true`; it publishes no native token
+for that row. Core consequently mints no Host input alias. Original editable
+acquisition independently refuses that read-only object. Unknown/ended observer
+and all other subscription errors still invalidate the original fence. Native
+labels may use observed AXDescription/AXIdentifier when AXTitle is absent;
+enabled/password fields are native observations, never input permission.
+The opt-in native owned-window reference only reads/acquires and must be run
+under the authorized actual App's GUI ancestry; it invokes no setter or click.
