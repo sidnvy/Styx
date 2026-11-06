@@ -284,7 +284,7 @@ enum ProductRestorationPolicy {
     var nativeLanJoinNotice: String? {
         guard status["gateway"]["lan"]["enabled"].bool,
               let origin = status["gateway"]["lan"]["origin"].string else { return nil }
-        return productText("网络上的其他电脑可以通过 \(origin) 加入。使用 `styx gateway invite` 创建邀请。", "Other computers on your network can join at \(origin). Create an invitation with `styx gateway invite`.")
+        return productText("网络上的其他电脑可以通过 \(origin) 加入。从菜单栏或设置中选择“添加电脑”来创建邀请。", "Other computers on your network can join at \(origin). Choose Add computer in the menu bar or Settings to create an invitation.")
     }
     var nativeCanCreateLocal: Bool {
         !nativeLocalSetupSubmitted && status["admission_fenced"] == .bool(false)
