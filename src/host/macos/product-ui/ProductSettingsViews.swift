@@ -185,7 +185,7 @@ struct ProductSettingsView: View {
     @ViewBuilder private var computers: some View {
         GroupBox(productText("这台 Mac", "This Mac")) { local.padding(8) }
         if let notice = model.nativeLanJoinNotice { Text(notice).font(.callout).textSelection(.enabled) }
-        if model.joined {
+        if model.joined || (model.nativeHost && model.status["gateway"] == .null) {
             Label(productText("由管理电脑管理电脑连接", "Computer connections are managed on the main computer"), systemImage: "link")
         } else {
             Button(productText("添加电脑", "Add computer")) { addComputer = true; model.beginDeviceInvitation() }
@@ -196,7 +196,7 @@ struct ProductSettingsView: View {
                         HStack { Label(device.label, systemImage: device.platform == "win32" ? "desktopcomputer" : "laptopcomputer"); Spacer(); ProductConnectionDot(state: device.indicator) }
                         Text(device.indicator.label).font(.caption).foregroundStyle(.secondary)
                         HStack {
-                            if !device.isDefault { Button(productText("设为默认", "Set as default")) { model.setDefault(device.id) }.disabled(model.busy) }
+                            if !model.nativeHost && !device.isDefault { Button(productText("设为默认", "Set as default")) { model.setDefault(device.id) }.disabled(model.busy) }
                             Spacer()
                             Button(productText("移除这台电脑", "Remove computer"), role: .destructive) { model.revokeDevice(device) }.disabled(model.busy)
                         }
@@ -212,8 +212,15 @@ struct ProductSettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             if model.nativeHost {
                 Text(productText("ChatGPT 中的 Styx", "Styx in ChatGPT")).font(.headline)
-                Text(productText("如果这台电脑加入了其他管理电脑，请复用那里的 Styx 连接。新 Tunnel 请在管理电脑终端运行 styx setup 配置；此 App 尚不能编辑原生 Tunnel 设置。", "If this computer joined another hub, reuse that hub’s Styx connection. Configure a new Tunnel by running styx setup on the hub; this App cannot yet edit native Tunnel settings."))
-                Text(productText("等待 Tunnel 就绪后，在目标 ChatGPT 账号打开 Plugins → Add → Add custom MCP server。填写名称，通过 Choose icon 上传下方图标，Connection 选择 Tunnel，粘贴 setup 显示的 Tunnel ID，Authentication 选择 No authentication。运行密钥只保存在 Styx。", "When the tunnel is ready, open Plugins → Add → Add custom MCP server in the intended ChatGPT account. Enter a name, upload the icon below with Choose icon, select Connection: Tunnel, paste the Tunnel ID from setup, and select Authentication: No authentication. Keep the runtime key only in Styx."))
+                if model.nativeSupportsOperation("tunnelSave") {
+                    ProductTunnelStatus(model: model, showNextStep: false)
+                    if !model.tunnelID.isEmpty { Text(model.tunnelID).textSelection(.enabled) }
+                    Button(productText("配置 Tunnel…", "Configure Tunnel…")) { editTunnel = true }.disabled(model.busy)
+                    Text(productText("保存时会短暂断开本 App 管理的连接，随后自动恢复。请先完成正在运行的任务。", "Saving briefly pauses connections managed by this App, then reconnects. Finish active tasks first.")).font(.caption)
+                } else {
+                    Text(productText("这台电脑已加入其他管理电脑，请复用那里的 Styx 连接。", "This computer uses another hub. Use that hub's existing Styx connection."))
+                }
+                Text(productText("等待 Tunnel 就绪后，在目标 ChatGPT 账号打开 Plugins → Add → Add custom MCP server。填写名称，通过 Choose icon 上传下方图标，Connection 选择 Tunnel，粘贴这里显示的 Tunnel ID，Authentication 选择 No authentication。运行密钥只保存在 Styx。", "When the tunnel is ready, open Plugins → Add → Add custom MCP server in the intended ChatGPT account. Enter a name, upload the icon below with Choose icon, select Connection: Tunnel, paste the Tunnel ID shown here, and select Authentication: No authentication. Keep the runtime key only in Styx."))
                 Button(productText("保存 Styx 上传图标…", "Save Styx upload icon…")) { model.saveBrandIcon() }.accessibilityIdentifier("styx-native-custom-mcp-save-icon")
                 Text(productText("复用已有连接，不要删除正式插件。创建并连接后刷新已安装详情页，检查 Styx Logo，再选择 Try in chat 并发送 List my Styx computers。Custom MCP 不会安装 ZIP 中的技能。", "Reuse an existing connection; do not delete a production plugin. After creating and connecting, refresh the installed details and check the Styx logo. Choose Try in chat and send: List my Styx computers. Custom MCP does not install the ZIP’s skills."))
                 Button(productText("打开 ChatGPT Plugins", "Open ChatGPT Plugins")) { model.openOfficial("https://chatgpt.com/plugins") }

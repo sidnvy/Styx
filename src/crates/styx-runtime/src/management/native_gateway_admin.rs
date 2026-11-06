@@ -262,6 +262,39 @@ pub async fn computers(state_dir: &Path) -> Result<Vec<PairedComputer>> {
 pub async fn revoke_computer(state_dir: &Path, device_id: DeviceId) -> Result<AdminReport> {
     owned(Action::Revoke(state_dir.into(), device_id)).await
 }
+// App-managed roots require the original in-process container owner. A path
+// supplied to the public CLI APIs cannot opt into this authority.
+pub(crate) async fn computers_for_app(
+    scope: Arc<crate::app::HostScope>,
+) -> Result<Vec<PairedComputer>> {
+    owned_scoped(Action::Computers(scope.state_dir().into()), Some(scope))
+        .await?
+        .computers
+        .ok_or_else(|| refused("native_gateway_computers_invalid"))
+}
+pub(crate) async fn pending_for_app(scope: Arc<crate::app::HostScope>) -> Result<AdminReport> {
+    owned_scoped(Action::Pending(scope.state_dir().into()), Some(scope)).await
+}
+pub(crate) async fn approve_for_app(
+    scope: Arc<crate::app::HostScope>,
+    selected: ApprovalSelection,
+) -> Result<AdminReport> {
+    owned_scoped(
+        Action::Approve(scope.state_dir().into(), selected),
+        Some(scope),
+    )
+    .await
+}
+pub(crate) async fn revoke_for_app(
+    scope: Arc<crate::app::HostScope>,
+    device: DeviceId,
+) -> Result<AdminReport> {
+    owned_scoped(
+        Action::Revoke(scope.state_dir().into(), device),
+        Some(scope),
+    )
+    .await
+}
 /// Read the selection committed by the original native state/journal chain.
 /// This observes configuration DATA; it does not claim a process is healthy.
 pub async fn committed_runtime_selection(state_dir: &Path) -> Result<NativeRuntimeSelection> {
@@ -288,6 +321,18 @@ pub async fn committed_runtime_selection(state_dir: &Path) -> Result<NativeRunti
 /// Uses the same original material/TLS checks as local admin; no raw credential
 /// or request content is returned. This is local evidence, not account acceptance.
 pub async fn observe(state_dir: &Path) -> Result<serde_json::Value> {
+    observe_scoped(state_dir, None).await
+}
+pub(crate) async fn observe_for_app(
+    scope: Arc<crate::app::HostScope>,
+) -> Result<serde_json::Value> {
+    let path = scope.state_dir().to_owned();
+    observe_scoped(&path, Some(scope)).await
+}
+async fn observe_scoped(
+    state_dir: &Path,
+    scope: Option<Arc<crate::app::HostScope>>,
+) -> Result<serde_json::Value> {
     use rmcp::{
         ClientServiceExt,
         model::{CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation},
@@ -298,7 +343,7 @@ pub async fn observe(state_dir: &Path) -> Result<serde_json::Value> {
         },
     };
     let path = state_dir.to_owned();
-    let mut material = blocking(move || Material::open(path)).await?;
+    let mut material = blocking(move || Material::open_scoped(path, scope)).await?;
     let key = material
         .root
         .read_raw("gateway-model.token", 4096)
@@ -499,6 +544,12 @@ async fn session_counters(
     Some(serde_json::json!({"mcp_sessions":counters,"computers":computers}))
 }
 async fn owned(action: Action) -> Result<AdminReport> {
+    owned_scoped(action, None).await
+}
+async fn owned_scoped(
+    action: Action,
+    scope: Option<Arc<crate::app::HostScope>>,
+) -> Result<AdminReport> {
     let permit = OPERATIONS
         .clone()
         .try_acquire_owned()
@@ -512,7 +563,7 @@ async fn owned(action: Action) -> Result<AdminReport> {
     // The original bounded worker retains its permit and read-only material.
     let job = tokio::spawn(async move {
         let _permit = permit;
-        let result = perform(action).await;
+        let result = perform(action, scope).await;
         let _ = send.send(result);
     });
     let result = receive.await.map_err(|_| unknown())?;
@@ -552,6 +603,7 @@ struct Ready {
     files: BTreeMap<String, Sha256Digest>,
 }
 struct Material {
+    app_scope: Option<Arc<crate::app::HostScope>>,
     path: PathBuf,
     root: PrivateRoot,
     files: Vec<RawFile>,
@@ -599,7 +651,15 @@ fn one_certificate(raw: &[u8]) -> Result<Vec<u8>> {
     Ok(certs[0].as_ref().to_vec())
 }
 impl Material {
-    fn open(path: PathBuf) -> Result<Self> {
+    fn open_scoped(path: PathBuf, app_scope: Option<Arc<crate::app::HostScope>>) -> Result<Self> {
+        if let Some(scope) = &app_scope {
+            scope
+                .validate()
+                .map_err(|_| refused("native_gateway_admin_material_changed"))?;
+            if scope.state_dir() != path {
+                return Err(refused("native_gateway_admin_input"));
+            }
+        }
         if !path.is_absolute() {
             return Err(refused("native_gateway_admin_input"));
         }
@@ -634,7 +694,8 @@ impl Material {
             || state.mode != NativeDeploymentMode::CreateLocal
             || state.desired.host.is_some()
             || state.desired.gateway.is_none_or(|d| {
-                d.manager == NativeManager::AppManaged || d.run != NativeRunDesired::Running
+                (d.manager == NativeManager::AppManaged) != app_scope.is_some()
+                    || d.run != NativeRunDesired::Running
             })
             || state.deployment_raw_sha256 != Sha256Digest::of_bytes(files[2].bytes())
         {
@@ -743,6 +804,7 @@ impl Material {
         }
         let bearer = Zeroizing::new(files[6].bytes().to_vec());
         let result = Self {
+            app_scope,
             path,
             root,
             files,
@@ -757,6 +819,11 @@ impl Material {
         Ok(result)
     }
     fn validate(&self) -> Result<()> {
+        if let Some(scope) = &self.app_scope {
+            scope
+                .validate()
+                .map_err(|_| refused("native_gateway_admin_material_changed"))?;
+        }
         if PrivateRoot::open(&self.path)
             .map_err(|_| refused("native_gateway_admin_material_changed"))?
             .identity()
@@ -1014,7 +1081,7 @@ fn invitation_app_link(
     crate::app::pairing_link::build(origin, &invite.invitation, invite.expires_at, ca, now)
         .map_err(|_| unknown())
 }
-async fn perform(action: Action) -> Result<AdminReport> {
+async fn perform(action: Action, scope: Option<Arc<crate::app::HostScope>>) -> Result<AdminReport> {
     let state_dir = match &action {
         Action::Invite(p, _, _, _, _)
         | Action::Pending(p)
@@ -1022,7 +1089,7 @@ async fn perform(action: Action) -> Result<AdminReport> {
         | Action::Computers(p)
         | Action::Revoke(p, _) => p.clone(),
     };
-    let material = blocking(move || Material::open(state_dir)).await?;
+    let material = blocking(move || Material::open_scoped(state_dir, scope)).await?;
     match action {
         Action::Computers(path) => {
             let response = http::exchange_local_computers(

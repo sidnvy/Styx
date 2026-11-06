@@ -187,6 +187,11 @@ final class ProductCoreClient {
     func write(_ route: String, _ body: [String: ProductJSON]) async throws -> ProductJSON {
         if isNativeHost {
             switch route {
+            case "devices": return try await native("computers")
+            case "pending/list": return try await native("pendingComputers")
+            case "pending/approve": return try await native("approveComputer", body)
+            case "device/revoke": return try await native("revokeComputer", body)
+            case "pairing-link/create": return try await native("inviteComputer", ["authorize": .bool(true)])
             case "plugin/profile": return try await native("pluginSave", body)
             case "pairing-link/inspect": return try await native("inspectJoin", body)
             case "foreground": return try await native("connect")

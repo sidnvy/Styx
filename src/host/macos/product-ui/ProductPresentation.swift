@@ -205,6 +205,7 @@ extension ProductModel {
                 // A timed-out write is uncertain. Read its journal before showing
                 // recovery; never replay preparation or publish an old invitation.
                 createdInvitation = .null; invitationCopied = false
+                if nativeHost { invitationError = productText("邀请未能完成。请检查连接状态；不会自动重新发送。", "The invitation did not complete. Check the connection status; it will not be resent automatically."); return }
                 if let observed = try? await client.write("device-ingress/status", [:])["setup"] { ingressSetup = observed }
                 else { ingressSetup = .object(["status": .string("needs_reconciliation"), "phase": .string("observation_unavailable")]) }
                 invitationError = productText("未能完成。请检查网络后重试；如果准备中断，请先恢复或撤回。", "Could not finish. Check your network and try again. If preparation was interrupted, resume or undo it first.")
@@ -222,6 +223,14 @@ extension ProductModel {
         if let expiry = createdInvitation["expiresAt"].number, expiry > Date().timeIntervalSince1970 * 1000 { return }
         invitationOperation { [self] in
             invitationClosed = false; createdInvitation = .null; invitationCopied = false
+            if nativeHost {
+                guard status["gateway"]["lan"]["enabled"].bool else {
+                    invitationError = productText("此管理电脑尚未启用局域网。首次设置时选择允许其他电脑加入并填写本机的私有网络地址。", "LAN joining is not configured. During setup, enable other computers to join and enter this hub's private network address.")
+                    return
+                }
+                createdInvitation = try await client.native("inviteComputer", ["authorize": .bool(true)])
+                return
+            }
             try await readInvitationPlan()
             guard !ingressNeedsRecovery, ingress["blockers"].array.isEmpty else { return }
             if ingress["requiresInterfaceChoice"].bool && !ingressCandidates.contains(selectedIngressAddress) { return }
@@ -256,6 +265,7 @@ extension ProductModel {
     }
     func closeDeviceInvitation(completion: @escaping () -> Void = {}) {
         guard !busy else { return }
+        if nativeHost { clearSecrets(); invitationExpanded = false; completion(); return }
         if !invitationWindowOpen { invitationExpanded = false; completion(); return }
         invitationOperation { [self] in
             let result = try await client.write("pairing-link/close", ["authorize": .bool(true)])
@@ -327,8 +337,13 @@ struct ProductDailyPanel: View {
                     controller?.present()
                 }
             } else {
-                ProductMenuRow(title: productText("添加电脑", "Add computer"), symbol: "plus") {}.disabled(true)
-                    .help(productText("请在管理电脑终端创建配对邀请；此版本尚不能从托盘添加电脑。", "Create a pairing invitation in the hub's terminal; adding computers from this menu is not available in this version."))
+                ForEach(model.devices.filter { !$0.isLocal }) { device in
+                    ProductMenuRow(title: device.label, symbol: "desktopcomputer", state: device.indicator, disclosure: true) { showSettings(.computers) }
+                }
+                ProductMenuRow(title: productText("添加电脑", "Add computer"), symbol: "plus") {
+                    model.beginDeviceInvitation()
+                }.disabled(model.busy)
+                if model.invitationExpanded { ProductInvitationView(model: model).padding(.horizontal, 10).padding(.bottom, 8) }
             }
             ProductMenuRow(title: "ChatGPT", symbol: "globe", disclosure: true) { showSettings(.chat) }
         }
@@ -430,7 +445,7 @@ struct ProductInvitationView: View {
             }
             if let error = model.invitationError { Text(error).font(.caption).foregroundStyle(.red) }
             if model.invitationWindowOpen {
-                Button(productText("关闭邀请", "Close invitation")) { model.closeDeviceInvitation() }
+                Button(model.nativeHost ? productText("关闭面板", "Close panel") : productText("关闭邀请", "Close invitation")) { model.closeDeviceInvitation() }
                 Text(productText("已连接的电脑仍可使用。", "Connected computers remain available.")).font(.caption2).foregroundStyle(.secondary)
             }
         }.padding(10).accessibilityIdentifier("styx-invitation-content").disabled(model.busy)
@@ -468,6 +483,7 @@ extension ProductModel {
         #if STYX_TESTING
         if testSuppressObservations { return }
         #endif
+        if nativeHost { await refresh(); return }
         guard !busy, loaded, deployment != nil else { return }
         guard !observationInFlight else { return }
         await refresh()

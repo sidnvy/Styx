@@ -574,6 +574,11 @@
       "kind": "original_owned_macos_capture_response_projection",
       "input": "STYX_TEST_MAC_CAPTURE_REFERENCE explicit bounded evidence file containing original native response, original Gateway request and independently recorded PNG hash",
       "required_for": "exact original Mac capture bytes and strict target/geometry/empty-tree projection; no new native call or input, not GUI/platform acceptance"
+    },
+    "app::maintenance_integration_tests::native_gui_computer_management_keeps_binding_and_local_identity": {
+      "kind": "explicit_signed_native_payload",
+      "input": "STYX_TEST_APP_CONTROL_SELECTION and STYX_TEST_APP_LAN_ADDRESS; disposable TLS Gateway and two App profiles",
+      "required_for": "Native GUI admin binding, wrong-code refusal, self-revoke refusal, real enrollment and revoke effects; not installed native GUI acceptance"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints",

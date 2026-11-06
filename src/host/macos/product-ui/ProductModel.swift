@@ -13,7 +13,7 @@ enum ProductTunnelConnection: Equatable {
     static func observed(_ tunnel: ProductJSON) -> Self {
         if tunnel["status"].string == "not_configured" { return .notConfigured }
         switch tunnel["transport"].string {
-        case "ready": return tunnel["status"].string == "running" ? .connected : .unknown
+        case "ready": return ["running", "configured"].contains(tunnel["status"].string ?? "") ? .connected : .unknown
         case "starting": return .connecting
         case "not_running": return .stopped
         case "unavailable": return .unavailable
@@ -470,7 +470,7 @@ enum ProductRestorationPolicy {
     }
     func applyNative(_ value: ProductJSON) throws {
         guard value["mode"].string == "rust_host" else { throw ProductCoreError.invalidResponse }
-        status = value; journey = .null; browserObservation = .null; acceptance = .null
+        status = value; browserObservation = .null; acceptance = .null
         if !restoredPage {
             restoredPage = true
             page = value["configuration"] == .null && value["enrollment"] == .null && value["gateway"] == .null && value["admission_fenced"] == .bool(false) ? .welcome : .overview
@@ -548,7 +548,17 @@ enum ProductRestorationPolicy {
         }
     }
     private func reload() async throws {
-        if nativeHost { try applyNative(try await client.native("status")); await refreshNativeLogin(); return }
+        if nativeHost {
+            try applyNative(try await client.native("status"))
+            if nativeSupportsOperation("computers") {
+                devices = try await client.native("computers")["devices"].array.compactMap(ProductDevice.init)
+                let tunnel = try await client.native("tunnelStatus")
+                journey = .object(["tunnel": tunnel]); tunnelObservationStale = false
+                tunnelID = tunnel["tunnelId"].string ?? ""
+                if invitationExpanded { pending = try await client.native("pendingComputers")["pending"].array }
+            }
+            await refreshNativeLogin(); return
+        }
         // Native permission observation must not depend on a successful Core read.
         observePermissions()
         let revision = mutationRevision
@@ -940,6 +950,13 @@ enum ProductRestorationPolicy {
         busy = true; error = nil
         defer { busy = false }
         try await waitForObservation()
+        if nativeHost {
+            var payload: [String: ProductJSON] = ["authorize": .bool(true), "tunnelId": .string(normalized)]
+            if let newKey = newKey { payload["apiKey"] = .string(newKey) }
+            _ = try await client.native("tunnelSave", payload)
+            tunnelID = normalized
+            try await reload(); monitorTunnel(); return
+        }
         // The Core keeps the stored key private. Omitting apiKey deliberately
         // retains it; the App never reads it back into a password field.
         if journey["tunnel"]["status"].string == "running" {
@@ -1057,7 +1074,14 @@ enum ProductRestorationPolicy {
         // cannot substitute another identity or its requested capabilities.
         comparisonConfirmation = ""
         perform { [self] in
-            _ = try await client.write("pending/approve", payload)
+            var approval = payload
+            if nativeHost {
+                approval.removeValue(forKey: "comparisonCodeConfirmation")
+                approval["comparisonCode"] = .string(selectedPending["comparison_code"].string ?? "")
+                approval["deviceId"] = selectedPending["device_id"]
+                approval["fingerprint"] = selectedPending["fingerprint"]
+            }
+            _ = try await client.write("pending/approve", approval)
             selectedPending = .null; fingerprintConfirmation = ""
             pending = try await client.write("pending/list", ["authorize": .bool(true)])["pending"].array
         }

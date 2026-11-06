@@ -67,6 +67,13 @@ fn prepare(install: &Path) -> Box<serde_json::value::RawValue> {
         "packageSha256":null,"candidatePackageSha256":null,"loginObservation":null}))
 }
 async fn enroll(container: &Path, selection: &NativeRuntimeSelection) -> (HostApp, PathBuf) {
+    enroll_on(container, selection, None).await
+}
+async fn enroll_on(
+    container: &Path,
+    selection: &NativeRuntimeSelection,
+    lan_address: Option<String>,
+) -> (HostApp, PathBuf) {
     directory(container);
     let candidates = container.join("migration-candidates");
     directory(&candidates);
@@ -88,7 +95,7 @@ async fn enroll(container: &Path, selection: &NativeRuntimeSelection) -> (HostAp
         browser_channel: None,
         persist_login: false,
         port,
-        lan_address: None,
+        lan_address,
     })
     .await
     .unwrap();
@@ -382,4 +389,156 @@ async fn original_app_maintenance_distinguishes_live_c07_from_launch_and_history
     println!(
         "completed_strict_tls_enrollment=true; original_stage_update_both_roles=true; launch_and_bootstrap_inside=true; current_runtime_external=true; prepare_cancel_full_quit_admission=true; original_history_preserved=true; payload_only_and_publisher_only_inside_refused=true; same_bytes_launch_replacement_unknown=true; original_instance_retained=true; installed_root=NOT_OPENED; Host_executor=NOT_STARTED; native_Core_process_exit=NOT_TESTED"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires STYX_TEST_APP_CONTROL_SELECTION and STYX_TEST_APP_LAN_ADDRESS; disposable real TLS Gateway and two App profiles"]
+async fn native_gui_computer_management_keeps_binding_and_local_identity() {
+    let selection_file = PathBuf::from(std::env::var("STYX_TEST_APP_CONTROL_SELECTION").unwrap());
+    let selection: NativeRuntimeSelection =
+        serde_json::from_slice(&fs::read(selection_file).unwrap()).unwrap();
+    let lan = std::env::var("STYX_TEST_APP_LAN_ADDRESS").unwrap();
+    let top = std::env::temp_dir().join(format!("styx-gui-admin-{}", uuid::Uuid::new_v4()));
+    directory(&top);
+    let (mut hub, candidate) = enroll_on(&top.join("hub"), &selection, Some(lan)).await;
+    hub.local_gateway.as_mut().unwrap().start().await.unwrap();
+    assert_eq!(
+        crate::management::native_gateway_admin::computers(
+            &hub.local_gateway.as_ref().unwrap().scope.state_dir
+        )
+        .await
+        .unwrap_err()
+        .code(),
+        "native_gateway_admin_fresh_gateway_required"
+    );
+    let before = hub
+        .dispatch(Operation::Computers, raw(json!({})))
+        .await
+        .unwrap();
+    assert_eq!(before["devices"].as_array().unwrap().len(), 1);
+    assert_eq!(before["devices"][0]["is_local"], true);
+    assert_eq!(
+        hub.dispatch(
+            Operation::RevokeComputer,
+            raw(json!({"authorize":true,"deviceId":before["devices"][0]["device_id"]}))
+        )
+        .await
+        .unwrap_err()
+        .code(),
+        "app_cannot_revoke_this_computer"
+    );
+    assert_eq!(
+        hub.dispatch(Operation::InviteComputer, raw(json!({"authorize":false})))
+            .await
+            .unwrap_err()
+            .code(),
+        "app_confirmation_required"
+    );
+    let invite = hub
+        .dispatch(Operation::InviteComputer, raw(json!({"authorize":true})))
+        .await
+        .unwrap();
+    let guest_dir = top.join("guest");
+    directory(&guest_dir);
+    let mut guest = HostApp::open_native(&guest_dir.join("profile"), &candidate)
+        .await
+        .unwrap();
+    let inspected = guest
+        .dispatch(Operation::InspectJoin, raw(json!({"link":invite["link"]})))
+        .await
+        .unwrap();
+    let request = guest.dispatch(Operation::Join, raw(json!({"label":"GUI guest","computer":false,"browser":false,"persistLogin":false,
+        "approvedGatewayOrigin":inspected["preview"]["origin"],"approvedCaSha256":inspected["preview"]["caSha256"]}))).await.unwrap();
+    assert_eq!(request["status"], "awaiting_approval");
+    let pending = hub
+        .dispatch(Operation::PendingComputers, raw(json!({})))
+        .await
+        .unwrap();
+    let row = &pending["pending"][0];
+    let mut approval = json!({"authorize":true,"requestId":row["request_id"],"deviceId":row["device_id"],"fingerprint":row["fingerprint"],
+        "comparisonCode":"FFFF-FFFF-FFFF-FFFF","enableComputer":false,"enableBrowser":false});
+    assert_eq!(
+        hub.dispatch(Operation::ApproveComputer, raw(approval.clone()))
+            .await
+            .unwrap_err()
+            .code(),
+        "native_gateway_approval_binding_mismatch"
+    );
+    assert_eq!(
+        hub.dispatch(Operation::Computers, raw(json!({})))
+            .await
+            .unwrap()["devices"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    approval["comparisonCode"] = row["comparison_code"].clone();
+    hub.dispatch(Operation::ApproveComputer, raw(approval))
+        .await
+        .unwrap();
+    let claimed = native_join::claim_for_app(guest.scope.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(claimed.status, "ready_to_connect");
+    let listed = hub
+        .dispatch(Operation::Computers, raw(json!({})))
+        .await
+        .unwrap();
+    assert_eq!(listed["devices"].as_array().unwrap().len(), 2);
+    hub.dispatch(
+        Operation::RevokeComputer,
+        raw(json!({"authorize":true,"deviceId":row["device_id"]})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        hub.dispatch(Operation::Computers, raw(json!({})))
+            .await
+            .unwrap()["devices"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let saved = hub
+        .dispatch(
+            Operation::TunnelSave,
+            raw(json!({"authorize":true,"tunnelId":"bad","apiKey":"not-a-key"})),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(saved.code(), "invalid_tunnel_id");
+    assert!(hub.local_gateway.as_ref().unwrap().is_running());
+    let presentation = hub
+        .dispatch(Operation::PluginRead, raw(json!({})))
+        .await
+        .unwrap();
+    assert_eq!(
+        presentation["plugin"]["presentation"]["displayName"],
+        "Styx"
+    );
+    guest.settle_all().await.unwrap();
+    hub.settle_all().await.unwrap();
+    drop(guest);
+    drop(hub);
+    let mut reopened = HostApp::open_native(&top.join("hub/profile"), &candidate)
+        .await
+        .unwrap();
+    reopened
+        .local_gateway
+        .as_mut()
+        .unwrap()
+        .start()
+        .await
+        .unwrap();
+    let observed = reopened
+        .dispatch(Operation::Computers, raw(json!({})))
+        .await
+        .unwrap();
+    assert_eq!(observed["devices"].as_array().unwrap().len(), 1);
+    assert_eq!(observed["devices"][0]["is_local"], true);
+    reopened.settle_all().await.unwrap();
+    drop(reopened);
+    fs::remove_dir_all(top).unwrap();
 }

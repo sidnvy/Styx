@@ -256,9 +256,9 @@ fn owner(path: &Path, root: &PrivateRoot) -> Result<File> {
 pub struct TunnelStatus {
     schema: u32,
     status: &'static str,
-    tunnel_id: Option<String>,
+    pub(crate) tunnel_id: Option<String>,
     auto_start: bool,
-    available: bool,
+    pub(crate) available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     transport: Option<&'static str>,
 }
@@ -294,13 +294,40 @@ pub fn configure(
         return Err(error("private_tunnel_file_required"));
     }
     let secret = read_secret(api_key_file)?;
-    let secret = secret.trim_end_matches(['\r', '\n']);
-    if !identifier(secret, "sk-", 16, 512) {
-        return Err(error("invalid_tunnel_runtime_key"));
+    configure_secret(state, tunnel_id, Some(&secret), auto_start, authorize)
+}
+
+/// App IPC supplies the secret in memory; it is never a command-line argument
+/// or a temporary input file. Omission preserves the existing private key.
+pub(crate) fn configure_secret(
+    state: &Path,
+    tunnel_id: &str,
+    secret: Option<&str>,
+    auto_start: bool,
+    authorize: bool,
+) -> Result<TunnelStatus> {
+    if !authorize {
+        return Err(error("explicit_tunnel_authorization_required"));
+    }
+    if !identifier(tunnel_id, "tunnel_", 8, 128) {
+        return Err(error("invalid_tunnel_id"));
     }
     let (path, root) = directory(state, true)?.ok_or(error("tunnel_protected_write"))?;
     let _owner = owner(&path, &root)?;
     let old = connection(&root)?;
+    let retained;
+    let secret = match secret {
+        Some(secret) => secret,
+        None => {
+            let prior = old.as_ref().ok_or(error("invalid_tunnel_runtime_key"))?;
+            retained = read_secret(&path.join(&prior.key_file))?;
+            &retained
+        }
+    };
+    let secret = secret.trim_end_matches(['\r', '\n']);
+    if !identifier(secret, "sk-", 16, 512) {
+        return Err(error("invalid_tunnel_runtime_key"));
+    }
     let c = Connection {
         schema: 1,
         tunnel_id: tunnel_id.into(),
@@ -316,6 +343,16 @@ pub fn configure(
             .map_err(|_| error("tunnel_old_key_removal_failed"))?;
     }
     Ok(projection(Some(c), available(state)))
+}
+
+pub(crate) fn validate_configuration(tunnel_id: &str, secret: Option<&str>) -> Result<()> {
+    if !identifier(tunnel_id, "tunnel_", 8, 128) {
+        return Err(error("invalid_tunnel_id"));
+    }
+    if secret.is_some_and(|key| !identifier(key.trim_end_matches(['\r', '\n']), "sk-", 16, 512)) {
+        return Err(error("invalid_tunnel_runtime_key"));
+    }
+    Ok(())
 }
 pub fn remove(state: &Path, authorize: bool) -> Result<TunnelStatus> {
     if !authorize {
@@ -1030,6 +1067,13 @@ mod tests {
         assert_eq!(report.tunnel_id.as_deref(), Some("tunnel_ijklmnop"));
         assert!(!report.auto_start);
         assert!(!report.available);
+        let retained = configure_secret(&dir.0, "tunnel_retainedkey", None, true, true).unwrap();
+        assert!(!serde_json::to_string(&retained).unwrap().contains(secret));
+        let saved = connection(&root).unwrap().unwrap();
+        assert_eq!(
+            fs::read_to_string(path.join(&saved.key_file)).unwrap(),
+            secret
+        );
         let held = owner(&path, &root).unwrap();
         assert_eq!(status(&dir.0).await.unwrap().transport, Some("starting"));
         private(&path.join("health.url"), b"http://untrusted.invalid:8080/");

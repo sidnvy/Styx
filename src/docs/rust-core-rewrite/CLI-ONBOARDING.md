@@ -610,3 +610,26 @@ signed from the exact validated source. A parallel Gateway must not reuse a live
 Tunnel ID. Stop/join the previous Tunnel owner before transferring that connection,
 or use a separate owner-provisioned Tunnel. Keep prior state for rollback; do not
 call an existing configured profile a fresh installation test.
+
+
+## Native App onboarding
+
+An App-owned hub configures its Tunnel in the App's ChatGPT settings. Do not run
+another `styx setup` just to edit that App's connection: CLI setup selects its
+own root and lifetime. The App passes the runtime key over its private Core IPC;
+only the existing Tunnel store persists it. Omitting a replacement retains the
+saved key. Saving stops and joins the App's roles before updating the connection,
+then resumes the previously running local Host and Gateway.
+
+For multi-computer GUI setup, enable LAN joining and enter the hub's private
+network address during initial creation. Add computer creates a ten-minute,
+one-use link. The joining App previews the hub/CA and shows a comparison code;
+the hub approves only the selected matching request and requested capabilities.
+The computer list uses authenticated Gateway observations. Removing another
+computer revokes its pairing; removing this hub's own computer through that list
+is refused. Host-only Apps manage the connection locally and use their hub for
+invitations and Tunnel settings.
+
+Custom MCP uses the displayed Tunnel ID and the exported small Styx PNG. Wait
+for Tunnel readiness, then verify account-side tool calls separately; saving
+configuration or exporting an icon does not establish account acceptance.

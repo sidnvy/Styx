@@ -88,6 +88,12 @@ struct RunningGateway {
     _cancel_on_drop: tokio_util::sync::DropGuard,
 }
 impl LocalGateway {
+    pub(super) fn invitation_origin(&self) -> Result<String, AppError> {
+        self.lan
+            .origin
+            .clone()
+            .ok_or(AppError("app_lan_setup_required"))
+    }
     pub async fn open(scope: Arc<HostScope>) -> Result<Self, AppError> {
         scope.validate()?;
         let root = scope

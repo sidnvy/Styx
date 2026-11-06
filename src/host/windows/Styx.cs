@@ -716,6 +716,56 @@ namespace StyxNative {
    Explain("If Add custom MCP server is missing, check Developer mode and workspace permissions. Custom MCP connects tools without installing the ZIP's skills. ZIP installation may replace the logo, so use this Custom MCP path.",105);
    Action("Open ChatGPT Plugins",()=>{Process.Start("https://chatgpt.com/plugins");return Task.FromResult(0);},false);
   }
+  async Task ShowNativeComputers(){
+   var response=await owner.Call("computers");ShowPage("overview");
+   var rows=Json.Get(response,"devices") as object[]??new object[0];
+   foreach(var row in rows){
+    string id=Json.Str(row,"device_id"),name=Json.Str(row,"label");
+    Explain(name+" · "+Json.Str(row,"platform")+" · "+(Json.Get(row,"online") is bool?(Json.Yes(row,"online")?"Connected":"Disconnected"):"Status unknown"),40);
+    if(!Json.Yes(row,"is_local"))Action("Remove "+name,async()=>{
+     if(MessageBox.Show("Revoke access for "+name+"?\n"+id,"Remove computer",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;
+     await owner.Call("revokeComputer",Json.Obj("authorize",true,"deviceId",id));await ShowNativeComputers();
+    });
+   }
+  }
+  async Task InviteNativeComputer(){
+   if(!Json.Yes(owner.CurrentStatus,"gateway","lan","enabled")){Feedback("LAN joining is not configured. During setup, enable other computers to join and enter this hub's private network address.");return;}
+   var invitation=await owner.Call("inviteComputer",Json.Obj("authorize",true));
+   ShowPage("overview");Explain("On the other computer choose Join an existing Styx and paste this invitation. It expires after 10 minutes. Compare the pairing codes before approving.",90);
+   string link=Json.Str(invitation,"link");
+   Action("Copy invitation link",()=>{Clipboard.SetText(link);Feedback("Invitation copied. It expires after 10 minutes.");return Task.FromResult(0);},false);
+   Action("Check joining requests",ShowNativePending);
+  }
+  async Task ShowNativePending(){
+   var response=await owner.Call("pendingComputers");ShowPage("overview");
+   var rows=Json.Get(response,"pending") as object[]??new object[0];
+   if(rows.Length==0)Explain("Waiting for the other computer to request joining.",45);
+   foreach(var row in rows){
+    string code=Json.Str(row,"comparison_code"),id=Json.Str(row,"device_id"),fingerprint=Json.Str(row,"fingerprint"),request=Json.Str(row,"request_id");
+    Explain(id+"\nPairing code: "+code,65);
+    Action("Confirm "+code,async()=>{
+     if(MessageBox.Show("Does the other computer show this exact code?\n\n"+code+"\n\nApprove requested features: Commands"+(Json.Yes(row,"browser_requested")?", Browser":"")+(Json.Yes(row,"computer_requested")?", Computer Use":""),"Confirm computer",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;
+     await owner.Call("approveComputer",Json.Obj("authorize",true,"requestId",request,"deviceId",id,"fingerprint",fingerprint,"comparisonCode",code,"enableComputer",Json.Yes(row,"computer_requested"),"enableBrowser",Json.Yes(row,"browser_requested")));
+     await ShowNativePending();Feedback("Approved. Continue joining on the other computer.");
+    });
+   }
+   Action("Refresh joining requests",ShowNativePending);
+  }
+  async Task EditNativeTunnel(){
+   var current=await owner.Call("tunnelStatus");
+   using(var dialog=StyxContext.Window("Connect ChatGPT through Tunnel",new Size(560,480))){
+    var stack=StyxContext.Stack(dialog);
+    StyxContext.Text(stack,"Use the Tunnel ID and runtime API key from your OpenAI Platform tunnel. Saving briefly pauses this App's connections, then reconnects. Finish active tasks first.",90);
+    StyxContext.Text(stack,"Tunnel ID",25);var id=new TextBox {Text=Json.Str(current,"tunnelId"),Width=490,AccessibleName="Tunnel ID"};stack.Controls.Add(id);
+    StyxContext.Text(stack,"Runtime API key (leave blank to retain the saved key)",40);var key=new TextBox {Width=490,UseSystemPasswordChar=true,AccessibleName="Runtime API key"};stack.Controls.Add(key);
+    var save=StyxContext.Button(stack,"Save and connect",()=>Task.FromResult(0));save.DialogResult=DialogResult.OK;
+    var cancel=StyxContext.Button(stack,"Cancel",()=>Task.FromResult(0));cancel.DialogResult=DialogResult.Cancel;dialog.CancelButton=cancel;
+    if(dialog.ShowDialog(this)!=DialogResult.OK){key.Clear();return;}
+    var input=Json.Obj("authorize",true,"tunnelId",id.Text.Trim());if(!String.IsNullOrEmpty(key.Text))input["apiKey"]=key.Text;key.Clear();
+    try{await owner.Call("tunnelSave",input);}finally{input.Remove("apiKey");}
+    await owner.RefreshAfterMutation();ShowPage("chat");Feedback("Tunnel configuration saved. Check Tunnel status before connecting in ChatGPT.");
+   }
+  }
   async Task EditNativePlugin(){
    var response=await owner.Call("pluginRead");var current=Json.Get(response,"plugin");var presentation=Json.Get(current,"presentation");var selection=Json.Get(current,"selection");object chosenIcon=Json.Get(presentation,"icon");var defaultIcon=Json.Get(current,"defaultIcon");
    using(var dialog=new Form {Text="Styx plugin details",ClientSize=new Size(620,700),MinimumSize=new Size(560,650),StartPosition=FormStartPosition.CenterParent,Font=Font,AutoScaleMode=AutoScaleMode.Dpi}){
@@ -798,7 +848,11 @@ namespace StyxNative {
     if(enrollment=="awaiting_approval")NativeAction("Check confirmation","claimJoin",async()=>{var result=await owner.Call("claimJoin");string actual=Json.Str(result,"status");if(actual!="awaiting_approval"&&actual!="ready_to_connect")throw new IOException();await owner.RefreshAfterMutation();ShowPage("overview");Feedback(actual=="awaiting_approval"?"The Gateway has not approved this request. No connection was started.":"The Gateway confirmed this identity. Choose Reconnect to start the Host.");});
     NativeAction("Reconnect","connect",async()=>{await owner.Call("connect");await owner.RefreshAfterMutation();Feedback(StyxContext.ReconnectResult(owner.CurrentStatus));});NativeAction("Pause","disconnect",async()=>{await owner.Call("disconnect");await owner.RefreshAfterMutation();});
     NativeAction("Change this computer's role…","retireRole",ChangeRole);
-    Unavailable("Add or revoke computers");Unavailable("Edit capabilities");
+    if(owner.Supports("computers")){
+     NativeAction("Computers…","computers",ShowNativeComputers);
+     NativeAction("Add computer…","inviteComputer",InviteNativeComputer);
+    }
+    Unavailable("Edit capabilities");
     Explain("Runtime updates preserve your identity, pairing and settings. Both App roles are stopped first and stay stopped until you reconnect. The two configuration updates are separate transactions.",95);
     NativeAction("Stage runtime candidate","stageRuntime",async()=>{await owner.Call("stageRuntime",new Dictionary<string,object>{{"authorize",true}});await owner.RefreshAfterMutation();ShowPage("overview");});
     NativeAction("Check runtime update","runtimeUpdateStatus",async()=>{await owner.Call("runtimeUpdateStatus");await owner.RefreshAfterMutation();ShowPage("overview");});
@@ -806,7 +860,11 @@ namespace StyxNative {
     if(updateState=="staged")NativeAction("Update runtime…","updateRuntime",async()=>{if(MessageBox.Show(this,"Update this App’s runtime components? Your identity, pairing and settings will be kept. Connections will pause; reconnect when the update completes. If it does not complete, use Recover update.","Update runtime",MessageBoxButtons.OKCancel,MessageBoxIcon.Question)!=DialogResult.OK)return;await owner.Call("updateRuntime",new Dictionary<string,object>{{"authorize",true},{"transactionId","app-runtime-"+Guid.NewGuid().ToString("N")}});await owner.RefreshAfterMutation();ShowPage("overview");});
     if(Json.Yes(owner.CurrentStatus,"runtimeUpdate","can_recover")&&ValidTransaction(updateTransaction))NativeAction("Recover original runtime update","recoverRuntimeUpdate",async()=>{await owner.Call("recoverRuntimeUpdate",new Dictionary<string,object>{{"authorize",true},{"transactionId",updateTransaction}});await owner.RefreshAfterMutation();ShowPage("overview");});
     if(!String.IsNullOrEmpty(updateState))Explain("Runtime update: "+updateState,40);
-   }else if(name=="chat"){Explain("If this computer joined another hub, use that hub's existing Styx connection. Configure a new tunnel only on the hub: run styx setup in its terminal and use the Tunnel ID it prints. This App does not yet edit native tunnel settings or issue target-chat acceptance proofs.",140);CustomMcpGuide();RefreshAction();}
+   }else if(name=="chat"){
+    if(owner.Supports("tunnelSave")){NativeAction("Configure Tunnel…","tunnelSave",EditNativeTunnel);NativeAction("Check Tunnel status","tunnelStatus",async()=>{var value=await owner.Call("tunnelStatus");Feedback(Json.Str(value,"tunnelId")+"\n"+Json.Str(value,"status")+" / "+Json.Str(value,"transport"));});}
+    else Explain("This computer uses another hub. Use that hub's existing Styx connection.",70);
+    CustomMcpGuide();RefreshAction();
+   }
    else{Explain("This operation is not implemented by the native Host App. Existing identities and configuration are retained.",80);Unavailable("Legacy operation");Action("Open this computer",ContinueJoiningView,false);}
    if(name=="overview"||name=="join-waiting")renderedRustOverviewKey=NativeOverviewKey(owner.CurrentStatus);
    Status(NativeStatus(owner.CurrentStatus));content.Controls.Add(statusReadout);content.Controls.Add(observationError);content.Controls.Add(feedback);

@@ -4,6 +4,7 @@
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod control_binding_tests;
 mod exit;
+mod gateway_ui;
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod join_retry_tests;
 mod local_gateway;
@@ -215,6 +216,13 @@ struct EmptyInput {}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum Operation {
+    Computers,
+    InviteComputer,
+    PendingComputers,
+    ApproveComputer,
+    RevokeComputer,
+    TunnelStatus,
+    TunnelSave,
     PluginRead,
     PluginSave,
     PluginExport,
@@ -1155,7 +1163,18 @@ impl HostApp {
             supported.extend(["serviceStatus", "prepareServiceFirstStart", "stopService"]);
         }
         if self.local_gateway.is_some() && !self.admission_fenced() {
-            supported.extend(["pluginRead", "pluginSave", "pluginExport"]);
+            supported.extend([
+                "pluginRead",
+                "pluginSave",
+                "pluginExport",
+                "computers",
+                "inviteComputer",
+                "pendingComputers",
+                "approveComputer",
+                "revokeComputer",
+                "tunnelStatus",
+                "tunnelSave",
+            ]);
         }
         json!({"schema":1,"maintenance":self.maintenance_status()["maintenance"],"runtimeUpdate":self.runtime_update,"service":self.service,"configuration":configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
     }
@@ -1208,7 +1227,11 @@ impl HostApp {
     ) -> Result<Value, AppError> {
         if !matches!(
             operation,
-            Operation::PluginSave
+            Operation::InviteComputer
+                | Operation::ApproveComputer
+                | Operation::RevokeComputer
+                | Operation::TunnelSave
+                | Operation::PluginSave
                 | Operation::PluginExport
                 | Operation::RetireRole
                 | Operation::InspectJoin
@@ -1253,6 +1276,15 @@ impl HostApp {
             self.reap().await?;
         }
         match operation {
+            Operation::Computers
+            | Operation::InviteComputer
+            | Operation::PendingComputers
+            | Operation::ApproveComputer
+            | Operation::RevokeComputer
+            | Operation::TunnelStatus
+            | Operation::TunnelSave => {
+                return self.gateway_ui_request(operation, input).await;
+            }
             Operation::PluginRead | Operation::PluginSave | Operation::PluginExport => {
                 return self.plugin_request(operation, input).await;
             }
@@ -1469,7 +1501,14 @@ impl HostApp {
                     json!({"quit":{"status":"ready_to_quit","scope":"local_app","ticketId":ticket},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g|g.status())}),
                 )
             }
-            Operation::PluginRead
+            Operation::Computers
+            | Operation::InviteComputer
+            | Operation::PendingComputers
+            | Operation::ApproveComputer
+            | Operation::RevokeComputer
+            | Operation::TunnelStatus
+            | Operation::TunnelSave
+            | Operation::PluginRead
             | Operation::PluginSave
             | Operation::PluginExport
             | Operation::RetireRole

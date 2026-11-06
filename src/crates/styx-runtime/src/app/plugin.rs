@@ -38,7 +38,7 @@ impl HostApp {
             .ok_or(AppError("plugin_managed_on_gateway"))?;
         gateway.scope.validate()?;
         let directory = gateway.scope.state_dir.join("plugin-presentation");
-        let discovery = native_gateway_admin::observe(&gateway.scope.state_dir)
+        let discovery = native_gateway_admin::observe_for_app(gateway.scope.clone())
             .await
             .map_err(|_| AppError("plugin_gateway_discovery_required"))?;
         gateway.scope.validate()?;
