@@ -666,6 +666,11 @@ mod platform {
         service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
     ) -> Result<GatewayForegroundOutcome, ForegroundError> {
         let tunnel_state = path.clone();
+        let tunnel_output = if app_scope.is_some() {
+            crate::foreground::tunnel::EventOutput::AppDiagnostic
+        } else {
+            crate::foreground::tunnel::EventOutput::Foreground
+        };
         let (diagnostic, retained_candidate) = startup;
         if retained_candidate.is_some() && app_scope.is_none() {
             return Err(error("app_scope_required_for_retained_gateway_runtime"));
@@ -924,6 +929,7 @@ mod platform {
             tunnel_port,
             tunnel_release,
             stop.clone(),
+            tunnel_output,
         );
         let mut invalidated = false;
         let mut interval = tokio::time::interval(Duration::from_secs(1));

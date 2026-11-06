@@ -512,9 +512,31 @@ struct TunnelEvent {
     event: &'static str,
     exit_code: Option<i32>,
 }
-fn emit(stop: &CancellationToken, event: &'static str, exit_code: Option<i32>) {
-    // Same stdout JSON-lines contract as foreground events. Never forward raw client logs.
-    let mut out = std::io::stdout().lock();
+/// App Core owns stdout exclusively for correlated RPC responses.
+/// Foreground CLI runs retain their public lifecycle JSON-lines stream.
+#[derive(Clone, Copy)]
+pub(super) enum EventOutput {
+    Foreground,
+    AppDiagnostic,
+}
+fn emit(
+    output: EventOutput,
+    stop: &CancellationToken,
+    event: &'static str,
+    exit_code: Option<i32>,
+) {
+    // Never forward raw client logs to either stream.
+    match output {
+        EventOutput::Foreground => write_event(std::io::stdout().lock(), stop, event, exit_code),
+        EventOutput::AppDiagnostic => write_event(std::io::stderr().lock(), stop, event, exit_code),
+    }
+}
+fn write_event(
+    mut out: impl Write,
+    stop: &CancellationToken,
+    event: &'static str,
+    exit_code: Option<i32>,
+) {
     if serde_json::to_writer(
         &mut out,
         &TunnelEvent {
@@ -669,19 +691,20 @@ async fn terminate(child: &mut Child) -> Result<ExitStatus> {
     child.wait().await.map_err(|_| error("tunnel_stop_unknown"))
 }
 
-pub(super) fn unavailable(stop: &CancellationToken) {
-    emit(stop, "tunnel_unavailable", None);
+fn unavailable(output: EventOutput, stop: &CancellationToken) {
+    emit(output, stop, "tunnel_unavailable", None);
 }
 pub(super) fn start(
     state: PathBuf,
     port: u16,
     release: Arc<crate::release::VerifiedNativeRelease>,
     stop: CancellationToken,
+    output: EventOutput,
 ) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
-        let result = run(state, port, release, stop.clone()).await;
+        let result = run(state, port, release, stop.clone(), output).await;
         if result.is_err() {
-            unavailable(&stop);
+            unavailable(output, &stop);
         }
         result
     })
@@ -750,6 +773,7 @@ pub(super) async fn run(
     port: u16,
     release: Arc<crate::release::VerifiedNativeRelease>,
     stop: CancellationToken,
+    output: EventOutput,
 ) -> Result<()> {
     if !release
         .manifest()
@@ -757,7 +781,7 @@ pub(super) async fn run(
         .iter()
         .any(|worker| worker.kind == NativeExternalWorker::TunnelClient)
     {
-        unavailable(&stop);
+        unavailable(output, &stop);
         return Ok(());
     }
     let original = release.clone();
@@ -772,6 +796,7 @@ pub(super) async fn run(
         prepared.arguments,
         &prepared.path,
         stop,
+        output,
     )
     .await;
     // Do not release the lock or original verified release before actual child wait.
@@ -786,6 +811,7 @@ async fn supervise(
     args: Arguments,
     path: &Path,
     stop: CancellationToken,
+    output: EventOutput,
 ) -> Result<()> {
     while !stop.is_cancelled() {
         if path.join("health.url").symlink_metadata().is_ok() {
@@ -794,7 +820,7 @@ async fn supervise(
         }
         match spawn(&image, args.clone(), path).await {
             Ok(mut child) => {
-                emit(&stop, "tunnel_started", None);
+                emit(output, &stop, "tunnel_started", None);
                 let mut ready = false;
                 let mut interval = tokio::time::interval(Duration::from_millis(250));
                 let result = loop {
@@ -809,16 +835,16 @@ async fn supervise(
                                 _ = stop.cancelled() => continue,
                                 result = health(path) => result,
                             };
-                            if transport == "ready" { ready = true; emit(&stop, "tunnel_ready", None); }
+                            if transport == "ready" { ready = true; emit(output, &stop, "tunnel_ready", None); }
                         }
                     }
                 };
                 let exit = result?;
                 let _ = fs::remove_file(path.join("health.url"));
-                emit(&stop, "tunnel_exited", exit.code());
+                emit(output, &stop, "tunnel_exited", exit.code());
             }
             Err(failure) if failure.code() == "tunnel_stop_unknown" => return Err(failure),
-            Err(_) => emit(&stop, "tunnel_start_failed", None),
+            Err(_) => emit(output, &stop, "tunnel_start_failed", None),
         }
         // Retry only the transport process. Never replay a queued MCP operation.
         tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(RETRY) => () }
@@ -830,6 +856,59 @@ async fn supervise(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn event_stream_child() {
+        let Ok(mode) = std::env::var("STYX_TUNNEL_EVENT_STREAM_TEST") else {
+            return;
+        };
+        let output = match mode.as_str() {
+            "app" => EventOutput::AppDiagnostic,
+            "foreground" => EventOutput::Foreground,
+            _ => panic!("unexpected test output mode"),
+        };
+        let stop = CancellationToken::new();
+        unavailable(output, &stop);
+        emit(output, &stop, "tunnel_exited", Some(7));
+        assert!(!stop.is_cancelled());
+    }
+
+    #[test]
+    fn app_diagnostics_preserve_rpc_stdout_and_cli_keeps_lifecycle_events() {
+        for mode in ["app", "foreground"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "foreground::tunnel::tests::event_stream_child",
+                    "--nocapture",
+                ])
+                .env("STYX_TUNNEL_EVENT_STREAM_TEST", mode)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            let (events, other) = if mode == "app" {
+                (stderr, stdout)
+            } else {
+                (stdout, stderr)
+            };
+            assert!(!other.contains("tunnel_unavailable"));
+            assert!(!other.contains("tunnel_exited"));
+            let actual: Vec<serde_json::Value> = events
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect();
+            assert_eq!(
+                actual,
+                vec![
+                    serde_json::json!({"schema":1,"event":"tunnel_unavailable","exit_code":null}),
+                    serde_json::json!({"schema":1,"event":"tunnel_exited","exit_code":7}),
+                ]
+            );
+        }
+    }
+
     struct Temporary(PathBuf);
     impl Temporary {
         fn new() -> Self {
@@ -1021,7 +1100,14 @@ while True: time.sleep(0.05)
         let path = dir.0.clone();
         let start = std::time::Instant::now();
         let task = tokio::spawn(async move {
-            supervise(Image::Fake(script), args, &path, original_stop).await
+            supervise(
+                Image::Fake(script),
+                args,
+                &path,
+                original_stop,
+                EventOutput::Foreground,
+            )
+            .await
         });
         let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
         while !dir.0.join("running").exists() {
@@ -1127,7 +1213,14 @@ while True: time.sleep(0.05)
         let child_stop = stop.clone();
         let path = dir.0.clone();
         let task = tokio::spawn(async move {
-            supervise(Image::Fake(script), Arguments(vec![]), &path, child_stop).await
+            supervise(
+                Image::Fake(script),
+                Arguments(vec![]),
+                &path,
+                child_stop,
+                EventOutput::Foreground,
+            )
+            .await
         });
         tokio::time::timeout(Duration::from_secs(5), async {
             while !dir.0.join("running").exists() {
@@ -1156,6 +1249,7 @@ while True: time.sleep(0.05)
             Arguments(vec![]),
             &dir.0,
             cancelled,
+            EventOutput::Foreground,
         )
         .await
         .unwrap();
