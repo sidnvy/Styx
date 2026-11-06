@@ -546,9 +546,16 @@ mod installed_source_tests {
         assert!(bound.probe_session.is_some(), "actual_native_read_session");
         // Withdraw only this test's discovery view. Never alter the running
         // App's descriptor, permissions, socket, peer or signed image pins.
-        let absent = tempfile::tempdir().expect("private_discovery_fixture");
-        bound.candidate.root = PrivateRoot::open(absent.path().canonicalize().unwrap())
-            .expect("private_discovery_root");
+        use std::os::unix::fs::DirBuilderExt;
+        let absent = std::env::temp_dir().join(format!("styx-withdrawal-{}", Uuid::new_v4()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&absent)
+            .expect("private_discovery_fixture");
+        Arc::get_mut(&mut bound.candidate)
+            .expect("exclusive_test_candidate")
+            .root =
+            PrivateRoot::open(absent.canonicalize().unwrap()).expect("private_discovery_root");
         assert_eq!(bound.fresh_binding(), Err(BindingError::NotPublished));
         assert_eq!(
             bound.drain_probe(std::time::Instant::now() + std::time::Duration::from_secs(10)),
@@ -556,6 +563,7 @@ mod installed_source_tests {
             "original_native_transport_drain_after_withdrawal"
         );
         assert!(bound.fenced, "cleanup_does_not_restore_admission");
+        std::fs::remove_dir(&absent).expect("remove_empty_discovery_fixture");
         read.expect("native_window_read");
         eprintln!(
             "MAC_SOURCE_WITHDRAWAL admission=REFUSED original_transport_drain=PASS replay=NONE"
