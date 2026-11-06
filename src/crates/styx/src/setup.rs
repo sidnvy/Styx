@@ -833,20 +833,6 @@ fn deployment_host(session: &Session, origin: &str, ca_hash: &str) -> Value {
     }
     json!({"schema":1,"mode":"join-existing", "gateway":{"url":origin,"caFile":session.input("join-ca.pem"),"expectedCaSha256":ca_hash},"host":host,"runtimeSelectionFile":session.input("runtime-selection.json"),"invitationFile":session.input("invitation")})
 }
-fn plugin_questions(label: &str) -> Result<Plugin> {
-    println!(
-        "Choose a display name that differs from any Styx plugin already installed in your ChatGPT account."
-    );
-    Ok(Plugin {
-        display_name: prompt::line("Plugin display name", Some(&format!("Styx ({label})")))?,
-        output: prompt::line(
-            "New plugin output directory (must end in styx-native)",
-            home()?.join("Styx/plugin/styx-native").to_str(),
-        )?
-        .into(),
-        wait: false,
-    })
-}
 fn plan_steps(answers: &Answers, foreground: bool, root: &Path) -> Vec<String> {
     let mut steps = vec![
         format!(
@@ -904,8 +890,11 @@ fn plan_steps(answers: &Answers, foreground: bool, root: &Path) -> Vec<String> {
         .into(),
     );
     if let Some(plugin) = &answers.plugin {
-        steps.push(format!("Write the ChatGPT plugin “{}” to {} and a ZIP beside it, then show you how to install it. Nothing is uploaded.", plugin.display_name, plugin.output.display()));
-    } else if answers.role == Role::Hub && answers.tunnel.is_none() {
+        steps.push(format!("Keep legacy ZIP settings for “{}” at {}. Only automated answers explicitly approving plugin export can write that ZIP; Custom MCP does not use it.", plugin.display_name, plugin.output.display()));
+    }
+    if answers.tunnel.is_some() {
+        steps.push(format!("Save the Styx upload icon in {} and show the Custom MCP > Tunnel connection steps. Nothing is uploaded or installed automatically.", root.join("chatgpt/styx-icon.png").display()));
+    } else if answers.role == Role::Hub {
         steps.push("Leave ChatGPT off for now and show how to connect it later.".into());
     }
     steps
@@ -1380,9 +1369,99 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
     Ok(())
 }
 
+const CHATGPT_ICON: &[u8] = include_bytes!("../../../assets/brand/styx-custom-mcp-icon.png");
+
+fn prepare_chatgpt_icon(root: &Path) -> Result<PathBuf> {
+    let directory = root.join("chatgpt");
+    inputs::private_directory(&directory)
+        .map_err(|_| Failure::new("setup_chatgpt_icon_directory_unavailable"))?;
+    let path = directory.join("styx-icon.png");
+    // A repeat setup may reuse the exact public asset, but never overwrite a
+    // user file or follow a symlink. No runtime settings enter this directory.
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {
+            let existing = inputs::read_private(&path, 10_000)
+                .map_err(|_| Failure::new("setup_chatgpt_icon_conflict"))?;
+            if existing != CHATGPT_ICON {
+                return Err("setup_chatgpt_icon_conflict".into());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            inputs::write_new(&path, CHATGPT_ICON)
+                .map_err(|_| Failure::new("setup_chatgpt_icon_write_failed"))?;
+        }
+        Err(_) => return Err("setup_chatgpt_icon_unavailable".into()),
+    }
+    Ok(path)
+}
+
+async fn export_legacy_plugin(session: &mut Session, gateway: &Path) -> Result<()> {
+    // Existing ZIP choices and stale archive bytes must not block Custom MCP.
+    // Only explicitly approved automated exports retain the old ZIP contract.
+    if !session.automated || !session.answers.approve.contains("plugin") {
+        return Ok(());
+    }
+    if session.input("plugin-intent.json").exists() {
+        let raw = inputs::read_private(&session.input("plugin-intent.json"), 16384)
+            .map_err(|_| Failure::new("setup_plugin_intent_unavailable"))?;
+        let plugin: Plugin = serde_json::from_slice(&raw)
+            .map_err(|_| Failure::new("setup_plugin_intent_invalid"))?;
+        if session
+            .answers
+            .plugin
+            .as_ref()
+            .is_some_and(|p| p.output != plugin.output || p.display_name != plugin.display_name)
+        {
+            return Err("setup_existing_plugin_differs".into());
+        }
+        session.answers.plugin = Some(plugin);
+    }
+    if let Some(plugin) = session.answers.plugin.as_ref() {
+        if !session.completed("plugin") {
+            session.consent("plugin", "Check the hub connection and create the ChatGPT plugin folder and ZIP. No secret is included and nothing is uploaded.")?;
+            let discovery = admin::observe(gateway).await.map_err(Failure::admin)?;
+            if !session.input("plugin-intent.json").exists() {
+                session.json_new("plugin-intent.json", plugin)?;
+            }
+            session.begin("plugin")?;
+            plugin_package::write(
+                &plugin.output,
+                &plugin.display_name,
+                &session
+                    .answers
+                    .tunnel
+                    .as_ref()
+                    .ok_or_else(|| Failure::new("setup_tunnel_missing"))?
+                    .id,
+                &discovery,
+            )?;
+            session.done("plugin")?;
+        } else {
+            let discovery = admin::observe(gateway).await.map_err(Failure::admin)?;
+            plugin_package::verify_existing(
+                &plugin.output,
+                &plugin.display_name,
+                &session
+                    .answers
+                    .tunnel
+                    .as_ref()
+                    .ok_or_else(|| Failure::new("setup_tunnel_missing"))?
+                    .id,
+                &discovery,
+            )?;
+            session.skip("Plugin export");
+        }
+        println!(
+            "Legacy ZIP retained at {}. ZIP installation may replace the Styx logo; follow the Custom MCP steps below.",
+            plugin.output.with_extension("zip").display()
+        );
+    }
+    Ok(())
+}
+
 async fn connect_chatgpt(session: &mut Session, gateway: &Path) -> Result<()> {
     println!(
-        "Waiting for the ChatGPT tunnel to be ready… You will then install the plugin in ChatGPT."
+        "Waiting for the ChatGPT tunnel to be ready… You will then add Styx as a Custom MCP plugin."
     );
     let until = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
@@ -1400,70 +1479,31 @@ async fn connect_chatgpt(session: &mut Session, gateway: &Path) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    if session.input("plugin-intent.json").exists() {
-        let raw = inputs::read_private(&session.input("plugin-intent.json"), 16384)
-            .map_err(|_| Failure::new("setup_plugin_intent_unavailable"))?;
-        let plugin: Plugin = serde_json::from_slice(&raw)
-            .map_err(|_| Failure::new("setup_plugin_intent_invalid"))?;
-        if session
-            .answers
-            .plugin
-            .as_ref()
-            .is_some_and(|p| p.output != plugin.output || p.display_name != plugin.display_name)
-        {
-            return Err("setup_existing_plugin_differs".into());
-        }
-        session.answers.plugin = Some(plugin);
-    }
-    let plugin = session
+    export_legacy_plugin(session, gateway).await?;
+    let icon = prepare_chatgpt_icon(&session.root)?;
+    let tunnel = &session
+        .answers
+        .tunnel
+        .as_ref()
+        .ok_or_else(|| Failure::new("setup_tunnel_missing"))?
+        .id;
+    let name = session
         .answers
         .plugin
         .as_ref()
-        .ok_or_else(|| Failure::new("setup_plugin_choices_required"))?;
-    if !session.completed("plugin") {
-        session.consent("plugin", "Check the hub connection and create the ChatGPT plugin folder and ZIP. No secret is included and nothing is uploaded.")?;
-        let discovery = admin::observe(gateway).await.map_err(Failure::admin)?;
-        if !session.input("plugin-intent.json").exists() {
-            session.json_new("plugin-intent.json", plugin)?;
-        }
-        session.begin("plugin")?;
-        plugin_package::write(
-            &plugin.output,
-            &plugin.display_name,
-            &session
-                .answers
-                .tunnel
-                .as_ref()
-                .ok_or_else(|| Failure::new("setup_tunnel_missing"))?
-                .id,
-            &discovery,
-        )?;
-        session.done("plugin")?;
-    } else {
-        let discovery = admin::observe(gateway).await.map_err(Failure::admin)?;
-        plugin_package::verify_existing(
-            &plugin.output,
-            &plugin.display_name,
-            &session
-                .answers
-                .tunnel
-                .as_ref()
-                .ok_or_else(|| Failure::new("setup_tunnel_missing"))?
-                .id,
-            &discovery,
-        )?;
-        session.skip("Plugin export");
-    }
-    println!(
-        "Plugin ZIP: {}\nIn ChatGPT: open Settings > Apps, use the supported plugin upload/import workflow, upload this ZIP, review the connection, and install it in the intended account/workspace. Start a new conversation with this plugin enabled.\nFirst test prompt: List my Styx computers",
-        plugin.output.with_extension("zip").display()
-    );
+        .map(|p| p.display_name.clone())
+        .unwrap_or_else(|| format!("Styx ({})", session.answers.label));
+    // Capture before presenting the instructions so a quick Connect is observed.
     let baseline = styx_runtime::foreground::tunnel::request_observation(gateway)
         .map_err(|e| Failure::new(e.code()))?["requests"]
         .as_u64()
         .unwrap_or(0);
+    println!(
+        "\nConnect Styx in ChatGPT:\n1. Open https://chatgpt.com/plugins in the intended account/workspace. If this hub already has a working Custom MCP connection, reuse it. Do not delete an existing plugin.\n2. For a new connection choose Add > Add custom MCP server. Name: {name}. Use a distinct name if another Styx exists.\n3. Choose icon: {} (PNG, under 10 KB). Connection: Tunnel. Tunnel ID: {tunnel}\n4. Authentication: No authentication. Keep the tunnel runtime API key only in Styx; the tunnel client supplies Gateway authentication.\n5. Review the notice, choose Create as a plugin, then Connect. Refresh its installed detail page and check that the Styx logo remains.\n6. Choose Try in chat, or start a new chat with this connection selected. Send: List my Styx computers\nCustom MCP connects the tools; it does not install the ZIP's bundled skills.\nIf Add custom MCP server is unavailable, check Developer mode and account/workspace permissions.\nLocal setup and tunnel readiness do not prove a successful ChatGPT tool call.",
+        icon.display()
+    );
     let wait = if session.automated {
-        plugin.wait
+        session.answers.plugin.as_ref().is_some_and(|p| p.wait)
     } else {
         prompt::confirm("Wait for the first request from ChatGPT? Ctrl-C stops waiting")?
     };
@@ -1474,7 +1514,9 @@ async fn connect_chatgpt(session: &mut Session, gateway: &Path) -> Result<()> {
             let observation = styx_runtime::foreground::tunnel::request_observation(gateway)
                 .map_err(|e| Failure::new(e.code()))?;
             if observation["requests"].as_u64().unwrap_or(0) > baseline {
-                println!("ChatGPT connected: the hub received a request through the tunnel.");
+                println!(
+                    "The hub received a request through the tunnel. Confirm that the computer list appears in your ChatGPT chat; connection discovery alone is not a successful tool test."
+                );
                 break;
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1535,16 +1577,6 @@ pub(super) async fn run(
             });
         }
     }
-    if !automated && answers.tunnel.is_some() && answers.plugin.is_none() {
-        let plugin_intent = root.join("inputs/plugin-intent.json");
-        answers.plugin = Some(if plugin_intent.exists() {
-            let raw = inputs::read_private(&plugin_intent, 16384)
-                .map_err(|_| Failure::new("setup_plugin_intent_unavailable"))?;
-            serde_json::from_slice(&raw).map_err(|_| Failure::new("setup_plugin_intent_invalid"))?
-        } else {
-            plugin_questions(&answers.label)?
-        });
-    }
     answers.validate()?;
     if answers.browser
         && (root.starts_with(&answers.workspace)
@@ -1569,9 +1601,6 @@ pub(super) async fn run(
                 if status["tunnelId"] != tunnel.id {
                     return Err("setup_private_tunnel_key_file_required".into());
                 }
-            }
-            if answers.plugin.is_none() && !root.join("inputs/plugin-intent.json").exists() {
-                return Err("setup_plugin_choices_required".into());
             }
         }
     }
@@ -2208,6 +2237,108 @@ mod tests {
             assert!(!parse(v));
         }
     }
+    #[test]
+    fn custom_mcp_icon_export_reuses_exact_asset_and_preserves_conflicts() {
+        let root = std::env::temp_dir().join(format!(
+            "styx-custom-mcp-{}-{}",
+            std::process::id(),
+            now_ms().unwrap()
+        ));
+        let path = prepare_chatgpt_icon(&root).unwrap();
+        let exported = std::fs::read(&path).unwrap();
+        assert!(exported.len() <= 10_000);
+        assert_eq!(&exported[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(exported, CHATGPT_ICON);
+        assert_eq!(prepare_chatgpt_icon(&root).unwrap(), path);
+        assert!(!root.join("inputs/plugin-intent.json").exists());
+        assert!(!root.with_extension("zip").exists());
+
+        std::fs::write(&path, b"owner file").unwrap();
+        assert_eq!(
+            prepare_chatgpt_icon(&root).unwrap_err().code,
+            "setup_chatgpt_icon_conflict"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"owner file");
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            std::fs::read(prepare_chatgpt_icon(&root).unwrap()).unwrap(),
+            CHATGPT_ICON
+        );
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&path).unwrap();
+            let other = root.join("owner-icon.png");
+            std::fs::write(&other, CHATGPT_ICON).unwrap();
+            std::os::unix::fs::symlink(&other, &path).unwrap();
+            assert_eq!(
+                prepare_chatgpt_icon(&root).unwrap_err().code,
+                "setup_chatgpt_icon_conflict"
+            );
+            assert_eq!(std::fs::read(other).unwrap(), CHATGPT_ICON);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tunnel_setup_does_not_require_a_zip_profile() {
+        let mut value = valid();
+        value["tunnel"] = json!({"id": format!("tunnel_{}", "a".repeat(32))});
+        let answers: Answers = serde_json::from_value(value).unwrap();
+        answers.validate().unwrap();
+        assert!(answers.plugin.is_none());
+        let plan = plan_steps(&answers, true, Path::new("/tmp/styx-example"));
+        assert!(plan.iter().any(|step| step.contains("Custom MCP > Tunnel")));
+        assert!(!plan.iter().any(|step| step.contains("legacy ZIP")));
+    }
+
+    #[tokio::test]
+    async fn custom_mcp_resume_does_not_read_or_rewrite_legacy_zip_inputs() {
+        let root = std::env::temp_dir().join(format!(
+            "styx-legacy-zip-resume-{}-{}",
+            std::process::id(),
+            now_ms().unwrap()
+        ));
+        inputs::private_directory(&root.join("inputs")).unwrap();
+        let legacy_intent = root.join("inputs/plugin-intent.json");
+        inputs::write_new(&legacy_intent, b"older or incomplete export intent").unwrap();
+        let mut answers: Answers = serde_json::from_value(valid()).unwrap();
+        answers.plugin = Some(Plugin {
+            display_name: "Existing Styx".into(),
+            output: root.join("styx-native"),
+            wait: false,
+        });
+        let mut session = Session {
+            root: root.clone(),
+            answers,
+            automated: false,
+            plan_approved: true,
+            mutation: Default::default(),
+        };
+        // No Gateway exists here. Custom MCP must not discover one just to
+        // validate an old archive, even when the saved ZIP intent is invalid.
+        export_legacy_plugin(&mut session, &root.join("gateway"))
+            .await
+            .unwrap();
+        session.automated = true;
+        export_legacy_plugin(&mut session, &root.join("gateway"))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(&legacy_intent).unwrap(),
+            b"older or incomplete export intent"
+        );
+        assert!(!root.join("styx-native").exists());
+        session.answers.approve.insert("plugin".into());
+        assert_eq!(
+            export_legacy_plugin(&mut session, &root.join("gateway"))
+                .await
+                .unwrap_err()
+                .code,
+            "setup_plugin_intent_invalid"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn resume_dispatch_without_receipt_is_never_replayed() {
         let root = std::env::current_dir()

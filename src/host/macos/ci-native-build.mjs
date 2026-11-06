@@ -16,7 +16,7 @@ export function compileMacTestingApp(output,{platform=process.platform,arch=proc
  fs.mkdirSync(path.dirname(binary),{recursive:true});
  const resources=path.join(contents,'Resources/brand');fs.mkdirSync(resources,{recursive:true});
  fs.writeFileSync(path.join(contents,'Info.plist'),appInfoPlist('0.0.0'),{flag:'wx'});
- for(const name of ['styx-icon-light-source.jpg','styx-icon-dark-source.jpg'])fs.copyFileSync(path.join(brand,name),path.join(resources,name),fs.constants.COPYFILE_EXCL);
+ for(const name of ['styx-icon-light-source.jpg','styx-icon-dark-source.jpg','styx-custom-mcp-icon.png'])fs.copyFileSync(path.join(brand,name),path.join(resources,name),fs.constants.COPYFILE_EXCL);
  fs.copyFileSync(inputs.source,entry,fs.constants.COPYFILE_EXCL);
  const sdkPath=String(run('/usr/bin/xcrun',['--sdk','macosx','--show-sdk-path'],{encoding:'utf8',timeout:10000})).trim();
  const args=macSwiftBuildArguments({source:entry,additionalSources:inputs.additionalSources,output:binary,arch,sdkPath,moduleCachePath});

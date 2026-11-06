@@ -24,6 +24,8 @@ test('CI copies main.swift, uses production Swift argv and provides real artwork
  const expected=macSwiftBuildArguments({source:path.join(output,'main.swift'),additionalSources:inputs.additionalSources,output:result.binary,arch:'arm64',sdkPath,moduleCachePath:path.join(output,'module-cache')});expected.splice(1,0,'-D','STYX_TESTING');
  assert.deepEqual(calls.map(call=>call.command),['/usr/bin/xcrun','/usr/bin/xcrun']);assert.deepEqual(calls[1].args,expected);assert.equal(result.signing,'NOT RUN');assert.equal(result.tcc,'NOT RUN');
  assert.ok(fs.statSync(path.join(result.app,'Contents/Resources/brand/styx-icon-light-source.jpg')).size>1000);assert.ok(fs.readFileSync(path.join(result.app,'Contents/Info.plist'),'utf8').includes('app.styx.host'));
+ const uploadIcon=fs.readFileSync(path.join(result.app,'Contents/Resources/brand/styx-custom-mcp-icon.png'));
+ assert.ok(uploadIcon.length<=10000);assert.deepEqual(uploadIcon,fs.readFileSync(new URL('../../../assets/brand/styx-custom-mcp-icon.png',import.meta.url)));
  assert.throws(()=>compileMacTestingApp(output,{platform:'darwin',run:()=>assert.fail('existing output must not compile')}),/fresh_absolute_native_ci_output_required/);
  const other=path.join(root,'other');assert.throws(()=>compileMacTestingApp(other,{platform:'linux',run:()=>assert.fail('non-native platform must not compile')}),/native_macos_compile_required/);assert.equal(fs.existsSync(other),false);
 });

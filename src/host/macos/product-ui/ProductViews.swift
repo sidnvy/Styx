@@ -32,9 +32,9 @@ struct ProductPanel<Content: View>: View {
 struct ProductView: View {
     @ObservedObject var model: ProductModel
     weak var controller: ProductWindowController?
-    @State private var usePluginPackage = true
+    @State private var usePluginPackage = false
     @State private var editTunnel = false
-    init(model: ProductModel, controller: ProductWindowController?, showPluginPackage: Bool = true) {
+    init(model: ProductModel, controller: ProductWindowController?, showPluginPackage: Bool = false) {
         self.model = model; self.controller = controller
         _usePluginPackage = State(initialValue: showPluginPackage)
     }
@@ -272,10 +272,8 @@ struct ProductView: View {
                 Button(productText("先完成电脑准备", "Finish computer setup")) { model.page = .preparation }
             } else {
                 tunnelPanel
-                if model.needsPluginSetup {
-                    officialPanel
-                    if usePluginPackage { pluginUploadPanel }
-                }
+                officialPanel
+                if usePluginPackage { pluginUploadPanel }
                 ProductTryoutView(model: model, controller: controller)
                 if model.accepted { Button(productText("完成设置", "Finish setup")) { model.page = .overview }.buttonStyle(.borderedProminent) }
             }
@@ -322,15 +320,17 @@ struct ProductView: View {
             if usePluginPackage {
                 pluginPackageContent
             } else {
-                Text(productText("打开 ChatGPT 插件页 → ＋ → 添加自建 MCP 服务器。", "Open ChatGPT Plugins → + → Add custom MCP server."))
-                Text(productText("名称填 Styx；Connection 选 Tunnel，粘贴下方 ID；Authentication 选 No authentication。", "Name: Styx. Connection: Tunnel, then paste the ID below. Authentication: No authentication."))
+                Text(productText("在目标账号和工作区打开 ChatGPT 插件页 → Add → Add custom MCP server。已有可用的 Styx Custom MCP 连接时直接复用，不要删除已有插件。", "In the intended account and workspace, open ChatGPT Plugins → Add → Add custom MCP server. Reuse a working Styx Custom MCP connection for this hub; do not delete an existing plugin."))
+                Text(productText("名称填 Styx（有多个 Hub 时加上电脑名称）。先保存下方图标，再通过 Choose icon 上传。Connection 选 Tunnel，粘贴下方 ID；Authentication 选 No authentication。运行密钥只保存在 Styx。", "Name it Styx (add the computer name for multiple hubs). Save the icon below and upload it with Choose icon. Connection: Tunnel, then paste the ID below. Authentication: No authentication. Keep the runtime key only in Styx."))
                 if !model.connectionTunnelID.isEmpty {
                     HStack { Text(model.connectionTunnelID).font(.caption).textSelection(.enabled); Button(productText("复制 Tunnel ID", "Copy Tunnel ID")) { model.copy(model.connectionTunnelID) } }
                 }
-                Text(productText("确认提示，点“创建为插件”，然后安装 Styx。", "Confirm the notice, select Create as a plugin, then install Styx."))
-                Button(productText("保存 Styx 图标…", "Save Styx icon…")) { model.saveBrandIcon() }
-                Button(productText("打开 ChatGPT 添加 Styx", "Open ChatGPT to add Styx")) { model.openOfficial("https://chatgpt.com/plugins") }
-                Button(productText("我已添加并安装 Styx", "I added and installed Styx")) { model.confirmPluginInstallation() }.disabled(model.plugin["contextChanged"].bool || model.connectionTunnelID.isEmpty)
+                Text(productText("阅读提示，点 Create as a plugin，再点 Connect。刷新已安装详情页，确认 Styx 图标保留；然后点 Try in chat，发送“列出我的 Styx 电脑”。", "Review the notice, select Create as a plugin, then Connect. Refresh the installed detail page and check the Styx logo. Choose Try in chat and send: List my Styx computers."))
+                Button(productText("保存 Styx 图标（小于 10 KB）…", "Save Styx icon (under 10 KB)…")) { model.saveBrandIcon() }.accessibilityIdentifier("styx-custom-mcp-save-icon")
+                Button(productText("打开 ChatGPT 添加 Styx", "Open ChatGPT to add Styx")) { model.openOfficial("https://chatgpt.com/plugins") }.disabled(model.tunnelConnection != .connected).accessibilityIdentifier("styx-custom-mcp-open")
+                if model.tunnelConnection != .connected { Text(productText("先完成第 1 步，等待连接成功后再添加。", "Complete step 1 and wait for the tunnel to connect before adding Styx.")).foregroundStyle(.secondary) }
+                Text(productText("如果没有添加入口，请检查开发者模式和工作区权限。Custom MCP 提供工具连接，不会安装 ZIP 内的技能；连接成功后仍需完成下方试用。", "If the Add option is missing, check Developer mode and workspace permissions. Custom MCP connects tools without installing the ZIP's skills; complete the test below after connecting.")).font(.caption).foregroundStyle(.secondary)
+                Button(productText("我已连接 Styx", "I connected Styx")) { model.confirmPluginInstallation() }.disabled(model.plugin["contextChanged"].bool || model.connectionTunnelID.isEmpty || model.tunnelConnection != .connected).accessibilityIdentifier("styx-custom-mcp-confirm")
             }
             if model.plugin["contextChanged"].bool {
                 Text(productText("连接信息已变化，请先核对当前连接。", "Connection details changed. Review the current connection first."))

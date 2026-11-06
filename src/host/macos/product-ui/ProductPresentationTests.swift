@@ -278,6 +278,29 @@ import SwiftUI
             try press(onboarding, "styx-reconnect")
             try require(model.error == "UI preview: connection operations are disabled.", "Reconnect button did not dispatch its action")
             try capture(onboarding, "onboarding-chat")
+            model.error = nil
+            model.acceptance = .object(["status": .string("pending")])
+            onboarding.setContentSize(NSSize(width: 880, height: 1350))
+            try await Task.sleep(nanoseconds: 200_000_000)
+            guard let openMCP = find(onboarding, "styx-custom-mcp-open"),
+                  let confirmMCP = find(onboarding, "styx-custom-mcp-confirm") else {
+                throw NSError(domain: "Styx.PresentationTest", code: 3, userInfo: [NSLocalizedDescriptionKey: "Default onboarding omitted Custom MCP controls"])
+            }
+            try require(openMCP.isAccessibilityEnabled?() == false && confirmMCP.isAccessibilityEnabled?() == false, "Disconnected tunnel admitted Custom MCP setup confirmation")
+            try require(find(onboarding, "styx-custom-mcp-save-icon") != nil, "Default onboarding omitted upload icon saving")
+            try capture(onboarding, "custom-mcp-disconnected")
+            model.journey = .object(["steps": model.journey["steps"], "tunnel": .object(["status": .string("running"), "transport": .string("ready")])])
+            try await Task.sleep(nanoseconds: 200_000_000)
+            try require(find(onboarding, "styx-custom-mcp-open")?.isAccessibilityEnabled?() == true && find(onboarding, "styx-custom-mcp-confirm")?.isAccessibilityEnabled?() == true, "Ready tunnel did not enable Custom MCP handoff")
+            guard let upload = ProductBrandAsset.customMCPIcon, let image = NSBitmapImageRep(data: upload) else { throw ProductCoreError.invalidResponse }
+            try require(upload.count < 10_000 && image.pixelsWide == 128 && image.pixelsHigh == 128, "Bundled icon does not meet the verified upload format")
+            try upload.write(to: directory.appendingPathComponent("custom-mcp-upload.png"))
+            try capture(onboarding, "custom-mcp-ready")
+            model.plugin = .object(["connection": initialPlugin["connection"], "contextChanged": .bool(true)])
+            try await Task.sleep(nanoseconds: 200_000_000)
+            try require(find(onboarding, "styx-custom-mcp-confirm")?.isAccessibilityEnabled?() == false, "Changed tunnel skipped connection review")
+            model.plugin = initialPlugin
+            onboarding.setContentSize(NSSize(width: 680, height: 640))
             model.error = nil; model.page = .capabilities
             try await Task.sleep(nanoseconds: 200_000_000)
             try capture(onboarding, "onboarding-capabilities")

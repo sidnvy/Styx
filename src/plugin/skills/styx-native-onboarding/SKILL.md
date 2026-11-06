@@ -1,104 +1,95 @@
 ---
 name: styx-native-onboarding
-description: Onboard a fresh native Linux, macOS, or Windows device to an independent Styx Gateway, then use its explicitly selected native execution and computer tools.
+description: Guide the owner through Rust Styx setup or joining an existing hub, then verify the explicitly selected native computer through the actual plugin connection.
 ---
 
-# Native Styx onboarding
+# Styx native onboarding
 
-Use only this standalone Styx connection and native Styx release. This is a CLI bootstrap workflow, not a graphical installer. Do not depend on a previous conversation, pilot state, another plugin, or an execution backend. If required tools or artifacts are missing, name the exact missing prerequisite; never silently substitute another connection.
+Use the installed Rust Styx CLI or native Styx App. This package is for an
+independent owner-managed Gateway and explicitly paired computers. Discover this
+plugin's actual tools and schemas; never substitute another deployment, plugin,
+executor or computer when Styx is unavailable.
 
-## Choose the workflow from the actual pinned source
+## Set up the computer locally
 
-Read the source/release revision first. The developer preview tag
-`v0.1.0-dev.20261019` does not contain the newer `src/onboarding` controller;
-use the commands actually shipped by that tag. When the selected source does
-contain `src/onboarding/README.md`, use its fixed CLI/UI workflow and persisted
-status/plan instead of inventing shell steps or editing its journal/config.
-A user-approved device scope can authorize the bounded installation sequence;
-do not request the same permission at every mechanical substep. Owner pairing
-approval and service startup must remain within that exact scope. Never pass an
-approval flag merely because it makes a blocked step continue.
+For a new CLI installation, have the owner run `styx setup` in their own terminal.
+They choose a hub (Gateway plus this computer) or join an existing hub using its
+one-use link. Setup confirms mutations and reuses the original enrollment and
+service actors. Use the release actually installed; obtain its original public
+publisher PEM and externally trusted SHA256 pin from the trusted release handoff.
+Never invent download links, pins, tunnel identities, endpoints or signing keys.
 
-A prior succeeded journal entry is not live service health. An uncertain outcome
-requires observation and reconciliation, not replay or lock deletion. SDK
-Gateway verification does not prove the account plugin connection. No model tool
-may receive owner credentials or device private keys. The local browser owner UI
-is distinct from the account plugin and must not be publicly exposed.
+On a hub, setup starts the Gateway, requests and approves this exact local Host,
+claims it, and only then hands the Host to its Linux user service. Linux services
+run as the owner, without sudo or linger. macOS/Windows CLI setup runs foreground
+for now; retain that terminal or follow the printed native run commands. The
+installed native App may provide its own supported first-run/join flow.
 
-## Establish the independent connection
+To add a computer, have the hub owner run `styx invite`. Transfer the secret link
+through a trusted private channel. On the other computer choose Join an existing
+Styx in the App, or Join an existing hub in `styx setup`. Confirm its Gateway
+origin and CA fingerprint and compare the request's comparison code on both
+computers before the hub owner approves its chosen Browser/Computer Use lanes.
+Joining computers use the existing hub owner's plugin; they do not create another
+Gateway or duplicate account connection. Do not perform owner approval through
+model-facing tools or ask for owner/admin credentials in a conversation.
 
-A fresh account connection needs a newly provisioned Styx Gateway with its own state, model Bearer credential, and separate owner/admin credential. Use a verified HTTPS MCP endpoint or a newly created Secure MCP Tunnel ID belonging to this Gateway. First check whether the user is creating a new Gateway/account connection or explicitly reusing their existing one. Reinstalling under the same owner may reuse its verified identity, tunnel and plugin; a Host joining that Gateway must use the existing owner-managed plugin. Never borrow unrelated deployments or credentials, auto-trust discovery, or create duplicates merely because local account history is absent. A Secure MCP Tunnel connects the account to MCP; it does not replace the Host's trusted HTTPS/WSS connection to the Gateway.
+`styx status` shows the setup profile, service observations and, on the hub, actual
+paired connections. A started process or approved capability is not evidence of a
+connected lane or a successful native action. If an enrollment, approval, claim,
+confirmation or native action has an unknown outcome, preserve its original root,
+inputs and transaction identity. Observe/reconcile it; do not request again,
+delete locks, edit journals, remove the profile, or silently re-pair.
 
-From the concrete merged-release handoff, obtain exact source/release revision, signed native Host bundle, publisher public key and independently trusted SHA-256 SPKI DER fingerprint. Do not invent download URLs, hashes, endpoints, or signing identities. The App-owned tunnel adds the model-only Bearer credential to both discovery and requests; the local Gateway still requires it. For this tunnel connection, choose No authentication in ChatGPT; the runtime API key belongs only in Styx. Direct HTTPS connections retain their separately configured authentication contract. Never put credentials in chat, a plugin package, or command arguments. Owner key operations are outside model-facing MCP tools.
+## Connect ChatGPT
 
-For the guided App flow, preserve or edit the display name, description and PNG
-icon in Styx, then export its verified plugin ZIP. Import through the supported
-ChatGPT plugin upload workflow and install it; prefer Upload new version for the
-existing Styx plugin. The package includes this onboarding skill plus CLI,
-Browser Automation and Computer Use skills. Use those skills for daily tasks.
-If the account cannot upload or the package is desktop-only, report that exact
-limitation rather than claiming web support or silently dropping its skills.
-The shared Core export verifies local TLS Gateway discovery, not cloud reachability.
-ZIP creation and installation do not replace actual chat tool-call acceptance.
-Local upload/install confirmations are user attestations, not platform observations.
-Never create a cloud plugin merely to probe access.
+The hub owner configures a Secure MCP Tunnel in their account using
+https://developers.openai.com/api/docs/guides/secure-mcp-tunnels and enters its
+runtime API key locally in setup's hidden prompt (or an owner-private file for
+authorized automation). Never request the key in chat or put it in command
+arguments, environment variables, plugin files, logs or screenshots.
 
-For initial package generation, the Gateway owner first performs authenticated MCP discovery against the actual fresh connection. Record the exact connection identity, server name, tool names, and verification time using the release's plugin verification contract. Then run `node src/plugin/package.mjs ABS_CONFIG ABS_OUTPUT/styx-native` from the trusted source. This validates the operator receipt, not a new live probe. Inspect the package, archive the one `styx-native` directory outside itself, and save through the supported plugin creation/install flow. Creation is not successful connection acceptance. Never create a placeholder cloud plugin.
+Setup saves a small Styx PNG and prints the hub's Tunnel ID. In the intended
+ChatGPT account/workspace, open Plugins > Add > Add custom MCP server. Name it
+Styx (use a distinct hub name when needed), upload the saved PNG with Choose icon,
+choose Connection: Tunnel and the exact Tunnel ID, and Authentication: No
+authentication. The local tunnel client supplies the Gateway's model-only bearer;
+this does not remove Gateway authentication. Keep the runtime key only in Styx.
+Review the notice, choose Create as a plugin, then Connect. Refresh the installed
+detail page and check that the Styx logo remains. Reuse an existing working Custom
+MCP connection for this hub; never delete a production plugin to troubleshoot it.
 
-## Prepare a fresh native device
+Custom MCP connects the tools without installing the ZIP's bundled skills.
+Use the connection's actual tool schemas and instructions. ZIP installation has
+been observed to replace the Styx icon with a placeholder and is not the default
+onboarding route. Existing explicit ZIP exports are retained for advanced use.
+The tunnel does not replace the computer's pinned HTTPS/WSS route to its hub.
 
-Use trusted local Node 22+ only for initial bootstrap. On the actual native device, create an owner-private parent directory and an owner-private setup JSON. Do not print secret file contents. The configuration requires absolute `bundle`, `publisherKeyFile`, a trusted `publisherSha256`, fresh `baseDir`, exact HTTPS Gateway origin `gatewayUrl`, human-readable `label`, and explicit boolean `computer`. Optional fields are dedicated `gatewayCaFile`, macOS `macTeamID`, Linux `wayland`, and native `shell`. A private CA must be trusted explicitly; never disable TLS verification.
+If the Add option is unavailable, check Developer mode and the intended
+account/workspace's permissions. Local TLS discovery, transport readiness and
+installation are separate checkpoints. None proves a successful chat tool call.
+Choose Try in chat and send **List my Styx computers**. Report the actual response
+or exact blocker; never manufacture account acceptance or treat local discovery
+or a tunnel request counter as a successful ChatGPT tool test.
 
-From the trusted merged source run:
+## Verify the selected computer
 
-```text
-node src/host/setup-native.mjs prepare ABS_PRIVATE_SETUP_JSON
-```
+Call `list_execution_environments`, resolve the user's computer to one exact
+returned `environment_id`, and call `get_execution_environment_status`. Ask if
+the target is ambiguous. Never invent identifiers or reuse session handles from
+another conversation. A Host-only CLI may require the hub owner to check its
+Gateway connection status; do not infer connected Browser from local startup.
 
-Use the returned bundled `node`, `release_root`, `enrollment_config`, and `service_config` paths. Preparation verifies publisher fingerprint, release signature and files, stages the native runtime, and creates configuration. It does not pair, approve, grant OS permissions, or start a service. If it partially fails, inspect its exact state; do not replay over an existing directory or erase evidence. Existing installations require their separate signed update path.
+Use the packaged CLI skill for commands, files, Git and builds. Use Browser
+Automation for supported web tasks and Computer Use for native GUI tasks, with
+fresh target-bound observations. Do not open a GUI terminal or use OS scripting
+to bypass an unavailable Exec/Browser/Computer Use tool or denied permission.
+The owner handles OS permission grants, account login and MFA personally.
 
-On macOS computer access requires the publisher-signed `/Applications/Styx.app` and verified team identity. Open through LaunchServices; the user grants TCC permissions in the actual GUI. Do not infer permission from a connected socket. Linux Wayland requires explicit supported opt-in. Windows GUI work runs in the intended interactive user session.
-
-## Pair and enable only with explicit owner approval
-
-The Gateway owner issues a one-use invitation using the separate private `gateway/enroll-admin.mjs` configuration. Transfer the invitation directly into an owner-private local file. It is not a model credential. Using paths from the setup receipt:
-
-```text
-BUNDLED_NODE RELEASE_ROOT/host/enroll.mjs onboard BASE_DIR/enrollment.json PRIVATE_INVITATION_FILE
-```
-
-Compare the public device fingerprint shown on the native device with the pending owner request. The owner separately approves the exact request ID and fingerprint; add computer permission only when explicitly requested. Do not put owner/admin keys in MCP or automate approval through model-facing tools. Pairing produces `device/host.json` but does not install a service. Run the signed `host/doctor.mjs` using that file and follow its actual diagnostics.
-
-Only after the user authorizes service installation/start, use the verified release helpers with the generated service configuration:
-
-- Linux: `host/linux-service.mjs install styx-host.service BASE_DIR/service.json`, then explicit `enable` and `start` for that name.
-- macOS: `host/macos-launchagent.mjs install app.styx.connector BASE_DIR/service.json`, then `start app.styx.connector`; retain the signed GUI app in the same user session.
-- Windows: `powershell.exe -NoProfile -File RELEASE_ROOT/host/windows-task.ps1 -Action install -TaskName Styx-Host -ConfigPath BASE_DIR/service.json`, then explicit start for `Styx-Host`.
-
-Use bundled Node for JavaScript helpers. Do not overwrite a foreign existing service. Recheck Doctor and service status independently.
-
-## Discover and verify actual native tools
-
-Use Exec first whenever the requested work is a command-line operation: GitHub repository cloning and pulls, downloads with a CLI, files, searches, builds, tests, package managers and other development or CI commands. Discover the selected device, then run `exec_command` on that device; an owned interactive PTY through `write_stdin` remains an Exec workflow. Do not launch Terminal, iTerm, PowerShell or a shell through Spotlight, Launchpad, App Center or Cua merely to paste those commands.
-
-Use Cua for essential GUI observation and interaction, including native permission dialogs or an application feature with no usable command-line/API route. Use the CLI/API portion of a mixed task through Exec and only its necessary GUI portion through Cua. An Exec error, disconnection, missing credential or policy restriction is not permission to switch to a GUI terminal and rerun the same command. Inspect status, recover the Exec connection or report the blocker; uncertain command delivery must not be replayed. A separately requested GUI-terminal demonstration is an explicit user workflow, not an automatic fallback. This routing guidance is delivered to the model; it is not a claim that real chat tool selection has been re-validated on the user's Mac Mini.
-
-Discover this plugin's tools before calling them. Call `list_execution_environments`, select an exact returned environment ID with the user, then call `get_execution_environment_status` for it. Connection and configured capability do not prove readiness. If no enrolled environment exists, finish pairing rather than invent an ID.
-
-Use `exec_command` with explicit `environment_id`, native command and working directory. Respect the returned `session_id`; poll or write only that owned session via `write_stdin`. A timeout, disconnect, or uncertain action is not permission to rerun it. Read back known state before deciding whether another action is safe. Never carry session handles across new conversations.
-
-Computer tools are discovered dynamically. Use their actual input schemas, starting with supported observation tools such as `list_apps`, `list_windows`, `get_window_state` or `get_desktop_state`. Actions require current observed references and the selected device. Observe again after a mutation. Do not invent cross-platform tool names or reuse stale GUI references. If permission is absent, guide the user through native OS permission UI.
-
-For fresh-conversation acceptance, execute an exact harmless marker, verify output, exercise a bounded PTY and cleanup, then use a self-expiring owned GUI fixture on the explicitly selected device. Check actual effect separately from dispatch. Verify revocation using owner-controlled administration, then confirm the removed device is rejected. Report the exact environment, revision, evidence and any failures. Never claim account-side acceptance from SDK tests or package creation alone.
-
-
-For ordinary desktop tasks, stay on the discovered Styx computer tools. Do not use
-`exec_command`/`write_stdin` with AppleScript, `osascript`, JXA, System Events or
-shell-driven input as a fallback for stale references, unavailable tools or
-missing desktop permissions. Refresh the observation for stale references;
-report and resolve the specific connection or native permission problem otherwise.
-Use an observed PID or bundle identifier when localized app names do not match.
-Application scripting is a separate, explicitly requested workflow: explain its
-macOS Automation permission before first invocation and let the user grant it.
-Do not ask users to authorize generic Node/System Events access just to complete
-ordinary Cua desktop tasks, or reset their existing permissions.
+For acceptance, run the exact authorized harmless command on the selected
+computer and independently read its visible file effect. Open/read a Browser
+page when that lane is requested; observe an actual desktop target before and
+after a Computer Use action. A dispatch response, synthetic fixture, test count,
+package or service registration is not independent native-effect evidence.
+Unknown actions are observed before another mutation is considered. Report the
+exact environment, observed effects, cleanup and remaining gaps honestly.

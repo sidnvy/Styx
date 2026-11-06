@@ -49,19 +49,28 @@ runtime API key locally in setup's hidden prompt (or an owner-private file for
 authorized automation). Never request the key in chat or put it in command
 arguments, environment variables, plugin files, logs or screenshots.
 
-Setup exports the verified allowlisted plugin directory and ZIP. Its stable
-identity is `styx-native`; its display name may differ to avoid clashing with an
-existing plugin. Import/install or update the ZIP through the account's supported
-plugin workflow. The MCP connection declares `tunnelId` and No authentication:
-the local tunnel client supplies the Gateway's model-only bearer. This does not
-remove the Gateway's authentication requirement. The tunnel is the account MCP
-route; it does not replace the computer's pinned HTTPS/WSS route to its hub.
+Setup saves a small Styx PNG and prints the hub's Tunnel ID. In the intended
+ChatGPT account/workspace, open Plugins > Add > Add custom MCP server. Name it
+Styx (use a distinct hub name when needed), upload the saved PNG with Choose icon,
+choose Connection: Tunnel and the exact Tunnel ID, and Authentication: No
+authentication. The local tunnel client supplies the Gateway's model-only bearer;
+this does not remove Gateway authentication. Keep the runtime key only in Styx.
+Review the notice, choose Create as a plugin, then Connect. Refresh the installed
+detail page and check that the Styx logo remains. Reuse an existing working Custom
+MCP connection for this hub; never delete a production plugin to troubleshoot it.
 
-Check the intended account/workspace and its actual tunnel/plugin permissions.
-Local TLS discovery, transport readiness, export and installation are separate
-checkpoints. None proves that the account has made a tool call. First test prompt:
-**List my Styx computers**. Report the actual response or exact blocker; never
-manufacture account acceptance or treat a local SDK test as a ChatGPT request.
+Custom MCP connects the tools without installing the ZIP's bundled skills.
+Use the connection's actual tool schemas and instructions. ZIP installation has
+been observed to replace the Styx icon with a placeholder and is not the default
+onboarding route. Existing explicit ZIP exports are retained for advanced use.
+The tunnel does not replace the computer's pinned HTTPS/WSS route to its hub.
+
+If the Add option is unavailable, check Developer mode and the intended
+account/workspace's permissions. Local TLS discovery, transport readiness and
+installation are separate checkpoints. None proves a successful chat tool call.
+Choose Try in chat and send **List my Styx computers**. Report the actual response
+or exact blocker; never manufacture account acceptance or treat local discovery
+or a tunnel request counter as a successful ChatGPT tool test.
 
 ## Verify the selected computer
 

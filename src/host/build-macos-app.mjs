@@ -244,6 +244,7 @@ export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=fal
     execFileSync(iconBinary,[path.join(BRAND,'styx-icon-light-source.jpg'),brand,iconset],{stdio:'pipe',timeout:30000});
     const pluginIcon=path.join(brand,'styx-plugin-icon.png');
     fs.writeFileSync(pluginIcon,prepareMacPluginIcon(fs.readFileSync(pluginIcon)));
+    fs.copyFileSync(path.join(BRAND,'styx-custom-mcp-icon.png'),path.join(brand,'styx-custom-mcp-icon.png'),fs.constants.COPYFILE_EXCL);
     execFileSync('/usr/bin/iconutil',['-c','icns',iconset,'-o',path.join(app,'Contents/Resources/Styx.icns')],{stdio:'pipe'});
     const macos=path.join(app,'Contents/MacOS');
     fs.mkdirSync(macos,{recursive:true});

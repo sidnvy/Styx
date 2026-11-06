@@ -10,7 +10,7 @@ import {buildWindowsApp} from '../build-windows-app.mjs';
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 function fixture(t){
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'styx-windows-builder-')));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
- const sourceRoot=path.join(dir,'source'),sourceFiles=['host/windows/Styx.cs','host/windows/SessionProbe.cs','host/windows/PrivateStorage.cs','assets/brand/styx-logo.png'];
+ const sourceRoot=path.join(dir,'source'),sourceFiles=['host/windows/Styx.cs','host/windows/SessionProbe.cs','host/windows/PrivateStorage.cs','assets/brand/styx-logo.png','assets/brand/styx-custom-mcp-icon.png'];
  for(const name of sourceFiles){const file=path.join(sourceRoot,...name.split('/'));fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,'public source fixture');}
  const {privateKey,publicKey}=generateKeyPairSync('ed25519'),publisherKeyFile=path.join(dir,'publisher.pem');fs.writeFileSync(publisherKeyFile,publicKey.export({type:'spki',format:'pem'}));
  return {dir,privateKey,sourceFiles,config:{sourceRoot,output:path.join(dir,'output'),publisherKeyFile,publisherSha256:digest(publicKey.export({type:'spki',format:'der'}))}};
@@ -30,6 +30,7 @@ test('native staging retains exact C08 bytes and fixed Rust bootstrap without a 
  for(const file of ['vnext','runtime/node.exe','host-bundle','install-windows-preview.mjs','Install-StyxPreview.cmd','StyxUpdater.exe'])assert.equal(fs.existsSync(path.join(out,...file.split('/'))),false,file);
  assert.deepEqual(fs.readFileSync(path.join(out,'native/manifest.json')),before);assert.deepEqual(fs.readFileSync(path.join(f.payloadDir,'manifest.json')),before);
  const catalog=JSON.parse(fs.readFileSync(path.join(out,'windows-package.json')));for(const member of catalog.files){const data=fs.readFileSync(path.join(out,...member.path.split('/')));assert.equal(digest(data),member.sha256);assert.equal(data.length,member.size);}
+ assert.deepEqual(fs.readFileSync(path.join(out,'styx-custom-mcp-icon.png')),fs.readFileSync(path.join(f.nativeConfig.sourceRoot,'assets/brand/styx-custom-mcp-icon.png')));
 });
 test('native staging refuses foreign target, unexpected member and source overlap before publishing an output',t=>{
  const f=nativeFixture(t);f.manifest.target='x86_64-unknown-linux-gnu';f.publish();assert.throws(()=>buildWindowsApp(f.nativeConfig),/native_windows_c08_runtime_required/);assert.equal(fs.existsSync(f.nativeConfig.output),false);

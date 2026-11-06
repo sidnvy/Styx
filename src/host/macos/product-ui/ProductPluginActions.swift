@@ -97,6 +97,11 @@ extension ProductModel {
 }
 
 enum ProductBrandAsset {
+    static var customMCPIcon: Data? {
+        guard let url = Bundle.main.resourceURL?.appendingPathComponent("brand/styx-custom-mcp-icon.png"),
+              let bytes = try? Data(contentsOf: url), bytes.count <= 10_000 else { return nil }
+        return bytes
+    }
     static var data: Data? {
         guard let url = Bundle.main.resourceURL?.appendingPathComponent("brand/styx-plugin-icon.png"),
               let bytes = try? Data(contentsOf: url), bytes.count <= 256 * 1024 else { return nil }
@@ -108,7 +113,10 @@ enum ProductBrandAsset {
 }
 extension ProductModel {
     func saveBrandIcon() {
-        guard let bytes = ProductBrandAsset.data else { return }
+        guard let bytes = ProductBrandAsset.customMCPIcon else {
+            self.error = productText("安装包缺少可上传的 Styx 图标，请修复安装。", "The upload icon is missing from this installation. Repair the installation.")
+            return
+        }
         let panel = NSSavePanel(); panel.allowedContentTypes = [.png]; panel.nameFieldStringValue = "Styx.png"
         panel.title = productText("保存 Styx 图标", "Save Styx icon")
         guard panel.runModal() == .OK, let url = panel.url else { return }

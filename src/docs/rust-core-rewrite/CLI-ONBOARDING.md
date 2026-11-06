@@ -212,8 +212,9 @@ are additionally checked by the existing native actors):
 ```
 
 For `role: join`, networks must be empty and tunnel/plugin must be absent/null.
-For a hub with a tunnel, supply plugin choices for automated export and approve
-`tunnel` and `plugin`. Display text rejects control/format characters and the
+For a hub with a tunnel, approve `tunnel`; `plugin` may be omitted.
+Only an explicitly requested legacy ZIP export requires plugin choices and
+`plugin` approval. New interactive setups do not ask for a ZIP output directory. Display text rejects control/format characters and the
 Unicode line/paragraph separators. Browser executable and lane selections remain
 subject to the existing signed-worker/platform checks. No new Browser takeover
 mode or desktop authorization is inferred by setup.
@@ -235,35 +236,47 @@ user service for configuration, then setup
 uses the existing service actor to restart it. Existing managed tunnel identity
 is detected from runtime status; a different tunnel ID is refused.
 
-Plugin display name/output choices are collected before plan approval. After transport readiness, setup performs authenticated local MCP discovery,
-checks the native server/tool surface and binds export to that Gateway's current
-tunnel ID. Its private discovery result is fresh and never packaged. The display
-name defaults to `Styx (<label>)`; choosing a different name avoids clashing with
-an installed plugin. The stable package identity remains `styx-native`.
+The default account connection is **Custom MCP > Tunnel**, verified on
+2026-11-06 to retain the Styx logo after installation and a detail-page refresh.
+ZIP installation replaced the logo with a placeholder, including skills-only
+packages; ZIP is no longer the default onboarding route.
 
-The fresh output directory and sibling `styx-native.zip` contain exactly:
+After transport readiness, setup saves the embedded 128×128 PNG (9,163 bytes) to
+`<setup-root>/chatgpt/styx-icon.png`. Repeating setup reuses the exact file and
+refuses conflicting files or aliases without overwriting them. The printed guide
+uses the configured Tunnel ID and suggests `Styx (<label>)`:
 
-- `plugin.json`
-- `mcp.json` (`tunnelId`, `auth.type: none`; no URL or credential)
-- `skills/styx-native-onboarding/SKILL.md`
-- `skills/styx-cli/SKILL.md`
-- `skills/styx-browser/SKILL.md`
-- `skills/styx-computer-use/SKILL.md`
-- `assets/icon.png` (the trusted embedded default PNG)
+1. Open `https://chatgpt.com/plugins` in the intended account/workspace. Reuse an
+   existing working Custom MCP connection for this hub; do not delete a plugin.
+2. Add > Add custom MCP server; set a distinct name and use Choose icon to upload
+   the saved PNG. It meets the entry's PNG / 10 KB limit.
+3. Connection: Tunnel, exact Tunnel ID; Authentication: No authentication. The
+   local tunnel client still supplies Gateway authentication. Runtime keys remain
+   private in Styx and are never pasted into ChatGPT.
+4. Review the notice, Create as a plugin, then Connect. Refresh the installed
+   detail page and check the logo, not merely its pre-install preview.
+5. Try in chat; send **List my Styx computers**. Check the actual returned list,
+   then run the separately authorized native capability tests.
 
-The output parent must be private; the suggested default creates one under
-`~/Styx/plugin`. Existing files are never overwritten. On resume, a completed
-export is compared with the exact allowlisted bytes and ZIP before it is skipped.
-The Rust writer embeds its own current native onboarding skill under the same
-allowlisted path; the reference template still contains retired JS commands and
-is left unchanged outside this task. The other three skills and default icon
-come from the existing plugin source. The writer uses deterministic stored ZIP members; an independent Python ZIP
-reader test checks names, CRCs and byte equality. No archive dependency was added.
+Missing Add entry: check Developer mode and account/workspace permissions.
+Custom MCP connects tools; it does not install the ZIP's bundled skills. Use the
+actual tool schemas/instructions. Mac onboarding defaults to this same flow and
+exports the same small PNG; Windows shows the same guide and asset. In the native
+Windows Host view, local Tunnel editing is still unavailable, so the guide directs
+the hub owner to `styx setup`; joined computers reuse their hub's connection.
 
-Setup prints the supported ChatGPT upload/import/install steps and the first
-prompt **List my Styx computers**. It does not upload, install or claim account
-acceptance. Waiting is optional and Ctrl-C stops waiting. The Gateway records only
-a successful tunnel-forwarded MCP POST counter and last-seen Unix timestamp.
+The optional legacy `plugin` answers object and export receipts are used only
+when automated answers explicitly approve `plugin`. Interactive resume retains
+old ZIP settings without reading or validating the old archive, so changes to
+embedded skills cannot block Custom MCP setup. Explicit automated exports retain
+fresh local MCP discovery, no-overwrite and exact-byte verification.
+They do not gate the default Custom MCP flow. Onboarding no longer recommends
+uploading that ZIP to achieve the icon acceptance requirement.
+
+Setup does not upload, install or claim account acceptance. Waiting is optional
+and Ctrl-C stops waiting. The baseline is captured before the guide is printed.
+The Gateway records a successful tunnel-forwarded MCP POST counter and last-seen
+timestamp; a discovery request alone is not a successful chat tool test.
 A per-process file-backed observation marker is supplied only in the signed
 client's forwarding headers, not its discovery headers. Matching is diagnostic
 and occurs after the existing bearer/path/protocol admission; it does not mint
@@ -468,7 +481,7 @@ If joining another computer, setup additionally shows the hub address and CA
 fingerprint and asks to trust it. It shows that computer’s comparison code and
 asks to continue only after checking it on the hub. The hub still approves that
 exact request with the selected capabilities. A ChatGPT-enabled plan includes
-its tunnel key storage and the plugin output path; after export, waiting for the
+its tunnel key storage and the saved upload icon path; after the guide, waiting for the
 first ChatGPT request is optional.
 
 ## Upgrade an existing Linux setup (post-v1)

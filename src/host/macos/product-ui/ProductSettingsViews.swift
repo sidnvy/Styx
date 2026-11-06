@@ -4,7 +4,7 @@ import SwiftUI
 struct ProductPluginCompatibilityNote: View {
     var body: some View {
         DisclosureGroup(productText("上传方式与兼容性", "Upload availability and compatibility")) {
-            Text(productText("上传入口取决于 ChatGPT 账号或工作区权限。目前已验证的是用 ZIP 更新已有网页插件；新账号首次仅通过 ZIP 安装尚未完成验证。", "Upload availability depends on your ChatGPT account or workspace. Updating an existing web plugin with a ZIP has been tested; a first installation using only a ZIP on a new account has not yet been verified."))
+            Text(productText("已复现 ZIP 插件安装后图标被 ChatGPT 占位图替换。请使用 Custom MCP → Tunnel，并单独上传 Styx 图标。ZIP 导出仅保留给高级用途，不作为推荐安装方式。", "ZIP-installed plugins can replace the Styx logo with a ChatGPT placeholder. Use Custom MCP → Tunnel and upload the Styx icon separately. ZIP export remains available for advanced use and is not the recommended installation path."))
         }.font(.caption).foregroundStyle(.secondary)
     }
 }
@@ -228,9 +228,7 @@ struct ProductSettingsView: View {
                 }
                 HStack {
                     Button(productText("试用 Styx", "Try Styx")) { tryChat = true }.accessibilityIdentifier("styx-settings-tryout")
-                    if model.needsPluginSetup {
-                        Button(productText("安装指引", "Installation guide")) { model.page = .chat; setupChat = true }
-                    }
+                    Button(productText("Custom MCP 连接指引", "Custom MCP connection guide")) { model.page = .chat; setupChat = true }
                     Button(productText("在 ChatGPT 中管理", "Manage in ChatGPT")) { model.openOfficial("https://chatgpt.com/plugins") }
                 }
                 Divider()
@@ -245,8 +243,12 @@ struct ProductSettingsView: View {
                 Button(productText("编辑连接信息", "Edit connection details")) { editTunnel = true }.accessibilityIdentifier("styx-settings-edit-tunnel")
                 Divider()
                 Text(productText("ChatGPT 中的 Styx", "Styx in ChatGPT")).font(.headline)
-                Text(productText("插件 ZIP 包含内置技能、连接配置、名称和图标。更改后，请在 ChatGPT 中更新已有 Styx。", "The plugin ZIP includes built-in skills, connection settings, its name and icon. After making changes, update the existing Styx in ChatGPT.")).font(.caption).foregroundStyle(.secondary)
-                Button(productText("名称、图标与插件 ZIP…", "Name, icon and plugin ZIP…")) { editPackage = true }
+                Text(productText("使用 Custom MCP → Tunnel。名称和图标在 ChatGPT 中设置；运行密钥只保存在 Styx。", "Use Custom MCP → Tunnel. Set the name and icon in ChatGPT; keep the runtime key only in Styx.")).font(.caption).foregroundStyle(.secondary)
+                Button(productText("保存 Styx 上传图标…", "Save Styx upload icon…")) { model.saveBrandIcon() }
+                DisclosureGroup(productText("高级：旧版 ZIP 导出", "Advanced: legacy ZIP export")) {
+                    ProductPluginCompatibilityNote()
+                    Button(productText("导出旧版插件 ZIP…", "Export legacy plugin ZIP…")) { editPackage = true }
+                }
             }
         }
     }
@@ -361,7 +363,7 @@ struct ProductPackageEditor: View {
                 Button(productText("选择图片", "Choose image")) { model.selectIcon() }
             }
             Text(productText("PNG · 正方形 · 48–1024 像素 · 不超过 256 KB", "Square PNG · 48–1024 pixels · up to 256 KB")).font(.caption).foregroundStyle(.secondary)
-            Text(productText("保存后，在 ChatGPT 打开已有 Styx，选择上传新版本。名称、图标和技能会随 ZIP 一起更新。", "After saving, open the existing Styx in ChatGPT and upload a new version. The ZIP updates its name, icon and skills together.")).font(.caption).foregroundStyle(.secondary)
+            Text(productText("ZIP 包含技能和展示信息，但安装后图标可能被替换。推荐返回连接指引，使用 Custom MCP 并单独上传图标。", "The ZIP contains skills and presentation metadata, but its icon may be replaced after installation. Use the Custom MCP connection guide and upload the icon separately.")).font(.caption).foregroundStyle(.secondary)
             if let url = model.exportedPluginURL, exported {
                 Label(productText("插件包已保存", "Plugin package saved"), systemImage: "doc.zipper")
                 Text(url.path).font(.caption).textSelection(.enabled)
