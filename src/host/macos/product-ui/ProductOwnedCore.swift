@@ -80,6 +80,8 @@ final class ProductOwnedCore: @unchecked Sendable {
     // Availability observation only. False withdraws discovery; neither value
     // is an executor-drain receipt or permission to replace this original child.
     var isRunning: Bool { !closed && child.isRunning }
+    // EOF fences requests before the original child has finished cleanup.
+    var hasLiveProcess: Bool { child.isRunning }
     private func line() throws -> Data? {
         while true {
             if let end = buffer.firstIndex(of: 10) {

@@ -389,6 +389,14 @@ impl BoundMacSource {
         result
     }
     fn check_binding(&self) -> Result<()> {
+        self.check_original_peer(true)
+    }
+    // Discovery withdrawal fences new observations/actions, not cleanup on
+    // the original authenticated FD. Process, socket and image pins still apply.
+    fn check_cleanup_binding(&self) -> Result<()> {
+        self.check_original_peer(false)
+    }
+    fn check_original_peer(&self, require_publication: bool) -> Result<()> {
         let candidate = &self.candidate;
         let mut byte = [0u8; 1];
         match recv(
@@ -402,7 +410,7 @@ impl BoundMacSource {
         }
         if getuid().as_raw() != candidate.uid
             || geteuid().as_raw() != candidate.uid
-            || hint(&candidate.root)? != candidate.hint
+            || (require_publication && hint(&candidate.root)? != candidate.hint)
             || socket_identity(&candidate.socket_path, candidate.uid)? != candidate.socket
             || birth(candidate.hint.owner_pid, candidate.uid)? != candidate.owner
             || birth(candidate.hint.daemon_pid, candidate.uid)? != candidate.daemon
@@ -436,7 +444,7 @@ impl BoundMacSource {
         candidate.images.revalidate()?;
         if birth(candidate.hint.owner_pid, candidate.uid)? != candidate.owner
             || birth(candidate.hint.daemon_pid, candidate.uid)? != candidate.daemon
-            || hint(&candidate.root)? != candidate.hint
+            || (require_publication && hint(&candidate.root)? != candidate.hint)
             || socket_identity(&candidate.socket_path, candidate.uid)? != candidate.socket
         {
             return Err(BindingError::Fenced);
@@ -514,6 +522,45 @@ fn verify_guest(
 #[cfg(test)]
 mod installed_source_tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires the owner-authorized installed Mac App and live original Cua"]
+    async fn installed_source_withdrawn_discovery_still_drains() {
+        assert_eq!(
+            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
+            Ok("read-only")
+        );
+        let images = MacAppImages::open_fixed().expect("fixed_signed_App_images");
+        let candidate = MacSourceCandidate::discover(images).expect("original_candidate");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut bound = candidate
+            .connect(deadline)
+            .await
+            .expect("original_socket_connect")
+            .finish_binding()
+            .expect("original_binding");
+        bound
+            .observe_native(deadline.into_std())
+            .expect("native_facts");
+        let read = bound.probe_windows(deadline.into_std());
+        assert!(bound.probe_session.is_some(), "actual_native_read_session");
+        // Withdraw only this test's discovery view. Never alter the running
+        // App's descriptor, permissions, socket, peer or signed image pins.
+        let absent = tempfile::tempdir().expect("private_discovery_fixture");
+        bound.candidate.root = PrivateRoot::open(absent.path().canonicalize().unwrap())
+            .expect("private_discovery_root");
+        assert_eq!(bound.fresh_binding(), Err(BindingError::NotPublished));
+        assert_eq!(
+            bound.drain_probe(std::time::Instant::now() + std::time::Duration::from_secs(10)),
+            Ok(true),
+            "original_native_transport_drain_after_withdrawal"
+        );
+        assert!(bound.fenced, "cleanup_does_not_restore_admission");
+        read.expect("native_window_read");
+        eprintln!(
+            "MAC_SOURCE_WITHDRAWAL admission=REFUSED original_transport_drain=PASS replay=NONE"
+        );
+    }
 
     // Opt-in native diagnostic only: authenticate the installed original source,
     // read native facts, then close these original FDs. No session or input.

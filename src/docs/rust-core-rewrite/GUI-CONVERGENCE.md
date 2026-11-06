@@ -60,6 +60,14 @@ and Browser navigation/readback/close passed. Windows GUI joining did not pass:
 macOS ALF logs show its incoming connection held pending the styx firewall prompt.
 Computer Use found the Mac fixture window but window read returned permission
 required. Neither result is end-to-end acceptance. The owner subsequently confirmed system grants; a fresh LAN TLS probe responded.
+Installed fdb1ef9 also failed normal Mac Quit after changing TCC permissions:
+the App stopped Cua before Rust drained the original native transports. Source
+now retains the daemon during permission/discovery withdrawal, drains the Host
+before explicit permission recovery, and allows cleanup on the authenticated
+original FD after discovery withdrawal. New actions remain fenced; process,
+socket and image checks and the actual drain acknowledgement remain required.
+The failed installed run is not lifecycle acceptance; a fresh candidate must
+repeat the real read/effect, withdrawal cleanup and normal Quit/reopen journey.
 The independent account Tunnel was created with explicit owner approval:
 `tunnel_6aee2359dfb48191b3a50e2ba095b595`. Pairing, Computer Use and account
 acceptance must still be rerun on the final candidate; production stays intact.

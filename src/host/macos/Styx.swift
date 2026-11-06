@@ -436,6 +436,7 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
     var nativeComponentObservation: UUID?
     var nativeDesktopIntentObservedAt: TimeInterval?
     var computerPermissionRecoveryRequired = false
+    var nativeComputerRecoveryInProgress = false
     var computerUseRequested = false
     #endif
     var terminationPreservesRecovery = false
@@ -698,11 +699,14 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
     func withdrawNativeComputerUse(_ message: String) {
         nativeDesktopIntentObservedAt = nil
         computerUseRequested = false
-        stop()
+        if let runtime = runtime { unlink(runtime.descriptor) }
+        // A live Core may still be draining this exact daemon, including after
+        // its request pipe has closed. Only stop after its actual process exit.
+        if nativeCore?.hasLiveProcess != true { stop() }
         statusLine?.title = message
     }
     func checkNativeComponentAvailability(_ core: ProductOwnedCore) {
-        guard nativeCore === core else { return }
+        guard nativeCore === core, !nativeComputerRecoveryInProgress else { return }
         if !core.isRunning {
             withdrawNativeComputerUse("Core connection stopped; Computer Use unavailable")
         } else if !productDesktopIntentFresh(nativeDesktopIntentObservedAt, now: ProcessInfo.processInfo.systemUptime) {
@@ -724,7 +728,7 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         Task { @MainActor in await refreshProductComponents(core) }
     }
     func refreshProductComponents(_ core: ProductOwnedCore) async {
-        guard nativeCore === core, nativeComponentObservation == nil, !terminationPending else { return }
+        guard nativeCore === core, nativeComponentObservation == nil, !terminationPending, !nativeComputerRecoveryInProgress else { return }
         checkNativeComponentAvailability(core)
         guard core.isRunning, setupWindow?.model.busy != true else { return }
         let observation = UUID(), requestedAt = ProcessInfo.processInfo.systemUptime
@@ -732,7 +736,7 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         defer { if nativeComponentObservation == observation { nativeComponentObservation = nil } }
         do {
             let status = try await core.call("status")
-            guard nativeCore === core, nativeComponentObservation == observation, !terminationPending else { return }
+            guard nativeCore === core, nativeComponentObservation == observation, !terminationPending, !nativeComputerRecoveryInProgress else { return }
             guard core.isRunning else { withdrawNativeComputerUse("Core connection stopped; Computer Use unavailable"); return }
             guard productDesktopIntentFresh(requestedAt, now: ProcessInfo.processInfo.systemUptime) else {
                 nativeDesktopIntentObservedAt = nil
@@ -754,12 +758,14 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
                 }
             } else { stop(); statusLine?.title = "Computer Use is not enabled in this session" }
         } catch {
-            guard nativeCore === core, nativeComponentObservation == observation else { return }
+            guard nativeCore === core, nativeComponentObservation == observation, !nativeComputerRecoveryInProgress else { return }
             withdrawNativeComputerUse("Core status unavailable; Computer Use withdrawn")
         }
     }
     func recoverComputerUseAfterPermissions(_ core: ProductOwnedCore) async throws {
-        guard nativeCore === core, core.isRunning, !terminationPending else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
+        guard nativeCore === core, core.isRunning, !terminationPending, !nativeComputerRecoveryInProgress else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
+        nativeComputerRecoveryInProgress = true
+        defer { nativeComputerRecoveryInProgress = false }
         let requestedAt = ProcessInfo.processInfo.systemUptime
         let status: ProductJSON
         do { status = try await core.call("status") }
@@ -780,11 +786,18 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         computerUseRequested = true
         poll()
         if computerPermissionRecoveryRequired {
+            // The Host must drain its original native transports before the
+            // App replaces the daemon. No interrupted action is replayed.
+            _ = try await core.call("disconnect")
+            guard nativeCore === core, core.isRunning, !terminationPending else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
             await stopAndJoin()
             guard nativeCore === core, core.isRunning, !terminationPending else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
+            guard phase != "cleanup_unknown" else { throw ProductOwnedCoreError.cleanupUnknown }
+            nativeDesktopIntentObservedAt = ProcessInfo.processInfo.systemUptime
             computerPermissionRecoveryRequired = false
             do { try start() }
             catch { computerPermissionRecoveryRequired = true; throw error }
+            _ = try await core.call("connect")
         }
         guard daemon?.isRunning == true, daemonStopTask == nil else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
         // Permission recovery remains distinct from native effect acceptance.
@@ -900,14 +913,26 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         }
         let session = CGSessionCopyCurrentDictionary() as? [String: Any]
         guard session?[kCGSessionOnConsoleKey as String] as? Bool == true else {
-            computerUseRequested = false; stop(); statusLine?.title = "Computer Use is not available in this session"; return
+            if nativeCoreAttempted {
+                computerPermissionRecoveryRequired = true
+                withdrawNativeComputerUse("Computer Use is not available in this session")
+            } else { computerUseRequested = false; stop(); statusLine?.title = "Computer Use is not available in this session" }
+            return
         }
+        if nativeCoreAttempted && computerPermissionRecoveryRequired { unlink(runtime.descriptor); return }
         #endif
         let ax = AXIsProcessTrusted(), screen = CGPreflightScreenCaptureAccess()
         let grants = "\(ax):\(screen)"
         if let previous = lastGrants, previous != grants {
             #if STYX_PRODUCT_UI
             computerPermissionRecoveryRequired = true
+            if nativeCoreAttempted {
+                // Withdraw admission, but leave the original daemon available
+                // for Rust's transport drain during recovery or normal Quit.
+                unlink(runtime.descriptor); phase = "permissions_changed"
+                statusLine?.title = "Permissions changed; review Computer Use permissions in Styx"
+                return
+            }
             #endif
             stop(); phase = "permissions_changed"
             statusLine?.title = "Permissions changed; review Computer Use permissions in Styx"; return

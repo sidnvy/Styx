@@ -563,7 +563,7 @@ impl BoundMacSource {
         if !self.protocol_clean {
             return Err(BindingError::NativeProtocol);
         }
-        self.check_binding()?;
+        self.check_cleanup_binding()?;
         self.fenced = true;
         let value = self.exchange_value(
             b"{\"method\":\"styx_private_transport_drain_v1\"}\n",
@@ -572,7 +572,7 @@ impl BoundMacSource {
         if value != serde_json::json!({"schema":1,"drained":true}) {
             return Err(BindingError::NativeProtocol);
         }
-        self.check_binding()?;
+        self.check_cleanup_binding()?;
         self.probe_drained = true;
         Ok(true)
     }
