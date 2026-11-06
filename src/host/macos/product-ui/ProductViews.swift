@@ -576,7 +576,7 @@ struct ProductAcceptanceField: NSViewRepresentable {
         }
     }
     required init?(coder: NSCoder) { nil }
-    func present() { model.onboardingVisible = true; model.observePermissions(); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+    func present() { menuPopover?.performClose(nil); model.onboardingVisible = true; model.observePermissions(); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     func showPreferences() { showSettings(.general) }
     func showOnboarding() {
         menuPopover?.performClose(nil)

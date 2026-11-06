@@ -560,7 +560,7 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         #if STYX_PRODUCT_UI
         ProductNativeDiagnostics.lifecycle(.bootstrapEntered)
         nativeCoreAttempted = true
-        if let _ = nativeCore { setupWindow?.present(); return }
+        if let _ = nativeCore { if setupOpenRequested { setupWindow?.present(); setupOpenRequested = false }; return }
         guard !nativeCoreStarting else { return }; nativeCoreStarting = true
         Task { [self] in
             defer { nativeCoreStarting = false }
@@ -588,6 +588,7 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
                 observeProductComponents(core)
                 setupStatusLine?.title = "Native Host settings ready"
                 if setupOpenRequested { setupWindow?.present(); setupOpenRequested = false }
+                else if menuOpenRequested { toggleProductPanel() }
             } catch { ProductNativeDiagnostics.lifecycle(.bootstrapFailed); setupStatusLine?.title = "Native package unavailable; original identity retained" }
         }
         return
@@ -617,7 +618,11 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
     }
     #if STYX_PRODUCT_UI
     @objc func toggleProductPanel() {
-        if nativeCore != nil { setupWindow?.present(); return }
+        if nativeCore != nil, let controller = setupWindow, let button = statusItem?.button {
+            menuOpenRequested = false
+            controller.toggleMenu(relativeTo: button, quit: { [weak self] in self?.quit() })
+            return
+        }
         menuOpenRequested = true
         do {
             try startSetup(openWindow: false)

@@ -153,6 +153,15 @@ extension ProductModel {
     }
     var localIndicator: ProductConnectionIndicator {
         guard loaded, observationError == nil else { return .unknown }
+        if nativeHost {
+            if status["admission_fenced"].bool { return .attention }
+            switch status["foreground"]["execConnection"].string {
+            case "connected": return .connected
+            case "disconnected": return .offline
+            case "connecting": return .attention
+            default: return .unknown
+            }
+        }
         guard localPrepared else { return .attention }
         switch status["foreground"]["status"].string {
         case "connected", "using_service": return .connected
@@ -301,11 +310,36 @@ struct ProductDailyPanel: View {
         if let controller = controller { controller.showSettings(section) }
         else { model.requestSettings(section) }
     }
+    @ViewBuilder private var nativeRows: some View {
+        if model.status["configuration"] == .null && model.status["enrollment"] == .null && model.status["gateway"] == .null {
+            ProductMenuRow(title: productText("开始设置", "Get started"), symbol: "sparkles") { controller?.showOnboarding() }
+                .disabled(!model.nativeCanCreateLocal)
+            ProductMenuRow(title: productText("加入已有 Styx", "Join an existing Styx"), symbol: "link") {
+                model.joining = true; model.page = .invitation; controller?.showOnboarding()
+            }.disabled(!model.nativeSupportsOperation("inspectJoin"))
+        } else {
+            ProductMenuRow(title: productText("这台 Mac", "This Mac"), symbol: "laptopcomputer", state: model.localIndicator, disclosure: true) {
+                controller?.present()
+            }
+            Divider().padding(.vertical, 5)
+            if model.status["gateway"] == .null {
+                ProductMenuRow(title: productText("管理电脑连接", "Main computer"), symbol: "link", state: model.localIndicator, disclosure: true) {
+                    controller?.present()
+                }
+            } else {
+                ProductMenuRow(title: productText("添加电脑", "Add computer"), symbol: "plus") {}.disabled(true)
+                    .help(productText("请在管理电脑终端创建配对邀请；此版本尚不能从托盘添加电脑。", "Create a pairing invitation in the hub's terminal; adding computers from this menu is not available in this version."))
+            }
+            ProductMenuRow(title: "ChatGPT", symbol: "globe", disclosure: true) { showSettings(.chat) }
+        }
+    }
     var body: some View {
         VStack(spacing: 0) {
             if !model.loaded {
                 ProgressView(model.loadingMessage).padding(16)
                 if model.error != nil { Button(productText("重试", "Retry")) { Task { await model.bootstrap() } } }
+            } else if model.nativeHost {
+                nativeRows
             } else if model.deployment == nil {
                 ProductMenuRow(title: productText("开始设置", "Get started"), symbol: "sparkles") { controller?.showOnboarding() }
                 ProductMenuRow(title: productText("加入已有 Styx", "Join an existing Styx"), symbol: "link") {
