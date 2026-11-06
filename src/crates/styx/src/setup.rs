@@ -1737,16 +1737,16 @@ pub(super) async fn run(
         {
             return Err("setup_join_link_required".into());
         }
-        if let Some(tunnel) = &answers.tunnel {
-            if tunnel.api_key_file.is_none() {
-                let status = styx_runtime::foreground::tunnel::status(&root.join("gateway"))
-                    .await
-                    .map_err(|_| Failure::new("setup_private_tunnel_key_file_required"))?;
-                let status = serde_json::to_value(status)
-                    .map_err(|_| Failure::new("setup_tunnel_status_failed"))?;
-                if status["tunnelId"] != tunnel.id {
-                    return Err("setup_private_tunnel_key_file_required".into());
-                }
+        if let Some(tunnel) = &answers.tunnel
+            && tunnel.api_key_file.is_none()
+        {
+            let status = styx_runtime::foreground::tunnel::status(&root.join("gateway"))
+                .await
+                .map_err(|_| Failure::new("setup_private_tunnel_key_file_required"))?;
+            let status = serde_json::to_value(status)
+                .map_err(|_| Failure::new("setup_tunnel_status_failed"))?;
+            if status["tunnelId"] != tunnel.id {
+                return Err("setup_private_tunnel_key_file_required".into());
             }
         }
     }

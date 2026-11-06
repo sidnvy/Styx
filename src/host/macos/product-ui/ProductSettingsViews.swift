@@ -219,21 +219,21 @@ struct ProductSettingsView: View {
                 Button(productText("打开 ChatGPT Plugins", "Open ChatGPT Plugins")) { model.openOfficial("https://chatgpt.com/plugins") }
                 DisclosureGroup(productText("高级：旧版 ZIP 导出", "Advanced: legacy ZIP export")) {
                     ProductPluginCompatibilityNote()
-                if model.nativeSupportsOperation("pluginRead") {
-                    Text(productText("预览并导出这台管理电脑的插件名称、描述和图标。保存后在 ChatGPT 更新已有插件。", "Preview and export this hub’s plugin name, descriptions and icon. Then update the existing plugin in ChatGPT."))
-                    Button(productText("名称、图标与插件 ZIP…", "Name, icon and plugin ZIP…")) {
-                        model.perform {
-                            let current = try await model.client.read("plugin")["plugin"]
-                            model.plugin = current
-                            model.pluginIdentity = current["selection"]["pluginId"].string ?? "styx"
-                            model.pluginName = current["presentation"]["displayName"].string ?? "Styx"
-                            model.pluginDescription = current["presentation"]["shortDescription"].string ?? ""
-                            model.pluginLongDescription = current["presentation"]["longDescription"].string ?? ""
-                            model.pluginIcon = current["presentation"]["icon"]
-                            editPackage = true
-                        }
-                    }.disabled(model.busy)
-                }
+                    if model.nativeSupportsOperation("pluginRead") {
+                        Text(productText("预览并导出这台管理电脑的插件名称、描述和图标。保存后在 ChatGPT 更新已有插件。", "Preview and export this hub’s plugin name, descriptions and icon. Then update the existing plugin in ChatGPT."))
+                        Button(productText("名称、图标与插件 ZIP…", "Name, icon and plugin ZIP…")) {
+                            model.perform {
+                                let current = try await model.client.read("plugin")["plugin"]
+                                model.plugin = current
+                                model.pluginIdentity = current["selection"]["pluginId"].string ?? "styx"
+                                model.pluginName = current["presentation"]["displayName"].string ?? "Styx"
+                                model.pluginDescription = current["presentation"]["shortDescription"].string ?? ""
+                                model.pluginLongDescription = current["presentation"]["longDescription"].string ?? ""
+                                model.pluginIcon = current["presentation"]["icon"]
+                                editPackage = true
+                            }
+                        }.disabled(model.busy)
+                    }
                 }
             } else if model.joined {
                 Label(productText("聊天连接由管理电脑管理", "Chat is managed on the main computer"), systemImage: "globe")
