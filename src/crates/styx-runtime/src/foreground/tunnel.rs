@@ -818,7 +818,7 @@ pub(super) fn ingress_key(
     let mut entropy = Zeroizing::new([0u8; 32]);
     getrandom::fill(&mut *entropy).map_err(|_| error("tunnel_ingress_unavailable"))?;
     Ok(Some(Arc::new(IngressKey(Zeroizing::new(
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&*entropy),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(entropy.as_slice()),
     )))))
 }
 pub(super) fn start(
