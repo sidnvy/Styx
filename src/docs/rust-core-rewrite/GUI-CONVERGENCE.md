@@ -506,3 +506,47 @@ remain open. PilotMac retains its independently verified recovered C15 state.
 
 Decision: finish exact-source checks, produce both native packages locally and
 repeat the full installed journey. Delivery and Stable remain NO-GO.
+
+## C18 first-run results and Mac intent observation
+
+Product: C18 `58bc86e` passed unified quality and both native Core builds. The
+Mac owner normally quit all five original C15 processes, installed build 1127
+from its verified DMG, completed fresh GUI hub setup with all three features,
+automatically selected en0/10.0.8.165 and connected the existing acceptance
+Tunnel. Local private comparison retained the authorized key. The new tray
+contains the computer, Add computer, ChatGPT, Settings and Quit entries. Actual
+account Computer reads against original App66493 still returned unsupported,
+definitely not dispatched. No desktop mutation or recovery restart occurred.
+
+Architecture: initial Mac component intent observation was suppressed while
+the GUI model remained busy through a mutation and its extra reloads. That
+can delay the descriptor needed by Rust's bounded optional Computer bootstrap.
+The correction permits the existing authenticated status read while the UI is
+busy. It preserves original-Core identity, serial request ordering, one pending
+observation, freshness, permission/recovery and termination fences. This is a
+bounded ordering correction, not proof that the C18 failure cause is resolved.
+Opt-in native diagnostics record only requested intent and a closed startup
+failure vocabulary; arbitrary errors, response bodies and credentials are never
+emitted. Normal execution leaves these diagnostics disabled.
+
+Integration: native first-run evidence is in C18 Mac owner Phase7 and the actual
+account refusal is retained under `candidate-18/mac-account-first-read/`.
+The next native candidate must pass a real Computer read on its original cold
+App before any Quit/reopen. A warmed restart cannot close that first-run gate.
+
+Release: C18 Mac DMG SHA-256 is
+`320fe0c99ff553cd1a20d0e5d39f3b324c9854da55e290fa4ee76e4343c48596`.
+Windows Core built in about 234 seconds, versus 83 seconds on Mac. Its complete
+App built, but Inno's signed-reader check correctly refused the shared build
+directory's writable ancestor. The local owner is using a fresh protected
+volume-root staging directory, with exact copied file hashes and no existing
+ACL change. That packaging recovery and Windows installation remain separately
+scoped to C18; the Mac ordering correction requires a later same-source pair.
+
+Reliability: both Mac OS grants are visibly allowed, but a daemon, source
+publication and connected Tunnel do not prove Computer readiness. Local window
+capture also failed and is not treated as an account screenshot pass. These
+failures remain retained independently of successful setup and key reuse.
+
+Decision: validate the narrow ordering correction, then repeat original-process
+cold setup and the remaining full journey. Delivery and Stable remain NO-GO.

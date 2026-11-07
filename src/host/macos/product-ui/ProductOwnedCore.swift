@@ -124,6 +124,7 @@ final class ProductOwnedCore: @unchecked Sendable {
                     let value = try JSONDecoder().decode(ProductJSON.self, from: response)
                     guard value["id"].number == Double(id) else { throw ProductOwnedCoreError.unknownNoReplay }
                     ProductNativeDiagnostics.lifecycle(.responseDecoded, operation: operation, id: id, ok: value["ok"].bool)
+                    if operation == "status", value["ok"].bool { ProductNativeDiagnostics.computerStartup(value["result"]) }
                     guard value["ok"].bool else { continuation.resume(throwing: ProductOwnedCoreRejection(response: value)); return }
                     continuation.resume(returning: value["result"])
                 } catch {

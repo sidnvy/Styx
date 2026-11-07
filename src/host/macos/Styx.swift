@@ -741,7 +741,11 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
     func refreshProductComponents(_ core: ProductOwnedCore) async {
         guard nativeCore === core, nativeComponentObservation == nil, !terminationPending, !nativeComputerRecoveryInProgress else { return }
         checkNativeComponentAvailability(core)
-        guard core.isRunning, setupWindow?.model.busy != true else { return }
+        // Computer bootstrap needs the original Core's configured intent while
+        // first-run UI work is still busy. Its serial request queue orders this
+        // read after the mutation; delaying it through the UI's extra reloads
+        // can exhaust Rust's bounded discovery-publication window.
+        guard core.isRunning else { return }
         let observation = UUID(), requestedAt = ProcessInfo.processInfo.systemUptime
         nativeComponentObservation = observation
         defer { if nativeComponentObservation == observation { nativeComponentObservation = nil } }

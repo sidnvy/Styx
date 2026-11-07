@@ -25,6 +25,16 @@ enum ProductNativeDiagnostics {
         if let ok { message += " ok=" + String(ok) }
         event(message)
     }
+    // Closed opt-in startup facts only; never record a response body or echo
+    // an arbitrary error string. This discriminates publication timeouts from
+    // source-binding/probe failures on an actual first-run owner.
+    static func computerStartup(_ status: ProductJSON) {
+        guard CommandLine.arguments.contains("--native-diagnostics") else { return }
+        let original = status["foreground"]["computerStartupError"].string
+        let known: Set<String> = ["desktop_session_not_ready", "desktop_source_unavailable", "computer_source_probe_failed", "computer_bootstrap_changed"]
+        let code = original.map { known.contains($0) ? $0 : "other" } ?? "none"
+        event("computer_intent requested=" + String(status["desktop_intent"]["computer_requested"].bool) + " startup=" + code)
+    }
     static func event(_ message: String) {
         guard CommandLine.arguments.contains("--native-diagnostics") else { return }
         let line = "STYX_NATIVE " + message + "\n"
