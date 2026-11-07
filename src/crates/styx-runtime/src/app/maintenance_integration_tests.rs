@@ -543,3 +543,185 @@ async fn native_gui_computer_management_keeps_binding_and_local_identity() {
     drop(reopened);
     fs::remove_dir_all(top).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires STYX_TEST_APP_CONTROL_SELECTION and STYX_TEST_APP_SETTLE_ROOT; real signed Exec worker, local strict TLS App and independent process/file effects"]
+async fn strict_settlement_with_live_exec_keeps_host_available_for_owner_cleanup() {
+    use rmcp::{
+        ClientServiceExt,
+        model::*,
+        service::ClientLifecycleMode,
+        transport::{
+            StreamableHttpClientTransport,
+            streamable_http_client::StreamableHttpClientTransportConfig,
+        },
+    };
+    let selection: NativeRuntimeSelection = serde_json::from_slice(
+        &fs::read(std::env::var("STYX_TEST_APP_CONTROL_SELECTION").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let parent = PathBuf::from(std::env::var("STYX_TEST_APP_SETTLE_ROOT").unwrap());
+    let top = parent.join(uuid::Uuid::new_v4().to_string());
+    directory(&top);
+    let (mut app, _) = enroll(&top.join("app"), &selection).await;
+    app.local_gateway.as_mut().unwrap().start().await.unwrap();
+    app.connect_host().await.unwrap();
+    let gateway = app.local_gateway.as_ref().unwrap();
+    let raw_client = reqwest::Client::builder()
+        .add_root_certificate(reqwest::Certificate::from_pem(gateway.ca.as_bytes()).unwrap())
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let token = zeroize::Zeroizing::new(
+        String::from_utf8(
+            gateway
+                .scope
+                .root
+                .get()
+                .unwrap()
+                .read_raw("gateway-model.token", 4096)
+                .unwrap()
+                .bytes()
+                .to_vec(),
+        )
+        .unwrap(),
+    );
+    let config = StreamableHttpClientTransportConfig::with_uri(format!("{}/mcp", gateway.origin))
+        .auth_header(token.trim().to_owned())
+        .reinit_on_expired_session(false)
+        .max_concurrent_requests(1);
+    let client = ClientConfig::new(
+        ClientCapabilities::default(),
+        Implementation::new("owned-app-settlement-oracle", "1"),
+    )
+    .with_protocol_version(ProtocolVersion::V_2025_11_25)
+    .serve_with_lifecycle(
+        StreamableHttpClientTransport::with_client(raw_client, config),
+        ClientLifecycleMode::Initialize,
+    )
+    .await
+    .unwrap();
+    let devices = app
+        .dispatch(Operation::Computers, raw(json!({})))
+        .await
+        .unwrap();
+    let device = devices["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["is_local"] == true)
+        .unwrap()["device_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let call = |name: &str, arguments: Value| {
+        serde_json::from_value::<CallToolRequestParams>(json!({"name":name,"arguments":arguments}))
+            .unwrap()
+    };
+    let until = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = client
+            .call_tool(call(
+                "get_execution_environment_status",
+                json!({"environment_id":device}),
+            ))
+            .await
+            .unwrap();
+        if status
+            .structured_content
+            .is_some_and(|v| v["exec"]["connection"] == "connected")
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < until,
+            "real local Host connection deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let cwd = top.join("effects");
+    directory(&cwd);
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let command = format!(
+        "printf '%s\\n' '{nonce}' >> settle-once.txt; printf '%s' \"$$\" > settle.pid; printf ready; IFS= read -r never; printf forbidden > settle-escaped.txt"
+    );
+    let started = client
+        .call_tool(call(
+            "exec_command",
+            json!({"cmd":command,"workdir":cwd,"login":false,"environment_id":device,"yield_time_ms":100}),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(
+        started.is_error,
+        Some(true),
+        "native Exec must actually start"
+    );
+    assert!(
+        started.structured_content.unwrap()["session_id"]
+            .as_u64()
+            .is_some()
+    );
+    let until = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !cwd.join("settle.pid").is_file() {
+        assert!(
+            tokio::time::Instant::now() < until,
+            "independent PID file deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let pid: u32 = fs::read_to_string(cwd.join("settle.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(pid > 1);
+    let process = PathBuf::from(format!("/proc/{pid}/stat"));
+    let birth = |path: &Path| -> std::io::Result<u64> {
+        let text = fs::read_to_string(path)?;
+        text.rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(|| std::io::Error::other("invalid process birth"))
+    };
+    let before = birth(&process).unwrap();
+    assert_eq!(
+        fs::read_to_string(cwd.join("settle-once.txt")).unwrap(),
+        format!("{nonce}\n")
+    );
+    let settled = app.settle_all().await;
+    let process_exited = match birth(&process) {
+        Ok(actual) => actual != before,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => panic!("kernel exit observation unknown: {error}"),
+    };
+    let observation = json!({"schema":1,"status":if settled.is_ok(){"PASS"}else{"FAIL"},"settle_error":settled.as_ref().err().map(AppError::code),"native_pid":pid,"original_process_exited":process_exited,"host_cleanup":app.cleanup,"gateway_cleanup":app.local_gateway.as_ref().unwrap().cleanup,"once_file":fs::read_to_string(cwd.join("settle-once.txt")).unwrap(),"escaped_input_effect":cwd.join("settle-escaped.txt").exists(),"scope":"disposable App/strict TLS/real Codex; not installed GUI or account acceptance"});
+    fs::write(
+        top.join("settlement-observation.json"),
+        serde_json::to_vec_pretty(&observation).unwrap(),
+    )
+    .unwrap();
+    let _ = client.cancel().await;
+    assert!(
+        settled.is_ok(),
+        "strict settlement failed: {:?}; fixture={}",
+        settled.err().map(|e| e.code()),
+        top.display()
+    );
+    assert!(app.cleanup.as_ref().unwrap().is_complete());
+    assert!(
+        app.local_gateway
+            .as_ref()
+            .unwrap()
+            .cleanup
+            .as_ref()
+            .unwrap()
+            .is_complete()
+    );
+    assert_eq!(observation["original_process_exited"], true);
+    assert!(!cwd.join("settle-escaped.txt").exists());
+    println!(
+        "PASS strict App settlement after actual Exec, independent one-time file/PID and exact Host/Gateway cleanup; fixture={}",
+        top.display()
+    );
+}

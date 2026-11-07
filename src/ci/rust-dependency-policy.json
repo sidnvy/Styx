@@ -185,6 +185,11 @@
       "input": "--tls-fixtures",
       "required_for": "real WSS framing/heartbeats/capacity/cleanup; not full native platform acceptance"
     },
+    "gateway::http::tests::conversation::authenticated_tunnel_context_across_transports_and_isolation": {
+      "kind": "explicit_owned_loopback_official_sdk_resource_fixture",
+      "input": "STYX_TEST_HTTP_ROOT; dedicated forwarding service credential and ordinary credential; no account key",
+      "required_for": "actual separate HTTP sessions share only one authenticated conversation owner; cross-scope/ordinary forgery and malformed context refusal; transport DELETE survival, live retention, one independent fixture file effect and joined cleanup; not native/TLS/account acceptance"
+    },
     "gateway::http::tests::official_sdk_tcp_auth_sessions_limits_and_pending_close": {
       "kind": "owned_loopback_sdk_fixture",
       "input": "fresh external STYX_TEST_HTTP_ROOT allocated by gate",
@@ -580,6 +585,11 @@
       "kind": "explicit_signed_native_payload",
       "input": "STYX_TEST_APP_CONTROL_SELECTION and STYX_TEST_APP_LAN_ADDRESS; disposable TLS Gateway and two App profiles",
       "required_for": "Native GUI admin binding, wrong-code refusal, self-revoke refusal, real enrollment and revoke effects; not installed native GUI acceptance"
+    },
+    "app::maintenance_integration_tests::strict_settlement_with_live_exec_keeps_host_available_for_owner_cleanup": {
+      "kind": "owned_signed_runtime_app_tls_native_exec_fixture",
+      "input": "STYX_TEST_APP_CONTROL_SELECTION + fresh STYX_TEST_APP_SETTLE_ROOT",
+      "required_for": "strict pre-configuration settlement after a live native Exec; independent one-time file, original PID/starttime exit and exact Host/Gateway cleanup; not installed or account acceptance"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints",

@@ -170,6 +170,127 @@ fn data(result: CallToolResult) -> Value {
     );
     result.structured_content.expect("typed output")
 }
+
+/// Same frozen Exec contract through different real MCP transports. This is
+/// strict-TLS/paired-Host/native-executor evidence, not ChatGPT acceptance.
+async fn tunnel_continuation(
+    raw: &reqwest::Client,
+    uri: &str,
+    forwarding: &str,
+    device: &DeviceId,
+    root: &Path,
+) -> Value {
+    let connect = || {
+        let mut config = StreamableHttpClientTransportConfig::with_uri(uri.to_owned())
+            .auth_header(forwarding.to_owned())
+            .reinit_on_expired_session(false)
+            .max_concurrent_requests(1);
+        config.allow_stateless = false;
+        ClientConfig::new(
+            ClientCapabilities::default(),
+            Implementation::new("owned-paired-tunnel-oracle", "1"),
+        )
+        .with_protocol_version(ProtocolVersion::V_2025_11_25)
+        .serve_with_lifecycle(
+            StreamableHttpClientTransport::with_client(raw.clone(), config),
+            ClientLifecycleMode::Initialize,
+        )
+    };
+    let meta = json!({"openai/organization":"owned-paired-org", "openai/subject":"owned-paired-subject", "openai/session":"owned-paired-conversation"});
+    let request = |name: &str, arguments: Value, meta: Value| {
+        serde_json::from_value::<CallToolRequestParams>(
+            json!({"name":name,"arguments":arguments,"_meta":meta}),
+        )
+        .unwrap()
+    };
+    let first = connect().await.unwrap();
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let command = format!(
+        "printf '%s' \"$$\" > tunnel.pid; printf '%s\\n' '{nonce}' >> tunnel-once.txt; printf tunnel-ready; IFS= read -r value; printf '%s' \"$value\" > tunnel-input.txt; printf tunnel-done"
+    );
+    let started = data(first.call_tool(request("exec_command", json!({"cmd":command,"login":false,"environment_id":device.as_str(),"yield_time_ms":100}), meta.clone())).await.unwrap());
+    let sid = started["session_id"].as_u64().expect("live native process");
+    file_within(&root.join("tunnel-once.txt"), &format!("{nonce}\n")).await;
+    let pid: u32 = std::fs::read_to_string(root.join("tunnel.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(pid > 1);
+    let process = PathBuf::from(format!("/proc/{pid}/stat"));
+    let birth = read_process_birth(&process).unwrap();
+    let second = connect().await.unwrap();
+    for field in ["openai/organization", "openai/subject", "openai/session"] {
+        let mut other = meta.clone();
+        other[field] = json!("different-scope");
+        let denied = second
+            .call_tool(request(
+                "write_stdin",
+                json!({"session_id":sid,"chars":"forbidden-input\n","yield_time_ms":100}),
+                other,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(denied.is_error, Some(true));
+        assert!(!root.join("tunnel-input.txt").exists());
+    }
+    first.cancel().await.unwrap();
+    assert_eq!(
+        read_process_birth(&process).unwrap(),
+        birth,
+        "deleting first transport must leave the original shell alive"
+    );
+    let mut output = data(
+        second
+            .call_tool(request(
+                "write_stdin",
+                json!({"session_id":sid,"chars":"authorized-tunnel-input\n","yield_time_ms":100}),
+                meta.clone(),
+            ))
+            .await
+            .unwrap(),
+    );
+    file_within(&root.join("tunnel-input.txt"), "authorized-tunnel-input").await;
+    let until = tokio::time::Instant::now() + Duration::from_secs(5);
+    while output["exit_code"].is_null() {
+        assert!(
+            tokio::time::Instant::now() < until,
+            "native exit receipt deadline"
+        );
+        output = data(
+            second
+                .call_tool(request(
+                    "write_stdin",
+                    json!({"session_id":sid,"chars":"","yield_time_ms":100}),
+                    meta.clone(),
+                ))
+                .await
+                .unwrap(),
+        );
+    }
+    assert_eq!(output["exit_code"], 0);
+    let until = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let still_original = match read_process_birth(&process) {
+            Ok(actual) => actual == birth,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => panic!("kernel exit observation unknown: {error}"),
+        };
+        if !still_original {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < until,
+            "native shell exit deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("tunnel-once.txt")).unwrap(),
+        format!("{nonce}\n")
+    );
+    second.cancel().await.unwrap();
+    json!({"native_nonce":nonce,"start_effect_count":1,"native_pid":pid,"native_starttime":birth,"first_transport_deleted":"original native process survived","different_chat_subject_organization":"stdin refused with no file effect","second_transport_stdin":"independent exact file readback","exit_code":0,"original_shell":"exited","scope":"owned strict-TLS paired Linux/Codex reference, not installed/account acceptance"})
+}
 async fn file_within(path: &Path, expected: &str) {
     let until = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -269,6 +390,7 @@ async fn paired_journey(capacity: bool, computers: usize) {
     let host_header = format!("localhost:{}", address.port());
     let admin = random_token();
     let mcp = random_token();
+    let forwarding = random_token();
     let service = EnrollmentService::recover_existing(
         fresh_store(&root.join("store")),
         admin.as_bytes(),
@@ -282,7 +404,10 @@ async fn paired_journey(capacity: bool, computers: usize) {
         GatewayEpoch::try_from(format!("owned-gateway-{}", uuid::Uuid::new_v4())).unwrap();
     let partition = Arc::new(Semaphore::new(crate::gateway::paired::GATEWAY_RELAY_BYTES));
     let policy = Arc::new(
-        GatewayBearerPolicy::new(mcp.as_bytes(), vec![host_header.clone()], vec![]).unwrap(),
+        GatewayBearerPolicy::new(mcp.as_bytes(), vec![host_header.clone()], vec![])
+            .unwrap()
+            .with_tunnel_ingress(forwarding.as_bytes())
+            .unwrap(),
     );
     // Constructor is composed with the same service, TLS leaf and listener.
     let shared = crate::enrollment::shared::SharedEnrollment::new(service);
@@ -511,6 +636,11 @@ async fn paired_journey(capacity: bool, computers: usize) {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        let tunnel = if !capacity {
+            tunnel_continuation(&raw, &uri, &forwarding, &device, &root_work).await
+        } else {
+            json!("covered by paired native journey")
+        };
         let no_default = owner_a
             .call_tool(call("exec_command", json!({"cmd":"printf forbidden"})))
             .await
@@ -629,7 +759,7 @@ async fn paired_journey(capacity: bool, computers: usize) {
         assert_eq!(after.is_error, Some(true));
         assert!(!root_work.join("revoked.txt").exists());
         owner_b.cancel().await.unwrap();
-        json!({"native_nonce":nonce,"start_effect_count":1,"wrong_device_legacy_route_wrong_credential_upgrades":"all rejected","cross_owner_input":"rejected_without_effect","host_policy_denial":"PERMISSION_DENIED/not_dispatched with no file effect","authorized_stdin":"observed_by_independent_file_read","closed_owner_shell":"original pid/starttime absent", "closed_owner_pid":pid,"closed_owner_starttime":process_birth,"host_physical_cleanup_complete":backend.observed_physical_cleanups()>=1, "other_owner_after_delete":"survived","revoked_device":"new_exec_rejected_without_effect","scope":"synthetic owned Linux loopback, not native package/account acceptance"})
+        json!({"native_nonce":nonce,"start_effect_count":1,"tunnel_continuation":tunnel,"wrong_device_legacy_route_wrong_credential_upgrades":"all rejected","cross_owner_input":"rejected_without_effect","host_policy_denial":"PERMISSION_DENIED/not_dispatched with no file effect","authorized_stdin":"observed_by_independent_file_read","closed_owner_shell":"original pid/starttime absent", "closed_owner_pid":pid,"closed_owner_starttime":process_birth,"host_physical_cleanup_complete":backend.observed_physical_cleanups()>=1, "other_owner_after_delete":"survived","revoked_device":"new_exec_rejected_without_effect","scope":"synthetic owned Linux loopback, not native package/account acceptance"})
     });
     let result = tokio::time::timeout(
         Duration::from_secs(if capacity { 900 } else { 90 }),

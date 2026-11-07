@@ -77,6 +77,7 @@ pub enum GatewayAuthError {
 pub struct GatewayBearerPolicy {
     owners: Arc<Mutex<Owners>>,
     token_digest: Sha256Digest,
+    tunnel_token_digest: Option<Sha256Digest>,
     allowed_hosts: BTreeSet<String>,
     allowed_origins: BTreeSet<String>,
 }
@@ -93,13 +94,14 @@ impl std::fmt::Debug for GatewayBearerPolicy {
 pub struct AuthenticatedGatewayPrincipal {
     owners: Arc<Mutex<Owners>>,
     digest: Sha256Digest,
+    tunnel: bool,
 }
 impl std::fmt::Debug for AuthenticatedGatewayPrincipal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("AuthenticatedGatewayPrincipal([REDACTED])")
     }
 }
-/// Ordinary HTTP session ownership, not a ChatGPT-account identity claim.
+/// Gateway-minted resource ownership, not a ChatGPT-account identity claim.
 /// No Deserialize and no public constructor accepting an OwnerId.
 #[derive(Clone)]
 pub struct VerifiedGatewayOwner {
@@ -107,6 +109,7 @@ pub struct VerifiedGatewayOwner {
     sequence: u64,
     owner_id: OwnerId,
     principal: Sha256Digest,
+    tunnel: bool,
 }
 impl std::fmt::Debug for VerifiedGatewayOwner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -116,6 +119,9 @@ impl std::fmt::Debug for VerifiedGatewayOwner {
     }
 }
 impl VerifiedGatewayOwner {
+    pub(super) fn is_tunnel(&self) -> bool {
+        self.tunnel
+    }
     pub(crate) fn is_fenced(&self) -> bool {
         self.owners.lock().map_or(true, |o| o.fenced(self.sequence))
     }
@@ -147,12 +153,29 @@ impl VerifiedGatewayOwner {
     }
 }
 impl AuthenticatedGatewayPrincipal {
+    pub(super) fn fingerprint(&self) -> Sha256Digest {
+        self.digest
+    }
     /// Exact service-principal binding, not a client-supplied owner claim.
     pub fn matches_owner(&self, owner: &VerifiedGatewayOwner) -> bool {
         verify_slices_are_equal(self.digest.as_bytes(), owner.principal.as_bytes()).is_ok()
     }
     /// Factory is confined to Gateway adapters after an authenticated ingress.
     pub(super) fn new_mcp_session_owner(&self) -> Result<VerifiedGatewayOwner, GatewayAuthError> {
+        self.new_owner("mcp-session")
+    }
+    pub(super) fn is_tunnel(&self) -> bool {
+        self.tunnel
+    }
+    pub(super) fn new_tunnel_conversation_owner(
+        &self,
+    ) -> Result<VerifiedGatewayOwner, GatewayAuthError> {
+        if !self.tunnel {
+            return Err(GatewayAuthError::Forbidden);
+        }
+        self.new_owner("tunnel-conversation")
+    }
+    fn new_owner(&self, kind: &str) -> Result<VerifiedGatewayOwner, GatewayAuthError> {
         let sequence = self
             .owners
             .lock()
@@ -162,10 +185,11 @@ impl AuthenticatedGatewayPrincipal {
         Ok(VerifiedGatewayOwner {
             owners: self.owners.clone(),
             sequence,
-            owner_id: format!("mcp-session:{}", Uuid::new_v4())
+            owner_id: format!("{kind}:{}", Uuid::new_v4())
                 .try_into()
                 .expect("fixed UUID owner syntax"),
             principal: self.digest,
+            tunnel: self.tunnel,
         })
     }
 }
@@ -217,9 +241,28 @@ impl GatewayBearerPolicy {
         Ok(Self {
             owners: Arc::new(Mutex::new(Owners::default())),
             token_digest: Sha256Digest::of_bytes(token),
+            tunnel_token_digest: None,
             allowed_hosts: allowed_hosts.into_iter().collect(),
             allowed_origins: allowed_origins.into_iter().collect(),
         })
+    }
+    /// Gateway bootstrap only. The private verified Tunnel worker gets this
+    /// per-run credential; ordinary model bearers cannot select this domain.
+    pub(crate) fn with_tunnel_ingress(mut self, token: &[u8]) -> Result<Self, GatewayAuthError> {
+        if self.tunnel_token_digest.is_some()
+            || !(32..=4096).contains(&token.len())
+            || !token
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(b))
+        {
+            return Err(GatewayAuthError::InvalidConfiguration);
+        }
+        let digest = Sha256Digest::of_bytes(token);
+        if digest == self.token_digest {
+            return Err(GatewayAuthError::InvalidConfiguration);
+        }
+        self.tunnel_token_digest = Some(digest);
+        Ok(self)
     }
     pub fn authorize(
         &self,
@@ -241,8 +284,8 @@ impl GatewayBearerPolicy {
                 return Err(GatewayAuthError::Forbidden);
             }
         }
-        // Dedicated Tunnel conversation authority is a separate adapter. Reject
-        // claims until that authenticated path is installed; never trust _meta.
+        // Header claims never select an owner. Only the separate private
+        // forwarding bearer admits the dedicated Tunnel context adapter.
         if headers.contains_key("x-styx-tunnel-context") {
             return Err(GatewayAuthError::Forbidden);
         }
@@ -263,14 +306,19 @@ impl GatewayBearerPolicy {
         {
             return Err(GatewayAuthError::Unauthenticated);
         }
-        verify_slices_are_equal(
-            Sha256Digest::of_bytes(token.as_bytes()).as_bytes(),
-            self.token_digest.as_bytes(),
-        )
-        .map_err(|_| GatewayAuthError::Unauthenticated)?;
+        let digest = Sha256Digest::of_bytes(token.as_bytes());
+        let ordinary =
+            verify_slices_are_equal(digest.as_bytes(), self.token_digest.as_bytes()).is_ok();
+        let tunnel = self.tunnel_token_digest.is_some_and(|expected| {
+            verify_slices_are_equal(digest.as_bytes(), expected.as_bytes()).is_ok()
+        });
+        if !ordinary && !tunnel {
+            return Err(GatewayAuthError::Unauthenticated);
+        }
         Ok(AuthenticatedGatewayPrincipal {
             owners: self.owners.clone(),
-            digest: self.token_digest,
+            digest,
+            tunnel,
         })
     }
 }

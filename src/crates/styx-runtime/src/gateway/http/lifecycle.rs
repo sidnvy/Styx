@@ -45,6 +45,7 @@ pub(super) struct Supervisor {
     pub accepting_cleanup_jobs: std::sync::atomic::AtomicBool,
 }
 pub(super) struct Life<L: GatewayOwnerLifecycle> {
+    pub boundary: Boundary,
     pub activity: Mutex<Activity>,
     pub owner: VerifiedGatewayOwner,
     pub lifecycle: Arc<L>,
@@ -55,6 +56,12 @@ pub(super) struct Life<L: GatewayOwnerLifecycle> {
     // All SDK handler/transport and cleanup owners retain this same real lease.
     pub _session_slot: tokio::sync::OwnedSemaphorePermit,
     pub _budget: Arc<super::HttpBudget>,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Boundary {
+    McpTransport,
+    /// This authority owns supervised logical work, not an SDK transport.
+    TunnelConversation,
 }
 pub(super) struct Activity {
     pub last: tokio::time::Instant,
@@ -83,7 +90,9 @@ impl<L: GatewayOwnerLifecycle> Life<L> {
     }
     pub fn is_complete(&self) -> bool {
         let f = self.facts.lock().expect("session lifetime");
-        f.fenced && f.cleanup == Some(OwnerCleanup::Complete) && f.transport_joined
+        f.fenced
+            && f.cleanup == Some(OwnerCleanup::Complete)
+            && (self.boundary == Boundary::TunnelConversation || f.transport_joined)
     }
     /// Wait only for this Life's original supervised cleanup and actual SDK
     /// transport close. Dropping this waiter cannot cancel or recreate either.
@@ -103,7 +112,7 @@ impl<L: GatewayOwnerLifecycle> Life<L> {
                     }
                     if facts.fenced
                         && facts.cleanup == Some(OwnerCleanup::Complete)
-                        && facts.transport_joined
+                        && (self.boundary == Boundary::TunnelConversation || facts.transport_joined)
                     {
                         return Ok(());
                     }

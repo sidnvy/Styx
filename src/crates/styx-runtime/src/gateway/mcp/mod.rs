@@ -26,6 +26,17 @@ pub trait GatewayToolBackend: Send + Sync + 'static {
         owner: &VerifiedGatewayOwner,
         request: CallToolRequestParams,
     ) -> impl Future<Output = Result<CallToolResult, ErrorData>> + Send;
+    /// Only the HTTP adapter interprets Rust-only transport extensions. Other
+    /// backends keep their original fixed-owner semantics; JSON cannot mint
+    /// typed HTTP Parts or an authenticated call binding.
+    fn call_tool_with_extensions(
+        &self,
+        owner: &VerifiedGatewayOwner,
+        request: CallToolRequestParams,
+        _extensions: Extensions,
+    ) -> impl Future<Output = Result<CallToolResult, ErrorData>> + Send {
+        self.call_tool(owner, request)
+    }
 }
 
 /// All five frozen legacy versions, including the oldest JS SDK version that
@@ -83,11 +94,11 @@ impl<B: GatewayToolBackend> ServerHandler for GatewayMcp<B> {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         // No owner or capability is inferred from model-supplied arguments/_meta.
         self.backend
-            .call_tool(&self.owner, request)
+            .call_tool_with_extensions(&self.owner, request, context.extensions)
             .await
             .map(Into::into)
     }

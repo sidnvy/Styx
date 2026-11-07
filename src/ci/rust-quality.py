@@ -54,6 +54,7 @@ TLS_TESTS = [
     ("host-drain-faults", "host::protocol::tests::drain::actual_tls_wss_drain_negotiation_stale_result_and_loss"),
 ]
 HTTP_TESTS = [
+    ("http-tunnel-conversation", "gateway::http::tests::conversation::authenticated_tunnel_context_across_transports_and_isolation"),
     ("official-http-sdk", "gateway::http::tests::official_sdk_tcp_auth_sessions_limits_and_pending_close"),
     ("http-control-pressure", "gateway::http::tests::actual_tcp_slow_post_readers_do_not_starve_bodyless_control"),
 ]

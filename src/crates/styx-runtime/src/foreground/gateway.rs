@@ -777,6 +777,32 @@ mod platform {
                 .map_err(|_| error("gateway_partition_unavailable"))?,
         )
         .map_err(|_| error("gateway_partition_invalid"))?;
+        let tunnel_release = admitted
+            .fresh
+            .as_ref()
+            .ok_or(error("fresh_native_gateway_required"))?
+            .verified_release();
+        let key_state = tunnel_state.clone();
+        let key_release = tunnel_release.clone();
+        let key_permit = LOADERS
+            .try_acquire()
+            .map_err(|_| error("gateway_reader_busy"))?;
+        let tunnel_ingress = tokio::task::spawn_blocking(move || {
+            let _permit = key_permit;
+            crate::foreground::tunnel::ingress_key(&key_state, &key_release)
+        })
+        .await
+        .map_err(|_| error("gateway_reader_failed"))??;
+        let policy = if let Some(key) = &tunnel_ingress {
+            Arc::new(
+                Arc::try_unwrap(policy)
+                    .map_err(|_| error("gateway_model_authority_invalid"))?
+                    .with_tunnel_ingress(key.token().as_bytes())
+                    .map_err(|_| error("gateway_model_authority_invalid"))?,
+            )
+        } else {
+            policy
+        };
         let mcp = GatewayHttp::new(policy, backend, budget);
         mcp.observe_tunnel(crate::foreground::tunnel::observe_requests(&tunnel_state)?);
         let mcp_stop = mcp.paired_shutdown_handle();
@@ -813,11 +839,7 @@ mod platform {
             .local_addr()
             .map_err(|_| error("gateway_listen_failed"))?
             .port();
-        let tunnel_release = admitted
-            .fresh
-            .as_ref()
-            .ok_or(error("fresh_native_gateway_required"))?
-            .verified_release();
+
         let control_failed = CancellationToken::new();
         #[cfg(any(
             all(target_os = "linux", target_env = "gnu"),
@@ -930,6 +952,7 @@ mod platform {
             tunnel_release,
             stop.clone(),
             tunnel_output,
+            tunnel_ingress,
         );
         let mut invalidated = false;
         let mut interval = tokio::time::interval(Duration::from_secs(1));

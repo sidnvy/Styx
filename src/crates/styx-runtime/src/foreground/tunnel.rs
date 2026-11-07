@@ -783,15 +783,54 @@ async fn terminate(child: &mut Child) -> Result<ExitStatus> {
 fn unavailable(output: EventOutput, stop: &CancellationToken) {
     emit(output, stop, "tunnel_unavailable", None);
 }
+/// Fresh forwarding service credential, never an account key or an owner claim.
+/// Only the selected native Tunnel worker receives it through a private file.
+pub(super) struct IngressKey(Zeroizing<String>);
+impl IngressKey {
+    pub(super) fn token(&self) -> &str {
+        self.0.as_str()
+    }
+}
+pub(super) fn ingress_key(
+    state: &Path,
+    release: &crate::release::VerifiedNativeRelease,
+) -> Result<Option<Arc<IngressKey>>> {
+    let Some((_, root)) = directory(state, false)? else {
+        return Ok(None);
+    };
+    let Some(config) = connection(&root)? else {
+        return Ok(None);
+    };
+    if !config.auto_start
+        || !release
+            .manifest()
+            .worker_closures
+            .iter()
+            .any(|worker| worker.kind == NativeExternalWorker::TunnelClient)
+    {
+        return Ok(None);
+    }
+    // Keep the original selected-image verification before creating ingress.
+    let _image = release
+        .pin_worker(NativeExternalWorker::TunnelClient)
+        .map_err(|_| error("tunnel_client_unavailable"))?;
+    use base64::Engine;
+    let mut entropy = Zeroizing::new([0u8; 32]);
+    getrandom::fill(&mut *entropy).map_err(|_| error("tunnel_ingress_unavailable"))?;
+    Ok(Some(Arc::new(IngressKey(Zeroizing::new(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&*entropy),
+    )))))
+}
 pub(super) fn start(
     state: PathBuf,
     port: u16,
     release: Arc<crate::release::VerifiedNativeRelease>,
     stop: CancellationToken,
     output: EventOutput,
+    ingress: Option<Arc<IngressKey>>,
 ) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
-        let result = run(state, port, release, stop.clone(), output).await;
+        let result = run(state, port, release, stop.clone(), output, ingress).await;
         if result.is_err() {
             unavailable(output, &stop);
         }
@@ -809,6 +848,7 @@ fn prepare(
     state: &Path,
     port: u16,
     release: &crate::release::VerifiedNativeRelease,
+    ingress: Option<&IngressKey>,
 ) -> Result<Option<Prepared>> {
     let Some((path, root)) = directory(state, false)? else {
         return Ok(None);
@@ -825,16 +865,8 @@ fn prepare(
             .pin_worker(NativeExternalWorker::TunnelClient)
             .map_err(|_| error("tunnel_client_unavailable"))?,
     );
-    let token = read_secret(&state.join("gateway-model.token"))?;
-    let token = token.trim_end_matches(['\r', '\n']);
-    if !(32..=4096).contains(&token.len())
-        || !token
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
-    {
-        return Err(error("invalid_gateway_model_credential"));
-    }
-    let header = Zeroizing::new(format!("Bearer {token}"));
+    let ingress = ingress.ok_or(error("tunnel_ingress_unavailable"))?;
+    let header = Zeroizing::new(format!("Bearer {}", ingress.token()));
     atomic_write(&path, &root, "gateway-header", header.as_bytes())?;
     let mut args = arguments(&c, state, port);
     // Only real forwarded MCP traffic has the observation marker. The client's
@@ -863,6 +895,7 @@ pub(super) async fn run(
     release: Arc<crate::release::VerifiedNativeRelease>,
     stop: CancellationToken,
     output: EventOutput,
+    ingress: Option<Arc<IngressKey>>,
 ) -> Result<()> {
     if !release
         .manifest()
@@ -874,9 +907,10 @@ pub(super) async fn run(
         return Ok(());
     }
     let original = release.clone();
-    let prepared = tokio::task::spawn_blocking(move || prepare(&state, port, &original))
-        .await
-        .map_err(|_| error("tunnel_configuration_worker_failed"))??;
+    let prepared =
+        tokio::task::spawn_blocking(move || prepare(&state, port, &original, ingress.as_deref()))
+            .await
+            .map_err(|_| error("tunnel_configuration_worker_failed"))??;
     let Some(prepared) = prepared else {
         return Ok(());
     };
@@ -1651,8 +1685,10 @@ int main(int argc, char **argv) {
                 assert!(running);
                 assert!(started.elapsed() >= RETRY);
                 assert_eq!(report.transport, Some("starting"));
-                assert_eq!(
-                    header.unwrap(),
+                let header = header.unwrap();
+                assert!(header.starts_with("Bearer ") && header.len() == 50);
+                assert_ne!(
+                    header,
                     format!(
                         "Bearer {}",
                         fs::read_to_string(state.join("gateway-model.token"))

@@ -2,6 +2,7 @@
 //! No native tools, real-account identity or production TLS acceptance is implied.
 mod backend;
 pub(crate) mod body;
+mod conversation;
 pub mod lifecycle;
 mod session;
 use crate::gateway::{
@@ -90,6 +91,7 @@ pub struct GatewayHttp<B: GatewayToolBackend + GatewayOwnerLifecycle> {
     backend: Arc<B>,
     budget: Arc<HttpBudget>,
     sessions: Mutex<BTreeMap<uuid::Uuid, Arc<Session<B>>>>,
+    conversations: Mutex<BTreeMap<[u8; 32], Arc<conversation::Conversation<B>>>>,
     requests: Arc<Semaphore>,
     body_readers: Arc<Semaphore>,
     control: Arc<Semaphore>,
@@ -138,6 +140,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             backend,
             budget,
             sessions: Mutex::new(BTreeMap::new()),
+            conversations: Mutex::new(BTreeMap::new()),
             requests: Arc::new(Semaphore::new(16)),
             body_readers: Arc::new(Semaphore::new(16)),
             control: Arc::new(Semaphore::new(2)),
@@ -171,6 +174,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
                             _ = stop.cancelled() => break,
                             _ = app.expire_idle(SESSION_IDLE) => {}
                         }
+                        app.expire_conversations(SESSION_IDLE);
                     }
                 }
             }
@@ -188,14 +192,16 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             .lock()
             .expect("HTTP sessions")
             .retain(|_, session| !session.life.is_complete());
+        self.conversations
+            .lock()
+            .expect("Tunnel conversations")
+            .retain(|_, conversation| !conversation.life.is_complete());
     }
-    fn create_session(&self, owner: VerifiedGatewayOwner) -> Result<Arc<Session<B>>, HttpError> {
-        self.collect_closed();
-        let mut registry = self.sessions.lock().expect("HTTP sessions");
-        if self.stop.is_cancelled() {
-            owner.cleanup_complete();
-            return Err(HttpError);
-        }
+    fn new_life(
+        &self,
+        owner: VerifiedGatewayOwner,
+        boundary: lifecycle::Boundary,
+    ) -> Result<Arc<Life<B>>, HttpError> {
         let slot = match self.budget.sessions.clone().try_acquire_owned() {
             Ok(slot) => slot,
             Err(_) => {
@@ -203,7 +209,8 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
                 return Err(HttpError);
             }
         };
-        let life = Arc::new(Life {
+        Ok(Arc::new(Life {
+            boundary,
             activity: Mutex::new(lifecycle::Activity {
                 last: tokio::time::Instant::now(),
                 users: 0,
@@ -216,7 +223,16 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             supervisor: Arc::downgrade(&self.supervisor),
             _session_slot: slot,
             _budget: self.budget.clone(),
-        });
+        }))
+    }
+    fn create_session(&self, owner: VerifiedGatewayOwner) -> Result<Arc<Session<B>>, HttpError> {
+        self.collect_closed();
+        let mut registry = self.sessions.lock().expect("HTTP sessions");
+        if self.stop.is_cancelled() {
+            owner.cleanup_complete();
+            return Err(HttpError);
+        }
+        let life = self.new_life(owner.clone(), lifecycle::Boundary::McpTransport)?;
         let manager = Arc::new(BoundedManager::new(life.clone()));
         let calls = Arc::new(Semaphore::new(1));
         let bridge = Arc::new(BackendBridge {
@@ -407,6 +423,16 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
                 unconfirmed += 1;
             }
         }
+        unconfirmed += self
+            .conversations
+            .lock()
+            .expect("Tunnel conversations")
+            .values()
+            .filter(|c| {
+                c.life.facts.lock().expect("conversation lifetime").cleanup
+                    != Some(lifecycle::OwnerCleanup::Complete)
+            })
+            .count();
         (transports_joined, unconfirmed)
     }
     pub(crate) async fn handle(
@@ -523,6 +549,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
                 Err(_) => return plain(StatusCode::REQUEST_TIMEOUT),
             }
         };
+        let mut conversation_context = None;
         let mut initialize_version = None;
         let mut cancel = false;
         if parts.method == Method::POST {
@@ -536,6 +563,10 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
                         initialize_version = Some(r.params.protocol_version.as_str().to_owned())
                     }
                     ClientRequest::CallToolRequest(_) => {
+                        if principal.is_tunnel() {
+                            conversation_context =
+                                Some(rmcp::model::GetMeta::get_meta(&r.request).clone());
+                        }
                         // Only a tool call shows ChatGPT used Styx: the tunnel
                         // client's own startup probe sends initialize/tools/list
                         // with the same forwarding headers. Recorded after bearer
@@ -677,6 +708,15 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
                     .forget();
             }
         }
+        let mut logical_delivery = None;
+        if let Some(meta) = conversation_context {
+            let call = match self.conversation_call(&principal, &meta) {
+                Ok(call) => call,
+                Err(status) => return plain(status),
+            };
+            logical_delivery = Some(call.conversation.life.clone());
+            parts.extensions.insert(call);
+        }
         let delete = parts.method == Method::DELETE;
         let new_session = sid.is_none();
         let response = match tokio::time::timeout_at(
@@ -730,7 +770,12 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
         );
         if !delete {
             let life = session.life.clone();
-            held.delivery_allowed = Some(Arc::new(move || life.is_active()));
+            held.delivery_allowed = Some(Arc::new(move || {
+                life.is_active()
+                    && logical_delivery
+                        .as_ref()
+                        .is_none_or(|logical| logical.is_active())
+            }));
         }
         Response::from_parts(parts, held)
     }
@@ -835,6 +880,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> HttpServer<B> {
         for session in self.app.sessions.lock().expect("HTTP sessions").values() {
             let _ = session.life.close();
         }
+        self.app.close_conversations();
         // Cancellation wakes SDK workers, whose actual close joins run on the
         // SDK task. Observe those joins before the final shutdown snapshot.
         loop {
@@ -980,6 +1026,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> Drop for HttpServer<B> {
         for s in self.app.sessions.lock().expect("HTTP sessions").values() {
             let _ = s.life.close();
         }
+        self.app.close_conversations();
     }
 }
 fn plain(status: StatusCode) -> Response<HeldBody> {

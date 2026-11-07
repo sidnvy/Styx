@@ -221,7 +221,7 @@ General displayed the correct settings page and its joined ChatGPT page directed
 connection management to the main computer.
 The corrected C11 diagnostic observed two real Work calls with different
 transport sessions and identical, present organization/subject/conversation
-hashes. This supersedes C9's invalid metadata-absence inference. The current
+hashes. This supersedes C9's invalid metadata-absence inference. The installed C11
 transport-bound owner remains unchanged, so these list calls are not account
 Exec/Browser/Computer acceptance. A dedicated authenticated Tunnel conversation
 adapter is still required; ordinary HTTP callers must not gain metadata-derived
@@ -234,16 +234,40 @@ the selector Browser, and bases that feedback on actual Host/Exec observations.
 Focused runtime/admin scenarios and native C# compilation passed; these follow-up
 changes are not yet installed. Do not produce another native candidate until the
 account continuity reference and shared source converge.
-Product: C11 installed network discovery, Windows settings and GUI pairing passed;
-the three follow-up corrections are source-only.
-Architecture: shared Rust discovery retains the sole configuration authority;
-no new Tunnel owner authority is implemented yet.
-Integration: C11 unified quality and both native builds passed; follow-up focused
-checks passed. A final same-source account candidate remains pending.
-Release: C11 is installed on both machines, not final end-to-end acceptance.
-Reliability: stale network selection refuses before writes; account session
-continuity and Tunnel saved-key recovery with execution resources remain open.
-Decision: final end-to-end delivery and Stable remain NO-GO.
+ADR-036 now implements the dedicated authenticated Tunnel conversation adapter
+in Rust. A fresh private forwarding credential distinguishes that ingress from
+the ordinary model bearer. Canonical organization/subject/chat metadata only
+correlates resources inside that authenticated domain; it is not account
+identity or a tool-supplied OwnerId. Each logical owner keeps the existing
+bounded reservation, fence and cleanup supervision. Transport DELETE closes
+its own SDK transport without revoking the conversation's resources.
+The actual official-SDK TCP reference passed continuation across two connections,
+transport deletion, cross-chat/subject/org isolation, ordinary bearer forgery
+refusal, malformed-context no-dispatch and dropped HTTP waiter retention. The
+strict-TLS/enrolled-Host/real Codex reference then started one native shell,
+independently read one nonce effect, deleted the first MCP connection, refused
+cross-scope input, continued through a second connection and observed exit 0
+and the original PID/starttime's exit. These are owned Linux references, not
+installed or account acceptance. The separate capacity/Unknown cleanup control
+keeps all reservations and refuses reminting a closing conversation.
+A real signed-runtime disposable App with a live native Exec also completed the
+existing strict settlement, with exact Host/Gateway cleanup and independent
+file/PID observations. This did not reproduce the hypothesized general Host-first
+shutdown defect, so no speculative settlement-order change was made. Installed
+Tunnel saving after account Exec/Browser/Computer work remains to be repeated.
+Product: C11 automatic network setup and GUI pairing remain installed passes;
+Windows claim/name/accessibility follow-ups and conversation continuation are
+source-only until the next package is installed.
+Architecture: the authenticated Tunnel adapter separates logical conversation
+ownership from SDK transport lifetime; ordinary admission stays isolated.
+Integration: focused SDK/TLS/Codex references passed; the next unified checkpoint
+and same-source native candidate remain pending.
+Release: C11 is still installed on both machines, not final end-to-end acceptance.
+Reliability: malformed/forged contexts never gain ownership, dropped waiters keep
+work/capacity, and unknown cleanup never becomes successful collection. Final
+account continuity and saved-key recovery remain open.
+Decision: proceed to a frozen candidate after the shared-source quality checkpoint;
+final end-to-end delivery and Stable remain NO-GO.
 Evidence: `/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/`, with
 exact fdb1ef9 inputs and quality receipt under `candidate-2/`. Installed native
 effects are retained on PilotMac under

@@ -663,3 +663,5 @@ async fn process_quit_joins_local_sdk_workers_without_forging_remote_owner_clean
 
 #[path = "capacity_tests.rs"]
 mod capacity;
+#[path = "conversation_tests.rs"]
+mod conversation;
