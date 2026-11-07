@@ -349,6 +349,12 @@ struct ConnectionStatus {
         skip_serializing_if = "Option::is_none"
     )]
     computer_probe: Option<crate::providers::cua::probe_diagnostic::ProbeDiagnostic>,
+    #[cfg(target_os = "macos")]
+    #[serde(
+        rename = "computerInitialEpochAdvanced",
+        skip_serializing_if = "Option::is_none"
+    )]
+    computer_initial_epoch_advanced: Option<bool>,
 }
 impl ConnectionStatus {
     fn pairing_refused() -> Self {
@@ -359,6 +365,8 @@ impl ConnectionStatus {
             computer_error: None,
             #[cfg(target_os = "macos")]
             computer_probe: None,
+            #[cfg(target_os = "macos")]
+            computer_initial_epoch_advanced: None,
             hint: Some(
                 "The Gateway refused this identity. Change this computer's role and pair again.",
             ),
@@ -374,6 +382,8 @@ impl ConnectionStatus {
             computer_error: None,
             #[cfg(target_os = "macos")]
             computer_probe: None,
+            #[cfg(target_os = "macos")]
+            computer_initial_epoch_advanced: None,
             hint: Some(crate::gateway::paired::CAPACITY_HINT),
         }
     }
@@ -386,6 +396,8 @@ impl ConnectionStatus {
             computer_error: None,
             #[cfg(target_os = "macos")]
             computer_probe: None,
+            #[cfg(target_os = "macos")]
+            computer_initial_epoch_advanced: None,
         }
     }
     fn unknown() -> Self {
@@ -397,6 +409,8 @@ impl ConnectionStatus {
             computer_error: None,
             #[cfg(target_os = "macos")]
             computer_probe: None,
+            #[cfg(target_os = "macos")]
+            computer_initial_epoch_advanced: None,
         }
     }
 }
@@ -914,6 +928,18 @@ impl HostApp {
                     // Computer initialization is independent of Exec transport.
                     // Retain its fixed failure code for this original Host; later
                     // connection events must not erase that optional-lane failure.
+                    // A closed diagnostic fact, never readiness or permission.
+                    #[cfg(target_os = "macos")]
+                    if event.event == "computer_initial_probe" {
+                        status.send_modify(|value| {
+                            value.computer_initial_epoch_advanced = match event.reason {
+                                Some("initial_console_epoch_advanced") => Some(true),
+                                Some("initial_console_epoch_unchanged") => Some(false),
+                                _ => None,
+                            };
+                        });
+                        continue;
+                    }
                     if event.event == "computer_unavailable" {
                         status.send_modify(|value| {
                             value.computer_error =
@@ -928,12 +954,16 @@ impl HostApp {
                     let computer_error = status.borrow().computer_error;
                     #[cfg(target_os = "macos")]
                     let computer_probe = status.borrow().computer_probe;
+                    #[cfg(target_os = "macos")]
+                    let computer_initial_epoch_advanced =
+                        status.borrow().computer_initial_epoch_advanced;
                     if event.reason == Some(crate::gateway::paired::CAPACITY_ERROR_CODE) {
                         let mut value = ConnectionStatus::hub_full();
                         value.computer_error = computer_error;
                         #[cfg(target_os = "macos")]
                         {
                             value.computer_probe = computer_probe;
+                            value.computer_initial_epoch_advanced = computer_initial_epoch_advanced;
                         }
                         status.send_replace(value);
                         continue;
@@ -952,6 +982,8 @@ impl HostApp {
                             computer_error,
                             #[cfg(target_os = "macos")]
                             computer_probe,
+                            #[cfg(target_os = "macos")]
+                            computer_initial_epoch_advanced,
                         },
                         "connecting" | "reconnecting" => ConnectionStatus {
                             status: "started",
@@ -961,6 +993,8 @@ impl HostApp {
                             computer_error,
                             #[cfg(target_os = "macos")]
                             computer_probe,
+                            #[cfg(target_os = "macos")]
+                            computer_initial_epoch_advanced,
                         },
                         "disconnected" => ConnectionStatus {
                             status: "started",
@@ -970,6 +1004,8 @@ impl HostApp {
                             computer_error,
                             #[cfg(target_os = "macos")]
                             computer_probe,
+                            #[cfg(target_os = "macos")]
+                            computer_initial_epoch_advanced,
                         },
                         _ => continue,
                     };
@@ -984,6 +1020,8 @@ impl HostApp {
                 computer_error: None,
                 #[cfg(target_os = "macos")]
                 computer_probe: None,
+                #[cfg(target_os = "macos")]
+                computer_initial_epoch_advanced: None,
             });
             let verified_runtime = self.native_runtime.clone();
             if let Some(d) = &diagnostic {

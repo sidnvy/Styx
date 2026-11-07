@@ -30,6 +30,8 @@ pub(crate) struct MacProxySource {
     observations: Mutex<BoundMacSource>,
     fingerprint: Sha256Digest,
     fenced: AtomicBool,
+    initial_probe_claimed: AtomicBool,
+    initial_epoch_advanced: AtomicBool,
     // Diagnostic custody only; no source permission or readiness derives from it.
     probe_failure: Mutex<Option<ProbeDiagnostic>>,
 }
@@ -86,6 +88,8 @@ impl MacProxySource {
             observations: Mutex::new(observations),
             fingerprint,
             fenced: AtomicBool::new(false),
+            initial_probe_claimed: AtomicBool::new(false),
+            initial_epoch_advanced: AtomicBool::new(false),
             probe_failure: Mutex::new(None),
         }))
     }
@@ -166,23 +170,24 @@ impl MacProxySource {
                     self.remember_probe_failure(binding, error.probe_cause(), started, until);
                     CuaError::PermissionDenied
                 })?;
-            let value = self
-                .observations
-                .lock()
-                .map_err(|_| {
-                    self.remember_probe_failure(
-                        ProbeStage::ObservationMutex,
-                        ProbeCause::MutexPoisoned,
-                        started,
-                        until,
-                    );
-                    CuaError::Unknown
-                })?
-                .observe_native(until)
-                .map_err(|error| {
-                    self.remember_probe_failure(observation, error.probe_cause(), started, until);
-                    CuaError::PermissionDenied
-                })?;
+            let mut observations = self.observations.lock().map_err(|_| {
+                self.remember_probe_failure(
+                    ProbeStage::ObservationMutex,
+                    ProbeCause::MutexPoisoned,
+                    started,
+                    until,
+                );
+                CuaError::Unknown
+            })?;
+            let value = observations.observe_native(until).map_err(|error| {
+                let fault = observations.probe_diagnostic().map_or_else(
+                    || ProbeDiagnostic::observed(observation, error.probe_cause(), started, until),
+                    |fault| ProbeDiagnostic::observed(fault.stage, fault.cause, started, until),
+                );
+                self.remember_probe_diagnostic(fault);
+                CuaError::PermissionDenied
+            })?;
+            drop(observations);
             if !value.observed_unlocked() {
                 self.remember_probe_failure(observation, ProbeCause::Locked, started, until);
                 return Err(CuaError::PermissionDenied);
@@ -212,9 +217,39 @@ impl MacProxySource {
     }
 }
 impl MacProxySource {
+    /// Before-target bootstrap only. Even a failed attempt consumes this claim;
+    /// neither a caller retry nor any strict window read can reopen it.
+    pub(crate) fn observe_initial_with_windows(
+        &self,
+        until: std::time::Instant,
+    ) -> Result<(NativeObservation, super::macos_source::WindowReadEvidence)> {
+        if self.initial_probe_claimed.swap(true, Ordering::AcqRel) {
+            self.fence_initial_sources();
+            self.remember_probe_failure(
+                ProbeStage::SessionBinding,
+                ProbeCause::Fenced,
+                std::time::Instant::now(),
+                until,
+            );
+            return Err(CuaError::PermissionDenied);
+        }
+        self.observe_windows_mode(until, true)
+    }
+    /// Receipt only; this value is never a readiness or authorization input.
+    pub(crate) fn initial_epoch_advanced(&self) -> bool {
+        self.initial_epoch_advanced.load(Ordering::Acquire)
+    }
     pub(crate) fn observe_with_windows(
         &self,
         until: std::time::Instant,
+    ) -> Result<(NativeObservation, super::macos_source::WindowReadEvidence)> {
+        self.initial_probe_claimed.store(true, Ordering::Release);
+        self.observe_windows_mode(until, false)
+    }
+    fn observe_windows_mode(
+        &self,
+        until: std::time::Instant,
+        initial: bool,
     ) -> Result<(NativeObservation, super::macos_source::WindowReadEvidence)> {
         let started = std::time::Instant::now();
         let result = (|| {
@@ -243,6 +278,80 @@ impl MacProxySource {
                 self.remember_probe_diagnostic(fault);
                 CuaError::PermissionDenied
             })?;
+            if initial {
+                let mut control = self.control.lock().map_err(|_| {
+                    self.remember_probe_failure(
+                        ProbeStage::ControlMutex,
+                        ProbeCause::MutexPoisoned,
+                        started,
+                        until,
+                    );
+                    CuaError::Unknown
+                })?;
+                let after = observations
+                    .observe_initial_native(until)
+                    .map_err(|error| {
+                        let fault = observations.probe_diagnostic().map_or_else(
+                            || {
+                                ProbeDiagnostic::observed(
+                                    ProbeStage::NativeAfterObservation,
+                                    error.probe_cause(),
+                                    started,
+                                    until,
+                                )
+                            },
+                            |fault| {
+                                ProbeDiagnostic::observed(fault.stage, fault.cause, started, until)
+                            },
+                        );
+                        self.remember_probe_diagnostic(fault);
+                        CuaError::PermissionDenied
+                    })?;
+                let control_after = control.observe_initial_native(until).map_err(|error| {
+                    let fault = control.probe_diagnostic().map_or_else(
+                        || {
+                            ProbeDiagnostic::observed(
+                                ProbeStage::NativeAfterFinalBinding,
+                                error.probe_cause(),
+                                started,
+                                until,
+                            )
+                        },
+                        |fault| ProbeDiagnostic::observed(fault.stage, fault.cause, started, until),
+                    );
+                    self.remember_probe_diagnostic(fault);
+                    CuaError::PermissionDenied
+                })?;
+                let advanced = observations
+                    .commit_initial_native_pair(
+                        &mut control,
+                        &before,
+                        &after,
+                        &control_after,
+                        until,
+                    )
+                    .map_err(|error| {
+                        let fault = observations.probe_diagnostic().map_or_else(
+                            || {
+                                ProbeDiagnostic::observed(
+                                    ProbeStage::ConsoleMatch,
+                                    error.probe_cause(),
+                                    started,
+                                    until,
+                                )
+                            },
+                            |fault| {
+                                ProbeDiagnostic::observed(fault.stage, fault.cause, started, until)
+                            },
+                        );
+                        self.remember_probe_diagnostic(fault);
+                        CuaError::PermissionDenied
+                    })?;
+                if advanced {
+                    self.initial_epoch_advanced.store(true, Ordering::Release);
+                }
+                return Ok((control_after, windows));
+            }
             drop(observations);
             // The read probe may take time. Return ONLY a new original-FD
             // native lock/TCC sample, never retimestamp the pre-probe facts.
@@ -261,9 +370,25 @@ impl MacProxySource {
             Ok((after, windows))
         })();
         if result.is_err() {
-            self.fenced.store(true, Ordering::Release);
+            if initial {
+                self.fence_initial_sources();
+            } else {
+                self.fenced.store(true, Ordering::Release);
+            }
         }
         result
+    }
+    fn fence_initial_sources(&self) {
+        self.fenced.store(true, Ordering::Release);
+        // Recover poisoned guards only to deny use, never to restore authority.
+        self.control
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .fence_initial_native();
+        self.observations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .fence_initial_native();
     }
 
     pub(crate) fn drain_source_probe(&self, until: std::time::Instant) -> Result<bool> {

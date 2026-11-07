@@ -42,6 +42,16 @@ impl DeferredComputer {
             .as_ref()?
             .startup_probe_diagnostic()
     }
+    #[cfg(target_os = "macos")]
+    fn startup_initial_epoch_advanced(&self) -> Option<bool> {
+        Some(
+            self.source
+                .lock()
+                .ok()?
+                .as_ref()?
+                .startup_initial_epoch_advanced(),
+        )
+    }
     // Retry only read-only startup prerequisites before any desktop source
     // exists. The same initialization job owns every check and is joined on
     // shutdown; no candidate, source or possibly dispatched action is replayed.
@@ -239,7 +249,26 @@ impl ComputerStartup {
         let retained_admitted = admitted.clone();
         let initialization = InitializationJob::spawn(move |retained| async move {
             match prepare_computer(&retained_admitted, &retained_host, &retained).await {
-                Ok(factory) => factory,
+                Ok(factory) => {
+                    #[cfg(target_os = "macos")]
+                    if factory.is_some() {
+                        if let Some(advanced) = retained.startup_initial_epoch_advanced() {
+                            event_with_reason(
+                                &events,
+                                &cancel,
+                                "computer_initial_probe",
+                                &device,
+                                None,
+                                Some(if advanced {
+                                    "initial_console_epoch_advanced"
+                                } else {
+                                    "initial_console_epoch_unchanged"
+                                }),
+                            );
+                        }
+                    }
+                    factory
+                }
                 Err(error) => {
                     #[cfg(target_os = "macos")]
                     computer_unavailable_with_probe(

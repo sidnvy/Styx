@@ -42,6 +42,7 @@ pub(crate) enum ProbeCause {
     MutexPoisoned,
     Locked,
     ConsoleChanged,
+    ConsoleEpochChanged,
     Deadline,
     EvidenceMissing,
     EvidenceExpired,

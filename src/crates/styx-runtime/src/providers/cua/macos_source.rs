@@ -304,6 +304,7 @@ impl ConnectedCandidate {
             probe_session: None,
             probe_drained: false,
             probe_failure: None,
+            initial_provisional: false,
         };
         bound.fresh_binding()?;
         Ok(bound)
@@ -323,6 +324,8 @@ pub(crate) struct BoundMacSource {
     probe_drained: bool,
     // First closed fault facts only; never consulted for source authority.
     probe_failure: Option<ProbeDiagnostic>,
+    // A fully checked initial sample stays fenced until the paired FD commit.
+    initial_provisional: bool,
 }
 impl BoundMacSource {
     pub(crate) fn probe_diagnostic(&self) -> Option<ProbeDiagnostic> {
@@ -330,6 +333,10 @@ impl BoundMacSource {
     }
     fn remember_probe_failure(&mut self, diagnostic: ProbeDiagnostic) {
         self.probe_failure.get_or_insert(diagnostic);
+    }
+    pub(super) fn fence_initial_native(&mut self) {
+        self.fenced = true;
+        self.initial_provisional = false;
     }
     /// Snapshot the original authenticated source solely to authenticate a NEW
     /// resource's control connection. Never used to retry/replace an existing
@@ -351,6 +358,7 @@ impl BoundMacSource {
             probe_session: None,
             probe_drained: false,
             probe_failure: None,
+            initial_provisional: false,
         };
         self.fresh_binding()?;
         Ok(next)
@@ -673,12 +681,27 @@ mod installed_source_tests {
         .expect("original_source_discovery");
         let original = source.clone();
         let observation = tokio::task::spawn_blocking(move || {
-            original.observe_with_windows(
+            original.observe_initial_with_windows(
                 std::time::Instant::now() + std::time::Duration::from_secs(15),
             )
         })
         .await
         .expect("original_read_task_joined");
+        let strict = if observation.is_ok() {
+            let original = source.clone();
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    original.observe_with_windows(
+                        std::time::Instant::now() + std::time::Duration::from_secs(15),
+                    )
+                })
+                .await
+                .expect("original_strict_read_task_joined"),
+            )
+        } else {
+            None
+        };
+        let advanced = source.initial_epoch_advanced();
         eprintln!(
             "MAC_SOURCE_PROBE_DIAGNOSTIC {}",
             serde_json::to_string(&source.probe_diagnostic()).expect("closed_probe_diagnostic")
@@ -693,9 +716,13 @@ mod installed_source_tests {
         assert_eq!(drain, Ok(true), "original_read_probe_drain");
         let (facts, windows) = observation.expect("original_FD_window_read");
         assert!(facts.observed_unlocked());
+        let (strict_facts, strict_windows) = strict
+            .expect("strict_read_after_initial_success")
+            .expect("strict_original_FD_window_read");
+        assert!(strict_facts.observed_unlocked());
         eprintln!(
-            "MAC_SOURCE_READ_ONLY window_read_count={} original_probe_drain=PASS",
-            windows.count
+            "MAC_SOURCE_READ_ONLY window_read_count={} strict_window_read_count={} initial_epoch_advanced={} original_probe_drain=PASS",
+            windows.count, strict_windows.count, advanced
         );
     }
 }

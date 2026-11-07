@@ -594,3 +594,59 @@ plugin, Tunnel, private key or publisher identity was changed.
 Decision: complete original cold diagnosis before freezing the final shared-source
 Mac/Windows delivery pair and repeating the remaining full journey. Stable and
 user delivery remain NO-GO.
+
+## C20 precise cold failure and initial-probe candidate
+
+Product: C20 build1129 passed quality, native Core and signed App packaging,
+then fresh GUI hub/all-three/automatic-LAN/Tunnel setup on PilotMac. The original
+App78943/Core78957/Cua79087 remained alive. Its original account `list_windows`
+returned unsupported, definitely not dispatched. The first retained fault is
+`native_after_observation / fenced / 88 ms / deadline_expired=false`; increasing
+a deadline is not supported by this evidence. Original C19 five-process Quit
+passed with all exit codes 0. C20 is not accepted.
+
+Architecture: `IOConsoleUsersSeed` is a console-user-table publication counter,
+not solely a login or lock generation. Apple increments it for a supplied user
+table without requiring changed rows ([XNU IOService::updateConsoleUsers](https://github.com/apple-oss-distributions/xnu/blob/main/iokit/Kernel/IOService.cpp#L7088-L7094)).
+The runtime currently retains this stamp as a strict source fence. A new closed
+`console_epoch_changed` diagnostic distinguishes a stable, unlocked same-login,
+same-registry seed change from other console changes. C20 itself did not retain
+that distinction, so its historical subcause remains unproven.
+
+Integration: the next candidate permits paired post-initialization sampling on
+the two original authenticated FDs only for the first retained read-only SDK
+probe, before the Deferred Computer factory or desktop targets are exposed.
+One atomic claim prevents a second initialization or advancement after a strict
+window read. Both provisional native samples must be stable/unlocked, retain
+UID/audit/UUID/registry IDs and match each other before either baseline commits.
+Only a seed difference may advance; partial results, changed identity or errors
+fence the original source. Subsequent reads and targets retain strict epoch
+checks. There is no reconnect, probe replay or new timeout. This is a bounded
+bootstrap hypothesis, not a retrospective claim about C20.
+
+Release: C20 DMG SHA-256 is
+`cff7323320ea7c59ed79ae91b099ddd7fbac25060a8351be25de7a7fc0850f8e`;
+Core production took 91.9 s, App prepare/finalize took 31.6/51.2 s. Obsolete
+Windows C19/C20 release compilation remains undispatched until Mac source
+converges. The Windows navigation correction is already integrated and native
+construction-checked; current C18 L remains at an empty pairing-link form.
+
+Reliability: exact C20 cold account refusal, original process identities,
+closed diagnostics, descriptor publication and normal C19 shutdown receipts are
+preserved under `candidate-20/mac-cold-account/`. The next native reference must
+exercise initialization and the later strict path with original-session drain;
+its result still cannot replace a fresh installed cold account read. A closed
+optional startup boolean records whether actual baseline advancement occurred,
+without exposing any console identifier or granting readiness/permission.
+
+Decision: test the bounded candidate, retain all existing stale-target/ABA
+fences, and require original cold account evidence before building the final
+shared-source pair. Full delivery and Stable remain NO-GO.
+
+Native development result for this candidate: Mac check passed in 8.7 s; the
+focused initial/strict identity policy checks passed. The separate existing-source
+reference performed initial and subsequent strict reads (12 windows each), with
+no probe diagnostic and successful original transport drain. Its advancement
+receipt was false, so the changed-seed branch is still unexercised on a real cold
+owner. Swift diagnostic typecheck passed. Original C20 remains fenced and failed;
+none of these checks restarted, repaired or accepted its installed Computer lane.

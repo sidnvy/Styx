@@ -246,6 +246,47 @@ pub(crate) struct ObservedConsoleIdentity {
     pub(crate) console_uuid: String,
     pub(crate) epoch: ConsoleEpoch,
 }
+fn console_mismatch_cause(
+    original: &ObservedConsoleIdentity,
+    current: Option<&ObservedConsoleIdentity>,
+    current_unlocked: bool,
+) -> ProbeCause {
+    if current_unlocked
+        && current.is_some_and(|current| {
+            same_console_source(original, current) && current.epoch.seed != original.epoch.seed
+        })
+    {
+        ProbeCause::ConsoleEpochChanged
+    } else {
+        ProbeCause::ConsoleChanged
+    }
+}
+fn same_console_source(
+    original: &ObservedConsoleIdentity,
+    current: &ObservedConsoleIdentity,
+) -> bool {
+    current.uid == original.uid
+        && current.audit_id == original.audit_id
+        && current.console_uuid == original.console_uuid
+        && current.epoch.root_entry_id == original.epoch.root_entry_id
+        && current.epoch.resources_entry_id == original.epoch.resources_entry_id
+}
+fn initial_console_compatible(
+    original: Option<&ObservedConsoleIdentity>,
+    current: Option<&ObservedConsoleIdentity>,
+    current_unlocked: bool,
+) -> bool {
+    current_unlocked
+        && original
+            .zip(current)
+            .is_some_and(|(original, current)| same_console_source(original, current))
+}
+fn strict_console_matches(
+    original: Option<&ObservedConsoleIdentity>,
+    current: Option<&ObservedConsoleIdentity>,
+) -> bool {
+    original.is_none_or(|original| current == Some(original))
+}
 impl NativeObservation {
     pub(crate) fn console_identity(&self) -> Option<ObservedConsoleIdentity> {
         let before = self.registry_before.selected_unique_row.as_ref()?;
@@ -298,6 +339,22 @@ impl BoundMacSource {
     /// Entire exchange stays serialized by &mut self on the original FD. No
     /// reconnect, side channel, action, hidden retry, or descriptor boolean.
     pub(crate) fn observe_native(&mut self, deadline: Instant) -> Result<NativeObservation> {
+        self.observe_native_mode(deadline, false)
+    }
+    /// Initial SDK read qualification only. Success deliberately retains the old
+    /// baseline and leaves this original FD fenced until both FD samples agree.
+    pub(in crate::providers::cua) fn observe_initial_native(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<NativeObservation> {
+        self.observe_native_mode(deadline, true)
+    }
+    fn observe_native_mode(
+        &mut self,
+        deadline: Instant,
+        initial: bool,
+    ) -> Result<NativeObservation> {
+        let started = Instant::now();
         self.fresh_binding()?;
         // Any partial protocol exchange or panic permanently fences this source.
         // A later waiter cannot consume a delayed reply as a different request.
@@ -341,15 +398,40 @@ impl BoundMacSource {
             return Err(BindingError::NativeProtocol);
         }
         let identity = value.console_identity();
-        if self
-            .native_console
-            .as_ref()
-            .is_some_and(|original| identity.as_ref() != Some(original))
-        {
+        let matches = if initial {
+            initial_console_compatible(
+                self.native_console.as_ref(),
+                identity.as_ref(),
+                value.observed_unlocked(),
+            )
+        } else {
+            strict_console_matches(self.native_console.as_ref(), identity.as_ref())
+        };
+        if !matches {
+            let cause =
+                self.native_console
+                    .as_ref()
+                    .map_or(ProbeCause::ConsoleChanged, |original| {
+                        console_mismatch_cause(
+                            original,
+                            identity.as_ref(),
+                            value.observed_unlocked(),
+                        )
+                    });
+            self.remember_probe_failure(ProbeDiagnostic::observed(
+                ProbeStage::ConsoleMatch,
+                cause,
+                started,
+                deadline,
+            ));
             return Err(BindingError::Fenced);
         }
         if value.session.status == SessionStatus::Unlocked && !value.observed_unlocked() {
             return Err(BindingError::NativeProtocol);
+        }
+        if initial {
+            self.initial_provisional = true;
+            return Ok(value);
         }
         self.native_instance = Some(value.daemon_instance.clone());
         self.native_console = identity;
@@ -357,6 +439,74 @@ impl BoundMacSource {
         // Locked/Unknown are actual typed results, never Ready. Core owns grant,
         // generation and operation admission separately from these observations.
         Ok(value)
+    }
+    /// All fallible checks precede either baseline assignment. The caller owns
+    /// both original FD guards and the sole initial-probe claim throughout.
+    pub(in crate::providers::cua) fn commit_initial_native_pair(
+        &mut self,
+        control: &mut Self,
+        before: &NativeObservation,
+        after: &NativeObservation,
+        control_after: &NativeObservation,
+        deadline: Instant,
+    ) -> Result<bool> {
+        let started = Instant::now();
+        let result: Result<bool> = (|| {
+            let before_identity = before.console_identity().ok_or(BindingError::Fenced)?;
+            let after_identity = after.console_identity().ok_or(BindingError::Fenced)?;
+            let control_identity = control_after
+                .console_identity()
+                .ok_or(BindingError::Fenced)?;
+            if !self.initial_provisional
+                || !control.initial_provisional
+                || !self.fenced
+                || !control.fenced
+                || !Arc::ptr_eq(&self.candidate, &control.candidate)
+                || self.peer_token != control.peer_token
+                || self.native_instance.as_deref() != Some(after.daemon_instance.as_str())
+                || control.native_instance.as_deref()
+                    != Some(control_after.daemon_instance.as_str())
+                || self.native_console.as_ref() != Some(&before_identity)
+                || !before.observed_unlocked()
+                || !initial_console_compatible(
+                    self.native_console.as_ref(),
+                    Some(&after_identity),
+                    after.observed_unlocked(),
+                )
+                || !initial_console_compatible(
+                    control.native_console.as_ref(),
+                    Some(&control_identity),
+                    control_after.observed_unlocked(),
+                )
+                || after_identity != control_identity
+            {
+                return Err(BindingError::Fenced);
+            }
+            self.check_binding()?;
+            control.check_binding()?;
+            if Instant::now() >= deadline {
+                return Err(BindingError::NativeProtocol);
+            }
+            let advanced = after_identity.epoch.seed != before_identity.epoch.seed;
+            self.native_console = Some(after_identity);
+            control.native_console = Some(control_identity);
+            self.initial_provisional = false;
+            control.initial_provisional = false;
+            self.fenced = false;
+            control.fenced = false;
+            Ok(advanced)
+        })();
+        if let Err(error) = result {
+            self.fence_initial_native();
+            control.fence_initial_native();
+            self.remember_probe_failure(ProbeDiagnostic::observed(
+                ProbeStage::ConsoleMatch,
+                error.probe_cause(),
+                started,
+                deadline,
+            ));
+        }
+        result
     }
     fn exchange_native_observation(&mut self, deadline: Instant) -> Result<NativeObservation> {
         self.protocol_clean = false;
@@ -657,6 +807,78 @@ impl BoundMacSource {
 #[cfg(test)]
 mod console_contract_tests {
     use super::*;
+    #[test]
+    fn seed_only_diagnostic_requires_same_unlocked_console_and_registry_sources() {
+        let original = ObservedConsoleIdentity {
+            uid: 501,
+            audit_id: 1001,
+            console_uuid: "7463ea88-7056-4b41-94d4-9b4311d2a970".into(),
+            epoch: ConsoleEpoch {
+                root_entry_id: 1,
+                resources_entry_id: 2,
+                seed: 3,
+            },
+        };
+        let mut changed = original.clone();
+        changed.epoch.seed += 1;
+        assert_eq!(
+            console_mismatch_cause(&original, Some(&changed), true),
+            ProbeCause::ConsoleEpochChanged
+        );
+        assert!(initial_console_compatible(
+            Some(&original),
+            Some(&changed),
+            true
+        ));
+        assert!(!strict_console_matches(Some(&original), Some(&changed)));
+        let committed = changed.clone();
+        assert!(strict_console_matches(Some(&committed), Some(&changed)));
+        let mut later = committed.clone();
+        later.epoch.seed += 1;
+        assert!(!strict_console_matches(Some(&committed), Some(&later)));
+        for field in 0..5 {
+            let mut other = changed.clone();
+            match field {
+                0 => other.uid += 1,
+                1 => other.audit_id += 1,
+                2 => other.console_uuid = "7b7a1188-4af2-4e4f-8d69-9bf23f28c578".into(),
+                3 => other.epoch.root_entry_id += 1,
+                _ => other.epoch.resources_entry_id += 1,
+            }
+            assert_eq!(
+                console_mismatch_cause(&original, Some(&other), true),
+                ProbeCause::ConsoleChanged
+            );
+            assert!(!initial_console_compatible(
+                Some(&original),
+                Some(&other),
+                true
+            ));
+            assert!(!strict_console_matches(Some(&committed), Some(&other)));
+        }
+        assert!(!initial_console_compatible(None, Some(&changed), true));
+        assert!(!initial_console_compatible(Some(&original), None, true));
+        assert!(!initial_console_compatible(
+            Some(&original),
+            Some(&changed),
+            false
+        ));
+        assert!(initial_console_compatible(
+            Some(&original),
+            Some(&original),
+            true
+        ));
+        for (current, unlocked) in [
+            (None, true),
+            (Some(&changed), false),
+            (Some(&original), true),
+        ] {
+            assert_eq!(
+                console_mismatch_cause(&original, current, unlocked),
+                ProbeCause::ConsoleChanged
+            );
+        }
+    }
     fn candidate() -> RegistryObservation {
         RegistryObservation {
             epoch: ConsoleEpochObservation::Cfdata4NativeEndian {

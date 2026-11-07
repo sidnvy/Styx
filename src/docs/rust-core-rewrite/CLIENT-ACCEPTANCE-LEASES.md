@@ -11,6 +11,11 @@ check and the separately scoped current read-only probe passed; original C19
 cold failure and its processes remain unchanged. The current probe is not
 cold acceptance.
 
+2026-11-08 initial-probe slice: the four-file provider source lease has returned
+to the integrator after implementation and read-only review. Native incremental
+check, focused policy and separate initial/strict read/drain reference passed;
+changed-seed cold acceptance is still pending. No agent owns a device now.
+
 Owner instruction: run the already signed-in Codex on PilotMac and NAB5 locally;
 each owns its platform client and coordinates cross-device work with the integrator.
 

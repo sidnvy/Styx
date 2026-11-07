@@ -142,6 +142,9 @@ impl DesktopSource {
                 deadline_expired: false,
             });
     }
+    pub(crate) fn startup_initial_epoch_advanced(&self) -> bool {
+        self.inner.source.initial_epoch_advanced()
+    }
     pub(crate) fn proxy_source(&self) -> Result<Arc<MacProxySource>> {
         if self.fenced() {
             return Err(DesktopSourceError::Fenced);
@@ -166,11 +169,27 @@ impl DesktopSource {
                 return Err(DesktopSourceError::Supervisor);
             }
         }
+        // Only the first retained read may establish its post-initialization
+        // console stamp. No window targets or published Computer factory exist
+        // while this observation has no window evidence. Later reads stay strict.
+        let initial_probe = self
+            .inner
+            .observations
+            .lock()
+            .map_err(|_| DesktopSourceError::Supervisor)?
+            .as_ref()
+            .ok_or(DesktopSourceError::Unavailable)?
+            .windows
+            .is_none();
         let source = self.inner.source.clone();
         *slot = Some(tokio::task::spawn_blocking(move || {
-            let (native, windows) = source
-                .observe_with_windows(Instant::now() + Duration::from_secs(10))
-                .map_err(|_| DesktopSourceError::Unavailable)?;
+            let until = Instant::now() + Duration::from_secs(10);
+            let (native, windows) = if initial_probe {
+                source.observe_initial_with_windows(until)
+            } else {
+                source.observe_with_windows(until)
+            }
+            .map_err(|_| DesktopSourceError::Unavailable)?;
             if !native.observed_unlocked() {
                 return Err(DesktopSourceError::Unavailable);
             }
