@@ -381,3 +381,50 @@ account and recovery work. Final GUI delivery and Stable remain NO-GO. Evidence:
 `/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/candidate-15/`, with
 device-local reports in the lease directories. Local Codex startup is execution
 evidence only, not a new native acceptance pass.
+
+## C15 local-owner results and bounded startup visibility correction
+
+Product: the Mac local owner performed a normal GUI Quit and one reopen. All
+five original App/Core/Cua/worker identities and the old listener/socket exited
+before reopening. Device identity, configuration, binary identities and private
+credential equality were retained. Actual account Computer then read the exact
+fixture, set its input once and pressed its button once; independent effects
+matched, including the paint-only `VIEW-MAC-47E23B` screenshot oracle. Actual
+Exec continued the original live PID across separate account turns with one
+nonempty stdin line, exit 0 and independent file/process confirmation. Browser
+nonce navigation/read/close also passed after reopen. These establish recovered
+C15 behavior; the original cold-start failure cause remains unproven.
+
+Architecture: App previously discarded the typed `computer_unavailable` startup
+event. The source correction retains its fixed code as optional private App
+status `foreground.computerStartupError`, independent of Exec transport events.
+It clears with the original Host's stop/new start and grants no admission or
+cleanup authority. Both native settings views show a normal Quit/reopen recovery
+instruction when that explicit optional-lane failure exists. This is visibility
+and guidance, not a claim to have corrected the original initialization cause.
+
+Integration: incremental `styx-runtime` check (8 jobs, existing cache) and existing
+App lifecycle/refusal/role controls passed. Mac Swift typecheck and Windows C#
+compile-only passed; neither installed C15 App was changed. The next same-source
+quality checkpoint and candidate acceptance remain required. No extra test count
+is claimed as a platform effect.
+
+Release: installed C15 remains immutable. The stale Windows enrollment guidance
+correction and optional Computer failure visibility are source-only pending the
+next candidate. Normal Mac lifecycle after all successful tool effects plus the
+saved-key edit are assigned to the same local owner, with no active account work.
+
+Reliability: NAB5's local owner independently matched its one existing click,
+input, paint-only visual oracle and one original Browser request. It found one
+App with legitimate Core descendants. Its lifecycle did not run: the test-profile
+root has two extra Codex sandbox grants; only one root node is affected, and the
+original ACL is saved. Automatic review rejected removing those grants pending
+specific owner approval. No permission repair occurred. NAB5 was disconnected
+after the coordinated Gateway reopen and must be recovered through that boundary,
+then complete account Exec, lifecycle and revoke/fresh-pairing acceptance.
+
+Decision: parallel local work produced independent effects and physical lifecycle
+evidence. Continue the full final-candidate journey; delivery and Stable remain
+NO-GO. C15 evidence is in `candidate-15/local-client-owners/`,
+`account-browser-desktop-observation/`, `account-logo-refresh/` and the device-local
+lease paths. Startup visibility checks are in `startup-failure-native-checks/`.

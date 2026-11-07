@@ -338,6 +338,11 @@ struct ConnectionStatus {
     error: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hint: Option<&'static str>,
+    #[serde(
+        rename = "computerStartupError",
+        skip_serializing_if = "Option::is_none"
+    )]
+    computer_error: Option<&'static str>,
 }
 impl ConnectionStatus {
     fn pairing_refused() -> Self {
@@ -345,6 +350,7 @@ impl ConnectionStatus {
             status: "stopped",
             exec_connection: "disconnected",
             error: Some("gateway_wss_admission_refused"),
+            computer_error: None,
             hint: Some(
                 "The Gateway refused this identity. Change this computer's role and pair again.",
             ),
@@ -357,6 +363,7 @@ impl ConnectionStatus {
             // actionable message visible without requiring a native UI change.
             exec_connection: crate::gateway::paired::CAPACITY_HINT,
             error: Some(crate::gateway::paired::CAPACITY_ERROR_CODE),
+            computer_error: None,
             hint: Some(crate::gateway::paired::CAPACITY_HINT),
         }
     }
@@ -366,6 +373,7 @@ impl ConnectionStatus {
             exec_connection: "disconnected",
             error: None,
             hint: None,
+            computer_error: None,
         }
     }
     fn unknown() -> Self {
@@ -374,6 +382,7 @@ impl ConnectionStatus {
             exec_connection: "unknown",
             error: None,
             hint: None,
+            computer_error: None,
         }
     }
 }
@@ -888,8 +897,21 @@ impl HostApp {
             let status = self.status.clone();
             let event_task = tokio::spawn(async move {
                 while let Some(event) = received.recv().await {
+                    // Computer initialization is independent of Exec transport.
+                    // Retain its fixed failure code for this original Host; later
+                    // connection events must not erase that optional-lane failure.
+                    if event.event == "computer_unavailable" {
+                        status.send_modify(|value| {
+                            value.computer_error =
+                                Some(event.reason.unwrap_or("computer_bootstrap_failed"));
+                        });
+                        continue;
+                    }
+                    let computer_error = status.borrow().computer_error;
                     if event.reason == Some(crate::gateway::paired::CAPACITY_ERROR_CODE) {
-                        status.send_replace(ConnectionStatus::hub_full());
+                        let mut value = ConnectionStatus::hub_full();
+                        value.computer_error = computer_error;
+                        status.send_replace(value);
                         continue;
                     }
                     if status.borrow().error == Some(crate::gateway::paired::CAPACITY_ERROR_CODE)
@@ -903,18 +925,21 @@ impl HostApp {
                             exec_connection: "connected",
                             error: None,
                             hint: None,
+                            computer_error,
                         },
                         "connecting" | "reconnecting" => ConnectionStatus {
                             status: "started",
                             exec_connection: "connecting",
                             error: None,
                             hint: None,
+                            computer_error,
                         },
                         "disconnected" => ConnectionStatus {
                             status: "started",
                             exec_connection: "disconnected",
                             error: None,
                             hint: None,
+                            computer_error,
                         },
                         _ => continue,
                     };
@@ -926,6 +951,7 @@ impl HostApp {
                 exec_connection: "connecting",
                 error: None,
                 hint: None,
+                computer_error: None,
             });
             let verified_runtime = self.native_runtime.clone();
             if let Some(d) = &diagnostic {

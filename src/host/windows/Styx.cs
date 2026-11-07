@@ -802,7 +802,9 @@ namespace StyxNative {
    if(Json.Yes(data,"admission_fenced")||Json.Str(data,"enrollment","status")=="awaiting_approval")return NativeStatus(data);
    if(page!="overview"&&page!="join-waiting")return "";
    string host=Json.Str(data,"foreground","status"),exec=Json.Str(data,"foreground","execConnection");
-   return host=="connected"&&exec=="connected"?"This computer is connected.":host=="started"?"Connecting this computer…":"This computer is not connected. Choose Reconnect to continue.";
+   string message=host=="connected"&&exec=="connected"?"This computer is connected.":host=="started"?"Connecting this computer…":"This computer is not connected. Choose Reconnect to continue.";
+   if(!String.IsNullOrEmpty(Json.Str(data,"foreground","computerStartupError")))message+="\nComputer Use could not start. Quit Styx normally, then reopen it.";
+   return message;
   }
   static string NativeOverviewKey(object data){return Json.Codec.Serialize(new object[]{Json.Str(data,"enrollment","status"),Json.Str(data,"foreground","error"),Json.Str(data,"runtimeUpdate","status"),Json.Yes(data,"runtimeUpdate","can_recover"),Json.Str(data,"runtimeUpdate","transaction_id"),Json.Get(data,"supportedOperations")});}
   sealed class NetworkChoice {

@@ -396,6 +396,10 @@ struct ProductView: View {
                     } else {
                         Text("Host: " + (model.status["foreground"]["status"].string ?? "unknown"))
                         Text("Exec transport: " + (model.status["foreground"]["execConnection"].string ?? "unknown"))
+                        if model.status["foreground"]["computerStartupError"].string != nil {
+                            Text(productText("Computer Use 未能启动。请正常退出 Styx 后重新打开。", "Computer Use could not start. Quit Styx normally, then reopen it."))
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     if model.status["enrollment"]["status"].string == "awaiting_approval" {
                         Text(model.status["enrollment"]["comparison_code"].string ?? "").textSelection(.enabled)
