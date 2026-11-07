@@ -586,6 +586,11 @@
       "input": "STYX_TEST_APP_CONTROL_SELECTION and STYX_TEST_APP_LAN_ADDRESS; disposable TLS Gateway and two App profiles",
       "required_for": "Native GUI admin binding, wrong-code refusal, self-revoke refusal, real enrollment and revoke effects; not installed native GUI acceptance"
     },
+    "app::maintenance_integration_tests::revoked_guest_startup_refusal_allows_fresh_role_without_replay": {
+      "kind": "explicit_signed_native_payload",
+      "input": "STYX_TEST_APP_CONTROL_SELECTION and STYX_TEST_APP_LAN_ADDRESS; disposable real TLS revoked identity and signed Host executor",
+      "required_for": "Revoked initial WSS admission, joined local cleanup, no automatic credential retry, normal Quit and preserved role backup; not installed or account acceptance"
+    },
     "app::maintenance_integration_tests::strict_settlement_with_live_exec_keeps_host_available_for_owner_cleanup": {
       "kind": "owned_signed_runtime_app_tls_native_exec_fixture",
       "input": "STYX_TEST_APP_CONTROL_SELECTION + fresh STYX_TEST_APP_SETTLE_ROOT",

@@ -340,6 +340,16 @@ struct ConnectionStatus {
     hint: Option<&'static str>,
 }
 impl ConnectionStatus {
+    fn pairing_refused() -> Self {
+        Self {
+            status: "stopped",
+            exec_connection: "disconnected",
+            error: Some("gateway_wss_admission_refused"),
+            hint: Some(
+                "The Gateway refused this identity. Change this computer's role and pair again.",
+            ),
+        }
+    }
     fn hub_full() -> Self {
         Self {
             status: "hub_full",
@@ -781,7 +791,10 @@ impl HostApp {
         Ok(())
     }
     async fn resume_desired_running(&mut self) -> Result<(), AppError> {
-        if self.running.is_some() || self.unknown {
+        if self.running.is_some()
+            || self.unknown
+            || self.observed.borrow().error == Some("gateway_wss_admission_refused")
+        {
             return Ok(());
         }
         if let Some(profile) = self.startup_profile.clone() {
@@ -812,6 +825,9 @@ impl HostApp {
         self.start_host().await
     }
     async fn connect_host(&mut self) -> Result<(), AppError> {
+        if self.observed.borrow().error == Some("gateway_wss_admission_refused") {
+            return Err(AppError("app_gateway_access_refused"));
+        }
         if self.running.is_none() {
             self.set_desired(NativeRunDesired::Running).await?;
             self.start_host().await?;
@@ -1051,6 +1067,24 @@ impl HostApp {
                         // host_run returns this admission error only after its
                         // owned local executor and input jobs have settled.
                         self.status.send_replace(ConnectionStatus::hub_full());
+                        return Ok(());
+                    }
+                    if cause == "gateway_wss_admission_refused"
+                        && events.is_ok()
+                        && !self.unknown
+                        && self
+                            .cleanup
+                            .as_ref()
+                            .is_none_or(ForegroundOutcome::is_complete)
+                    {
+                        // This fixed error comes from the initial WSS 403,
+                        // before any transport grants this Host an owner. The
+                        // original host_run returns only after its executor,
+                        // inputs and providers have physically joined. Keep
+                        // the denial visible without inventing a remote drain
+                        // receipt or clearing any prior Unknown outcome.
+                        self.status
+                            .send_replace(ConnectionStatus::pairing_refused());
                         return Ok(());
                     }
                     self.unknown = true;

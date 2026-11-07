@@ -289,3 +289,47 @@ effects are retained on PilotMac under
 Decision: Stable remains NO-GO until the above journey and explicit release
 gates close. Public signing/distribution and deferred services/auto-update are
 not silently promoted into this task.
+
+## C14 account acceptance and revoked-guest recovery correction
+
+Product: C14 (`f94260d`) was installed from its Mac DMG and Windows Inno package.
+Both native GUIs paired the real devices, and the target Custom MCP account
+proved Exec continuation, Browser nonce read/close and Computer Use input/click
+with independent effects on both machines. Normal Quit/reopen and account
+readback passed. Refreshing the installed detail retained Styx's own ripple Logo.
+GUI revocation excluded NAB5; one rejected Exec produced no forbidden marker.
+The final usable two-device handoff is still incomplete: repairing the revoked
+Windows guest exposed a startup/reconfiguration failure.
+
+Architecture: the new real TLS regression reproduced a fixed initial WSS 403
+after revocation. The original signed executor and event tasks had joined, but
+the App classified this as `app_cleanup_unknown`. Only this initial admission
+refusal is now represented as disconnected/refused; repeated startup reads and
+explicit Connect cannot resend that credential. Prior Unknown cleanup remains
+fenced and no remote drain receipt is invented. Role changes retain the original
+strict remote-cleanup preflight. Both native UIs now guide an already locally
+stopped user to Quit/reopen when that preflight cannot confirm remote cleanup,
+and direct a refused identity to fresh pairing instead of Reconnect.
+
+Integration: the disposable signed-runtime/TLS scenario failed before the fix
+with `gateway_wss_admission_refused` followed by `app_cleanup_unknown`, and passed
+after the correction, including physical role-backup paths and no startup retry.
+The existing Unknown/quit/role controls and both native UI compile-only checks
+passed. The ignored scenario is explicitly registered because it requires an
+owner-provided signed payload and LAN address; no dependency was added.
+
+Release: these recovery corrections are source-only until a new same-source
+candidate is packaged, installed and exercised. C14 remains immutable; its
+installed passes do not prove the corrected recovery path.
+
+Reliability: the original Windows App/Core were normally exited once after the
+first preflight refusal. The reopened old C14 App remains preserved for diagnosis;
+no forced termination, profile rewrite, credential transfer or automatic replay
+was used. The UI runner's earlier Windows Text-type comparison failure is retained
+separately from the independently verified successful runtime reopen.
+
+Decision: continue to the integration checkpoint and next candidate; final GUI
+delivery and Stable remain NO-GO. Evidence is under
+`/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/candidate-14/` and
+`revocation-investigation/`. The reference uses its declared signed fixture;
+it is not a claim about the next installed package or its native pixels.

@@ -1,5 +1,6 @@
 //! Real signed C08 + completed strict-TLS local enrollment and original C07.
-//! No installed root, Host executor, publisher private key or canonical edit.
+//! No installed root, publisher private key or canonical edit. The revoked
+//! guest scenario also starts the original signed Host executor.
 use super::*;
 use crate::{release, store::native_host_snapshot, store::native_state};
 use std::{
@@ -29,6 +30,128 @@ fn write_new(path: &Path, bytes: &[u8]) {
         .unwrap();
     file.write_all(bytes).unwrap();
     file.sync_all().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires STYX_TEST_APP_CONTROL_SELECTION and STYX_TEST_APP_LAN_ADDRESS; real TLS revoked identity and signed Host executor"]
+async fn revoked_guest_startup_refusal_allows_fresh_role_without_replay() {
+    let selection_file = PathBuf::from(std::env::var("STYX_TEST_APP_CONTROL_SELECTION").unwrap());
+    let selection: NativeRuntimeSelection =
+        serde_json::from_slice(&fs::read(selection_file).unwrap()).unwrap();
+    let lan = std::env::var("STYX_TEST_APP_LAN_ADDRESS").unwrap();
+    let top = std::env::temp_dir().join(format!("styx-revoked-repair-{}", uuid::Uuid::new_v4()));
+    directory(&top);
+    let (mut hub, candidate) = enroll_on(&top.join("hub"), &selection, Some(lan)).await;
+    hub.local_gateway.as_mut().unwrap().start().await.unwrap();
+    let invite = hub
+        .dispatch(Operation::InviteComputer, raw(json!({"authorize":true})))
+        .await
+        .unwrap();
+    let guest_dir = top.join("guest");
+    directory(&guest_dir);
+    let profile = guest_dir.join("profile");
+    let mut guest = HostApp::open_native(&profile, &candidate).await.unwrap();
+    let inspected = guest
+        .dispatch(Operation::InspectJoin, raw(json!({"link":invite["link"]})))
+        .await
+        .unwrap();
+    guest.dispatch(Operation::Join, raw(json!({"label":"Revoked recovery guest","computer":false,"browser":false,"persistLogin":false,
+        "approvedGatewayOrigin":inspected["preview"]["origin"],"approvedCaSha256":inspected["preview"]["caSha256"]}))).await.unwrap();
+    let pending = hub
+        .dispatch(Operation::PendingComputers, raw(json!({})))
+        .await
+        .unwrap();
+    let row = &pending["pending"][0];
+    hub.dispatch(Operation::ApproveComputer, raw(json!({"authorize":true,"requestId":row["request_id"],"deviceId":row["device_id"],"fingerprint":row["fingerprint"],
+        "comparisonCode":row["comparison_code"],"enableComputer":false,"enableBrowser":false}))).await.unwrap();
+    native_join::claim_for_app(guest.scope.clone(), None)
+        .await
+        .unwrap();
+    // Persist the same Running intent a real App resumes. No executor has
+    // started yet; the next original App must actually encounter revoked TLS
+    // admission, rather than receiving an injected worker result.
+    guest.set_desired(NativeRunDesired::Running).await.unwrap();
+    drop(guest);
+    hub.dispatch(
+        Operation::RevokeComputer,
+        raw(json!({"authorize":true,"deviceId":row["device_id"]})),
+    )
+    .await
+    .unwrap();
+    let inventory = hub
+        .dispatch(Operation::Computers, raw(json!({})))
+        .await
+        .unwrap();
+    assert_eq!(inventory["devices"].as_array().unwrap().len(), 1);
+    let mut guest = HostApp::open_native(&profile, &candidate).await.unwrap();
+    guest
+        .dispatch(Operation::StartupStatus, raw(json!({})))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !guest
+            .running
+            .as_ref()
+            .is_some_and(|role| role.worker.is_finished())
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("original revoked admission must terminate");
+    let observed = guest.dispatch(Operation::Status, raw(json!({}))).await;
+    assert!(
+        observed.is_ok(),
+        "actual revoked startup result: {:?}",
+        observed.as_ref().err().map(AppError::code)
+    );
+    let observed = observed.unwrap();
+    assert_eq!(
+        observed["foreground"]["error"],
+        "gateway_wss_admission_refused"
+    );
+    assert_eq!(observed["admission_fenced"], false);
+    assert!(guest.running.is_none());
+    // Repeated observation must not retry the rejected credential. Explicit
+    // reconfiguration preserves the old identity as a backup instead.
+    guest
+        .dispatch(Operation::StartupStatus, raw(json!({})))
+        .await
+        .unwrap();
+    assert!(guest.running.is_none());
+    assert_eq!(
+        guest
+            .dispatch(Operation::Connect, raw(json!({})))
+            .await
+            .unwrap_err()
+            .code(),
+        "app_gateway_access_refused"
+    );
+    assert!(guest.running.is_none());
+    let quitting = guest
+        .dispatch(Operation::QuitAdmission, raw(json!({})))
+        .await
+        .unwrap();
+    assert_eq!(quitting["quit"]["status"], "ready_to_quit");
+    let retired = guest
+        .dispatch(
+            Operation::RetireRole,
+            raw(json!({"allowOtherDevices":false})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retired["retirement"]["outcome"], "retired");
+    assert!(!profile.exists());
+    for path in retired["retirement"]["retired"].as_array().unwrap() {
+        assert!(!Path::new(path["oldPath"].as_str().unwrap()).exists());
+        assert!(Path::new(path["newPath"].as_str().unwrap()).exists());
+    }
+    assert!(guest.enrollment.is_none() && guest.configuration.is_none());
+    assert!(!guest.admission_fenced());
+    hub.settle_all().await.unwrap();
+    drop(guest);
+    drop(hub);
+    fs::remove_dir_all(top).unwrap();
 }
 // Hashes avoid exposing private enrollment material if an assertion fails.
 fn tree(path: &Path) -> Vec<(PathBuf, u64, String)> {

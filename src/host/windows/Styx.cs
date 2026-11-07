@@ -692,7 +692,7 @@ namespace StyxNative {
    var stopped=await owner.Call("quitAdmission");if(Json.Str(stopped,"quit","status")!="ready_to_quit")throw new IOException();
    // The C# 5 compiler does not allow await inside catch blocks.
    NativeOperationException refusal=null;object result=null;
-   try{result=await owner.Call("retireRole",Json.Obj("allowOtherDevices",false));}catch(NativeOperationException failure){if(failure.Code!="role_retire_gateway_has_devices")throw;refusal=failure;}
+   try{result=await owner.Call("retireRole",Json.Obj("allowOtherDevices",false));}catch(NativeOperationException failure){if(failure.Code=="app_cleanup_unknown"){Feedback("This computer has stopped, but the Gateway did not confirm cleanup. Quit and reopen Styx, then change this computer's role to pair again. No settings reset was repeated.");return;}if(failure.Code!="role_retire_gateway_has_devices")throw;refusal=failure;}
    if(refusal!=null){
     var devices=Json.Get(refusal.Retirement,"otherDevices") as object[];if(devices==null||devices.Length==0)throw new IOException();
     var names=new System.Text.StringBuilder();foreach(var device in devices)names.AppendLine(Json.Str(device,"label")+" ("+Json.Str(device,"deviceId")+")");
@@ -798,12 +798,13 @@ namespace StyxNative {
   }
   string NativeStatus(object data){var enrollment=Json.Get(data,"enrollment");string text="Exec transport: "+Json.Str(data,"foreground","execConnection")+"\nHost: "+Json.Str(data,"foreground","status");if(Json.Get(data,"gateway")!=null)text+="\nLocal gateway address: "+Json.Str(data,"gateway","origin")+"\nLocal gateway: "+(Json.Yes(data,"gateway","running")&&Json.Yes(data,"gateway","listening")?"running":"status not confirmed");if(Json.Yes(data,"gateway","lan","enabled")&&!String.IsNullOrEmpty(Json.Str(data,"gateway","lan","origin")))text+="\nOther computers on your network can join at "+Json.Str(data,"gateway","lan","origin")+". Choose Add computer to create an invitation.";if(Json.Yes(data,"admission_fenced"))text+="\nThe last setup result is unconfirmed. Refresh status to review it; your existing settings have been retained.";string status=Json.Str(enrollment,"status");if(status.Length>0)text+="\nEnrollment: "+status+"\nDevice: "+Json.Str(enrollment,"device_id");if(status=="awaiting_approval")text+="\nCompare on your Gateway: "+Json.Str(enrollment,"comparison_code")+"\nFingerprint: "+Json.Str(enrollment,"fingerprint")+"\nApproval must be performed on the Gateway. Then check confirmation here.";return text+"\nTool execution, desktop control and target ChatGPT account acceptance are not inferred from connection status.";}
   string NativeSettingsStatus(object data){
+   if(Json.Str(data,"foreground","error")=="gateway_wss_admission_refused")return "The Gateway refused this computer's access. Change this computer's role to pair again.";
    if(Json.Yes(data,"admission_fenced")||Json.Str(data,"enrollment","status")=="awaiting_approval")return NativeStatus(data);
    if(page!="overview"&&page!="join-waiting")return "";
    string host=Json.Str(data,"foreground","status"),exec=Json.Str(data,"foreground","execConnection");
    return host=="connected"&&exec=="connected"?"This computer is connected.":host=="started"?"Connecting this computer…":"This computer is not connected. Choose Reconnect to continue.";
   }
-  static string NativeOverviewKey(object data){return Json.Codec.Serialize(new object[]{Json.Str(data,"enrollment","status"),Json.Str(data,"runtimeUpdate","status"),Json.Yes(data,"runtimeUpdate","can_recover"),Json.Str(data,"runtimeUpdate","transaction_id"),Json.Get(data,"supportedOperations")});}
+  static string NativeOverviewKey(object data){return Json.Codec.Serialize(new object[]{Json.Str(data,"enrollment","status"),Json.Str(data,"foreground","error"),Json.Str(data,"runtimeUpdate","status"),Json.Yes(data,"runtimeUpdate","can_recover"),Json.Str(data,"runtimeUpdate","transaction_id"),Json.Get(data,"supportedOperations")});}
   sealed class NetworkChoice {
    internal string Name,Address;
    public override string ToString(){return String.IsNullOrEmpty(Address)?Name:Name+" · "+Address;}
@@ -899,7 +900,7 @@ namespace StyxNative {
    }else if(name=="overview"||name=="join-waiting"){
     Explain("Styx keeps your local connection and gateway running while the App is open. If you joined another computer, its gateway is still used.",85);RefreshAction();string enrollment=Json.Str(owner.CurrentStatus,"enrollment","status");
     if(enrollment=="awaiting_approval")NativeAction("Check confirmation","claimJoin",async()=>{var result=await owner.Call("claimJoin");string actual=Json.Str(result,"status");if(actual!="awaiting_approval"&&actual!="ready_to_connect")throw new IOException();await owner.RefreshAfterMutation();ShowPage("overview");bool connected=Json.Str(owner.CurrentStatus,"foreground","status")=="connected"&&Json.Str(owner.CurrentStatus,"foreground","execConnection")=="connected";Feedback(actual=="awaiting_approval"?"The Gateway has not approved this request. No connection was started.":connected?"The Gateway confirmed this identity and this computer is connected.":"The Gateway confirmed this identity. Choose Reconnect to start the Host.");});
-    NativeAction("Reconnect","connect",async()=>{await owner.Call("connect");await owner.RefreshAfterMutation();Feedback(StyxContext.ReconnectResult(owner.CurrentStatus));});NativeAction("Pause","disconnect",async()=>{await owner.Call("disconnect");await owner.RefreshAfterMutation();});
+    if(Json.Str(owner.CurrentStatus,"foreground","error")!="gateway_wss_admission_refused")NativeAction("Reconnect","connect",async()=>{await owner.Call("connect");await owner.RefreshAfterMutation();Feedback(StyxContext.ReconnectResult(owner.CurrentStatus));});NativeAction("Pause","disconnect",async()=>{await owner.Call("disconnect");await owner.RefreshAfterMutation();});
     NativeAction("Change this computer's role…","retireRole",ChangeRole);
     if(owner.Supports("computers")){
      NativeAction("Computers…","computers",ShowNativeComputers);

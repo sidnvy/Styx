@@ -127,7 +127,7 @@ enum ProductPreparationPolicy {
 
 enum ProductBrowserPreparation: Equatable { case notRequired, prepare, needsReview }
 enum ProductForegroundTransition: Equatable { case stopped, owned, needsReview }
-enum ProductWorkflowError: Error { case browserPreparationNeedsReview, capabilityNeedsOfflineReview, foregroundStopUnconfirmed, capabilityChangeInterrupted, foregroundRecoveryRequired, computerPermissionRecoveryRequired }
+enum ProductWorkflowError: Error { case browserPreparationNeedsReview, capabilityNeedsOfflineReview, foregroundStopUnconfirmed, capabilityChangeInterrupted, foregroundRecoveryRequired, computerPermissionRecoveryRequired, roleChangeNeedsRestart }
 
 // Desired selection does not grant a capability. These decisions use Core's
 // current approved Host projection and refuse absent or uncertain observations.
@@ -187,6 +187,7 @@ enum ProductRestorationPolicy {
             let result: ProductJSON
             do { result = try await client.native("retireRole", ["allowOtherDevices": .bool(false)]) }
             catch let failure as ProductOwnedCoreRejection {
+                if failure.response["error"].string == "app_cleanup_unknown" { throw ProductWorkflowError.roleChangeNeedsRestart }
                 guard failure.response["error"].string == "role_retire_gateway_has_devices" else { throw failure }
                 let devices = failure.response["retirement"]["otherDevices"].array
                 guard !devices.isEmpty else { throw ProductCoreError.invalidResponse }
@@ -686,6 +687,8 @@ enum ProductRestorationPolicy {
         }
         // Never interpolate raw transport errors, response bodies or secrets.
         switch failure as? ProductWorkflowError {
+        case .roleChangeNeedsRestart:
+            error = productText("这台电脑已停止连接，但网关尚未确认清理。请退出并重新打开 Styx，再更改角色并配对；不会重复重置设置。", "This computer has stopped, but the Gateway did not confirm cleanup. Quit and reopen Styx, then change its role to pair again. No settings reset was repeated.")
         case .browserPreparationNeedsReview:
             error = productText("浏览器尚未准备好。请点击“重新检查”；若这台电脑由邀请加入，请先在发出邀请的电脑上允许浏览器自动化。", "The browser is not ready. Select Check again. If this computer joined by invitation, first allow Browser Automation on the computer that invited it.")
         case .capabilityNeedsOfflineReview:

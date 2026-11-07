@@ -402,7 +402,9 @@ struct ProductView: View {
                         Text(model.status["enrollment"]["fingerprint"].string ?? "").font(.caption).textSelection(.enabled)
                         Button(productText("检查批准", "Check confirmation")) { model.nativeClaim() }
                     }
-                    if model.nativeSupportsOperation("connect") {
+                    if model.status["foreground"]["error"].string == "gateway_wss_admission_refused" {
+                        Text(productText("网关拒绝了这台电脑的访问。请更改这台电脑的角色并重新配对。", "The Gateway refused this computer's access. Change this computer's role to pair again.")).foregroundStyle(.secondary)
+                    } else if model.nativeSupportsOperation("connect") {
                         Button(productText("重新连接", "Reconnect")) { model.resumeForeground() }.disabled(model.busy || model.status["admission_fenced"].bool)
                     }
                     if model.nativeSupportsOperation("disconnect") {
