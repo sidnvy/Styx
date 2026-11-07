@@ -756,7 +756,11 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
                     if runtime == nil { runtime = try RuntimeDirectory() }
                     try start()
                 }
-            } else { stop(); statusLine?.title = "Computer Use is not enabled in this session" }
+            } else {
+                // A fenced or disconnected Host can still own native FDs.
+                // Withdraw discovery while its original Core settles them.
+                withdrawNativeComputerUse("Computer Use is not enabled in this session")
+            }
         } catch {
             guard nativeCore === core, nativeComponentObservation == observation, !nativeComputerRecoveryInProgress else { return }
             withdrawNativeComputerUse("Core status unavailable; Computer Use withdrawn")

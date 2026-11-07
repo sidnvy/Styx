@@ -84,6 +84,27 @@ Native Swift typechecking passed; installed verification remains pending.
 NAB5's candidate-5 installation failed with zero free bytes on C: and Inno
 completed rollback. This is an installation failure, not Windows acceptance;
 the original failure log is retained and a new attempt requires available space.
+On follow-up, 21 inactive historical Windows installer files were copied to D:
+with SHA-256 and alternate-stream verification before removing the C: copies.
+This released 3.31 GB; candidate-6 Inno then installed successfully on NAB5 and
+the GUI reached the join form with the requested Computer and Browser choices.
+Candidate-6 Mac local Exec and Browser passed, but Computer returned
+SESSION_DISCONNECTED before dispatch. The console was logged in; the earlier
+lock-screen inference was incorrect. macOS logs prove the first tray Quit was
+blocked by the open Tunnel sheet. After dismissing it, normal Quit still did
+not settle. A subsequent invitation committed, but its link was not returned.
+The enrollment clock led the independently recorded wall-clock commit time by
+77 ms. Link export now caps the advertised expiry at the original dispatch
+wall-time deadline and the committed Gateway deadline. Confirmed mutation
+replies are separated from local link-rendering failures. A focused regression
+and the disposable real-TLS computer-management scenario passed.
+The Mac component-status false branch now withdraws discovery while retaining
+the daemon for the live Core's original transports. Swift typechecking passed;
+the next installed candidate must verify session recovery and normal Quit.
+Candidate-6 recovery required TERM then KILL after exact image/parent checks,
+no child workers or remote clients, expired committed invites, no pending
+pairings, and unchanged desktop fixture output. This remains failed lifecycle
+acceptance; the failed App and Core were not counted as a normal Quit.
 The independent account Tunnel was created with explicit owner approval:
 `tunnel_6aee2359dfb48191b3a50e2ba095b595`. Pairing, Computer Use and account
 acceptance must still be rerun on the final candidate; production stays intact.

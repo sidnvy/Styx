@@ -13,6 +13,7 @@ use zeroize::Zeroizing;
 const MAX_LINK: usize = 32_768;
 const MAX_CA: usize = 12_000;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+pub(super) const MAX_LIFETIME_MS: u64 = 600_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PairingLinkError(&'static str);
@@ -110,12 +111,35 @@ fn validate_expiry(expires: u64, now_ms: u64) -> Result<()> {
         || expires > MAX_SAFE_INTEGER
         || expires <= now_ms
         || now_ms
-            .checked_add(600_000)
+            .checked_add(MAX_LIFETIME_MS)
             .is_none_or(|last| expires > last)
     {
         return Err(error("pairing_link_expired_or_invalid"));
     }
     Ok(())
+}
+
+/// The local Gateway can advance its enrollment clock beyond wall time.
+/// Export a deadline that neither exceeds its committed expiry nor starts
+/// a fresh validity window when the reply arrives.
+pub(super) fn local_export_expiry(
+    gateway_expires_ms: u64,
+    dispatched_wall_ms: u64,
+    now_ms: u64,
+) -> Result<u64> {
+    let invalid = || error("pairing_link_expired_or_invalid");
+    if gateway_expires_ms > MAX_SAFE_INTEGER
+        || dispatched_wall_ms == 0
+        || dispatched_wall_ms > now_ms
+    {
+        return Err(invalid());
+    }
+    let dispatch_deadline = dispatched_wall_ms
+        .checked_add(MAX_LIFETIME_MS)
+        .ok_or_else(invalid)?;
+    let expires = gateway_expires_ms.min(dispatch_deadline);
+    validate_expiry(expires, now_ms)?;
+    Ok(expires)
 }
 // JS RegExp \s includes BOM but excludes NEL. Match the original PEM suffix.
 fn js_whitespace(c: char) -> bool {
@@ -460,6 +484,26 @@ mod tests {
                 .is_err()
         );
         assert!(inspect(&link(&raw(NOW + 600_000)), NOW).is_ok());
+    }
+    #[test]
+    fn local_export_bounds_logical_clock_lead_and_never_extends_an_invite() {
+        let received = NOW + 40;
+        let logical_expiry = NOW + MAX_LIFETIME_MS + 123;
+        assert!(inspect(&link(&raw(logical_expiry)), received).is_err());
+        let expiry = local_export_expiry(logical_expiry, NOW, received).unwrap();
+        assert_eq!(expiry, NOW + MAX_LIFETIME_MS);
+        assert_eq!(
+            inspect(&link(&raw(expiry)), received)
+                .unwrap()
+                .preview()
+                .expires_at,
+            expiry
+        );
+        let shorter = NOW + 60_000;
+        assert_eq!(local_export_expiry(shorter, NOW, received), Ok(shorter));
+        assert!(local_export_expiry(shorter, NOW, shorter).is_err());
+        assert!(local_export_expiry(logical_expiry, NOW, NOW - 1).is_err());
+        assert!(local_export_expiry(MAX_SAFE_INTEGER + 1, NOW, received).is_err());
     }
     #[test]
     fn noncanonical_and_schema_confusion_never_become_inspected() {
