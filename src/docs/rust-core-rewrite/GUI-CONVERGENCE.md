@@ -130,6 +130,32 @@ before the Rust adapter. Rust reports configured status with separately observed
 ready transport health; the existing self-test now expects that pair as connected
 while keeping unobserved configured state unknown. Account connection, saved-key
 editing, installed Logo refresh and disposable guest revocation remain pending.
+Candidate-8 (d6fb84c, Mac 1122 and Windows 0.4.20261107.8, fresh guest H)
+installed and completed real GUI invitation, mismatched-code cancellation,
+approval, claim and reconnect. The installed Mac descriptor regression passed
+119256 actual protected reads with zero failures over ten seconds. That narrow
+regression does not establish desktop or account acceptance.
+With explicit owner approval, Custom MCP `Styx GUI Acceptance` was created and
+connected to the independent acceptance Tunnel. Refreshing its installed detail
+retained the black Styx ripple Logo. A real ChatGPT conversation listed both
+new identities, and separate Exec calls created unique files on both machines;
+independent SSH readback matched their nonce. However, immediate write_stdin
+returned unknown_session, including polling in the same assistant turn. The
+first Windows call supplied an unsupported shell alias and was definitely
+refused; the later default-shell call was dispatched once. Neither file command
+was replayed after dispatch. Account Computer Use returned not-dispatched
+capability_unsupported on Mac and capacity_busy on Windows. A same-session local
+Mac read also returned capability_unsupported. Their causes remain unproven.
+Saving the existing Tunnel from the Mac GUI preserved the exact key bytes on
+that machine but failed to restore the connection. This is failed save/recovery
+acceptance, not a passed key-edit journey. No secret was exported in evidence.
+The Mac address clarification is checked in as cbf48fe and Swift-checked, but is
+not yet in installed build 1122. A bounded, private-file-opt-in Tunnel diagnostic
+now records only tool names and hashes of transport/correlation identifiers;
+payloads, raw identifiers and credentials are excluded. Its disabled, forged
+marker, bounded retention, correlation and private-permission controls passed.
+It changes no owner or admission rules. The next diagnostic candidate must
+establish the actual transport facts before a session-binding fix is selected.
 Evidence: `/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/`, with
 exact fdb1ef9 inputs and quality receipt under `candidate-2/`. Installed native
 effects are retained on PilotMac under

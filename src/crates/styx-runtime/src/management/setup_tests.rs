@@ -75,13 +75,14 @@ fn setup_tunnel_observation_ignores_foreign_markers_and_contains_only_metadata()
     let observer = crate::foreground::tunnel::observe_requests(&gateway)
         .unwrap()
         .unwrap();
-    observer.record(b"forged-marker");
+    let call = rmcp::model::CallToolRequestParams::new("list_execution_environments");
+    observer.record(b"forged-marker", None, &call);
     assert_eq!(
         crate::foreground::tunnel::request_observation(&gateway).unwrap()["requests"],
         0
     );
     let marker = read_private(&gateway.join("tunnel/request-marker"), 128).unwrap();
-    observer.record(&marker);
+    observer.record(&marker, None, &call);
     let value = crate::foreground::tunnel::request_observation(&gateway).unwrap();
     assert_eq!(value["requests"], 1);
     assert!(value["last_seen_unix_ms"].as_u64().unwrap() > 0);

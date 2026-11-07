@@ -28,9 +28,15 @@ pub(crate) struct RequestObservation {
     path: PathBuf,
     root: PrivateRoot,
     counters: std::sync::Mutex<(u64, Option<u64>)>,
+    session_diagnostics: Option<std::sync::Mutex<std::collections::VecDeque<serde_json::Value>>>,
 }
 impl RequestObservation {
-    pub(crate) fn record(&self, marker: &[u8]) {
+    pub(crate) fn record(
+        &self,
+        marker: &[u8],
+        session: Option<&str>,
+        request: &rmcp::model::CallToolRequestParams,
+    ) {
         if aws_lc_rs::constant_time::verify_slices_are_equal(marker, &self.marker).is_err() {
             return;
         }
@@ -43,12 +49,45 @@ impl RequestObservation {
         let mut count = self.counters.lock().unwrap_or_else(|e| e.into_inner());
         count.0 = count.0.saturating_add(1);
         count.1 = Some(now);
+        // Explicit, private-file opt-in for a bounded acceptance diagnostic.
+        // Never retain request arguments, raw metadata, headers or identities.
+        // These observations grant no authority and cannot alter admission.
+        if let Some(rows) = &self.session_diagnostics {
+            let mut rows = rows.lock().unwrap_or_else(|e| e.into_inner());
+            if rows.len() == 32 {
+                rows.pop_front();
+            }
+            rows.push_back(session_diagnostic(session, request, now));
+            if let Ok(bytes) = serde_json::to_vec(&serde_json::json!({"schema":1,"calls":*rows})) {
+                let _ = atomic_write(&self.path, &self.root, "session-observation.json", &bytes);
+            }
+        }
         if let Ok(bytes) = serde_json::to_vec(
             &serde_json::json!({"schema":1,"requests":count.0,"last_seen_unix_ms":count.1}),
         ) {
             let _ = atomic_write(&self.path, &self.root, "request-observation.json", &bytes);
         }
     }
+}
+fn session_diagnostic(
+    session: Option<&str>,
+    request: &rmcp::model::CallToolRequestParams,
+    now: u64,
+) -> serde_json::Value {
+    use styx_contracts::identity::Sha256Digest;
+    let hash = |value: &str| Sha256Digest::of_bytes(value.as_bytes()).to_hex();
+    let meta = serde_json::to_value(&request.meta).unwrap_or(serde_json::Value::Null);
+    let correlation = ["openai/session", "openai/subject", "openai/organization"]
+        .into_iter()
+        .map(|name| {
+            (
+                name,
+                meta.get(name).and_then(serde_json::Value::as_str).map(hash),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    serde_json::json!({"at_unix_ms":now,"tool":request.name,
+        "transport_session_sha256":session.map(hash),"correlation_sha256":correlation})
 }
 pub(crate) fn observe_requests(state: &Path) -> Result<Option<Arc<RequestObservation>>> {
     let Some((path, root)) = directory(state, false)? else {
@@ -60,6 +99,10 @@ pub(crate) fn observe_requests(state: &Path) -> Result<Option<Arc<RequestObserva
     let old = request_observation(state)?;
     let marker = Zeroizing::new(uuid::Uuid::new_v4().simple().to_string().into_bytes());
     atomic_write(&path, &root, "request-marker", &marker)?;
+    let session_diagnostics = root
+        .read_raw("session-diagnostics.enabled", 16)
+        .is_ok_and(|raw| raw.bytes() == b"schema=1\n")
+        .then(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
     Ok(Some(Arc::new(RequestObservation {
         marker,
         path,
@@ -68,6 +111,7 @@ pub(crate) fn observe_requests(state: &Path) -> Result<Option<Arc<RequestObserva
             old["requests"].as_u64().unwrap_or(0),
             old["last_seen_unix_ms"].as_u64(),
         )),
+        session_diagnostics,
     })))
 }
 /// Private metadata only: no request body, headers, account or conversation ID.
@@ -971,6 +1015,67 @@ mod tests {
             key_file: format!("key-{}", "a".repeat(32)),
             auto_start: true,
         }
+    }
+    #[test]
+    fn session_diagnostic_requires_opt_in_marker_and_never_records_payloads() {
+        let dir = Temporary::new();
+        let key = dir.0.join("input-key");
+        private(&key, b"sk-abcdefghijklmnop");
+        configure(&dir.0, "tunnel_abcdefgh", &key, true, true).unwrap();
+        let request: rmcp::model::CallToolRequestParams =
+            serde_json::from_value(serde_json::json!({
+                "name":"exec_command","arguments":{"cmd":"SECRET_COMMAND"},
+                "_meta":{"openai/session":"PRIVATE_CONVERSATION","openai/subject":"PRIVATE_SUBJECT",
+                    "unrelated":"PRIVATE_METADATA"}
+            }))
+            .unwrap();
+        let output = dir.0.join("tunnel/session-observation.json");
+        let observation = observe_requests(&dir.0).unwrap().unwrap();
+        observation.record(&observation.marker, Some("PRIVATE_TRANSPORT"), &request);
+        assert!(
+            !output.exists(),
+            "disabled diagnostics must not retain calls"
+        );
+        private(
+            &dir.0.join("tunnel/session-diagnostics.enabled"),
+            b"schema=1\n",
+        );
+        let observation = observe_requests(&dir.0).unwrap().unwrap();
+        observation.record(b"wrong-marker", Some("PRIVATE_TRANSPORT"), &request);
+        assert!(
+            !output.exists(),
+            "unverified marker must not create diagnostic output"
+        );
+        for _ in 0..33 {
+            observation.record(&observation.marker, Some("PRIVATE_TRANSPORT"), &request);
+        }
+        let raw = fs::read_to_string(&output).unwrap();
+        for secret in [
+            "SECRET_COMMAND",
+            "PRIVATE_CONVERSATION",
+            "PRIVATE_SUBJECT",
+            "PRIVATE_METADATA",
+            "PRIVATE_TRANSPORT",
+        ] {
+            assert!(!raw.contains(secret));
+        }
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["calls"].as_array().unwrap().len(), 32);
+        assert_eq!(value["calls"][0]["tool"], "exec_command");
+        assert!(value["calls"][0]["correlation_sha256"]["openai/session"].is_string());
+        let other = session_diagnostic(Some("another-transport"), &request, 0);
+        assert_eq!(
+            other["correlation_sha256"],
+            value["calls"][0]["correlation_sha256"]
+        );
+        assert_ne!(
+            other["transport_session_sha256"],
+            value["calls"][0]["transport_session_sha256"]
+        );
+        assert_eq!(
+            fs::metadata(output).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
     #[test]
     fn tunnel_arguments_match_v0_0_17_exactly() {
