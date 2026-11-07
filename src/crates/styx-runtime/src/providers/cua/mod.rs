@@ -1221,6 +1221,14 @@ impl CuaActionSlot {
             return refused("native_client_missing", CuaError::ProtocolMismatch);
         };
         let peer = client.peer().clone();
+        // Only this validated, purpose-bound private Mac read can interpret the
+        // pinned bridge's explicit incomplete-read refusal. A reply cannot opt
+        // itself into this context, and other platforms keep their prior path.
+        let ax_read_reply = if cfg!(target_os = "macos") {
+            driver_result::AxReadReplyContext::for_action(&action, permit.purpose())
+        } else {
+            None
+        };
         let params = CallToolRequestParams::new(action.name).with_arguments(action.arguments);
         if bounded_bytes(&params, REQUEST_BYTES - 1024).is_err() {
             return refused("request_bound", CuaError::InvalidRequest);
@@ -1253,6 +1261,8 @@ impl CuaActionSlot {
                 write_gate.expect("checked write gate"),
             )
             .await
+        } else if let Some(read) = ax_read_reply {
+            driver_result::invoke_ax_read(&peer, params, &self.resource.stop, until, read).await
         } else {
             driver_result::invoke(&peer, params, &self.resource.stop, until).await
         };

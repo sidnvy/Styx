@@ -917,7 +917,11 @@ namespace StyxNative {
    }else if(name=="chat"){
     if(owner.Supports("tunnelSave")){NativeAction("Configure Tunnel…","tunnelSave",EditNativeTunnel);NativeAction("Check Tunnel status","tunnelStatus",async()=>{var value=await owner.Call("tunnelStatus");Feedback(Json.Str(value,"tunnelId")+"\n"+Json.Str(value,"status")+" / "+Json.Str(value,"transport"));});}
     if(owner.Supports("tunnelSave")){CustomMcpGuide();RefreshAction();}
-    else{
+    else if(NeedsNativeSetup(owner.CurrentStatus)){
+     StyxContext.Heading(content,"Finish setting up Styx");
+     Explain("Set up this computer or join an existing Gateway first. Then configure ChatGPT on your main computer.");
+     Action("Open setup",()=>{ShowPage("welcome");return Task.FromResult(0);},false);
+    }else{
      StyxContext.Heading(content,"Managed on the main computer");
      Explain("This computer uses the main computer's Styx connection. Configure ChatGPT on the computer that invited you.");
      Action("Open ChatGPT Plugins",()=>{Process.Start("https://chatgpt.com/plugins");return Task.FromResult(0);},false);

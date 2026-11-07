@@ -650,3 +650,60 @@ no probe diagnostic and successful original transport drain. Its advancement
 receipt was false, so the changed-seed branch is still unexercised on a real cold
 owner. Swift diagnostic typecheck passed. Original C20 remains fenced and failed;
 none of these checks restarted, repaired or accepted its installed Computer lane.
+
+## C21 full Mac effects and bounded read-refusal correction
+
+Product: original C21 Mac App82305 passed actual account window enumeration,
+complete AX tree and pixels before any restart. Exec retained original shell
+PID82896 across calls, accepted one nonempty input and exited 0; independent
+files matched. Browser read its fresh nonce page, closed, and independent HTTP
+logs showed exactly one nonce GET. Computer wrote one input and pressed once;
+independent fixture state matched, including paint-only `VIEW-MAC-62FC10` read
+from actual pixels. Windows C21 Inno installed M, original L App/Core/conhost
+exited 0, and ChatGPT→Computers retained the fresh Join entry. Windows pairing
+and actual effects are still pending; these are C21 results, not later acceptance.
+
+Architecture: one actual Add computer press created a native invitation AXSheet.
+Reading its separately CG-listed ID returned `outcome_unknown`; a later parent
+read was also blocked. The pinned native lookup enumerates AXWindows without
+separate sheet lookup. More importantly, its signed private incomplete-read
+reply explicitly declares a six-field known refusal, but the Rust result decoder
+previously treated that structure as Unknown and fenced the caller context.
+The precise first native code was not retained, so that subcause is unproven.
+The correction recognizes only exact private read refusals after validated Core
+accessibility-read purpose; it preserves setter/click, timeout, malformed and
+unknown outcomes. Marker-free existing refusals retain their earlier rules.
+No native SDK replacement, sheet-support expansion, Gateway retry or old-target
+revival is introduced. C22 must show safe refusal followed by a distinct valid
+read on the same worker, with stale target actions still refused.
+
+Integration: local native owners now control both clients. NAB5's Codex failure
+was caused by integrator-created Administrator-owned workspaces: ordinary Sid
+lacked WRITE_DAC for sandbox refresh. A new workspace created by Limited
+Interactive Sid passed real normal elevated-sandbox execution; existing ACLs,
+global configuration, accounts and product data were not changed. The resumed
+local owner uses normal reviewed original-Sid access for GUI helpers instead of
+granting the sandbox access to private product state. Root's Windows UI helper
+finished normally. PilotMac's local owner preserved the existing invitation and
+confirmed its expiry, without creating another invitation or reading clipboard
+contents. A fresh invitation waits for the coordinated final candidate.
+
+Release: C21 Windows Core built in 219 s; Inno
+`f1612fdc8d005769aa508ea2a7142ec3a69b24856419cdabe94718f25668bb36`
+is version 0.4.20261108.21, package
+`93d635ae6309d890c14ea84b241a0e0722cf01ed363e92d9c1f9d3cc00e0cfca`.
+The next checkpoint includes the bounded read-result fix and a small fresh
+Windows ChatGPT-page correction: unconfigured computers should finish setup,
+rather than claim they already use an inviting main computer.
+
+Reliability: exact focused Linux refusal tests passed after respecting the
+existing admitted-transport `{prompt:false}` permission query. The transport
+continuation fixture is Linux/Windows only; Mac uses its separate original facts
+FD for permissions. This is not Mac platform acceptance. Actual C22 same-worker
+refusal recovery, Windows real effects, both post-tools lifecycles, revoke/re-pair
+and final installed Logo refresh remain open. Original C21 unknown reads are not
+replayed. Source and evidence remain in the established checkout/artifact paths.
+
+Decision: freeze the small correction, build both platforms in parallel through
+their restored local owners, then finish the defined remaining journey. No new
+scope or repeated general audits. Delivery and Stable remain NO-GO.
