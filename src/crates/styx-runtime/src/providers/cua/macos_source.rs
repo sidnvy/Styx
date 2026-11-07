@@ -2,6 +2,7 @@
 //! Uses the separate fixed read-only SignedAppMembers factory in signed-app-pin/.
 //! All filesystem/Security calls run on the caller's existing blocking boundary.
 
+use super::probe_diagnostic::{ProbeCause, ProbeDiagnostic, ProbeStage};
 use crate::store::{PrivateRoot, ProcessIdentity, SignedAppMember, SignedAppMembers, StoreError};
 use core_foundation::{base::TCFType, data::CFData};
 use nix::{
@@ -60,6 +61,20 @@ pub(crate) enum BindingError {
     Fenced,
 }
 type Result<T> = std::result::Result<T, BindingError>;
+impl BindingError {
+    pub(super) fn probe_cause(self) -> ProbeCause {
+        match self {
+            Self::NotPublished => ProbeCause::NotPublished,
+            Self::Unavailable => ProbeCause::Unavailable,
+            Self::NativeProtocol => ProbeCause::NativeProtocol,
+            Self::InvalidHint => ProbeCause::InvalidHint,
+            Self::ImagePin => ProbeCause::ImagePin,
+            Self::Signature => ProbeCause::Signature,
+            Self::Peer => ProbeCause::Peer,
+            Self::Fenced => ProbeCause::Fenced,
+        }
+    }
+}
 
 /// Fixed read-only App pins have no configuration or process-launch authority.
 pub(crate) struct MacAppImages {
@@ -288,6 +303,7 @@ impl ConnectedCandidate {
             native_console: None,
             probe_session: None,
             probe_drained: false,
+            probe_failure: None,
         };
         bound.fresh_binding()?;
         Ok(bound)
@@ -305,8 +321,16 @@ pub(crate) struct BoundMacSource {
     native_console: Option<ObservedConsoleIdentity>,
     probe_session: Option<String>,
     probe_drained: bool,
+    // First closed fault facts only; never consulted for source authority.
+    probe_failure: Option<ProbeDiagnostic>,
 }
 impl BoundMacSource {
+    pub(crate) fn probe_diagnostic(&self) -> Option<ProbeDiagnostic> {
+        self.probe_failure
+    }
+    fn remember_probe_failure(&mut self, diagnostic: ProbeDiagnostic) {
+        self.probe_failure.get_or_insert(diagnostic);
+    }
     /// Snapshot the original authenticated source solely to authenticate a NEW
     /// resource's control connection. Never used to retry/replace an existing
     /// resource's control after dispatch or a lost drain acknowledgement.
@@ -326,6 +350,7 @@ impl BoundMacSource {
             native_console: self.native_console.clone(),
             probe_session: None,
             probe_drained: false,
+            probe_failure: None,
         };
         self.fresh_binding()?;
         Ok(next)
@@ -654,6 +679,10 @@ mod installed_source_tests {
         })
         .await
         .expect("original_read_task_joined");
+        eprintln!(
+            "MAC_SOURCE_PROBE_DIAGNOSTIC {}",
+            serde_json::to_string(&source.probe_diagnostic()).expect("closed_probe_diagnostic")
+        );
         // Settle the same original read control even if its observation failed.
         let drain = tokio::task::spawn_blocking(move || {
             source

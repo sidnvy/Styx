@@ -23,6 +23,9 @@ pub struct ForegroundEvent {
     /// Fixed category only; never profile contents, native output or credentials.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
+    #[cfg(target_os = "macos")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) computer_probe: Option<crate::providers::cua::probe_diagnostic::ProbeDiagnostic>,
     pub device_id: Option<styx_contracts::identity::DeviceId>,
     pub connection_generation: Option<styx_contracts::identity::ConnectionGeneration>,
 }

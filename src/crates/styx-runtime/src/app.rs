@@ -343,6 +343,12 @@ struct ConnectionStatus {
         skip_serializing_if = "Option::is_none"
     )]
     computer_error: Option<&'static str>,
+    #[cfg(target_os = "macos")]
+    #[serde(
+        rename = "computerStartupProbe",
+        skip_serializing_if = "Option::is_none"
+    )]
+    computer_probe: Option<crate::providers::cua::probe_diagnostic::ProbeDiagnostic>,
 }
 impl ConnectionStatus {
     fn pairing_refused() -> Self {
@@ -351,6 +357,8 @@ impl ConnectionStatus {
             exec_connection: "disconnected",
             error: Some("gateway_wss_admission_refused"),
             computer_error: None,
+            #[cfg(target_os = "macos")]
+            computer_probe: None,
             hint: Some(
                 "The Gateway refused this identity. Change this computer's role and pair again.",
             ),
@@ -364,6 +372,8 @@ impl ConnectionStatus {
             exec_connection: crate::gateway::paired::CAPACITY_HINT,
             error: Some(crate::gateway::paired::CAPACITY_ERROR_CODE),
             computer_error: None,
+            #[cfg(target_os = "macos")]
+            computer_probe: None,
             hint: Some(crate::gateway::paired::CAPACITY_HINT),
         }
     }
@@ -374,6 +384,8 @@ impl ConnectionStatus {
             error: None,
             hint: None,
             computer_error: None,
+            #[cfg(target_os = "macos")]
+            computer_probe: None,
         }
     }
     fn unknown() -> Self {
@@ -383,6 +395,8 @@ impl ConnectionStatus {
             error: None,
             hint: None,
             computer_error: None,
+            #[cfg(target_os = "macos")]
+            computer_probe: None,
         }
     }
 }
@@ -904,13 +918,23 @@ impl HostApp {
                         status.send_modify(|value| {
                             value.computer_error =
                                 Some(event.reason.unwrap_or("computer_bootstrap_failed"));
+                            #[cfg(target_os = "macos")]
+                            {
+                                value.computer_probe = event.computer_probe;
+                            }
                         });
                         continue;
                     }
                     let computer_error = status.borrow().computer_error;
+                    #[cfg(target_os = "macos")]
+                    let computer_probe = status.borrow().computer_probe;
                     if event.reason == Some(crate::gateway::paired::CAPACITY_ERROR_CODE) {
                         let mut value = ConnectionStatus::hub_full();
                         value.computer_error = computer_error;
+                        #[cfg(target_os = "macos")]
+                        {
+                            value.computer_probe = computer_probe;
+                        }
                         status.send_replace(value);
                         continue;
                     }
@@ -926,6 +950,8 @@ impl HostApp {
                             error: None,
                             hint: None,
                             computer_error,
+                            #[cfg(target_os = "macos")]
+                            computer_probe,
                         },
                         "connecting" | "reconnecting" => ConnectionStatus {
                             status: "started",
@@ -933,6 +959,8 @@ impl HostApp {
                             error: None,
                             hint: None,
                             computer_error,
+                            #[cfg(target_os = "macos")]
+                            computer_probe,
                         },
                         "disconnected" => ConnectionStatus {
                             status: "started",
@@ -940,6 +968,8 @@ impl HostApp {
                             error: None,
                             hint: None,
                             computer_error,
+                            #[cfg(target_os = "macos")]
+                            computer_probe,
                         },
                         _ => continue,
                     };
@@ -952,6 +982,8 @@ impl HostApp {
                 error: None,
                 hint: None,
                 computer_error: None,
+                #[cfg(target_os = "macos")]
+                computer_probe: None,
             });
             let verified_runtime = self.native_runtime.clone();
             if let Some(d) = &diagnostic {

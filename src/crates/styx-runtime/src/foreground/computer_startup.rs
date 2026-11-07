@@ -32,6 +32,16 @@ impl DeferredComputer {
         assert!(slot.is_none(), "one original desktop source per startup");
         *slot = Some(source);
     }
+    #[cfg(target_os = "macos")]
+    fn startup_probe_diagnostic(
+        &self,
+    ) -> Option<crate::providers::cua::probe_diagnostic::ProbeDiagnostic> {
+        self.source
+            .lock()
+            .ok()?
+            .as_ref()?
+            .startup_probe_diagnostic()
+    }
     // Retry only read-only startup prerequisites before any desktop source
     // exists. The same initialization job owns every check and is joined on
     // shutdown; no candidate, source or possibly dispatched action is replayed.
@@ -231,6 +241,15 @@ impl ComputerStartup {
             match prepare_computer(&retained_admitted, &retained_host, &retained).await {
                 Ok(factory) => factory,
                 Err(error) => {
+                    #[cfg(target_os = "macos")]
+                    computer_unavailable_with_probe(
+                        &events,
+                        &cancel,
+                        &device,
+                        error.code(),
+                        retained.startup_probe_diagnostic(),
+                    );
+                    #[cfg(not(target_os = "macos"))]
                     event_with_reason(
                         &events,
                         &cancel,

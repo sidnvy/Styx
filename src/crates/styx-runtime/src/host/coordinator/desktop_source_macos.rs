@@ -1,4 +1,5 @@
 //! Original App-owned source: actual facts/read acquisition, never descriptor grants.
+use crate::providers::cua::probe_diagnostic::{ProbeCause, ProbeDiagnostic, ProbeStage};
 use crate::{
     providers::cua::{
         MacProxySource,
@@ -125,6 +126,22 @@ impl DesktopSource {
     pub(crate) fn epoch(&self) -> u64 {
         self.inner.epoch.load(Ordering::Acquire)
     }
+    /// Original-source fault facts remain readable after fencing. No authority.
+    pub(crate) fn startup_probe_diagnostic(&self) -> Option<ProbeDiagnostic> {
+        self.inner.source.probe_diagnostic()
+    }
+    /// Generic refresh fallback only; an earlier nested native fact wins.
+    /// The coordinator has no outer deadline, unlike the native probe worker.
+    pub(crate) fn remember_startup_coordinator_refusal(&self, started: Instant) {
+        self.inner
+            .source
+            .remember_probe_diagnostic(ProbeDiagnostic {
+                stage: ProbeStage::CoordinatorRefresh,
+                cause: ProbeCause::CoordinatorRefused,
+                elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                deadline_expired: false,
+            });
+    }
     pub(crate) fn proxy_source(&self) -> Result<Arc<MacProxySource>> {
         if self.fenced() {
             return Err(DesktopSourceError::Fenced);
@@ -186,18 +203,36 @@ impl DesktopSource {
     }
     fn with_observation<T>(&self, f: impl FnOnce(&Observed) -> Result<T>) -> Result<T> {
         if self.fenced() {
+            self.remember_lookup_failure(ProbeCause::Fenced, Instant::now());
             return Err(DesktopSourceError::Fenced);
         }
-        let held = self
-            .inner
-            .observations
-            .lock()
-            .map_err(|_| DesktopSourceError::Supervisor)?;
-        let value = held.as_ref().ok_or(DesktopSourceError::Unavailable)?;
-        if value.at.elapsed() > Duration::from_secs(1) || !value.native.observed_unlocked() {
+        let held = self.inner.observations.lock().map_err(|_| {
+            self.remember_lookup_failure(ProbeCause::MutexPoisoned, Instant::now());
+            DesktopSourceError::Supervisor
+        })?;
+        let value = held.as_ref().ok_or_else(|| {
+            self.remember_lookup_failure(ProbeCause::EvidenceMissing, Instant::now());
+            DesktopSourceError::Unavailable
+        })?;
+        if value.at.elapsed() > Duration::from_secs(1) {
+            self.remember_lookup_failure(ProbeCause::EvidenceExpired, value.at);
+            return Err(DesktopSourceError::Unavailable);
+        }
+        if !value.native.observed_unlocked() {
+            self.remember_lookup_failure(ProbeCause::Locked, value.at);
             return Err(DesktopSourceError::Unavailable);
         }
         f(value)
+    }
+    fn remember_lookup_failure(&self, cause: ProbeCause, started: Instant) {
+        self.inner
+            .source
+            .remember_probe_diagnostic(ProbeDiagnostic::observed(
+                ProbeStage::EvidenceLookup,
+                cause,
+                started,
+                started + Duration::from_secs(1),
+            ));
     }
     pub(crate) fn initial_facts(
         &self,

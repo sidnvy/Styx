@@ -1,5 +1,16 @@
 # C15 native client acceptance leases · 2026-11-07
 
+2026-11-08 diagnostic slice: integrator owns the new closed probe diagnostic DTO,
+foreground/App status propagation, Swift logging, all manifests and Git. The
+`windows_control_review` agent owns only `providers/cua/{macos.rs,macos_source.rs,
+macos_native_observation.rs}` and `host/coordinator/desktop_source_macos.rs` in
+`styx-runtime`, to retain the first fixed probe stage/cause before error mapping.
+It has no device or product mutation lease. Source lease retired after its
+implementation and read-only review; integrator owns all source. Native Mac
+check and the separately scoped current read-only probe passed; original C19
+cold failure and its processes remain unchanged. The current probe is not
+cold acceptance.
+
 Owner instruction: run the already signed-in Codex on PilotMac and NAB5 locally;
 each owns its platform client and coordinates cross-device work with the integrator.
 

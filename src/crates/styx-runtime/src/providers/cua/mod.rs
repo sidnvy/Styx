@@ -31,6 +31,8 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_source;
 #[cfg(target_os = "macos")]
+pub(crate) mod probe_diagnostic;
+#[cfg(target_os = "macos")]
 pub(crate) use macos::{MacProxySource, TrustedCuaLaunch};
 mod admission;
 mod click;

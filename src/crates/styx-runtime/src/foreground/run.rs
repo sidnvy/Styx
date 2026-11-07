@@ -368,10 +368,16 @@ async fn prepare_computer(
     // The original source is now retained in the Host lane. A lost read-probe
     // reply remains owned Unknown through the common Host cleanup, even if
     // profile construction below fails or the Computer lane stays unavailable.
+    #[cfg(target_os = "macos")]
+    let refresh_started = std::time::Instant::now();
     host.coordinator()
         .refresh_desktop_source()
         .await
-        .map_err(|_| ForegroundError("computer_source_probe_failed"))?;
+        .map_err(|_| {
+            #[cfg(target_os = "macos")]
+            source.remember_startup_coordinator_refusal(refresh_started);
+            ForegroundError("computer_source_probe_failed")
+        })?;
     let retained = admitted.clone();
     let prepared = tokio::task::spawn_blocking(move || {
         super::computer::prepare_computer_bootstrap(retained.profile.clone(), source, binding)
@@ -407,6 +413,8 @@ fn event_with_reason(
             schema: 1,
             event: name,
             reason,
+            #[cfg(target_os = "macos")]
+            computer_probe: None,
             device_id: Some(device.clone()),
             connection_generation: generation.cloned(),
         })
@@ -1322,5 +1330,28 @@ mod tests {
             outcome.is_complete(),
             "independently known exit is monotonic, not operation success"
         );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn computer_unavailable_with_probe(
+    events: &mpsc::Sender<ForegroundEvent>,
+    cancel: &CancellationToken,
+    device: &DeviceId,
+    reason: &'static str,
+    computer_probe: Option<crate::providers::cua::probe_diagnostic::ProbeDiagnostic>,
+) {
+    if events
+        .try_send(ForegroundEvent {
+            schema: 1,
+            event: "computer_unavailable",
+            reason: Some(reason),
+            computer_probe,
+            device_id: Some(device.clone()),
+            connection_generation: None,
+        })
+        .is_err()
+    {
+        cancel.cancel();
     }
 }

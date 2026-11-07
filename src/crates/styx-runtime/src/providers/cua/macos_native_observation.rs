@@ -477,78 +477,154 @@ struct RawResponse {
 }
 impl BoundMacSource {
     fn exchange_value(&mut self, request: &[u8], deadline: Instant) -> Result<serde_json::Value> {
+        self.exchange_value_diagnostic(request, deadline, None)
+    }
+    fn probe_protocol_failure(
+        &mut self,
+        probe: Option<(ProbeStage, Instant)>,
+        cause: ProbeCause,
+        deadline: Instant,
+    ) -> BindingError {
+        if let Some((stage, started)) = probe {
+            self.remember_probe_failure(ProbeDiagnostic::observed(stage, cause, started, deadline));
+        }
+        BindingError::NativeProtocol
+    }
+    fn exchange_value_diagnostic(
+        &mut self,
+        request: &[u8],
+        deadline: Instant,
+        probe: Option<(ProbeStage, Instant)>,
+    ) -> Result<serde_json::Value> {
         self.protocol_clean = false;
         let bytes = self.exchange_frame(request, deadline, 64 * 1024)?;
         self.protocol_clean = true;
-        let reply: RawResponse =
-            serde_json::from_slice(&bytes).map_err(|_| BindingError::NativeProtocol)?;
-        if !reply.ok || reply.error.is_some() || reply.exit_code.is_some() {
-            return Err(BindingError::NativeProtocol);
+        let reply: RawResponse = serde_json::from_slice(&bytes)
+            .map_err(|_| self.probe_protocol_failure(probe, ProbeCause::ReplyJson, deadline))?;
+        if !reply.ok || reply.error.is_some() {
+            return Err(self.probe_protocol_failure(probe, ProbeCause::ReplyRefused, deadline));
         }
-        reply.result.ok_or(BindingError::NativeProtocol)
+        if reply.exit_code.is_some() {
+            return Err(self.probe_protocol_failure(probe, ProbeCause::ReplyExitCode, deadline));
+        }
+        reply.result.ok_or_else(|| {
+            self.probe_protocol_failure(probe, ProbeCause::ReplyMissingResult, deadline)
+        })
     }
     /// Fixed no-user-arguments acquisition on the SAME authenticated facts FD.
     /// This creates one private native read transport, retained until source stop.
     pub(crate) fn probe_windows(&mut self, deadline: Instant) -> Result<WindowReadEvidence> {
-        self.fresh_binding()?;
-        if self.probe_drained {
-            return Err(BindingError::Fenced);
-        }
-        self.fenced = true;
-        if self.probe_session.is_none() {
-            let sid = format!("styx-source-{}", Uuid::new_v4().simple());
-            let mut request =
-                serde_json::to_vec(&serde_json::json!({"method":"session_begin","session_id":sid}))
-                    .map_err(|_| BindingError::NativeProtocol)?;
-            request.push(b'\n');
-            // Store original identity BEFORE sending: lost ACK is never a new begin.
-            self.probe_session = Some(sid);
-            let reply = self.exchange_value(&request, deadline)?;
-            if reply != serde_json::json!({"session_begin":true}) {
-                return Err(BindingError::NativeProtocol);
+        let started = Instant::now();
+        let mut stage = ProbeStage::SessionBinding;
+        let result: Result<WindowReadEvidence> = (|| {
+            self.fresh_binding()?;
+            if self.probe_drained {
+                return Err(BindingError::Fenced);
             }
-        }
-        let mut request=serde_json::to_vec(&serde_json::json!({"method":"call","name":"list_windows","args":{},"session_id":self.probe_session})).map_err(|_|BindingError::NativeProtocol)?;
-        request.push(b'\n');
-        let value = self.exchange_value(&request, deadline)?;
-        if value
-            .get("isError")
-            .is_some_and(|v| v != &serde_json::Value::Bool(false))
-        {
-            return Err(BindingError::NativeProtocol);
-        }
-        let windows = value
-            .get("structuredContent")
-            .and_then(|v| v.get("windows"))
-            .and_then(serde_json::Value::as_array)
-            .ok_or(BindingError::NativeProtocol)?;
-        if windows.len() > 512 {
-            return Err(BindingError::NativeProtocol);
-        }
-        for row in windows {
-            if row
-                .get("pid")
-                .and_then(serde_json::Value::as_u64)
-                .is_none_or(|v| v == 0 || v > u32::MAX as u64)
-                || row
+            self.fenced = true;
+            if self.probe_session.is_none() {
+                stage = ProbeStage::SessionBeginExchange;
+                let sid = format!("styx-source-{}", Uuid::new_v4().simple());
+                let mut request = serde_json::to_vec(
+                    &serde_json::json!({"method":"session_begin","session_id":sid}),
+                )
+                .map_err(|_| BindingError::NativeProtocol)?;
+                request.push(b'\n');
+                // Store original identity BEFORE sending: lost ACK is never a new begin.
+                self.probe_session = Some(sid);
+                let reply =
+                    self.exchange_value_diagnostic(&request, deadline, Some((stage, started)))?;
+                stage = ProbeStage::SessionBeginReply;
+                if reply != serde_json::json!({"session_begin":true}) {
+                    return Err(self.probe_protocol_failure(
+                        Some((stage, started)),
+                        ProbeCause::BeginReplyShape,
+                        deadline,
+                    ));
+                }
+            }
+            stage = ProbeStage::ListWindowsExchange;
+            let mut request=serde_json::to_vec(&serde_json::json!({"method":"call","name":"list_windows","args":{},"session_id":self.probe_session})).map_err(|_|BindingError::NativeProtocol)?;
+            request.push(b'\n');
+            let value =
+                self.exchange_value_diagnostic(&request, deadline, Some((stage, started)))?;
+            stage = ProbeStage::ListWindowsResult;
+            if value
+                .get("isError")
+                .is_some_and(|v| v != &serde_json::Value::Bool(false))
+            {
+                return Err(self.probe_protocol_failure(
+                    Some((stage, started)),
+                    ProbeCause::WindowsReplyIsError,
+                    deadline,
+                ));
+            }
+            let windows = value
+                .get("structuredContent")
+                .and_then(|v| v.get("windows"))
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    self.probe_protocol_failure(
+                        Some((stage, started)),
+                        ProbeCause::WindowsArrayMissing,
+                        deadline,
+                    )
+                })?;
+            stage = ProbeStage::ListWindowsRows;
+            if windows.len() > 512 {
+                return Err(self.probe_protocol_failure(
+                    Some((stage, started)),
+                    ProbeCause::WindowsLimit,
+                    deadline,
+                ));
+            }
+            for row in windows {
+                if row
+                    .get("pid")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_none_or(|v| v == 0 || v > u32::MAX as u64)
+                {
+                    return Err(self.probe_protocol_failure(
+                        Some((stage, started)),
+                        ProbeCause::WindowPidInvalid,
+                        deadline,
+                    ));
+                }
+                if row
                     .get("window_id")
                     .and_then(serde_json::Value::as_u64)
                     .is_none_or(|v| v == 0)
-            {
+                {
+                    return Err(self.probe_protocol_failure(
+                        Some((stage, started)),
+                        ProbeCause::WindowIdInvalid,
+                        deadline,
+                    ));
+                }
+            }
+            let raw = serde_json::to_vec(&value).map_err(|_| BindingError::NativeProtocol)?;
+            let evidence = WindowReadEvidence {
+                count: windows.len(),
+                digest: styx_contracts::identity::Sha256Digest::of_bytes(&raw),
+            };
+            stage = ProbeStage::ReadBindingAfter;
+            self.check_binding()?;
+            stage = ProbeStage::ReadDeadline;
+            if Instant::now() >= deadline {
                 return Err(BindingError::NativeProtocol);
             }
+            self.fenced = false;
+            Ok(evidence)
+        })();
+        if let Err(error) = result {
+            let cause = if stage == ProbeStage::ReadDeadline {
+                ProbeCause::Deadline
+            } else {
+                error.probe_cause()
+            };
+            self.remember_probe_failure(ProbeDiagnostic::observed(stage, cause, started, deadline));
         }
-        let raw = serde_json::to_vec(&value).map_err(|_| BindingError::NativeProtocol)?;
-        let evidence = WindowReadEvidence {
-            count: windows.len(),
-            digest: styx_contracts::identity::Sha256Digest::of_bytes(&raw),
-        };
-        self.check_binding()?;
-        if Instant::now() >= deadline {
-            return Err(BindingError::NativeProtocol);
-        }
-        self.fenced = false;
-        Ok(evidence)
+        result
     }
     pub(crate) fn drain_probe(&mut self, deadline: Instant) -> Result<bool> {
         if self.probe_drained {

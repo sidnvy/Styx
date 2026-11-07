@@ -570,6 +570,8 @@ mod platform {
                 schema: 1,
                 event: name,
                 reason: None,
+                #[cfg(target_os = "macos")]
+                computer_probe: None,
                 device_id: None,
                 connection_generation: None,
             })

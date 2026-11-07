@@ -550,3 +550,47 @@ failures remain retained independently of successful setup and key reuse.
 
 Decision: validate the narrow ordering correction, then repeat original-process
 cold setup and the remaining full journey. Delivery and Stable remain NO-GO.
+
+## C19 cold result and bounded diagnostic follow-up · 2026-11-08
+
+Product: original C19 Mac App69718/Core69724 published the requested source but
+reported `computer_source_probe_failed`; actual account reads remained unsupported
+before dispatch. Its processes and failure remain unchanged. Windows C18 L passed
+normal management status, Quit and one reopen in Limited Interactive Sid session1:
+App3344/Core5496/conhost7116 all exited 0, new App12028. Elevated SSH management
+refusal is a caller-context result, not failure of the installed reader correction.
+The fresh Windows navigation correction passed native C# compilation and actual
+UI construction checks; installed C18 still contains the earlier navigation bug.
+
+Architecture: retain the first Mac probe failure as a closed stage/cause, elapsed
+time and actual deadline flag before generic error mapping. Preserve original
+fencing, transport ownership, strict reply validation, deadlines and no replay.
+Propagate those non-authoritative facts through existing optional App status and
+opt-in native logging, without paths, window data, identifiers or arbitrary error
+strings. A generic coordinator fallback has no invented outer timeout. The one
+second evidence age begins after the full native probe returns; no deterministic
+cold-only cause was established by source inspection.
+
+Integration: source lease returned to the integrator. A separate native Mac dev
+snapshot passed check and a current read-only source reference (12 windows and
+original probe drain); Swift diagnostic logging passed native typecheck. Those
+warm/current results do not establish the cause or pass of C19's original cold
+bootstrap. Local Windows Codex continues preparatory Join UI evidence only;
+account, pairing and source integration remain coordinated by the integrator.
+
+Release: C19 Mac build1128 DMG SHA-256
+`2d57ee7d55b8ef8c908dd078764ec3d89350f255f880fc71a7e06f162e836a9a`.
+C19 Windows source was staged but its obsolete release producer was not dispatched.
+The next diagnostic candidate must preserve a fresh cold failure or demonstrate a
+real first-run account Computer read before any warm restart. Native dev checks,
+packages, installation and account acceptance remain separate results.
+
+Reliability: keep C19 cold timestamps and descriptor publication evidence, the
+separate current-source reference, Windows source-only navigation checks and the
+Limited Sid lifecycle receipts under the convergence artifact directory. Normal
+Windows lifecycle succeeded without force or profile/ACL changes. No production
+plugin, Tunnel, private key or publisher identity was changed.
+
+Decision: complete original cold diagnosis before freezing the final shared-source
+Mac/Windows delivery pair and repeating the remaining full journey. Stable and
+user delivery remain NO-GO.

@@ -34,6 +34,13 @@ enum ProductNativeDiagnostics {
         let known: Set<String> = ["desktop_session_not_ready", "desktop_source_unavailable", "computer_source_probe_failed", "computer_bootstrap_changed"]
         let code = original.map { known.contains($0) ? $0 : "other" } ?? "none"
         event("computer_intent requested=" + String(status["desktop_intent"]["computer_requested"].bool) + " startup=" + code)
+        let probe = status["foreground"]["computerStartupProbe"]
+        let stages: Set<String> = ["native_before_binding", "native_before_observation", "native_before_final_binding", "session_binding", "session_begin_exchange", "session_begin_reply", "list_windows_exchange", "list_windows_result", "list_windows_rows", "read_binding_after", "read_deadline", "native_after_binding", "native_after_observation", "native_after_final_binding", "console_match", "evidence_lookup", "coordinator_refresh", "observation_mutex", "control_mutex", "already_fenced"]
+        let causes: Set<String> = ["not_published", "unavailable", "native_protocol", "invalid_hint", "image_pin", "signature", "peer", "fenced", "mutex_poisoned", "locked", "console_changed", "deadline", "evidence_missing", "evidence_expired", "coordinator_refused", "reply_json", "reply_refused", "reply_exit_code", "reply_missing_result", "begin_reply_shape", "windows_reply_is_error", "windows_array_missing", "windows_limit", "window_pid_invalid", "window_id_invalid"]
+        guard let stage = probe["stage"].string, stages.contains(stage),
+              let cause = probe["cause"].string, causes.contains(cause),
+              let elapsed = probe["elapsed_ms"].number, elapsed.isFinite, elapsed >= 0, elapsed <= 86_400_000 else { return }
+        event("computer_probe stage=" + stage + " cause=" + cause + " elapsed_ms=" + String(UInt64(elapsed)) + " deadline_expired=" + String(probe["deadline_expired"].bool))
     }
     static func event(_ message: String) {
         guard CommandLine.arguments.contains("--native-diagnostics") else { return }

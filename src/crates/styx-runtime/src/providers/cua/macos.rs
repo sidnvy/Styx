@@ -3,6 +3,7 @@
 //! to the same original App/daemon. Only that control's real drain ACK settles
 //! native work. Proxy wait and all IO joins remain separate requirements.
 use super::macos_source::{BoundMacSource, MacAppImages, MacSourceCandidate, NativeObservation};
+use super::probe_diagnostic::{ProbeCause, ProbeDiagnostic, ProbeStage};
 use super::{CuaError, OwnedCuaConfig, Result};
 use crate::{
     platform::macos_spawn::{self, RunningChild, SuspendedChild},
@@ -29,6 +30,8 @@ pub(crate) struct MacProxySource {
     observations: Mutex<BoundMacSource>,
     fingerprint: Sha256Digest,
     fenced: AtomicBool,
+    // Diagnostic custody only; no source permission or readiness derives from it.
+    probe_failure: Mutex<Option<ProbeDiagnostic>>,
 }
 impl MacProxySource {
     /// Trusted supervisor setup only. No operation/grant/session can be minted by
@@ -83,6 +86,7 @@ impl MacProxySource {
             observations: Mutex::new(observations),
             fingerprint,
             fenced: AtomicBool::new(false),
+            probe_failure: Mutex::new(None),
         }))
     }
     pub(crate) fn fingerprint(&self) -> Sha256Digest {
@@ -91,32 +95,114 @@ impl MacProxySource {
     pub(crate) fn fenced(&self) -> bool {
         self.fenced.load(Ordering::Acquire)
     }
+    pub(crate) fn probe_diagnostic(&self) -> Option<ProbeDiagnostic> {
+        *self
+            .probe_failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+    pub(crate) fn remember_probe_diagnostic(&self, diagnostic: ProbeDiagnostic) {
+        self.probe_failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_or_insert(diagnostic);
+    }
+    fn remember_probe_failure(
+        &self,
+        stage: ProbeStage,
+        cause: ProbeCause,
+        started: std::time::Instant,
+        until: std::time::Instant,
+    ) {
+        self.remember_probe_diagnostic(ProbeDiagnostic::observed(stage, cause, started, until));
+    }
     /// Caller owns the existing bounded blocking job and joins it; facts never
     /// derive from caller env/descriptor booleans or the proxy's exit status.
     pub(crate) fn observe_current(&self, until: std::time::Instant) -> Result<NativeObservation> {
+        self.observe_current_at(until, std::time::Instant::now(), false)
+    }
+    fn observe_current_at(
+        &self,
+        until: std::time::Instant,
+        started: std::time::Instant,
+        after: bool,
+    ) -> Result<NativeObservation> {
+        let (binding, observation, final_binding) = if after {
+            (
+                ProbeStage::NativeAfterBinding,
+                ProbeStage::NativeAfterObservation,
+                ProbeStage::NativeAfterFinalBinding,
+            )
+        } else {
+            (
+                ProbeStage::NativeBeforeBinding,
+                ProbeStage::NativeBeforeObservation,
+                ProbeStage::NativeBeforeFinalBinding,
+            )
+        };
         if self.fenced() {
+            self.remember_probe_failure(
+                ProbeStage::AlreadyFenced,
+                ProbeCause::Fenced,
+                started,
+                until,
+            );
             return Err(CuaError::PermissionDenied);
         }
         let result = (|| {
             self.control
                 .lock()
-                .map_err(|_| CuaError::Unknown)?
+                .map_err(|_| {
+                    self.remember_probe_failure(
+                        ProbeStage::ControlMutex,
+                        ProbeCause::MutexPoisoned,
+                        started,
+                        until,
+                    );
+                    CuaError::Unknown
+                })?
                 .fresh_binding()
-                .map_err(|_| CuaError::PermissionDenied)?;
+                .map_err(|error| {
+                    self.remember_probe_failure(binding, error.probe_cause(), started, until);
+                    CuaError::PermissionDenied
+                })?;
             let value = self
                 .observations
                 .lock()
-                .map_err(|_| CuaError::Unknown)?
+                .map_err(|_| {
+                    self.remember_probe_failure(
+                        ProbeStage::ObservationMutex,
+                        ProbeCause::MutexPoisoned,
+                        started,
+                        until,
+                    );
+                    CuaError::Unknown
+                })?
                 .observe_native(until)
-                .map_err(|_| CuaError::PermissionDenied)?;
+                .map_err(|error| {
+                    self.remember_probe_failure(observation, error.probe_cause(), started, until);
+                    CuaError::PermissionDenied
+                })?;
             if !value.observed_unlocked() {
+                self.remember_probe_failure(observation, ProbeCause::Locked, started, until);
                 return Err(CuaError::PermissionDenied);
             }
             self.control
                 .lock()
-                .map_err(|_| CuaError::Unknown)?
+                .map_err(|_| {
+                    self.remember_probe_failure(
+                        ProbeStage::ControlMutex,
+                        ProbeCause::MutexPoisoned,
+                        started,
+                        until,
+                    );
+                    CuaError::Unknown
+                })?
                 .fresh_binding()
-                .map_err(|_| CuaError::PermissionDenied)?;
+                .map_err(|error| {
+                    self.remember_probe_failure(final_binding, error.probe_cause(), started, until);
+                    CuaError::PermissionDenied
+                })?;
             Ok(value)
         })();
         if result.is_err() {
@@ -130,18 +216,44 @@ impl MacProxySource {
         &self,
         until: std::time::Instant,
     ) -> Result<(NativeObservation, super::macos_source::WindowReadEvidence)> {
+        let started = std::time::Instant::now();
         let result = (|| {
-            let before = self.observe_current(until)?;
-            let windows = self
-                .observations
-                .lock()
-                .map_err(|_| CuaError::Unknown)?
-                .probe_windows(until)
-                .map_err(|_| CuaError::PermissionDenied)?;
+            let before = self.observe_current_at(until, started, false)?;
+            let mut observations = self.observations.lock().map_err(|_| {
+                self.remember_probe_failure(
+                    ProbeStage::ObservationMutex,
+                    ProbeCause::MutexPoisoned,
+                    started,
+                    until,
+                );
+                CuaError::Unknown
+            })?;
+            let windows = observations.probe_windows(until).map_err(|error| {
+                let fault = observations.probe_diagnostic().map_or_else(
+                    || {
+                        ProbeDiagnostic::observed(
+                            ProbeStage::SessionBinding,
+                            error.probe_cause(),
+                            started,
+                            until,
+                        )
+                    },
+                    |fault| ProbeDiagnostic::observed(fault.stage, fault.cause, started, until),
+                );
+                self.remember_probe_diagnostic(fault);
+                CuaError::PermissionDenied
+            })?;
+            drop(observations);
             // The read probe may take time. Return ONLY a new original-FD
             // native lock/TCC sample, never retimestamp the pre-probe facts.
-            let after = self.observe_current(until)?;
+            let after = self.observe_current_at(until, started, true)?;
             if before.console_identity() != after.console_identity() {
+                self.remember_probe_failure(
+                    ProbeStage::ConsoleMatch,
+                    ProbeCause::ConsoleChanged,
+                    started,
+                    until,
+                );
                 return Err(CuaError::PermissionDenied);
             }
             // BoundMacSource also verifies the same original daemon instance,
