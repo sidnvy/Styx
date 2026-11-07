@@ -152,6 +152,10 @@ async fn authenticated_tunnel_context_across_transports_and_isolation() {
         let original_owner = backend.resource.lock().unwrap().as_ref().unwrap().0.clone();
         let second = sdk(&uri, forwarding).await;
         assert_eq!(app.sessions.lock().unwrap().len(), 2, "distinct actual SDK transport sessions");
+        let second_sid = app.sessions.lock().unwrap().values().find_map(|s| {
+            let id = s.manager.id.lock().unwrap().as_ref().map(ToString::to_string);
+            id.filter(|id| id != &first_sid && s.life.owner.is_tunnel())
+        }).unwrap();
         let result = second.call_tool(request("write_stdin", meta.clone())).await.unwrap();
         assert_ne!(result.is_error, Some(true));
         assert!(serde_json::to_string(&result).unwrap().contains("one-owned-resource-effect"));
@@ -167,7 +171,7 @@ async fn authenticated_tunnel_context_across_transports_and_isolation() {
         let direct_again = sdk(&uri, ordinary).await;
         assert_eq!(direct_again.call_tool(request("write_stdin", meta.clone())).await.unwrap().is_error, Some(true));
         let raw = reqwest::Client::new();
-        assert_eq!(raw.delete(&uri).bearer_auth(ordinary).header(SID, &first_sid).header(VERSION, "2025-11-25").send().await.unwrap().status(), StatusCode::NOT_FOUND);
+        assert_eq!(raw.delete(&uri).bearer_auth(ordinary).header(SID, &second_sid).header(VERSION, "2025-11-25").send().await.unwrap().status(), StatusCode::NOT_FOUND);
         assert_eq!(raw.post(&uri).bearer_auth(ordinary).header("x-styx-tunnel-context", "forged").send().await.unwrap().status(), StatusCode::FORBIDDEN);
         let before = backend.attempts.load(Ordering::Acquire);
         for invalid in [serde_json::json!({}), serde_json::json!({"openai/organization":"owned-org","openai/subject":"owned-subject","openai/session":"bad\nchat"}), serde_json::json!({"openai/organization":"owned-org","openai/subject":"owned-subject","openai/session":"x".repeat(513)})] {
@@ -176,10 +180,6 @@ async fn authenticated_tunnel_context_across_transports_and_isolation() {
         assert_eq!(backend.attempts.load(Ordering::Acquire), before, "invalid contexts refused before backend dispatch");
         // Drop a real HTTP response waiter after backend admission. The single
         // logical call reservation and actual work must outlive that waiter.
-        let second_sid = app.sessions.lock().unwrap().values().find_map(|s| {
-            let id = s.manager.id.lock().unwrap().as_ref().map(ToString::to_string);
-            id.filter(|id| id != &first_sid && s.life.owner.is_tunnel())
-        }).unwrap();
         let pending_http = raw.post(&uri).bearer_auth(forwarding).header(SID, &second_sid).header(VERSION, "2025-11-25").header("accept", "application/json, text/event-stream").json(&serde_json::json!({"jsonrpc":"2.0","id":9001,"method":"tools/call","params":{"name":"write_stdin","arguments":{"session_id":1,"chars":"hold-owned-call"},"_meta":meta}}));
         let waiter = tokio::spawn(async move { pending_http.send().await });
         tokio::time::timeout(Duration::from_secs(2), backend.entered.acquire()).await.unwrap().unwrap().forget();
@@ -195,7 +195,13 @@ async fn authenticated_tunnel_context_across_transports_and_isolation() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert_eq!(backend.completed.load(Ordering::Acquire), 1);
-        app.expire_conversations(Duration::ZERO);
+        let until = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            app.expire_conversations(Duration::ZERO);
+            if app.conversations.lock().unwrap().len() == 1 { break; }
+            assert!(tokio::time::Instant::now() < until, "idle completed contexts must return their reservations");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         assert!(!backend.fenced.lock().unwrap().contains(&original_owner), "live logical work cannot expire");
         assert_ne!(second.call_tool(request("write_stdin", meta)).await.unwrap().is_error, Some(true));
         assert_eq!(std::fs::read_to_string(&backend.file).unwrap(), "one-owned-resource-effect\n", "one independent effect, no replay");

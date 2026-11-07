@@ -255,6 +255,20 @@ existing strict settlement, with exact Host/Gateway cleanup and independent
 file/PID observations. This did not reproduce the hypothesized general Host-first
 shutdown defect, so no speculative settlement-order change was made. Installed
 Tunnel saving after account Exec/Browser/Computer work remains to be repeated.
+The C13 full optional checkpoint passed the new Tunnel and real paired journey
+but stopped on an older preverified-owner WSS fixture: after a lost final read,
+the Host had already observed exit/drain and released provider storage. A fresh
+read correctly returned STATE_CONFLICT/not_dispatched; the old fixture still
+required another successful decoded read despite read_resume=false. The updated
+fixture accepts only that exact refusal with matching operation/digest, terminal
+inspection and independent original PID absence. Normal reads still require
+exact output, exit 0 and drain; both nonce files must remain single effects.
+No product behavior was relaxed. The first terminal-proof probe used the wrong
+Snapshot DTO field (`id` instead of `operation_id`), failed before cleanup proof,
+and was corrected without replaying its actions. Fresh focused WSS and HTTP
+scenarios then passed, including completed idle-context collection and rejection
+of an ordinary bearer deleting an actually active Tunnel session. C12/C13 raw
+failures remain retained; neither candidate started native compilation.
 Product: C11 automatic network setup and GUI pairing remain installed passes;
 Windows claim/name/accessibility follow-ups and conversation continuation are
 source-only until the next package is installed.

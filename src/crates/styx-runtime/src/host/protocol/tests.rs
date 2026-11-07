@@ -71,9 +71,9 @@ async fn call(ws: &mut GatewayWs, generation: &str, request: Value) -> Value {
     response["reply"].clone()
 }
 fn spec(root: &Path, file: &str, nonce: &str) -> Value {
-    json!({"argv":["/bin/sh","-c",format!("printf '%s\\n' '{nonce}' >> '{file}'; printf '%s' '{nonce}'")],"cwd_file_uri":url::Url::from_directory_path(root).unwrap().to_string(),"environment":{"PATH":"/usr/bin:/bin"},"tty":false})
+    json!({"argv":["/bin/sh","-c",format!("printf '%s' \"$$\" > '{file}.pid'; printf '%s\\n' '{nonce}' >> '{file}'; printf '%s' '{nonce}'")],"cwd_file_uri":url::Url::from_directory_path(root).unwrap().to_string(),"environment":{"PATH":"/usr/bin:/bin"},"tty":false})
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Journey {
     Normal,
     LostStart,
@@ -232,7 +232,55 @@ async fn journey(
         let mut drained = false;
         for _ in 0..50 {
             let read=call(&mut ws,&server_generation,json!({"method":"read","owner":owner(),"target":target,"grant_revision":1,"timeout_ms":10000,"max_bytes":16384,"wait_ms":100})).await;
-            assert_eq!(read["status"], "read");
+            if matches!(mode, Journey::Reconcile) && read["status"] == "error" {
+                // The lost response may have been the final drained read. The
+                // normal Host path releases provider storage before returning
+                // that result; its consumed decoded cursor cannot be resumed.
+                // Require the exact refusal AND terminal facts. Never accept a
+                // generic error or replay native execution to repair a test.
+                assert_eq!(read["category"], "STATE_CONFLICT");
+                assert_eq!(read["certainty"], "not_dispatched");
+                assert_eq!(read["cursor_may_be_consumed"], false);
+                let inspected = call(
+                    &mut ws,
+                    &server_generation,
+                    json!({"method":"inspect_start","owner":owner(),"target":target}),
+                )
+                .await;
+                assert_eq!(inspected["status"], "inspected");
+                assert_eq!(inspected["snapshot"]["state"], "succeeded");
+                assert_eq!(inspected["snapshot"]["liveness"], "exited");
+                assert_eq!(inspected["snapshot"]["output_drain"], "drained");
+                assert_eq!(
+                    inspected["snapshot"]["operation_id"],
+                    target["operation_id"]
+                );
+                assert_eq!(
+                    inspected["snapshot"]["payload_digest"],
+                    target["payload_digest"]
+                );
+                let pid: u32 = std::fs::read_to_string(root.join("lost-start.txt.pid"))
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                assert!(pid > 1);
+                assert!(
+                    matches!(std::fs::metadata(format!("/proc/{pid}")),Err(error) if error.kind()==std::io::ErrorKind::NotFound),
+                    "original shell PID must be absent"
+                );
+                std::fs::write(root.join("lost-read-reconciliation.json"),serde_json::to_vec_pretty(&json!({"read_refusal":read,"terminal_inspection":inspected,"original_pid":pid,"original_process_absent":true,"lost_output_restored":false,"execution_replayed":false})).unwrap()).unwrap();
+                drained = true;
+                break;
+            }
+            if read["status"] != "read" {
+                std::fs::write(
+                    root.join("unexpected-read.json"),
+                    serde_json::to_vec_pretty(&json!({"journey":format!("{mode:?}"),"reply":read}))
+                        .unwrap(),
+                )
+                .unwrap();
+            }
+            assert_eq!(read["status"], "read", "journey={mode:?}; reply={read}");
             assert_eq!(read["read_resume"], false);
             for chunk in read["chunks"].as_array().unwrap() {
                 output.push_str(chunk["text"].as_str().unwrap());
