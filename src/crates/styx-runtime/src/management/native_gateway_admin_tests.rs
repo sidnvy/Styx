@@ -97,6 +97,21 @@ fn pending_actual_leaf_and_explicit_identity_gate_the_original_approval_body() {
         10_000,
     )
     .expect("verified pending");
+    assert_eq!(rows[0].label, row["label"].as_str().unwrap());
+    for label in [String::new(), "forged\ncomputer".into(), "x".repeat(73)] {
+        let mut invalid = row.clone();
+        invalid["label"] = json!(label);
+        assert!(
+            pending_body(
+                &serde_json::to_vec(&vec![invalid]).unwrap(),
+                &[origin.origin().ascii_serialization()],
+                &leaf,
+                10_000,
+            )
+            .is_err(),
+            "unbounded or control-bearing display identity must not reach approval"
+        );
+    }
     let wire = approval_body(&rows, &selected).expect("exact explicit binding");
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&wire).expect("wire"),

@@ -208,12 +208,41 @@ not started once the metadata diagnostic defect was identified. The next
 immutable candidate must include the diagnostic correction as well as these UI
 changes. C10's source and passing quality evidence are retained without claiming
 that its known-bad metadata diagnostic was accepted.
-Product: network discovery and settings corrections are source-complete.
-Architecture: shared Rust discovery retains the sole configuration authority.
-Integration: focused checks passed; final same-source candidate remains pending.
-Release: no new installed Windows/Mac acceptance is claimed for these changes.
+C11 200b5e3 passed the unified development gate and both native Core producers.
+Mac DMG build 1124 installed, automatically selected en0 / 10.0.8.165 without
+manual IP input, and started the independently observed private and loopback
+listeners. Windows Inno 0.4.20261107.11 installed as test profile I after the old
+H App/Core normally exited with code 0. Its real network selector discovered
+Ethernet / 10.0.8.146; that local setup form was left without submitting a second
+Gateway. NAB5 instead joined PilotMac through the GUI: independent CA comparison,
+the mismatch/cancel path, matching-code approval, original claim and connection
+completed. Both real native UIs showed the paired guest connected. Windows
+General displayed the correct settings page and its joined ChatGPT page directed
+connection management to the main computer.
+The corrected C11 diagnostic observed two real Work calls with different
+transport sessions and identical, present organization/subject/conversation
+hashes. This supersedes C9's invalid metadata-absence inference. The current
+transport-bound owner remains unchanged, so these list calls are not account
+Exec/Browser/Computer acceptance. A dedicated authenticated Tunnel conversation
+adapter is still required; ordinary HTTP callers must not gain metadata-derived
+authority or share an owner across unrelated chats.
+Installed testing exposed three small follow-ups: the native pending projection
+dropped the existing Gateway label, the Windows browser selector inherited an
+incorrect accessibility name, and claim feedback could tell an already connected
+computer to reconnect. Source now retains a bounded literal pending label, names
+the selector Browser, and bases that feedback on actual Host/Exec observations.
+Focused runtime/admin scenarios and native C# compilation passed; these follow-up
+changes are not yet installed. Do not produce another native candidate until the
+account continuity reference and shared source converge.
+Product: C11 installed network discovery, Windows settings and GUI pairing passed;
+the three follow-up corrections are source-only.
+Architecture: shared Rust discovery retains the sole configuration authority;
+no new Tunnel owner authority is implemented yet.
+Integration: C11 unified quality and both native builds passed; follow-up focused
+checks passed. A final same-source account candidate remains pending.
+Release: C11 is installed on both machines, not final end-to-end acceptance.
 Reliability: stale network selection refuses before writes; account session
-continuity and Tunnel saved-key recovery remain open.
+continuity and Tunnel saved-key recovery with execution resources remain open.
 Decision: final end-to-end delivery and Stable remain NO-GO.
 Evidence: `/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/`, with
 exact fdb1ef9 inputs and quality receipt under `candidate-2/`. Installed native

@@ -87,6 +87,7 @@ fn http_error(error: JoinHttpError) -> AdminError {
 pub struct PendingDevice {
     pub request_id: String,
     pub device_id: DeviceId,
+    pub label: String,
     pub fingerprint: Sha256Digest,
     pub comparison_code: String,
     pub expires_at: u64,
@@ -942,6 +943,7 @@ struct Ingress {
 struct PendingWire {
     request_id: String,
     device_id: DeviceId,
+    label: String,
     fingerprint: Sha256Digest,
     comparison_code: String,
     expires_at: u64,
@@ -976,7 +978,10 @@ fn pending_body(
         }
         .comparison_code()
         .map_err(|_| refused("native_gateway_pending_invalid"))?;
-        if !ids.insert(row.request_id.clone())
+        if row.label.is_empty()
+            || row.label.chars().count() > 72
+            || row.label.chars().any(char::is_control)
+            || !ids.insert(row.request_id.clone())
             || row.expires_at <= now
             || !origins.contains(&row.ingress.origin)
             || row.ingress.certificate_sha256 != certificate
@@ -987,6 +992,7 @@ fn pending_body(
         result.push(PendingDevice {
             request_id: row.request_id,
             device_id: row.device_id,
+            label: row.label,
             fingerprint: row.fingerprint,
             comparison_code: row.comparison_code,
             expires_at: row.expires_at,
