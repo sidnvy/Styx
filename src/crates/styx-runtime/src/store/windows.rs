@@ -737,7 +737,9 @@ mod publication_tests;
 
 #[path = "windows_browser.rs"]
 mod browser;
-pub(crate) use browser::LocalExecutable as WindowsLocalExecutable;
+pub(crate) use browser::{
+    LocalExecutable as WindowsLocalExecutable, LocalFile as WindowsLocalFile,
+};
 
 #[path = "release_stage_windows.rs"]
 mod release_staging;

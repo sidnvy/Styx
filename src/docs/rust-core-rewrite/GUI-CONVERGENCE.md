@@ -428,3 +428,37 @@ evidence. Continue the full final-candidate journey; delivery and Stable remain
 NO-GO. C15 evidence is in `candidate-15/local-client-owners/`,
 `account-browser-desktop-observation/`, `account-logo-refresh/` and the device-local
 lease paths. Startup visibility checks are in `startup-failure-native-checks/`.
+
+## Windows public installation reader correction
+
+Product: the owner approved removal of exactly the two test-only sandbox grants
+on the NAB5 acceptance profile. The original private ACL was backed up; only its
+root changed, retaining Sid, SYSTEM and Administrators. The profile now has three
+protected grants. Normal bundled CLI control still refused before sending a
+request because it incorrectly required public installed files to be private.
+
+Architecture: public metadata and managed App bytes now use the existing local
+image modification boundary with retained namespace/file handles, bounded reads
+and digest checks. Ordinary read access is permitted. Private profile policy,
+PE64 executable admission, actual server PID/birth/SID/image binding and the C#
+server's exact bundled-caller path gate remain enforced. An unbundled test caller
+was correctly rejected before Hello; that invalid positive reference was removed.
+
+Integration: native Windows compile and the actual-filesystem read/write ACL,
+bounded-read, sharing, modification-refusal and recovery scenario passed in
+`windows-public-install-check-2/`, source archive
+`44e323ee862cfce13694ba1b6f7a51cc8b052685ef48a4671dd1408072d10df1`.
+The Windows local owner continues with the real tray menu, not a protocol bypass.
+
+Release: installed C15 remains unchanged. C16 unified quality passed and its Mac
+Core compiled, but C16 was not packaged or installed; the public-reader correction
+requires a new same-source candidate before final installation acceptance.
+
+Reliability: the failed development control references sent no normal Quit.
+Original Windows process closure and reconnect remain pending. The Mac local
+owner subsequently verified saved-key editing and a second normal post-tools
+Quit/reopen; independent same-machine key comparison retained the original bytes.
+Neither those C15 passes nor native ACL tests establish final-candidate acceptance.
+
+Decision: complete real Windows lifecycle, integrate the bounded reader fix and
+produce the next immutable candidate. Full GUI delivery and Stable remain NO-GO.

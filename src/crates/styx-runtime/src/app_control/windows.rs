@@ -1,6 +1,6 @@
 #![allow(unsafe_code)] // Kernel peer identity and retained process waits only; no signalling.
 use super::*;
-use crate::store::{PrivateRoot, ProcessIdentity, RootIdentity};
+use crate::store::{PrivateRoot, ProcessIdentity, RootIdentity, WindowsLocalFile};
 use std::{
     ffi::OsString,
     os::windows::{
@@ -193,19 +193,20 @@ pub(super) async fn request(state: &Path, operation: Operation) -> Result<Report
         return Err(ControlError("app_control_use_bundled_cli"));
     }
     let package = native.parent().ok_or_else(error)?;
-    // Private package pins are consistency/lifetime evidence, not Authenticode.
+    // Installed package metadata and managed App bytes are public, read-only
+    // inputs. Protect modification and retain their original namespace/handles;
+    // do not require the confidentiality policy of the private state above.
+    // These consistency pins are not an Authenticode or publisher grant.
     let package_path = package.to_owned();
-    let package = PrivateRoot::open(package).map_err(|_| error())?;
-    let metadata = package
-        .read_raw("windows-runtime.json", 16384)
+    let metadata_pin = WindowsLocalFile::open(&package_path.join("windows-runtime.json"), 16384)
         .map_err(|_| error())?;
     let metadata: serde_json::Value =
-        serde_json::from_slice(metadata.bytes()).map_err(|_| error())?;
-    let app_image = package
-        .read_raw("StyxPreview.exe", 16 * 1024 * 1024)
-        .map_err(|_| error())?;
-    let _app_image_pin = package.retain_raw_file(&app_image).map_err(|_| error())?;
-    let app_hash = styx_contracts::identity::Sha256Digest::of_bytes(app_image.bytes()).to_hex();
+        serde_json::from_slice(&metadata_pin.read_bytes(16384).map_err(|_| error())?)
+            .map_err(|_| error())?;
+    let app_image_pin =
+        WindowsLocalFile::open(&package_path.join("StyxPreview.exe"), 16 * 1024 * 1024)
+            .map_err(|_| error())?;
+    let app_hash = app_image_pin.digest().to_hex();
     if metadata["desktopApp"]["path"] != "StyxPreview.exe"
         || metadata["desktopApp"]["sha256"].as_str() != Some(app_hash.as_str())
     {

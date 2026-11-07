@@ -73,9 +73,9 @@ mod platform;
 mod platform;
 
 #[cfg(target_os = "windows")]
-pub(crate) use platform::WindowsLocalExecutable;
-#[cfg(target_os = "windows")]
 pub(crate) use platform::file_identity as windows_file_identity;
+#[cfg(target_os = "windows")]
+pub(crate) use platform::{WindowsLocalExecutable, WindowsLocalFile};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
