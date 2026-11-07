@@ -284,7 +284,7 @@ enum ProductRestorationPolicy {
     var nativeLanJoinNotice: String? {
         guard status["gateway"]["lan"]["enabled"].bool,
               let origin = status["gateway"]["lan"]["origin"].string else { return nil }
-        return productText("网络上的其他电脑可以通过 \(origin) 加入。从菜单栏或设置中选择“添加电脑”来创建邀请。", "Other computers on your network can join at \(origin). Choose Add computer in the menu bar or Settings to create an invitation.")
+        return productText("其他电脑加入地址：\(origin)\n选择“添加电脑”来创建邀请。", "Address for other computers to join: \(origin)\nChoose Add computer to create an invitation.")
     }
     var nativeCanCreateLocal: Bool {
         !nativeLocalSetupSubmitted && status["admission_fenced"] == .bool(false)

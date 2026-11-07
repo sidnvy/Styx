@@ -360,9 +360,14 @@ struct ProductView: View {
             ProductPanel(title: productText("这台电脑", "This computer")) {
                 if model.nativeHost {
                     if model.status["gateway"] != .null {
-                        Text(productText("本机网关地址：", "Local gateway address: ") + (model.status["gateway"]["origin"].string ?? productText("状态未确认", "status not confirmed")))
+                        if let notice = model.nativeLanJoinNotice {
+                            Text(notice).font(.callout).textSelection(.enabled)
+                        } else {
+                            Text(productText("其他电脑加入未启用", "Joining from other computers is disabled")).foregroundStyle(.secondary)
+                        }
                         Text(productText("本机网关：", "Local gateway: ") + (model.status["gateway"]["running"] == .bool(true) && model.status["gateway"]["listening"] == .bool(true) ? productText("运行中", "running") : productText("状态未确认", "status not confirmed")))
-                        if let notice = model.nativeLanJoinNotice { Text(notice).font(.callout).textSelection(.enabled) }
+                        Text(productText("仅供这台 Mac 内部连接：", "For connections within this Mac only: ") + (model.status["gateway"]["origin"].string ?? productText("状态未确认", "status not confirmed")))
+                            .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     }
                     if model.status["admission_fenced"].bool || model.status["gateway"]["admission_fenced"].bool {
                         Text(productText("上次设置结果尚未确认，请刷新状态查看；原配置已保留。", "The last setup result is unconfirmed. Refresh status to review it; your existing settings have been retained.")).foregroundStyle(.secondary)
