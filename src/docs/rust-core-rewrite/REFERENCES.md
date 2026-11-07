@@ -31,3 +31,14 @@ rustup toolchain file and dependency policy now pin 1.97.1. Compiler upgrading
 alone does not change the edition, dependency lock or identity/state contracts.
 Official references: https://doc.rust-lang.org/cargo/reference/rust-version.html
 and https://doc.rust-lang.org/stable/edition-guide/editions/ .
+
+2026-11-07 native setup network discovery uses pinned
+[`if-addrs 0.15.0`](https://crates.io/crates/if-addrs/0.15.0), with the
+registry archive checksum recorded in Cargo.lock. Its upstream source uses OS
+interface APIs for Unix and Windows, including operational interface status;
+the selected release's MIT/BSD license and source were inspected. It reuses the
+already locked libc/windows-sys versions and adds no other package. Rust CLI
+and App share this adapter instead of maintaining a Windows empty result or a
+second handwritten OS implementation. Discovery remains a read, not listener
+authorization. Real OS address inventory and independent UDP binds passed on
+Linux; macOS/Windows setup evidence is still required from installed packages.

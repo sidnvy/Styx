@@ -36,6 +36,7 @@
         "sha2",
         "thiserror",
         "libc",
+        "if-addrs",
         "getrandom",
         "tokio",
         "aws-lc-rs",
