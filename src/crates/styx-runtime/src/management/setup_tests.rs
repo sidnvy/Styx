@@ -75,7 +75,9 @@ fn setup_tunnel_observation_ignores_foreign_markers_and_contains_only_metadata()
     let observer = crate::foreground::tunnel::observe_requests(&gateway)
         .unwrap()
         .unwrap();
-    let call = rmcp::model::CallToolRequestParams::new("list_execution_environments");
+    let call = rmcp::model::ClientRequest::CallToolRequest(rmcp::model::CallToolRequest::new(
+        rmcp::model::CallToolRequestParams::new("list_execution_environments"),
+    ));
     observer.record(b"forged-marker", None, &call);
     assert_eq!(
         crate::foreground::tunnel::request_observation(&gateway).unwrap()["requests"],

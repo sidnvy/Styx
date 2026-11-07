@@ -35,8 +35,11 @@ impl RequestObservation {
         &self,
         marker: &[u8],
         session: Option<&str>,
-        request: &rmcp::model::CallToolRequestParams,
+        request: &rmcp::model::ClientRequest,
     ) {
+        let rmcp::model::ClientRequest::CallToolRequest(call) = request else {
+            return;
+        };
         if aws_lc_rs::constant_time::verify_slices_are_equal(marker, &self.marker).is_err() {
             return;
         }
@@ -57,7 +60,12 @@ impl RequestObservation {
             if rows.len() == 32 {
                 rows.pop_front();
             }
-            rows.push_back(session_diagnostic(session, request, now));
+            rows.push_back(session_diagnostic(
+                session,
+                &call.params.name,
+                rmcp::model::GetMeta::get_meta(request),
+                now,
+            ));
             if let Ok(bytes) = serde_json::to_vec(&serde_json::json!({"schema":1,"calls":*rows})) {
                 let _ = atomic_write(&self.path, &self.root, "session-observation.json", &bytes);
             }
@@ -71,12 +79,12 @@ impl RequestObservation {
 }
 fn session_diagnostic(
     session: Option<&str>,
-    request: &rmcp::model::CallToolRequestParams,
+    tool: &str,
+    meta: &rmcp::model::RequestMetaObject,
     now: u64,
 ) -> serde_json::Value {
     use styx_contracts::identity::Sha256Digest;
     let hash = |value: &str| Sha256Digest::of_bytes(value.as_bytes()).to_hex();
-    let meta = serde_json::to_value(&request.meta).unwrap_or(serde_json::Value::Null);
     let correlation = ["openai/session", "openai/subject", "openai/organization"]
         .into_iter()
         .map(|name| {
@@ -86,7 +94,7 @@ fn session_diagnostic(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    serde_json::json!({"at_unix_ms":now,"tool":request.name,
+    serde_json::json!({"at_unix_ms":now,"tool":tool,
         "transport_session_sha256":session.map(hash),"correlation_sha256":correlation})
 }
 pub(crate) fn observe_requests(state: &Path) -> Result<Option<Arc<RequestObservation>>> {
@@ -1022,13 +1030,27 @@ mod tests {
         let key = dir.0.join("input-key");
         private(&key, b"sk-abcdefghijklmnop");
         configure(&dir.0, "tunnel_abcdefgh", &key, true, true).unwrap();
-        let request: rmcp::model::CallToolRequestParams =
+        // The SDK extracts wire params._meta into envelope extensions. Decode
+        // the same full JSON-RPC shape as HTTP, rather than a params-only mock.
+        let message: rmcp::model::ClientJsonRpcMessage =
             serde_json::from_value(serde_json::json!({
-                "name":"exec_command","arguments":{"cmd":"SECRET_COMMAND"},
-                "_meta":{"openai/session":"PRIVATE_CONVERSATION","openai/subject":"PRIVATE_SUBJECT",
-                    "unrelated":"PRIVATE_METADATA"}
+                "jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"exec_command","arguments":{"cmd":"SECRET_COMMAND"},
+                    "_meta":{"openai/session":"PRIVATE_CONVERSATION","openai/subject":"PRIVATE_SUBJECT",
+                        "unrelated":"PRIVATE_METADATA"}}
             }))
             .unwrap();
+        let rmcp::model::ClientJsonRpcMessage::Request(envelope) = message else {
+            panic!("real wire request expected");
+        };
+        let request = envelope.request;
+        let rmcp::model::ClientRequest::CallToolRequest(call) = &request else {
+            panic!("tool request expected");
+        };
+        assert!(
+            call.params.meta.is_none(),
+            "SDK moved metadata to extensions"
+        );
         let output = dir.0.join("tunnel/session-observation.json");
         let observation = observe_requests(&dir.0).unwrap().unwrap();
         observation.record(&observation.marker, Some("PRIVATE_TRANSPORT"), &request);
@@ -1062,8 +1084,17 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(value["calls"].as_array().unwrap().len(), 32);
         assert_eq!(value["calls"][0]["tool"], "exec_command");
-        assert!(value["calls"][0]["correlation_sha256"]["openai/session"].is_string());
-        let other = session_diagnostic(Some("another-transport"), &request, 0);
+        assert_eq!(
+            value["calls"][0]["correlation_sha256"]["openai/session"],
+            styx_contracts::identity::Sha256Digest::of_bytes(b"PRIVATE_CONVERSATION").to_hex()
+        );
+        assert!(value["calls"][0]["correlation_sha256"]["openai/organization"].is_null());
+        let other = session_diagnostic(
+            Some("another-transport"),
+            &call.params.name,
+            rmcp::model::GetMeta::get_meta(&request),
+            0,
+        );
         assert_eq!(
             other["correlation_sha256"],
             value["calls"][0]["correlation_sha256"]

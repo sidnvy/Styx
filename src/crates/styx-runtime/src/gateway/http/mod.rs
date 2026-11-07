@@ -535,7 +535,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
                     ClientRequest::InitializeRequest(r) => {
                         initialize_version = Some(r.params.protocol_version.as_str().to_owned())
                     }
-                    ClientRequest::CallToolRequest(request) => {
+                    ClientRequest::CallToolRequest(_) => {
                         // Only a tool call shows ChatGPT used Styx: the tunnel
                         // client's own startup probe sends initialize/tools/list
                         // with the same forwarding headers. Recorded after bearer
@@ -547,7 +547,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
                                 .expect("tunnel observation")
                                 .as_ref()
                         {
-                            observation.record(marker.as_bytes(), sid.as_deref(), &request.params);
+                            observation.record(marker.as_bytes(), sid.as_deref(), &r.request);
                         }
                     }
                     ClientRequest::PingRequest(_) | ClientRequest::ListToolsRequest(_) => {}

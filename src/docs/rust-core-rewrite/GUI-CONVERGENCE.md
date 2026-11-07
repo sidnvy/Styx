@@ -161,12 +161,24 @@ Candidate-9 (93161ad, Mac 1123) installed from its DMG and completed fresh GUI
 setup and Tunnel connection. Its actual setup view distinguishes the other
 computers' joining address from this Mac's loopback connection. In the real
 Work conversation, two consecutive read-only list calls in one assistant turn
-arrived with different MCP transport sessions; all three selected correlation
-metadata fields were absent. This establishes transport facts, not a safe
-replacement owner policy. No owner isolation or authentication rule was relaxed.
+arrived with different MCP transport sessions. The claim that all three
+correlation metadata fields were absent was withdrawn: the diagnostic read the
+typed parameter field after the MCP SDK had moved wire metadata into envelope
+extensions. Its transport-session hashes remain valid; metadata absence is
+unproven. The diagnostic now reads the SDK's canonical envelope metadata and
+its regression decodes a complete JSON-RPC request, checking the exact expected
+correlation hash and absence of raw payloads. No owner isolation or
+authentication rule was relaxed.
 NAB5's old November 6 setup-check App/Core tree was audited and normally quit;
 its files and profile were retained. The current H guest remains paired to the
 archived candidate-8 hub, so candidate-9 is not two-machine acceptance.
+In the installed C9 GUI after read-only account calls, saving the same Tunnel
+with no replacement key restored the connected state. Current key bytes matched
+the original authorized source over a direct encrypted stdin comparison pipe;
+neither key nor its digest was exported. The first post-action evidence script
+tried to read the old key filename, which normal configuration rotation had
+removed; the correction only read the current file and did not repeat saving.
+This passes that narrow journey, not the C8 recovery with execution resources.
 
 The owner's subsequent network/setup and Windows settings corrections are
 implemented in source. CLI and both native GUIs now share pinned `if-addrs
@@ -191,6 +203,11 @@ corrected and the full affected local-gateway filter passed. An isolated native
 Windows settings preview was inspected using own-window bitmaps; the earlier
 desktop capture hit the old foreground window and is invalid evidence.
 These corrections are not yet installed packages or native setup acceptance.
+C10 e2a829b passed the unified development quality gate, but its native build was
+not started once the metadata diagnostic defect was identified. The next
+immutable candidate must include the diagnostic correction as well as these UI
+changes. C10's source and passing quality evidence are retained without claiming
+that its known-bad metadata diagnostic was accepted.
 Product: network discovery and settings corrections are source-complete.
 Architecture: shared Rust discovery retains the sole configuration authority.
 Integration: focused checks passed; final same-source candidate remains pending.
