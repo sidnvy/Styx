@@ -333,3 +333,51 @@ delivery and Stable remain NO-GO. Evidence is under
 `/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/candidate-14/` and
 `revocation-investigation/`. The reference uses its declared signed fixture;
 it is not a claim about the next installed package or its native pixels.
+
+## C15 installed candidate and local client ownership
+
+Product: C15 (`f10e20186fdc68519563fd57bb3274fb9c0ed631`) is installed on both
+machines. GUI first setup, automatic LAN address selection, independent CA and
+code comparison, mismatch refusal and approved pairing were exercised. Actual
+Custom MCP Browser nonce read/close passed on both machines. Windows desktop
+input and one click have independent file effects; the account model also read
+the random paint-only visual marker from its returned screenshot. Mac Computer
+Use returned `CAPABILITY_UNSUPPORTED / not_dispatched`; no Mac desktop mutation
+was sent. The current installed Custom MCP details were explicitly refreshed
+again and retained Styx’s own black ripple Logo; screenshot and observation are
+under `candidate-15/account-logo-refresh/`. C15 Exec, complete lifecycle and
+revoke/restore remain open. C14 passes do not fill those C15 gaps.
+
+Architecture: the revoked initial WSS admission correction is included in C15.
+The Mac Computer source bootstrap failure is a separate unconfirmed cause; a
+running Cua process and advertised capability do not prove a ready provider.
+
+Integration: the frozen C15 unified quality receipt is PASS with unchanged inputs
+and source revision. Both native packages were produced from the same archive
+`f7adb5b586431f2ce096a35fdd8b40699274dace47f95ac964d229f307b26b18`.
+The owner requested device-local Codex work to replace serialized SSH/UI
+round trips. [Client leases](CLIENT-ACCEPTANCE-LEASES.md) assign disjoint devices
+and evidence paths; shared source and Git remain integrator-owned.
+
+Release: Mac build 1126 DMG SHA-256 is
+`7b6708727f986f738a3b402a09f76aa1bc028231b857bacfd9aec5cb2d8d3a9d`;
+Windows Inno 0.4.20261107.15 SHA-256 is
+`49eeb80ddb0e4143c1c216520906d1915a4644546cd8b5d2e501b21a6789c19f`.
+Verified delivery copies and provenance are under `candidate-15/deliverables/`.
+Mac uses its original local signing identity, without Developer ID/notarization;
+Windows is an unsigned outer preview with verified signed Runtime. Installation
+does not imply complete account acceptance or a Stable release.
+
+Reliability: the old C14 J processes exited after one unclean normal Quit. A
+subsequent attempted UI-only termination found the process already absent and
+had no force effect. The original raw failed receipt and independent correction
+are retained in `candidate-15/installed-evidence/old-J-exit-correction.json`;
+this supersedes the earlier statement that the old J App remained running and
+does not relabel that exit as a clean lifecycle pass. New C15 native acceptance
+owners must retain original process identity and avoid replaying uncertain work.
+
+Decision: proceed with parallel native client diagnosis/acceptance, then coordinated
+account and recovery work. Final GUI delivery and Stable remain NO-GO. Evidence:
+`/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/candidate-15/`, with
+device-local reports in the lease directories. Local Codex startup is execution
+evidence only, not a new native acceptance pass.
