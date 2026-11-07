@@ -22,8 +22,9 @@ publisher-key transfer, or unobserved operation replay.
 Required journey for the final immutable candidate:
 
 1. Install the signed Mac DMG on PilotMac and the Windows Inno package on NAB5.
-2. In the GUI create a hub with the required private LAN address, or join it
-   from the other computer without creating another Gateway.
+2. In the GUI create a hub, enable other computers to join and automatically
+   detect an available LAN/VPN interface without requiring manual IP entry;
+   join it from the other computer without creating another Gateway.
 3. Show real computer inventory in the App; create/copy an expiring invitation;
    compare and approve the exact pairing code; observe the joined computer.
    Wrong confirmation and revoking the hub's own computer must be refused.
