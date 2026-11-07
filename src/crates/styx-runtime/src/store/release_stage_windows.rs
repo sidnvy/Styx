@@ -7,16 +7,19 @@ impl Root {
     ) -> Result<(File, FileObservation)> {
         self.validate_root()?;
         let opened = self.open_relative(relative, false, false, false)?;
-        let facts = private_facts(&opened.file, false)?;
+        let facts = self.read_facts(&opened.file, false)?;
         ffi::require_no_streams(&opened.path)?;
         self.validate_root()?;
         Ok((opened.file, facts.observation))
     }
     pub(in crate::store) fn release_observe(&self, file: &File) -> Result<FileObservation> {
         self.validate_root()?;
-        Ok(private_facts(file, false)?.observation)
+        Ok(self.read_facts(file, false)?.observation)
     }
     pub(in crate::store) fn release_create(&self, name: &OsStr) -> Result<File> {
+        if self.installation_read_only {
+            return Err(StoreError::NotPrivate);
+        }
         component(name)?;
         self.validate_root()?;
         ffi::require_local_ntfs(&self.path, &self.directory)?;
@@ -28,6 +31,9 @@ impl Root {
         Ok(file)
     }
     pub(in crate::store) fn release_flush(&self, file: &File, _executable: bool) -> Result<()> {
+        if self.installation_read_only {
+            return Err(StoreError::NotPrivate);
+        }
         private_facts(file, false)?;
         ffi::flush_file(file)?;
         self.sync_directory()?;

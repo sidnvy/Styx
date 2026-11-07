@@ -491,6 +491,11 @@
       "input": "STYX_TEST_NATIVE_HOST_ROOT existing private parent",
       "required_for": "pending Host fixed phase chain and retained unknown writer; opaque bytes are not pairing or runtime acceptance"
     },
+    "release::windows_tests::existing_public_windows_installation_signature_and_retained_images": {
+      "kind": "explicit_windows_readonly_existing_installation",
+      "input": "STYX_TEST_PUBLIC_WINDOWS_PAYLOAD, STYX_TEST_PUBLIC_WINDOWS_PUBLISHER and external STYX_TEST_WINDOWS_RELEASE_PUBLISHER_PIN",
+      "required_for": "read existing signed public installation, exact publisher/worker/image retention and wrong-pin refusal; no ACL mutation, launch, control or GUI acceptance"
+    },
     "release::windows_tests::actual_signed_windows_runtime_closure_selection_and_refusals": {
       "kind": "explicit_windows_signed_fixture",
       "input": "STYX_TEST_WINDOWS_RELEASE_ROOT protected signed fixture; external publisher pin",

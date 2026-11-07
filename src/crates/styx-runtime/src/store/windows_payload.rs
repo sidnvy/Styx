@@ -80,8 +80,8 @@ fn directory_names(path: &Path, max: usize) -> Result<BTreeSet<std::ffi::OsStrin
     }
     Ok(names)
 }
-fn observe(opened: &Opened, directory: bool) -> Result<Observed> {
-    let facts = private_facts(&opened.file, directory)?;
+fn observe(root: &Root, opened: &Opened, directory: bool) -> Result<Observed> {
+    let facts = root.read_facts(&opened.file, directory)?;
     if !directory {
         ffi::require_no_streams(&opened.path)?;
     }
@@ -101,7 +101,7 @@ impl Root {
     pub(in crate::store) fn retain_raw_file(&self, original: &RawFile) -> Result<File> {
         self.validate_root()?;
         let opened = self.open_relative(original.relative_path(), false, false, false)?;
-        let observed = observe(&opened, false)?;
+        let observed = observe(self, &opened, false)?;
         if observed.facts.observation != *original.observation()
             || observed.facts.observation.byte_len != original.bytes().len() as u64
             || stream_hash(&opened.file, observed.facts.observation.byte_len)?
@@ -110,8 +110,8 @@ impl Root {
             return Err(StoreError::Changed);
         }
         let current = self.open_relative(original.relative_path(), false, false, false)?;
-        if !same(&observed, &observe(&opened, false)?)
-            || !same(&observed, &observe(&current, false)?)
+        if !same(&observed, &observe(self, &opened, false)?)
+            || !same(&observed, &observe(self, &current, false)?)
         {
             return Err(StoreError::Changed);
         }
@@ -185,7 +185,7 @@ impl Root {
             return Err(StoreError::TooLarge);
         }
         let relative = &directory.relative;
-        let before = observe(&directory, true)?;
+        let before = observe(self, &directory, true)?;
         *directories += 1;
         let names = directory_names(&directory.path, limits.max_files + limits.max_directories)?;
         for name in &names {
@@ -205,7 +205,7 @@ impl Root {
             if kind.is_dir() {
                 // The opened directory remains held while recursing through its
                 // ordinary path, so neither it nor an ancestor can be renamed.
-                private_facts(&opened.file, true)?;
+                self.read_facts(&opened.file, true)?;
                 self.walk_payload(
                     opened,
                     depth + 1,
@@ -220,7 +220,7 @@ impl Root {
                 if members.len() >= limits.max_files {
                     return Err(StoreError::TooLarge);
                 }
-                let mut facts = observe(&opened, false)?;
+                let mut facts = observe(self, &opened, false)?;
                 let size = facts.facts.observation.byte_len;
                 if size > limits.max_file_bytes {
                     return Err(StoreError::TooLarge);
@@ -259,8 +259,11 @@ impl Root {
         let after_names =
             directory_names(&directory.path, limits.max_files + limits.max_directories)?;
         if after_names != names
-            || !same(&before, &observe(&directory, true)?)
-            || !same(&before, &observe(&self.payload_directory(relative)?, true)?)
+            || !same(&before, &observe(self, &directory, true)?)
+            || !same(
+                &before,
+                &observe(self, &self.payload_directory(relative)?, true)?,
+            )
         {
             return Err(StoreError::Changed);
         }
@@ -277,6 +280,11 @@ impl Root {
 }
 impl PayloadSnapshot {
     pub(in crate::store) fn revalidate(&self) -> Result<()> {
+        // Public installation policy also binds the current root/ancestor ACLs.
+        // Keep the private snapshot's original retained-handle fast path.
+        if self.root.installation_read_only {
+            self.root.validate_root()?;
+        }
         // Root retains the entire ancestor chain without delete sharing, and
         // every payload directory is retained below with the same protection.
         // Thus these ordinary directory listing paths still name the original
@@ -352,7 +360,7 @@ impl PayloadSnapshot {
             .ok_or(StoreError::NotRegularFile)?
             .clone();
         let opened = self.root.open_relative(path, false, false, false)?;
-        if !same(&observed, &observe(&opened, false)?) {
+        if !same(&observed, &observe(&self.root, &opened, false)?) {
             return Err(StoreError::Changed);
         }
         check_pe64(&opened.file, observed.facts.observation.byte_len)?;
@@ -418,8 +426,8 @@ impl PinnedImage {
             .open_relative(&self.relative, false, false, false)?;
         // The retained handle denies write sharing, so the bytes hashed when this
         // image was pinned cannot change while it is held; metadata suffices.
-        if !same(&self.observed, &observe(&self.opened, false)?)
-            || !same(&self.observed, &observe(&current, false)?)
+        if !same(&self.observed, &observe(&self.root, &self.opened, false)?)
+            || !same(&self.observed, &observe(&self.root, &current, false)?)
             || self.observed.sha256.is_none()
         {
             return Err(StoreError::Changed);

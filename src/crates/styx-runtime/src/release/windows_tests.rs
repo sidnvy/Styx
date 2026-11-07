@@ -254,3 +254,37 @@ async fn actual_signed_windows_runtime_closure_selection_and_refusals() {
         serde_json::json!({"schema":1,"status":"PASS_SIGNED_WINDOWS_RELEASE_READ_ONLY", "manifest_sha256":report.manifest_sha256,"target":report.target,"external_worker_count":report.external_worker_count,"selection_reopened":true,"ordinary_launch_refused":true,"runtime_launched":false,"installed":false})
     );
 }
+
+// Read the existing installation as-is. No ACL edits, fixture adoption,
+// process launch or control request; the external publisher pin is mandatory.
+#[test]
+#[ignore = "requires explicit existing Windows public signed installation and external publisher pin"]
+fn existing_public_windows_installation_signature_and_retained_images() {
+    let payload =
+        PathBuf::from(std::env::var_os("STYX_TEST_PUBLIC_WINDOWS_PAYLOAD").expect("payload"));
+    let publisher =
+        PathBuf::from(std::env::var_os("STYX_TEST_PUBLIC_WINDOWS_PUBLISHER").expect("publisher"));
+    let pin = std::env::var("STYX_TEST_WINDOWS_RELEASE_PUBLISHER_PIN").expect("external pin");
+    let expected = PublisherFingerprint::parse(&pin).unwrap();
+    let verified =
+        verify(&payload, &publisher, &expected).expect("existing public signed installation");
+    let report = verified.report();
+    assert_eq!(report.target, "x86_64-pc-windows-msvc");
+    let selection = verified.runtime_selection().unwrap();
+    for worker in &verified.manifest().worker_closures {
+        verified
+            .worker_image(worker.kind)
+            .unwrap()
+            .revalidate()
+            .unwrap();
+    }
+    verified.revalidate().unwrap();
+    let reopened = verify_selected(&selection).expect("same selected public installation");
+    assert_eq!(reopened.report().manifest_sha256, report.manifest_sha256);
+    let wrong = PublisherFingerprint::parse(&"0".repeat(64)).unwrap();
+    assert!(verify(&payload, &publisher, &wrong).is_err());
+    println!(
+        "PASS_PUBLIC_SIGNED_INSTALLATION_READ_REVALIDATE_ALL_WORKERS_WRONG_PIN_REFUSED source={} members={}",
+        report.source_revision, report.member_count
+    );
+}

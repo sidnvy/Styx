@@ -366,6 +366,39 @@ pub(crate) use platform::{
     SignedAppMember, SignedAppMembers, service_require_empty_acl as macos_service_require_empty_acl,
 };
 
+/// Public signed installation reader. It exposes no writer, lock, creation,
+/// configuration or private-state adoption port. Publisher authority remains
+/// with release verification, independent of these filesystem observations.
+#[cfg(target_os = "windows")]
+pub(crate) struct PublicInstallationRoot {
+    inner: platform::Root,
+}
+#[cfg(target_os = "windows")]
+impl PublicInstallationRoot {
+    pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self {
+            inner: platform::Root::open_installation(path.as_ref())?,
+        })
+    }
+    pub(crate) fn identity(&self) -> RootIdentity {
+        self.inner.identity()
+    }
+    pub(crate) fn read_raw(&self, relative: impl AsRef<Path>, max: usize) -> Result<RawFile> {
+        self.inner.read_raw(relative.as_ref(), max)
+    }
+    pub(crate) fn retain_raw_file(&self, original: &RawFile) -> Result<std::fs::File> {
+        self.inner.retain_raw_file(original)
+    }
+    pub(crate) fn payload_inventory_with_known(
+        &self,
+        limits: PayloadLimits,
+        known: &KnownDigests,
+    ) -> Result<PayloadInventory> {
+        limits.validate()?;
+        self.inner.payload_inventory(limits, known)
+    }
+}
+
 pub struct PrivateRoot {
     inner: platform::Root,
 }

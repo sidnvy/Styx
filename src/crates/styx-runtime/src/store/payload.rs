@@ -176,13 +176,6 @@ impl PinnedExecutable {
 }
 
 impl PrivateRoot {
-    /// Retain the exact already-read private input with Windows no-write/delete
-    /// sharing. This grants no execution or publisher authority.
-    #[cfg(target_os = "windows")]
-    pub(crate) fn retain_raw_file(&self, original: &RawFile) -> Result<std::fs::File> {
-        self.inner.retain_raw_file(original)
-    }
-
     pub fn payload_inventory(&self, limits: PayloadLimits) -> Result<PayloadInventory> {
         self.payload_inventory_with_known(limits, &KnownDigests::new())
     }

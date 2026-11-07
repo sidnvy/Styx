@@ -462,3 +462,47 @@ Neither those C15 passes nor native ACL tests establish final-candidate acceptan
 
 Decision: complete real Windows lifecycle, integrate the bounded reader fix and
 produce the next immutable candidate. Full GUI delivery and Stable remain NO-GO.
+
+## Native tray outcome and public signed Runtime closure
+
+Product: the NAB5 owner identified the original NotifyIcon by its actual
+PID/HWND/icon ID, correlated the visible overflow icon and invoked its real
+owned `Quit Styx` menu once. Original App/Core/conhost physically exited with
+codes 4/2/0. This is an unclean shutdown, not lifecycle acceptance. One authorized
+reopen retained the same installation/profile but failed package verification
+before a Core started. No Retry, setup, force stop or duplicate launch followed.
+
+Architecture: signed Runtime verification had the same confidentiality mismatch
+as outer App control: its public publisher, payload and worker readers used
+`PrivateRoot`. A distinct `PublicInstallationRoot` now exposes only reads,
+identity, retained-file pins and inventory. Its Windows backend carries the
+protected-modification policy through namespace reads, snapshots and image pins.
+Staging accepts a narrow read-source port; destinations and every configuration
+writer remain private. Signatures, exact closure membership, file identities,
+PE64 and suspended process admission still apply. Snapshot revalidation also
+rechecks the installation root/ancestor policy. The unused private-file pin
+facade was removed; no public installation writer is exposed.
+
+Integration: the native development snapshot
+`6b7a850224f9ed73ef808f9314b63910c379dc524f4ba8b1cb8f4f7fb008a2c2`
+passed Windows compilation, the extended real-filesystem ACL/refusal/recovery
+scenario and untouched C15 installed signed-closure verification: 2156 members,
+all worker image pins, selected reopening and wrong-publisher refusal. Evidence
+is under `windows-public-payload-check/` and the local owner Phase9 directory.
+The subsequent root-policy recheck and dead-facade removal require the next
+exact-source checkpoint. The affected Linux signed staging/exclusive failed
+publication scenario passed; this is not Windows GUI or account acceptance.
+
+Release: C17 unified quality and its Mac native Core build passed. The later
+Windows signed-reader correction supersedes C17 before App packaging; no C17
+final App or Windows producer was dispatched. Final packages must share the
+next immutable source. Existing installed C15 remains unchanged.
+
+Reliability: actual tray and failed-reopen receipts are retained under
+`candidate-15/local-client-owners/windows-phase8/`. The old failure is not
+relabelled by successful package reads. Current NAB5 has one blocked App4460
+and no Core; account Exec/reconnect, clean lifecycle and revoke/fresh pairing
+remain open. PilotMac retains its independently verified recovered C15 state.
+
+Decision: finish exact-source checks, produce both native packages locally and
+repeat the full installed journey. Delivery and Stable remain NO-GO.

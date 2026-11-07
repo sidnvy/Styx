@@ -8,6 +8,36 @@ use std::{
 };
 use styx_contracts::identity::Sha256Digest;
 
+/// Read-only source port. A source cannot create/flush a staging destination.
+pub(crate) trait ReleaseSource {
+    fn release_open(&self, relative: &Path) -> Result<(File, FileObservation)>;
+    fn release_observe(&self, file: &File) -> Result<FileObservation>;
+    fn release_validate(&self) -> Result<()>;
+}
+impl ReleaseSource for PrivateRoot {
+    fn release_open(&self, relative: &Path) -> Result<(File, FileObservation)> {
+        self.inner.release_open(relative)
+    }
+    fn release_observe(&self, file: &File) -> Result<FileObservation> {
+        self.inner.release_observe(file)
+    }
+    fn release_validate(&self) -> Result<()> {
+        self.inner.with_readonly_directory(|_| Ok(()))
+    }
+}
+#[cfg(target_os = "windows")]
+impl ReleaseSource for PublicInstallationRoot {
+    fn release_open(&self, relative: &Path) -> Result<(File, FileObservation)> {
+        self.inner.release_open(relative)
+    }
+    fn release_observe(&self, file: &File) -> Result<FileObservation> {
+        self.inner.release_observe(file)
+    }
+    fn release_validate(&self) -> Result<()> {
+        self.inner.with_readonly_directory(|_| Ok(()))
+    }
+}
+
 pub(crate) struct ReleaseCopyMember<'a> {
     pub source_relative: &'a Path,
     pub destination_relative: &'a Path,
@@ -81,7 +111,7 @@ impl ReleaseStage {
     }
     pub(crate) fn copy_member(
         &mut self,
-        source: &PrivateRoot,
+        source: &impl ReleaseSource,
         member: ReleaseCopyMember<'_>,
     ) -> Result<()> {
         let source_relative = checked_relative(member.source_relative)?;
@@ -103,7 +133,7 @@ impl ReleaseStage {
         self.copied_bytes = next_bytes;
         let directory = self.directory(target.parent().ok_or(StoreError::InvalidRelativePath)?)?;
         let name = target.file_name().ok_or(StoreError::InvalidRelativePath)?;
-        let (mut input, before) = source.inner.release_open(&source_relative)?;
+        let (mut input, before) = source.release_open(&source_relative)?;
         if before.byte_len != member.bytes {
             return Err(StoreError::Changed);
         }
@@ -113,10 +143,10 @@ impl ReleaseStage {
         if hash != member.sha256 {
             return Err(StoreError::Changed);
         }
-        if source.inner.release_observe(&input)? != before {
+        if source.release_observe(&input)? != before {
             return Err(StoreError::Changed);
         }
-        let (_, source_after) = source.inner.release_open(&source_relative)?;
+        let (_, source_after) = source.release_open(&source_relative)?;
         if source_after != before {
             return Err(StoreError::Changed);
         }
@@ -142,7 +172,7 @@ impl ReleaseStage {
         if after != observed {
             return Err(StoreError::Changed);
         }
-        source.inner.with_readonly_directory(|_| Ok(()))?;
+        source.release_validate()?;
         directory.inner.with_readonly_directory(|_| Ok(()))?;
         self.root.inner.with_readonly_directory(|_| Ok(()))?;
         Ok(())

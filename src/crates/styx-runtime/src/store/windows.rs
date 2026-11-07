@@ -26,6 +26,8 @@ pub(super) struct Root {
     ancestors: Arc<Vec<File>>,
     path: PathBuf,
     identity: RootIdentity,
+    // Set only by the separate read-only installation facade, never PrivateRoot.
+    installation_read_only: bool,
 }
 /// Borrowed read port inside one validated original directory operation. This
 /// does not cache trust across operations; the original ancestor HANDLEs remain
@@ -154,6 +156,52 @@ impl From<StoreError> for ServiceStateReadError {
     }
 }
 impl Root {
+    fn read_facts(&self, file: &File, directory: bool) -> Result<ffi::Facts> {
+        if !self.installation_read_only {
+            return private_facts(file, directory);
+        }
+        let facts = ffi::facts(file)?;
+        if facts.directory != directory {
+            return Err(StoreError::NotRegularFile);
+        }
+        ffi::local_executable_acl(file)?;
+        Ok(facts)
+    }
+    fn read_identity(&self, file: &File) -> Result<RootIdentity> {
+        let facts = self.read_facts(file, true)?;
+        let owner_sid = if self.installation_read_only {
+            ffi::local_executable_acl(file)?
+        } else {
+            ffi::private(file)?
+        };
+        Ok(RootIdentity::Windows {
+            volume_serial: facts.observation.device,
+            file_id: facts.observation.inode,
+            owner_sid,
+        })
+    }
+    pub(in crate::store) fn open_installation(path: &Path) -> Result<Self> {
+        let (path, mut ancestors) = absolute_pins(path)?;
+        for directory in ancestors.iter().skip(1) {
+            ffi::local_executable_acl(directory)?;
+        }
+        let directory = ancestors.pop().ok_or(StoreError::InvalidRoot)?;
+        let facts = ffi::facts(&directory)?;
+        let identity = RootIdentity::Windows {
+            volume_serial: facts.observation.device,
+            file_id: facts.observation.inode,
+            owner_sid: ffi::local_executable_acl(&directory)?,
+        };
+        let root = Self {
+            directory: Arc::new(directory),
+            ancestors: Arc::new(ancestors),
+            path,
+            identity,
+            installation_read_only: true,
+        };
+        root.validate_root()?;
+        Ok(root)
+    }
     /// A replacement observed during the checked read is a pending publication.
     pub(super) fn read_service_state(
         &self,
@@ -502,6 +550,7 @@ impl Root {
             ancestors: Arc::new(ancestors),
             path,
             identity,
+            installation_read_only: false,
         })
     }
     /// Runtime scratch only. Creation supplies its own owner/private inheritable
@@ -528,10 +577,15 @@ impl Root {
     pub(super) fn validate_root(&self) -> Result<()> {
         let (_, pins) = absolute_pins(&self.path)?;
         let current = pins.last().ok_or(StoreError::InvalidRoot)?;
-        if root_identity(current)? != self.identity
-            || root_identity(&self.directory)? != self.identity
+        if self.read_identity(current)? != self.identity
+            || self.read_identity(&self.directory)? != self.identity
         {
             return Err(StoreError::Changed);
+        }
+        if self.installation_read_only {
+            for file in self.ancestors.iter().skip(1) {
+                ffi::local_executable_acl(file)?;
+            }
         }
         // Keep the original chain alive across the validation call too.
         if self.ancestors.iter().any(|f| ffi::facts(f).is_err()) {
@@ -546,6 +600,9 @@ impl Root {
         write: bool,
         create: bool,
     ) -> Result<Opened> {
+        if self.installation_read_only && (write || create) {
+            return Err(StoreError::NotPrivate);
+        }
         #[cfg(test)]
         OPEN_RELATIVE_CALLS.with(|calls| calls.set(calls.get() + 1));
         let raw = relative.to_str().ok_or(StoreError::InvalidRelativePath)?;
@@ -573,7 +630,7 @@ impl Root {
                 });
             }
             let file = ffi::open(&path, true, false, false)?;
-            private_facts(&file, true)?;
+            self.read_facts(&file, true)?;
             parents.push(file);
         }
         Err(StoreError::InvalidRelativePath)
@@ -603,7 +660,7 @@ impl Root {
     }
     fn read_raw_member(&self, relative: &Path, max_bytes: usize) -> Result<RawFile> {
         let opened = self.open_relative(relative, false, false, false)?;
-        let before = private_facts(&opened.file, false)?;
+        let before = self.read_facts(&opened.file, false)?;
         ffi::require_no_streams(&opened.path)?;
         if before.observation.byte_len > max_bytes as u64 {
             return Err(StoreError::TooLarge);
@@ -617,10 +674,10 @@ impl Root {
         if bytes.len() > max_bytes {
             return Err(StoreError::TooLarge);
         }
-        let after = private_facts(&opened.file, false)?;
+        let after = self.read_facts(&opened.file, false)?;
         let current = self.open_relative(relative, false, false, false)?;
         if before != after
-            || after != private_facts(&current.file, false)?
+            || after != self.read_facts(&current.file, false)?
             || bytes.len() as u64 != after.observation.byte_len
         {
             return Err(StoreError::Changed);

@@ -197,6 +197,27 @@ mod public_file_tests {
         acl(&path, &["/grant", "*S-1-1-0:(OI)(CI)(RX)"]);
         acl(&metadata, &["/grant", "*S-1-1-0:(R)"]);
         assert!(matches!(Root::open(&path), Err(StoreError::NotPrivate)));
+        let installation = crate::store::PublicInstallationRoot::open(&path).unwrap();
+        let raw = installation
+            .read_raw("windows-runtime.json", 16384)
+            .unwrap();
+        assert_eq!(raw.bytes(), bytes);
+        let _raw_pin = installation.retain_raw_file(&raw).unwrap();
+        let inventory = installation
+            .payload_inventory_with_known(
+                crate::store::PayloadLimits::default(),
+                &crate::store::KnownDigests::new(),
+            )
+            .unwrap();
+        assert_eq!(inventory.members().len(), 1);
+        inventory.revalidate().unwrap();
+        // A read-only installation cannot mint a writer through its backend.
+        assert!(
+            installation
+                .inner
+                .open_relative(Path::new("new"), false, true, true)
+                .is_err()
+        );
         let pinned = LocalFile::open(&metadata, 16384).unwrap();
         assert_eq!(pinned.read_bytes(16384).unwrap(), bytes);
         assert!(pinned.digest() == Sha256Digest::of_bytes(bytes));
@@ -216,12 +237,30 @@ mod public_file_tests {
         acl(&path, &["/grant", "*S-1-1-0:(W)"]);
         assert!(matches!(pinned.revalidate(), Err(StoreError::NotPrivate)));
         assert!(LocalFile::open(&metadata, 16384).is_err());
+        assert!(
+            installation
+                .read_raw("windows-runtime.json", 16384)
+                .is_err()
+        );
+        assert!(inventory.revalidate().is_err());
         acl(&path, &["/remove:g", "*S-1-1-0"]);
         acl(&path, &["/grant", "*S-1-1-0:(OI)(CI)(RX)"]);
         pinned.revalidate().unwrap();
         assert_eq!(pinned.read_bytes(16384).unwrap(), bytes);
+        assert_eq!(
+            installation
+                .read_raw("windows-runtime.json", 16384)
+                .unwrap()
+                .bytes(),
+            bytes
+        );
         acl(&metadata, &["/grant", "*S-1-1-0:(W)"]);
         assert!(matches!(pinned.revalidate(), Err(StoreError::NotPrivate)));
         assert!(LocalFile::open(&metadata, 16384).is_err());
+        assert!(
+            installation
+                .read_raw("windows-runtime.json", 16384)
+                .is_err()
+        );
     }
 }

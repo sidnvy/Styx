@@ -10,6 +10,10 @@
     )
 ))]
 use crate::store::PayloadLimits;
+#[cfg(not(target_os = "windows"))]
+use crate::store::PrivateRoot as ReleaseRoot;
+#[cfg(target_os = "windows")]
+use crate::store::PublicInstallationRoot as ReleaseRoot;
 use crate::{
     crypto::{PublisherFingerprint, PublisherVerifyingKey, RawReleaseManifest},
     store::{PayloadInventory, PinnedExecutable, PrivateRoot, RawFile, StoreError},
@@ -136,12 +140,12 @@ pub struct ReleaseReport {
 /// descriptions. A plain manifest DTO or launch pathname cannot reconstruct it.
 /// A caller launching this image must keep this object until real child reaping.
 pub struct VerifiedNativeRelease {
-    root: PrivateRoot,
+    root: ReleaseRoot,
     prefix: PathBuf,
     publisher_locator: PathBuf,
     manifest_file: RawFile,
     signature_file: RawFile,
-    publisher_root: PrivateRoot,
+    publisher_root: ReleaseRoot,
     publisher_file: RawFile,
     // RawFile preserves the byte/identity observation, while this original
     // Windows reader HANDLE also excludes physical publisher replacement.
@@ -365,7 +369,7 @@ impl VerifiedNativeRelease {
         self.executable.launch_path().map_err(ReleaseError::from)
     }
 }
-fn reobserve(root: &PrivateRoot, original: &RawFile, limit: usize) -> Result<()> {
+fn reobserve(root: &ReleaseRoot, original: &RawFile, limit: usize) -> Result<()> {
     let current = root
         .read_raw(original.relative_path(), limit)
         .map_err(ReleaseError::from)?;
@@ -525,8 +529,8 @@ fn validate_selection_locator(selection: &NativeRuntimeSelection) -> Result<()> 
     #[cfg(target_os = "windows")]
     for locator in [&selection.payload_path, &selection.publisher_file] {
         use std::path::{Component, Prefix};
-        // Only a local drive path is a locator. PrivateRoot remains the single
-        // owner/ACL/component/reparse/ADS authority and pins every ancestor.
+        // Only a local drive path is a locator. The read-only installation root
+        // enforces modification/identity/reparse/ADS checks and pins ancestors.
         if locator
             .split(['\\', '/'])
             .any(|part| matches!(part, "." | ".."))
@@ -590,11 +594,11 @@ fn verify_native(
     }
     let parent = publisher_path.parent().ok_or(ReleaseError::Invalid)?;
     let name = publisher_path.file_name().ok_or(ReleaseError::Invalid)?;
-    let publisher_root = PrivateRoot::open(parent)?;
+    let publisher_root = ReleaseRoot::open(parent)?;
     let publisher_file = publisher_root.read_raw(Path::new(name), 4096)?;
     #[cfg(target_os = "windows")]
     let publisher_file_pin = publisher_root.retain_raw_file(&publisher_file)?;
-    let root = PrivateRoot::open(payload)?;
+    let root = ReleaseRoot::open(payload)?;
     let manifest_file = root.read_raw("manifest.json", NATIVE_RELEASE_MANIFEST_BYTES)?;
     let signature_file = root.read_raw("manifest.sig", 64)?;
     if signature_file.bytes().len() != 64 {
