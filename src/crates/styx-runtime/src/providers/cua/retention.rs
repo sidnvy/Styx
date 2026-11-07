@@ -35,6 +35,7 @@ fn canonical_not_dispatched(digest: Option<Sha256Digest>) -> Result<bool> {
         Some(CuaError::Busy),
         Some(CuaError::InvalidRequest),
         Some(CuaError::PermissionDenied),
+        Some(CuaError::StaleObservation),
         Some(CuaError::Unsupported),
         Some(CuaError::ProtocolMismatch),
         Some(CuaError::Unknown),
@@ -283,6 +284,12 @@ mod tests {
         assert!(
             canonical_not_dispatched(Some(Sha256Digest::of_bytes(
                 &encode(CuaEvidence::NotDispatched, Some(CuaError::Busy)).unwrap()
+            )))
+            .unwrap()
+        );
+        assert!(
+            canonical_not_dispatched(Some(Sha256Digest::of_bytes(
+                &encode(CuaEvidence::NotDispatched, Some(CuaError::StaleObservation)).unwrap()
             )))
             .unwrap()
         );

@@ -315,6 +315,18 @@ impl HostAuthority {
     }
 }
 impl HostCoordinator {
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn authorize_native_reference_read_result(
+        ledger: &OperationLedger,
+        owner: &OwnerLease,
+        operation: &OperationId,
+        digest: Sha256Digest,
+        facts: &AdmissionFacts,
+        now: MonotonicMillis,
+        receipt: &mut CuaReceipt,
+    ) -> Result<(), CoordinatorError> {
+        super::desktop_read::authorize_result(ledger, owner, operation, digest, facts, now, receipt)
+    }
     pub(crate) fn desktop_configured(&self) -> bool {
         self.inner
             .state
@@ -1082,17 +1094,15 @@ impl HostCoordinator {
                                     .map_err(CoordinatorError::from);
                             }
                             if read_acquisition {
-                                return state
-                                    .ledger
-                                    .authorize_desktop_read_result(
-                                        bound.owner(),
-                                        &operation,
-                                        digest,
-                                        &f,
-                                        inner.now(),
-                                    )
-                                    .map(|_| ())
-                                    .map_err(CoordinatorError::from);
+                                return super::desktop_read::authorize_result(
+                                    &state.ledger,
+                                    bound.owner(),
+                                    &operation,
+                                    digest,
+                                    &f,
+                                    inner.now(),
+                                    &mut receipt,
+                                );
                             }
                             state
                                 .ledger

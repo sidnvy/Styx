@@ -70,6 +70,40 @@ fn insufficient_read() -> CallToolResult {
         .to_string(),
     )])
 }
+pub(super) fn authorize_result(
+    ledger: &styx_core::operations::OperationLedger,
+    owner: &styx_core::operations::OwnerLease,
+    operation: &styx_contracts::operation::OperationId,
+    digest: styx_contracts::identity::Sha256Digest,
+    facts: &AdmissionFacts,
+    now: MonotonicMillis,
+    receipt: &mut CuaReceipt,
+) -> Result<(), CoordinatorError> {
+    if receipt.evidence == CuaEvidence::NotDispatched {
+        // A known refusal carries no acquired data. Core correctly records it
+        // as Failed, so it must not enter the Succeeded-only read-data gate.
+        // Keep the original owner/digest/purpose binding and return only the
+        // trusted typed refusal; no native payload or observation is delivered.
+        let snapshot = ledger.inspect(owner, operation, digest)?;
+        if receipt.operation != *operation
+            || snapshot.state != OperationState::Failed
+            || snapshot.target.is_none()
+            || !matches!(
+                ledger.inspect_purpose(owner, operation, digest)?,
+                styx_core::operations::OperationPurpose::DesktopAccessibilityReadAcquisition
+                    | styx_core::operations::OperationPurpose::DesktopWindowCaptureReadAcquisition
+            )
+        {
+            return Err(ErrorCategory::StateConflict.into());
+        }
+        receipt.result = None;
+        return Ok(());
+    }
+    ledger
+        .authorize_desktop_read_result(owner, operation, digest, facts, now)
+        .map(|_| ())
+        .map_err(CoordinatorError::from)
+}
 pub(super) fn settle_acquired_read(
     lane: &mut DesktopLane,
     target: &DesktopReadTarget,

@@ -177,6 +177,222 @@ async fn fixture_for_pid(pid: u32) -> (State, OwnerLease, ResourceTarget) {
 async fn fixture() -> (State, OwnerLease, ResourceTarget) {
     fixture_for_pid(std::process::id()).await
 }
+
+#[tokio::test]
+async fn known_read_refusal_is_delivered_without_read_data_or_replaying_the_action() {
+    use super::super::desktop_read::{acquisition_facts, authorize_result};
+    use crate::providers::cua::{CuaError, CuaReceipt};
+    let (mut state, owner, resource) = fixture().await;
+    let action = CuaAction::new(
+        "get_window_state".into(),
+        json!({"pid":std::process::id(),"window_id":42,"include_screenshot":false})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    let mut context = context();
+    context.session = Some(desktop(&state).unwrap().binding.clone());
+    context.capability = CapabilityId::DesktopAccessibility;
+    let facts = acquisition_facts(&state, context.capability).unwrap();
+    let prepared = state
+        .ledger
+        .prepare_desktop_read_acquisition(
+            &owner,
+            resource.clone(),
+            context.clone(),
+            action.to_operation_payload().unwrap(),
+            MonotonicMillis(1),
+        )
+        .unwrap();
+    let DispatchDisposition::ExecuteOnce(permit) = state
+        .ledger
+        .dispatch(
+            &owner,
+            &prepared.id,
+            prepared.payload_digest,
+            &facts,
+            MonotonicMillis(2),
+        )
+        .unwrap()
+    else {
+        panic!("fresh_read")
+    };
+    drop(permit);
+    // This is the real Core settlement produced by the native NotDispatched
+    // receipt. The separate opt-in Mac reference supplies actual native proof.
+    let failed = state
+        .ledger
+        .record_action_result(
+            &prepared.id,
+            ActionResult::NotDispatched,
+            MonotonicMillis(3),
+        )
+        .unwrap();
+    assert_eq!(failed.state, OperationState::Failed);
+    invalidate(state.desktop.as_mut(), None);
+    let mut receipt = CuaReceipt {
+        operation: prepared.id.clone(),
+        evidence: CuaEvidence::NotDispatched,
+        result: Some(CallToolResult::error(vec![
+            rmcp::model::ContentBlock::text("window_unavailable"),
+        ])),
+        cause: Some(CuaError::StaleObservation),
+    };
+    // No refused native payload becomes read data or an input observation.
+    authorize_result(
+        &state.ledger,
+        &owner,
+        &prepared.id,
+        prepared.payload_digest,
+        &facts,
+        MonotonicMillis(4),
+        &mut receipt,
+    )
+    .unwrap();
+    assert!(receipt.result.is_none());
+    assert!(desktop(&state).unwrap().ax_observation.is_none());
+    assert!(prepare(&state, &owner, &resource, &click("s00000002:1")).is_err());
+    assert!(matches!(
+        state
+            .ledger
+            .dispatch(
+                &owner,
+                &prepared.id,
+                prepared.payload_digest,
+                &facts,
+                MonotonicMillis(4)
+            )
+            .unwrap(),
+        DispatchDisposition::Existing(_)
+    ));
+    assert!(
+        authorize_result(
+            &state.ledger,
+            &owner,
+            &prepared.id,
+            Sha256Digest::of_bytes(b"wrong"),
+            &facts,
+            MonotonicMillis(4),
+            &mut receipt
+        )
+        .is_err()
+    );
+    let other = state
+        .ledger
+        .register_verified_owner(
+            "other-read-owner".try_into().unwrap(),
+            "other-read-epoch".try_into().unwrap(),
+        )
+        .unwrap();
+    assert!(
+        authorize_result(
+            &state.ledger,
+            &other,
+            &prepared.id,
+            prepared.payload_digest,
+            &facts,
+            MonotonicMillis(4),
+            &mut receipt
+        )
+        .is_err()
+    );
+
+    // A DISTINCT known acquisition on the original resource can still settle;
+    // no earlier failure or its stale target is revived.
+    let next = state
+        .ledger
+        .prepare_desktop_read_acquisition(
+            &owner,
+            resource.clone(),
+            context.clone(),
+            action.to_operation_payload().unwrap(),
+            MonotonicMillis(5),
+        )
+        .unwrap();
+    let DispatchDisposition::ExecuteOnce(permit) = state
+        .ledger
+        .dispatch(
+            &owner,
+            &next.id,
+            next.payload_digest,
+            &facts,
+            MonotonicMillis(6),
+        )
+        .unwrap()
+    else {
+        panic!("distinct_read")
+    };
+    drop(permit);
+    state
+        .ledger
+        .record_action_result(&next.id, ActionResult::Acknowledged, MonotonicMillis(7))
+        .unwrap();
+    let mut acknowledged = CuaReceipt {
+        operation: next.id.clone(),
+        evidence: CuaEvidence::Acknowledged,
+        result: Some(CallToolResult::structured(json!({"read":"new"}))),
+        cause: None,
+    };
+    authorize_result(
+        &state.ledger,
+        &owner,
+        &next.id,
+        next.payload_digest,
+        &facts,
+        MonotonicMillis(8),
+        &mut acknowledged,
+    )
+    .unwrap();
+    assert!(acknowledged.result.is_some());
+
+    let unknown = state
+        .ledger
+        .prepare_desktop_read_acquisition(
+            &owner,
+            resource,
+            context,
+            action.to_operation_payload().unwrap(),
+            MonotonicMillis(9),
+        )
+        .unwrap();
+    let DispatchDisposition::ExecuteOnce(permit) = state
+        .ledger
+        .dispatch(
+            &owner,
+            &unknown.id,
+            unknown.payload_digest,
+            &facts,
+            MonotonicMillis(10),
+        )
+        .unwrap()
+    else {
+        panic!("distinct_unknown_read")
+    };
+    drop(permit);
+    state
+        .ledger
+        .record_action_result(&unknown.id, ActionResult::Unknown, MonotonicMillis(11))
+        .unwrap();
+    let mut uncertain = CuaReceipt {
+        operation: unknown.id.clone(),
+        evidence: CuaEvidence::Unknown,
+        result: None,
+        cause: Some(CuaError::Unknown),
+    };
+    assert!(
+        authorize_result(
+            &state.ledger,
+            &owner,
+            &unknown.id,
+            unknown.payload_digest,
+            &facts,
+            MonotonicMillis(12),
+            &mut uncertain
+        )
+        .is_err()
+    );
+}
 fn click(token: &str) -> CuaAction {
     CuaAction::new(
         "click".into(),

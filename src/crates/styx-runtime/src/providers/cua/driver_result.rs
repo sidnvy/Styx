@@ -1,6 +1,10 @@
 //! Only fixed structured pre-dispatch refusals prove that no input was sent.
 use super::*;
 
+#[cfg(all(test, target_os = "macos"))]
+#[path = "driver_result_native_reference.rs"]
+mod native_reference;
+
 /// Constructed only from a validated private read and its Core operation purpose.
 /// This is local call context, never a field accepted from the native reply.
 pub(super) struct AxReadReplyContext(());

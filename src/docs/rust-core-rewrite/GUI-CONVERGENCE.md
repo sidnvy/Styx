@@ -707,3 +707,78 @@ replayed. Source and evidence remain in the established checkout/artifact paths.
 Decision: freeze the small correction, build both platforms in parallel through
 their restored local owners, then finish the defined remaining journey. No new
 scope or repeated general audits. Delivery and Stable remain NO-GO.
+
+## C22 actual refusal failure and Host delivery correction · 2026-11-08
+
+Product: C22 Mac build1131 passed actual account cold window enumeration, complete
+AX tree and separate pixels on its original App/Core. The independently held
+paint-only marker matched; input and clicks remained untouched. A later single
+read of its new invitation Sheet56357 still returned `outcome_unknown`, and a
+read of a distinct valid fixture was fenced. No input or failed read was replayed.
+The first native code/envelope of that account call was not retained and remains
+unproven. One new invitation and explicit Copy were confirmed by a fresh pasteboard
+change; the private link was never transferred and expired without pairing.
+
+Architecture: a new disposable NSWindow/NSAlert reference used the pinned signed
+native daemon, production proxy/admitted transport and official MCP codec. It
+returned the exact six-field `window_unavailable` refusal with legacy2025-06-18,
+no metadata, and continued reading a valid window on the same proxy. This rules
+out metadata as a necessary explanation for that reference, not for the historical
+account call. The provider correction alone missed a definite upper-layer defect:
+Core records a known refused read as Failed, but Host sent it through Core's
+Succeeded-only read-data authorization. Host then projected the terminal record
+as `existing_no_replay`, which Gateway correctly treated as Unknown.
+
+Host now checks the original owner, digest, acquisition purpose and Failed record
+before delivering a known NotDispatched read refusal. It discards the native
+payload; no read observation or input authority is installed. Acknowledged and
+Unknown reads retain the existing read-data gate. The finite input-free retention
+audit also recognizes the existing StaleObservation cause. No native SDK,
+timeout, target freshness, owner isolation or unknown replay rule was relaxed.
+
+Integration: the focused real-Core regression failed with Admission(StateConflict)
+before this correction and passed afterward. Existing stale/expired/wrong-target,
+permission-refresh, read-refusal/malformed/timeout, Unknown and audit controls
+passed. A second disposable native reference used real Core acquisition permits,
+production CuaWorker.call_once and the actual Host delivery gate: valid read,
+window_unavailable/NotDispatched with no delivered payload, then valid read on the
+same proxy all passed. Its original native transport drained, I/O joined, and
+proxy exited0. These references are diagnostic evidence, not account acceptance.
+The new opt-in native test is registered in the ignored-scenario policy. No new
+worktree or dependency was introduced; shared source remains integrator-owned.
+
+Release: Windows C22 Inno643e30da02cda3328004033f16723b33bfd04702827272ae97962945c89da6cd
+installed once with actual exit0. Its full2169-file installed closure and publisher
+verification passed. Native fresh Join navigation, unconfigured setup wording,
+all three choices and Chrome passed. The first N App/Core/conhost and independent
+fixtures disappeared after the local owner ended; actual exit codes and cause
+are unknown, so that continuity result is failed. After proving all old processes
+absent and no pairing/unknown mutation pending, the same installation/profile was
+normally reopened once through a Limited Interactive Sid direct App task. Exact
+new App/Core/conhost survived the local owner terminal exit0; no reinstall was
+performed. Fresh independent fixtures and a private empty receiver are ready.
+Neither Windows setup nor Mac diagnostics close the final-candidate journey.
+
+Reliability: original Mac App94794/Core94802 and the failed account worker97832
+remain preserved. Earlier cold worker96212 independently exited0 before the Sheet
+sequence; it is not described as continuously alive. Windows recovery preserves
+its original unexplained failure and all profiles/keys. Closed M program bytes
+were archived with full file/hash/metadata/stream verification before C copies
+were removed; the exact nominated L path was already absent. No production
+plugin/Tunnel, signing key, existing ACL or sandbox configuration changed.
+
+Decision: freeze the bounded Host correction after the native reference, then run
+one integration checkpoint and produce a new same-source candidate through the
+local owners. C22's original failed account result is immutable. Both platforms'
+final actual effects, post-tools lifecycle, revoke/fresh pairing and final Logo
+refresh remain open. The latest Linux candidate has not been installed/accepted;
+its running service is not replaced by this work. Delivery and Stable remain NO-GO.
+
+Evidence: C22 account results are under
+`candidate-22/resumed-account-acceptance/` in the established workstation artifact
+root. PilotMac's `20261108-gui-read-refusal-final/local-codex-install/phase23` through
+`phase28` receipts distinguish installed facts, failure preservation and native
+references; exact reference results are in `ax-wire-reference/` and
+`ax-host-refusal-reference/`. NAB5's existing `native-client-owner2` holds
+`C22-install-*`, `C22-pair-*` and `C22-recovery-*`; the final recovery report retains
+the earlier failed continuity and independent post-owner process proof.
