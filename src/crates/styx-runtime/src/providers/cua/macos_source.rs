@@ -572,6 +572,37 @@ mod installed_source_tests {
 
     // Opt-in native diagnostic only: authenticate the installed original source,
     // read native facts, then close these original FDs. No session or input.
+    #[test]
+    #[ignore = "requires the owner-authorized installed Mac App and live original Cua"]
+    fn installed_source_publication_continuity_read_only() {
+        assert_eq!(
+            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
+            Ok("read-only")
+        );
+        let images = MacAppImages::open_fixed().expect("fixed_signed_App_images");
+        let candidate = MacSourceCandidate::discover(images).expect("original_candidate");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut reads = 0;
+        let mut failures = 0;
+        while std::time::Instant::now() < until {
+            match hint(&candidate.root) {
+                Ok(value) => assert!(value == candidate.hint, "original_generation_changed"),
+                Err(error) => {
+                    failures += 1;
+                    eprintln!("MAC_SOURCE_PUBLICATION read_error={error:?}");
+                }
+            }
+            reads += 1;
+        }
+        candidate
+            .images
+            .revalidate()
+            .expect("original_images_retained");
+        assert!(hint(&candidate.root).expect("final_publication") == candidate.hint);
+        eprintln!("MAC_SOURCE_PUBLICATION reads={reads} failures={failures}");
+        assert_eq!(failures, 0, "unchanged_publication_must_remain_readable");
+    }
+
     #[tokio::test]
     #[ignore = "requires the owner-authorized installed Mac App and live original Cua"]
     async fn installed_source_binding_read_only() {

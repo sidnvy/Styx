@@ -33,6 +33,17 @@ final class RuntimeDirectory {
         }
         guard flock(lock, LOCK_EX | LOCK_NB) == 0 else { close(lock); throw HostError.alreadyRunning }
     }
+    func publishDescriptor(_ data: Data) throws {
+        let url = URL(fileURLWithPath: descriptor)
+        // The Rust reader retains file identity across its observation. Replacing
+        // identical bytes during a read can fence an otherwise unchanged source.
+        if (try? Data(contentsOf: url)) == data { return }
+        let temporary = path + "/.connection-" + UUID().uuidString
+        try data.write(to: URL(fileURLWithPath: temporary), options: .withoutOverwriting)
+        defer { unlink(temporary) }
+        guard chmod(temporary, 0o600) == 0,
+              rename(temporary, descriptor) == 0 else { throw HostError.unsafeRuntime }
+    }
     func clear() { unlink(descriptor); unlink(socket); unlink(path + "/cua.pid") }
     deinit { close(lock) }
 }
@@ -952,8 +963,7 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
                 "mcp_attribution": "NOT RUN"]
             do {
                 let data = try JSONSerialization.data(withJSONObject: descriptor, options: [.sortedKeys])
-                try data.write(to: URL(fileURLWithPath: runtime.descriptor), options: .atomic)
-                chmod(runtime.descriptor, 0o600)
+                try runtime.publishDescriptor(data)
             } catch { runtime.clear(); stop(); statusLine?.title = "Connection descriptor failed"; return }
             statusLine?.title = ax && screen ? "Cua socket available; GUI check required" : "Cua socket available; permissions required"
         } else if phase == "socket_accepting" || Date() > deadline {
@@ -1366,6 +1376,30 @@ if CommandLine.arguments.contains("--self-test") {
     do {
         var owner: RuntimeDirectory? = try RuntimeDirectory(path: dir)
         guard owner != nil else { fatalError("missing owner") }
+        let publication = Data("{\"generation\":\"original\"}".utf8)
+        try owner!.publishDescriptor(publication)
+        var originalPublication = stat(), repeatedPublication = stat()
+        guard lstat(owner!.descriptor, &originalPublication) == 0 else { fatalError("missing publication") }
+        for _ in 0..<8 { try owner!.publishDescriptor(publication) }
+        guard lstat(owner!.descriptor, &repeatedPublication) == 0,
+              originalPublication.st_ino == repeatedPublication.st_ino,
+              originalPublication.st_mtimespec.tv_sec == repeatedPublication.st_mtimespec.tv_sec,
+              originalPublication.st_mtimespec.tv_nsec == repeatedPublication.st_mtimespec.tv_nsec else {
+            fatalError("unchanged publication replaced its file identity")
+        }
+        let changedPublication = Data("{\"generation\":\"changed\"}".utf8)
+        try owner!.publishDescriptor(changedPublication)
+        guard try Data(contentsOf: URL(fileURLWithPath: owner!.descriptor)) == changedPublication else {
+            fatalError("changed publication retained old contents")
+        }
+        unlink(owner!.descriptor)
+        try owner!.publishDescriptor(changedPublication)
+        guard lstat(owner!.descriptor, &repeatedPublication) == 0,
+              repeatedPublication.st_mode & 0o777 == 0o600,
+              try Data(contentsOf: URL(fileURLWithPath: owner!.descriptor)) == changedPublication else {
+            fatalError("withdrawn publication did not return privately")
+        }
+        unlink(owner!.descriptor)
         let privateFile = dir + "/native-host-config.json"
         try Data("{}".utf8).write(to: URL(fileURLWithPath: privateFile)); chmod(privateFile, 0o600)
         try requireNativeHostFile(privateFile, privateFile: true)

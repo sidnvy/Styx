@@ -130,7 +130,8 @@ func productCoreSelfTest() throws {
     try require(upgradePaused[1].state == .needsReview, "An incomplete signing upgrade was shown as pending setup")
     let oldServiceOnly = ProductDeployment(try JSONDecoder().decode(ProductJSON.self, from: Data(#"{"mode":"create-local","steps":[{"id":"host.service.install","status":"blocked"}]}"#.utf8)))
     try require(ProductPreparationPolicy.blockingStep(oldServiceOnly) == nil, "A legacy optional service blocked the App-owned local setup")
-    for (status, transport, expected) in [("configured", "not_observed", ProductTunnelConnection.unknown), ("configured", "not_running", .stopped), ("running", "starting", .connecting), ("running", "ready", .connected), ("configured", "ready", .unknown), ("not_configured", "not_observed", .notConfigured)] {
+    // Rust retains configured status while separately observing the live worker's health.
+    for (status, transport, expected) in [("configured", "not_observed", ProductTunnelConnection.unknown), ("configured", "not_running", .stopped), ("running", "starting", .connecting), ("running", "ready", .connected), ("configured", "ready", .connected), ("not_configured", "not_observed", .notConfigured)] {
         try require(ProductTunnelConnection.observed(.object(["status": .string(status), "transport": .string(transport)])) == expected, "Tunnel configuration or a missing observation was presented as an active connection")
     }
     try require(ProductRestorationPolicy.page(deployment: stalled, localPrepared: true, browser: preparedBrowser, foreground: .object(["status": .string("needs_attention")]), accepted: true, accessibility: true, screenRecording: true) == .preparation, "Uncertain connection recovery skipped review")

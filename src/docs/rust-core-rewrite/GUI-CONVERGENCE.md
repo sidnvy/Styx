@@ -108,6 +108,28 @@ acceptance; the failed App and Core were not counted as a normal Quit.
 The independent account Tunnel was created with explicit owner approval:
 `tunnel_6aee2359dfb48191b3a50e2ba095b595`. Pairing, Computer Use and account
 acceptance must still be rerun on the final candidate; production stays intact.
+Candidate-7 (8631a75, Mac 1121 and Windows 0.4.20261107.7) installed on both
+machines. GUI invitation, independent CA comparison, mismatched-code cancellation,
+approval and claim passed. Both machines produced real Exec file effects,
+Browser navigation/readback/close, native desktop click/text/screenshot and normal
+Quit/reopen evidence. Windows exported the exact 128px, 9163-byte Custom MCP PNG
+through its native Save dialog. These local checks do not close account acceptance.
+The Mac desktop source failed again on the same reopened App after its earlier
+successful effects. Eight independent native observations reported unlocked
+console state and both TCC grants. Separate window probes and closing one of
+two independent read transports also passed. A specific publication race was
+then reproduced with the actual Rust secure reader: 52 failures in 87714 reads
+over ten seconds while the descriptor generation and contents stayed identical.
+The App had atomically replaced that same descriptor every 200ms. The native
+publisher now leaves identical contents in place, and sets private permissions
+on a new temporary file before publishing changes or a withdrawn descriptor.
+The opt-in installed-source continuity regression retains strict Rust identity
+checks. A new installed candidate must pass it and repeat delayed desktop reads.
+Native self-test execution also exposed an outdated Tunnel expectation from
+before the Rust adapter. Rust reports configured status with separately observed
+ready transport health; the existing self-test now expects that pair as connected
+while keeping unobserved configured state unknown. Account connection, saved-key
+editing, installed Logo refresh and disposable guest revocation remain pending.
 Evidence: `/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/`, with
 exact fdb1ef9 inputs and quality receipt under `candidate-2/`. Installed native
 effects are retained on PilotMac under
