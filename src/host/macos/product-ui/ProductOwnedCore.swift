@@ -36,7 +36,7 @@ final class ProductOwnedCore: @unchecked Sendable {
     private var maintenanceUnknown = false
     private var sequence = 0
     private var buffer = Data()
-    static let operations: Set<String> = ["computers", "inviteComputer", "pendingComputers", "approveComputer", "revokeComputer", "tunnelStatus", "tunnelSave", "pluginRead", "pluginSave", "pluginExport", "startupStatus", "status", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "retireRole", "appLifecycle", "appLogin", "appLoginResult", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService", "prepareAppMaintenance", "appMaintenanceStatus", "cancelAppMaintenance"]
+    static let operations: Set<String> = ["computers", "inviteComputer", "pendingComputers", "approveComputer", "revokeComputer", "tunnelStatus", "tunnelSave", "pluginRead", "pluginSave", "pluginExport", "startupStatus", "status", "networkInterfaces", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "retireRole", "appLifecycle", "appLogin", "appLoginResult", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService", "prepareAppMaintenance", "appMaintenanceStatus", "cancelAppMaintenance"]
 
     // Only the fixed package bootstrap below can construct this owner.
     private init(cli: URL, selection: URL, state: URL, cliPin: FileHandle, selectionPin: FileHandle) throws {

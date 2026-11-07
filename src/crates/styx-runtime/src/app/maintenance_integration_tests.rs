@@ -96,6 +96,7 @@ async fn enroll_on(
         persist_login: false,
         port,
         lan_address,
+        allow_remote_hosts: false,
     })
     .await
     .unwrap();

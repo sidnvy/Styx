@@ -507,7 +507,7 @@ impl HostApp {
         self.unknown = true;
         self.finish_local_pairing(choice).await
     }
-    pub(super) async fn create_local(&mut self, input: LocalInput) -> Result<(), AppError> {
+    pub(super) async fn create_local(&mut self, mut input: LocalInput) -> Result<(), AppError> {
         self.startup_diagnostic = startup_diagnostic::StartupDiagnostic::from_env();
         if let Some(diagnostic) = &self.startup_diagnostic {
             diagnostic.report("app_create_local");
@@ -520,6 +520,13 @@ impl HostApp {
             return Err(AppError("app_setup_already_exists"));
         }
         // Validate and serialize before acquiring a writer or publishing inputs.
+        let enabled = input.allow_remote_hosts;
+        let selected = input.lan_address.clone();
+        input.lan_address = tokio::task::spawn_blocking(move || {
+            super::network_interfaces::resolve(enabled, selected.as_deref())
+        })
+        .await
+        .map_err(|_| AppError("app_network_interfaces_unavailable"))??;
         let deployment = local_deployment(&input)?;
         let selection = self
             .runtime_selection_file

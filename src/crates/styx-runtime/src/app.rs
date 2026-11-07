@@ -12,6 +12,7 @@ mod login;
 mod maintenance;
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod maintenance_integration_tests;
+mod network_interfaces;
 pub(crate) mod pairing_link;
 mod plugin;
 mod role_retire;
@@ -228,6 +229,7 @@ enum Operation {
     PluginExport,
     StartupStatus,
     Status,
+    NetworkInterfaces,
     CreateLocal,
     ResumeLocal,
     RequestJoin,
@@ -296,6 +298,8 @@ struct LocalInput {
     port: u16,
     #[serde(default)]
     lan_address: Option<String>,
+    #[serde(default)]
+    allow_remote_hosts: bool,
 }
 fn local_port() -> u16 {
     22022
@@ -1116,6 +1120,7 @@ impl HostApp {
             "appLoginResult",
             "startupStatus",
             "status",
+            "networkInterfaces",
             "quitAdmission",
             "prepareAppMaintenance",
             "cancelAppMaintenance",
@@ -1249,6 +1254,12 @@ impl HostApp {
                 | Operation::StopService
         ) {
             let _: EmptyInput = decode_input(&input)?;
+        }
+        if matches!(operation, Operation::NetworkInterfaces) {
+            self.scope.validate()?;
+            return tokio::task::spawn_blocking(network_interfaces::snapshot)
+                .await
+                .map_err(|_| AppError("app_network_interfaces_unavailable"))?;
         }
         // Only unchanged reads may retain the startup observation. Every
         // explicit operation re-enters its existing mutable coordinator.
@@ -1520,6 +1531,7 @@ impl HostApp {
             | Operation::AppLoginResult
             | Operation::StartupStatus
             | Operation::Status
+            | Operation::NetworkInterfaces
             | Operation::StageRuntime
             | Operation::UpdateRuntime
             | Operation::RuntimeUpdateStatus

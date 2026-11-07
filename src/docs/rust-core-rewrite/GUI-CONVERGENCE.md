@@ -156,6 +156,47 @@ payloads, raw identifiers and credentials are excluded. Its disabled, forged
 marker, bounded retention, correlation and private-permission controls passed.
 It changes no owner or admission rules. The next diagnostic candidate must
 establish the actual transport facts before a session-binding fix is selected.
+Candidate-9 (93161ad, Mac 1123) installed from its DMG and completed fresh GUI
+setup and Tunnel connection. Its actual setup view distinguishes the other
+computers' joining address from this Mac's loopback connection. In the real
+Work conversation, two consecutive read-only list calls in one assistant turn
+arrived with different MCP transport sessions; all three selected correlation
+metadata fields were absent. This establishes transport facts, not a safe
+replacement owner policy. No owner isolation or authentication rule was relaxed.
+NAB5's old November 6 setup-check App/Core tree was audited and normally quit;
+its files and profile were retained. The current H guest remains paired to the
+archived candidate-8 hub, so candidate-9 is not two-machine acceptance.
+
+The owner's subsequent network/setup and Windows settings corrections are
+implemented in source. CLI and both native GUIs now share pinned `if-addrs
+0.15.0` discovery in Rust, replacing the empty Windows interface adapter.
+Enabling other computers' access detects operational private LAN/VPN IPv4
+interfaces, recommends the current route's source (falling back to an available
+interface), and offers a selector with advanced manual input. No peer scan or
+DHCP rebinding is implied. Setup revalidates the selected interface before any
+configuration write. Wildcard, loopback, public, link-local and removed
+addresses cannot become the joining address; explicit invalid input still
+fails instead of silently selecting a different address. The existing listener
+policy and explicit opt-in remain unchanged.
+Windows settings now use content-sized text, matching Computers/ChatGPT/General
+navigation, a real General page and a separate runtime maintenance page. A
+joined computer directs ChatGPT setup to its main computer. These are native
+adapters over the existing Rust Core, not missing Rust product authority.
+Incremental runtime checking, real Linux OS-interface/bind comparison, the
+existing pre-write setup refusal scenario, Mac Swift typechecking and Windows
+native C# compilation passed. The first invalid-input regression failed because
+empty explicit input had accidentally selected automatically; that behavior was
+corrected and the full affected local-gateway filter passed. An isolated native
+Windows settings preview was inspected using own-window bitmaps; the earlier
+desktop capture hit the old foreground window and is invalid evidence.
+These corrections are not yet installed packages or native setup acceptance.
+Product: network discovery and settings corrections are source-complete.
+Architecture: shared Rust discovery retains the sole configuration authority.
+Integration: focused checks passed; final same-source candidate remains pending.
+Release: no new installed Windows/Mac acceptance is claimed for these changes.
+Reliability: stale network selection refuses before writes; account session
+continuity and Tunnel saved-key recovery remain open.
+Decision: final end-to-end delivery and Stable remain NO-GO.
 Evidence: `/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/`, with
 exact fdb1ef9 inputs and quality receipt under `candidate-2/`. Installed native
 effects are retained on PilotMac under

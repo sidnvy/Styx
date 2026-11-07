@@ -266,6 +266,27 @@ enum ProductRestorationPolicy {
     @Published var label = ""
     @Published var allowRemoteHosts = false
     @Published var lanAddress = ""
+    @Published var networkInterfaces: ProductJSON = .null
+    @Published var networkDiscoveryLoading = false
+    @Published var networkDiscoveryError: String?
+    func discoverNetworkInterfaces() {
+        guard nativeHost, nativeSupportsOperation("networkInterfaces"), !networkDiscoveryLoading else { return }
+        networkDiscoveryLoading = true; networkDiscoveryError = nil
+        Task { [self] in
+            defer { networkDiscoveryLoading = false }
+            do {
+                let value = try await client.native("networkInterfaces")
+                networkInterfaces = value
+                if lanAddress.isEmpty { lanAddress = value["recommendedAddress"].string ?? "" }
+                if value["interfaces"].array.isEmpty {
+                    networkDiscoveryError = productText("未发现可用的局域网或 VPN 网络。连接网络后重新检测，或暂时关闭其他电脑加入。", "No available LAN or VPN network was found. Connect a network and detect again, or turn off joining for now.")
+                }
+            } catch {
+                networkDiscoveryError = productText("暂时无法读取这台电脑的网络接口。请重新检测。", "This computer’s network interfaces could not be read. Detect again.")
+            }
+        }
+    }
+
     @Published var invite = ""
     @Published var inspection: ProductJSON = .null
     @Published var joinAcceptance: ProductJSON = .null
@@ -772,7 +793,8 @@ enum ProductRestorationPolicy {
                     joinAcceptance = .null; inspection = .null; page = afterSetupPage
                 } else {
                     guard nativeCanCreateLocal else { throw ProductCoreError.rejected }
-                    if allowRemoteHosts { choice["lanAddress"] = .string(lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                    choice["allowRemoteHosts"] = .bool(allowRemoteHosts)
+                    if allowRemoteHosts && !lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { choice["lanAddress"] = .string(lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)) }
                     nativeLocalSetupSubmitted = true
                     defer { if nativeLocalSetupSubmitted { page = afterSetupPage } }
                     // One request; omitted port uses Core's fixed default 22022.
@@ -780,10 +802,10 @@ enum ProductRestorationPolicy {
                     do { try applyNative(try await client.native("createLocal", choice)) }
                     catch {
                         if let failure = error as? ProductOwnedCoreRejection,
-                           failure.response["error"].string == "app_lan_address_invalid" {
+                           ["app_lan_address_invalid", "app_network_interface_changed", "app_network_interface_required", "app_network_interfaces_unavailable"].contains(failure.response["error"].string ?? "") {
                             // Core refused before publishing any setup input.
                             nativeLocalSetupSubmitted = false
-                            self.error = productText("请输入这台电脑的私有 IPv4 地址，例如 192.168.1.20 或 Tailscale 100.x 地址。", "Enter a private IPv4 address of this computer, e.g. 192.168.1.20 or a Tailscale 100.x address.")
+                            self.error = productText("请选择可用的局域网或 VPN 网络。若网络已变化，请重新检测；设置尚未提交。", "Select an available LAN or VPN network. If the network changed, detect networks again. Setup was not submitted.")
                             return
                         }
                         self.error = productText("上次设置结果尚未确认，请刷新状态查看；原配置已保留。", "The last setup result is unconfirmed. Refresh status to review it; your existing settings have been retained.")

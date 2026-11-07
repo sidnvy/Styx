@@ -227,52 +227,28 @@ pub fn os_hostname() -> Option<String> {
 pub fn os_hostname() -> Option<String> {
     std::env::var("COMPUTERNAME").ok()
 }
-#[cfg(unix)]
-#[allow(unsafe_code)] // libc owns getifaddrs allocation; only OS IPv4 records are read.
+/// Shared read-only OS adapter for CLI and native App network choices.
+/// Operational LAN/VPN interfaces come from the pinned cross-platform library.
 pub fn private_addresses() -> io::Result<Vec<PrivateAddress>> {
-    let mut head = std::ptr::null_mut();
-    // SAFETY: valid out-pointer; success returns a linked list owned until freeifaddrs.
-    if unsafe { libc::getifaddrs(&mut head) } != 0 {
-        return Err(io::Error::last_os_error());
+    let interfaces = if_addrs::get_if_addrs()?;
+    if interfaces.len() > 1024 {
+        return Err(io::Error::other("interface_snapshot_too_large"));
     }
-    struct Addresses(*mut libc::ifaddrs);
-    impl Drop for Addresses {
-        fn drop(&mut self) {
-            unsafe { libc::freeifaddrs(self.0) };
-        }
-    }
-    let _owned = Addresses(head);
-    let mut current = head;
     let mut output = Vec::new();
-    while !current.is_null() {
-        // SAFETY: OS list remains allocated; sockaddr family is checked before casting.
-        let item = unsafe { &*current };
-        if item.ifa_flags & libc::IFF_LOOPBACK as u32 == 0
-            && !item.ifa_addr.is_null()
-            && !item.ifa_name.is_null()
-            && unsafe { (*item.ifa_addr).sa_family as i32 } == libc::AF_INET
-        {
-            let raw = unsafe { &*item.ifa_addr.cast::<libc::sockaddr_in>() };
-            let ip = std::net::Ipv4Addr::from(raw.sin_addr.s_addr.to_ne_bytes());
-            if private_ipv4(ip) {
-                let name = unsafe { std::ffi::CStr::from_ptr(item.ifa_name) }
-                    .to_string_lossy()
-                    .into_owned();
-                output.push(PrivateAddress {
-                    interface: name,
-                    address: ip,
-                });
-            }
+    for interface in interfaces {
+        let std::net::IpAddr::V4(address) = interface.ip() else {
+            continue;
+        };
+        if interface.is_oper_up() && private_ipv4(address) {
+            output.push(PrivateAddress {
+                interface: interface.name,
+                address,
+            });
         }
-        current = item.ifa_next;
     }
     output.sort_by(|a, b| (&a.interface, a.address).cmp(&(&b.interface, b.address)));
     output.dedup();
     Ok(output)
-}
-#[cfg(not(unix))]
-pub fn private_addresses() -> io::Result<Vec<PrivateAddress>> {
-    Ok(Vec::new())
 }
 
 /// A secret is never returned to the presentation layer. Only the existing

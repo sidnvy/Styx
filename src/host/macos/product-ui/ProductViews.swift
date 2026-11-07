@@ -128,16 +128,34 @@ struct ProductView: View {
             if model.nativeHost && !model.joining {
                 Toggle(productText("允许网络上的其他电脑加入此网关", "Let other computers on my network join this Gateway"), isOn: $model.allowRemoteHosts)
                 if model.allowRemoteHosts {
-                    TextField(productText("这台电脑的 IPv4 地址", "This computer's IPv4 address"), text: $model.lanAddress)
-                    Text(productText("这台电脑的私有地址，例如 192.168.1.20 或 Tailscale 100.x 地址", "a private address of this computer, e.g. 192.168.1.20 or a Tailscale 100.x address")).font(.caption).foregroundStyle(.secondary)
+                    if model.networkDiscoveryLoading { ProgressView(productText("正在检测网络…", "Detecting networks…")) }
+                    Picker(productText("用于其他电脑加入的网络", "Network for other computers"), selection: $model.lanAddress) {
+                        Text(productText("自动选择", "Automatic")).tag("")
+                        ForEach(model.networkInterfaces["interfaces"].array.indices, id: \.self) { index in
+                            let interface = model.networkInterfaces["interfaces"].array[index]
+                            let address = interface["address"].string ?? ""
+                            Text((interface["name"].string ?? "") + " · " + address).tag(address)
+                        }
+                        if !model.lanAddress.isEmpty && !model.networkInterfaces["interfaces"].array.contains(where: { $0["address"].string == model.lanAddress }) {
+                            Text(productText("手动地址：", "Manual address: ") + model.lanAddress).tag(model.lanAddress)
+                        }
+                    }
+                    Text(productText("自动发现这台电脑当前可用的局域网或 VPN 地址。其他电脑需能通过所选网络访问本机。", "Available LAN and VPN addresses are detected automatically. Other computers need access to the selected network.")).font(.caption).foregroundStyle(.secondary)
+                    if let error = model.networkDiscoveryError { Text(error).font(.caption).foregroundStyle(.secondary) }
+                    Button(productText("重新检测网络", "Detect networks again")) { model.discoverNetworkInterfaces() }.disabled(model.networkDiscoveryLoading)
+                    DisclosureGroup(productText("高级：手动地址", "Advanced: manual address")) {
+                        TextField(productText("这台电脑现有接口的 IPv4 地址", "IPv4 address of an existing interface"), text: $model.lanAddress)
+                    }.font(.caption)
                 }
             }
             HStack {
                 Button(productText("返回", "Back")) { model.page = model.joining ? .invitation : .welcome }
                 Spacer()
                 Button(productText("继续", "Continue")) { model.createAndPrepare() }.buttonStyle(.borderedProminent)
-                    .disabled(model.busy || model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (model.nativeHost && !model.joining && !model.nativeCanCreateLocal) || (!model.nativeHost && model.session["defaults"]["bundle"].string == nil))
+                    .disabled(model.busy || (model.nativeHost && !model.joining && model.allowRemoteHosts && model.networkDiscoveryLoading) || model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (model.nativeHost && !model.joining && !model.nativeCanCreateLocal) || (!model.nativeHost && model.session["defaults"]["bundle"].string == nil))
             }
+        }.task(id: model.allowRemoteHosts) {
+            if model.nativeHost && !model.joining && model.allowRemoteHosts { model.discoverNetworkInterfaces() }
         }
     }
     private var preparation: some View {
