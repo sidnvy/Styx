@@ -1,8 +1,15 @@
 import Foundation
 
-// Opt-in local diagnostics: fixed route names and numeric results only.
+// Opt-in local diagnostics: fixed route names, codes and numeric results only.
 // Never emit request/response bodies, session URLs, headers or credentials.
 enum ProductNativeDiagnostics {
+    private static func operationIsSupported(_ operation: String) -> Bool {
+        #if STYX_PRODUCT_UI
+        return ProductOwnedCore.operations.contains(operation)
+        #else
+        return false
+        #endif
+    }
     // Closed lifecycle vocabulary. Optional operation is checked against the
     // private JSONL protocol; no arbitrary Error/body/path reaches this sink.
     enum LifecycleStage: String {
@@ -17,13 +24,29 @@ enum ProductNativeDiagnostics {
     }
     static func lifecycle(_ stage: LifecycleStage, operation: String? = nil, id: Int? = nil, ok: Bool? = nil) {
         guard CommandLine.arguments.contains("--native-diagnostics") else { return }
-        let operations = ProductOwnedCore.operations
-        if let operation { guard operations.contains(operation) else { return } }
+        if let operation { guard operationIsSupported(operation) else { return } }
         var message = "lifecycle stage=" + stage.rawValue
         if let operation { message += " operation=" + operation }
         if let id { message += " id=" + String(id) }
         if let ok { message += " ok=" + String(ok) }
         event(message)
+    }
+    // Only the error field can supply a code, and only these fixed Core codes
+    // may reach the diagnostic sink. Unknown values never get echoed.
+    static func rejectionCode(_ response: ProductJSON) -> String {
+        let known: Set<String> = [
+            "native_management_invalid_input", "native_management_conflict", "native_management_unavailable",
+            "native_management_unsupported", "native_management_unknown_inspect", "native_management_busy",
+            "app_scope_changed", "app_instance_changed", "app_scope_invalid",
+            "app_service_original_operation_unknown", "app_runtime_update_pending", "app_cleanup_unknown",
+            "app_gateway_fenced", "app_quit_admitted"
+        ]
+        guard let code = response["error"].string, known.contains(code) else { return "other" }
+        return code
+    }
+    static func rejection(operation: String, id: Int, response: ProductJSON) {
+        guard CommandLine.arguments.contains("--native-diagnostics"), operationIsSupported(operation) else { return }
+        event("rejection operation=" + operation + " id=" + String(id) + " code=" + rejectionCode(response))
     }
     // Closed opt-in startup facts only; never record a response body or echo
     // an arbitrary error string. This discriminates publication timeouts from
@@ -100,8 +123,12 @@ final class ProductRedirectBlocker: NSObject, URLSessionTaskDelegate {
 final class ProductCoreClient {
     private let origin: URL?
     private let token: String?
+    #if STYX_PRODUCT_UI
     private let owned: ProductOwnedCore?
     var isNativeHost: Bool { owned != nil }
+    #else
+    var isNativeHost: Bool { false }
+    #endif
     // A transient no-replay guard, never a saved preference. Only the OS owns
     // the registration, and Core owns the one-shot intent ticket.
     private var nativeLoginUnconfirmed = false
@@ -132,6 +159,7 @@ final class ProductCoreClient {
         return (origin, token)
     }
 
+    #if STYX_PRODUCT_UI
     init(owned: ProductOwnedCore) { self.owned = owned; origin = nil; token = nil; transport = nil }
     func native(_ operation: String, _ input: [String: ProductJSON] = [:]) async throws -> ProductJSON {
         guard let owner = owned else { throw ProductCoreError.unavailable }; return try await owner.call(operation, input)
@@ -145,7 +173,6 @@ final class ProductCoreClient {
         guard let owner = owned else { throw ProductCoreError.unavailable }
         try await owner.cancelAppMaintenance(ticketId: ticketId)
     }
-    #if STYX_PRODUCT_UI
     func changeNativeService(_ operation: String) async throws -> ProductJSON {
         guard ["transferToService", "prepareServiceFirstStart", "stopService"].contains(operation) else { throw ProductCoreError.rejected }
         guard nativeServiceChangeAllowed else { throw ProductCoreError.serviceChangeUnconfirmed }
@@ -175,9 +202,15 @@ final class ProductCoreClient {
         }
         return result
     }
+    #else
+    func native(_ operation: String, _ input: [String: ProductJSON] = [:]) async throws -> ProductJSON {
+        throw ProductCoreError.rejected
+    }
     #endif
     init(sessionURL: URL) throws {
+        #if STYX_PRODUCT_UI
         owned = nil
+        #endif
         guard let bootstrap = Self.bootstrap(sessionURL) else { throw ProductCoreError.invalidBootstrap }
         origin = bootstrap.origin; token = bootstrap.token
         let config = URLSessionConfiguration.ephemeral
@@ -187,7 +220,12 @@ final class ProductCoreClient {
         config.timeoutIntervalForRequest = 90; config.timeoutIntervalForResource = 300
         transport = URLSession(configuration: config, delegate: redirectBlocker, delegateQueue: nil)
     }
-    deinit { transport?.invalidateAndCancel(); owned?.requestEOF() }
+    deinit {
+        transport?.invalidateAndCancel()
+        #if STYX_PRODUCT_UI
+        owned?.requestEOF()
+        #endif
+    }
     func read(_ route: String) async throws -> ProductJSON {
         if isNativeHost {
             #if STYX_PRODUCT_UI

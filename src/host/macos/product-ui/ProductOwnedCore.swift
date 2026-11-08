@@ -125,7 +125,10 @@ final class ProductOwnedCore: @unchecked Sendable {
                     guard value["id"].number == Double(id) else { throw ProductOwnedCoreError.unknownNoReplay }
                     ProductNativeDiagnostics.lifecycle(.responseDecoded, operation: operation, id: id, ok: value["ok"].bool)
                     if operation == "status", value["ok"].bool { ProductNativeDiagnostics.computerStartup(value["result"]) }
-                    guard value["ok"].bool else { continuation.resume(throwing: ProductOwnedCoreRejection(response: value)); return }
+                    guard value["ok"].bool else {
+                        ProductNativeDiagnostics.rejection(operation: operation, id: id, response: value)
+                        continuation.resume(throwing: ProductOwnedCoreRejection(response: value)); return
+                    }
                     continuation.resume(returning: value["result"])
                 } catch {
                     // EOF requests original Rust cleanup. Retain/wait the same

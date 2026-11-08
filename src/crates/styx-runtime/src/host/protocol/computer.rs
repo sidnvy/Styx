@@ -279,13 +279,37 @@ impl HostProtocol<'_> {
                         }
                         .into(),
                     },
-                    Err(e) => self.computer_dispatch_error(
-                        &owner,
-                        &target.operation_id,
-                        target.payload_digest,
-                        false,
-                        e,
-                    ),
+                    Err(e) => {
+                        let reply = self.computer_dispatch_error(
+                            &owner,
+                            &target.operation_id,
+                            target.payload_digest,
+                            false,
+                            e,
+                        );
+                        if !matches!(
+                            &reply,
+                            Reply::Error {
+                                certainty: ExecutionCertainty::NotDispatched,
+                                ..
+                            }
+                        ) {
+                            return reply;
+                        }
+                        match self.coordinator.cancel_refused_desktop_open(
+                            &owner,
+                            &target.operation_id,
+                            target.payload_digest,
+                        ) {
+                            Ok(Some(snapshot)) => Reply::Start {
+                                snapshot: snapshot.into(),
+                                dispatch: "not_dispatched".into(),
+                            },
+                            // A racing dispatch or a changed binding cannot
+                            // borrow this caller's pre-dispatch refusal.
+                            _ => uncertain(reply),
+                        }
+                    }
                 }
             }
             ComputerCommand::InspectOpen { target } => match self.coordinator.inspect_desktop(

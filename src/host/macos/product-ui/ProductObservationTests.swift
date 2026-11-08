@@ -6,6 +6,16 @@ import Combine
     func require(_ value: Bool, _ message: String) throws {
         if !value { throw NSError(domain: "Styx.ObservationTest", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
     }
+    let knownCodes = ["native_management_invalid_input", "native_management_conflict", "native_management_unavailable", "native_management_unsupported", "native_management_unknown_inspect", "native_management_busy", "app_scope_changed", "app_instance_changed", "app_scope_invalid", "app_service_original_operation_unknown", "app_runtime_update_pending", "app_cleanup_unknown", "app_gateway_fenced", "app_quit_admitted"]
+    for code in knownCodes {
+        try require(ProductNativeDiagnostics.rejectionCode(.object(["error": .string(code)])) == code, "Known rejection code was lost")
+    }
+    let unsafeErrors: [ProductJSON] = [.string("https://example.invalid/fake-secret"), .string("fake-test-secret"), .string("unknown_code"), .number(7), .null]
+    for error in unsafeErrors {
+        let response: ProductJSON = .object(["error": error, "result": .string("native_management_busy"), "body": .string("fake-test-secret")])
+        try require(ProductNativeDiagnostics.rejectionCode(response) == "other", "Rejection diagnostic disclosed or borrowed response data")
+    }
+    try require(ProductNativeDiagnostics.rejectionCode(.object(["result": .object(["error": .string("native_management_busy")])])) == "other", "Rejection diagnostic used result")
     let model = try ProductModel(sessionURL: sessionURL, permissionReader: { (false, false) })
     await model.bootstrap()
     try require(model.loaded && !model.busy, "Isolated Core bootstrap failed")

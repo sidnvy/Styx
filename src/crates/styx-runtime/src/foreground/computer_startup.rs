@@ -244,11 +244,27 @@ impl ComputerStartup {
         events: mpsc::Sender<ForegroundEvent>,
         device: DeviceId,
         cancel: CancellationToken,
+        #[cfg(target_os = "macos")] runtime_fault: Option<
+            tokio::sync::watch::Sender<
+                Option<(
+                    crate::providers::cua::probe_diagnostic::ProbeStage,
+                    crate::providers::cua::probe_diagnostic::ProbeCause,
+                )>,
+            >,
+        >,
     ) -> Self {
         let retained_host = host.clone();
         let retained_admitted = admitted.clone();
         let initialization = InitializationJob::spawn(move |retained| async move {
-            match prepare_computer(&retained_admitted, &retained_host, &retained).await {
+            match prepare_computer(
+                &retained_admitted,
+                &retained_host,
+                &retained,
+                #[cfg(target_os = "macos")]
+                runtime_fault,
+            )
+            .await
+            {
                 Ok(factory) => {
                     #[cfg(target_os = "macos")]
                     if factory.is_some() {

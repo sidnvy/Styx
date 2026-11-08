@@ -187,6 +187,13 @@ impl LocalGateway {
         AppError(code)
     }
     pub async fn start(&mut self) -> Result<(), AppError> {
+        self.start_with_intent(false).await
+    }
+    /// Startup may resume a running intent, but must never promote Stopped.
+    pub(super) async fn resume_if_desired_running(&mut self) -> Result<(), AppError> {
+        self.start_with_intent(true).await
+    }
+    async fn start_with_intent(&mut self, resume_only: bool) -> Result<(), AppError> {
         self.validate()?;
         if let Some(role) = &self.running {
             return if role.worker.is_finished() || !*self.observed.borrow() {
@@ -206,6 +213,9 @@ impl LocalGateway {
             .gateway
             .is_none_or(|g| g.run != NativeRunDesired::Running)
         {
+            if resume_only {
+                return Ok(());
+            }
             let change = native::NativeDesiredChange {
                 component: native::NativeComponent::Gateway,
                 run: NativeRunDesired::Running,

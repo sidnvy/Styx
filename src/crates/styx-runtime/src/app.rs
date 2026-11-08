@@ -423,6 +423,13 @@ struct RunningHost {
     cancel: CancellationToken,
     worker: JoinHandle<Result<ForegroundOutcome, ForegroundError>>,
     events: JoinHandle<()>,
+    #[cfg(target_os = "macos")]
+    computer_runtime_fault: watch::Receiver<
+        Option<(
+            crate::providers::cua::probe_diagnostic::ProbeStage,
+            crate::providers::cua::probe_diagnostic::ProbeCause,
+        )>,
+    >,
     // Dropping a waiter can signal cleanup, but can never issue a joined receipt.
     _cancel_on_drop: tokio_util::sync::DropGuard,
 }
@@ -830,10 +837,7 @@ impl HostApp {
         Ok(())
     }
     async fn resume_desired_running(&mut self) -> Result<(), AppError> {
-        if self.running.is_some()
-            || self.unknown
-            || self.observed.borrow().error == Some("gateway_wss_admission_refused")
-        {
+        if self.running.is_some() || self.unknown {
             return Ok(());
         }
         if let Some(profile) = self.startup_profile.clone() {
@@ -848,6 +852,14 @@ impl HostApp {
         } else {
             self.read_configuration().await?;
         }
+        // Each role retains its own durable intent. Gateway resume must not
+        // promote a stopped Gateway or depend on the local Host being enabled.
+        if let Some(gateway) = &mut self.local_gateway {
+            gateway.resume_if_desired_running().await?;
+        }
+        if self.observed.borrow().error == Some("gateway_wss_admission_refused") {
+            return Ok(());
+        }
         let wanted = self
             .configuration
             .as_ref()
@@ -855,9 +867,6 @@ impl HostApp {
             .is_some_and(|host| host.run == NativeRunDesired::Running);
         if !wanted {
             return Ok(());
-        }
-        if let Some(gateway) = &mut self.local_gateway {
-            gateway.start().await?;
         }
         // Resume observes Running; it must never overwrite a newer Stopped
         // intent. Original Host admission rechecks canonical Running itself.
@@ -1026,6 +1035,8 @@ impl HostApp {
                 computer_initial_epoch_advanced: None,
             });
             let verified_runtime = self.native_runtime.clone();
+            #[cfg(target_os = "macos")]
+            let (computer_runtime_fault_tx, computer_runtime_fault) = watch::channel(None);
             if let Some(d) = &diagnostic {
                 d.report("app_host_worker_scheduled");
             }
@@ -1033,7 +1044,15 @@ impl HostApp {
                 if let Some(d) = &diagnostic {
                     d.report("app_host_worker_started");
                 }
-                foreground::host_run_for_app(scope, worker_cancel, events, verified_runtime).await
+                foreground::host_run_for_app(
+                    scope,
+                    worker_cancel,
+                    events,
+                    verified_runtime,
+                    #[cfg(target_os = "macos")]
+                    computer_runtime_fault_tx,
+                )
+                .await
             });
             let cancel_on_drop = cancel.clone().drop_guard();
             self.running = Some(RunningHost {
@@ -1041,6 +1060,8 @@ impl HostApp {
                 cancel,
                 worker,
                 events: event_task,
+                #[cfg(target_os = "macos")]
+                computer_runtime_fault,
                 _cancel_on_drop: cancel_on_drop,
             });
         }
@@ -1324,7 +1345,23 @@ impl HostApp {
                 supported.push("rejectComputer");
             }
         }
-        json!({"schema":1,"maintenance":self.maintenance_status()["maintenance"],"runtimeUpdate":self.runtime_update,"service":self.service,"configuration":configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
+        let foreground = serde_json::to_value(&*self.observed.borrow())
+            .expect("closed foreground status serializes");
+        #[cfg(target_os = "macos")]
+        let foreground = {
+            let mut value = foreground;
+            // Read only the original Host's cached, closed fault projection.
+            // No source observation, native call or recovery is performed here.
+            if let Some((stage, cause)) = self
+                .running
+                .as_ref()
+                .and_then(|running| *running.computer_runtime_fault.borrow())
+            {
+                value["computerRuntimeFirstFault"] = json!({"stage":stage,"cause":cause});
+            }
+            value
+        };
+        json!({"schema":1,"maintenance":self.maintenance_status()["maintenance"],"runtimeUpdate":self.runtime_update,"service":self.service,"configuration":configuration,"foreground":foreground,"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
     }
     async fn dispatch(
         &mut self,

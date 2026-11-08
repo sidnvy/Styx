@@ -19,6 +19,7 @@ pub(super) struct BindingCleanup {
     pub(super) result: Option<bool>,
     entry: Option<Arc<Entry>>,
     pub(super) job: Option<tokio::task::JoinHandle<()>>,
+    pub(super) transport_joined: bool,
 }
 pub(crate) struct EntryDrain {
     id: RequestId,
@@ -247,8 +248,9 @@ impl RelayHandle {
             .expect("transport drain")
             .as_mut()
             .and_then(|d| d.job.take().map(|job| (job, d.acceptance.clone())));
-        if let Some((job, acceptance)) = original {
-            if job.await.is_err() {
+        let accepted = if let Some((job, acceptance)) = original {
+            let joined = job.await.is_ok();
+            if !joined {
                 self.inner.shutdown_failed.store(true, Ordering::Release);
             }
             if acceptance.load(Ordering::Acquire) != 1 {
@@ -256,7 +258,10 @@ impl RelayHandle {
                 self.inner.unconfirmed_drains.fetch_add(1, Ordering::AcqRel);
                 eprintln!("{{\"schema\":1,\"event\":\"transport_drain_acceptance_unconfirmed\"}}");
             }
-        }
+            joined && acceptance.load(Ordering::Acquire) == 1
+        } else {
+            false
+        };
         let bindings = self.inner.bindings.lock().expect("bindings").clone();
         for binding in bindings {
             let job = {
@@ -271,10 +276,17 @@ impl RelayHandle {
                     None
                 }
             };
-            if let Some(job) = job
-                && job.await.is_err()
-            {
-                self.inner.shutdown_failed.store(true, Ordering::Release);
+            if let Some(job) = job {
+                let joined = job.await.is_ok();
+                if !joined {
+                    self.inner.shutdown_failed.store(true, Ordering::Release);
+                }
+                if joined && accepted {
+                    let mut cleanup = binding.cleanup.lock().expect("binding cleanup");
+                    if cleanup.result == Some(true) {
+                        cleanup.transport_joined = true;
+                    }
+                }
             }
         }
     }

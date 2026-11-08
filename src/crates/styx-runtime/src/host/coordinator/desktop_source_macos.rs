@@ -80,11 +80,20 @@ pub(crate) struct DesktopSource {
     inner: Arc<Inner>,
 }
 impl DesktopSource {
+    #[cfg(test)]
     pub(crate) async fn start() -> Result<Self> {
+        Self::start_with_runtime_fault(None).await
+    }
+    pub(crate) async fn start_with_runtime_fault(
+        runtime_fault: Option<tokio::sync::watch::Sender<Option<(ProbeStage, ProbeCause)>>>,
+    ) -> Result<Self> {
         let source =
             MacProxySource::discover(tokio::time::Instant::now() + Duration::from_secs(10))
                 .await
                 .map_err(|_| DesktopSourceError::Unavailable)?;
+        if let Some(sender) = runtime_fault {
+            source.attach_runtime_fault(sender);
+        }
         let value = Self {
             inner: Arc::new(Inner {
                 source,

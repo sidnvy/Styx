@@ -34,8 +34,13 @@ Source: "{#SourceDir}\*"; DestDir: "{app}\versions\{#PackageHash}"; Flags: ignor
 Source: "{#GateFile}"; DestDir: "{app}\.installer"; Flags: ignoreversion
 Source: "{#GateFile}"; Flags: dontcopy
 
+#define StateDirectory Copy(StateDirectoryArgument, 1, Len(StateDirectoryArgument) - 1)
 [Icons]
-Name: "{userprograms}\{#ProductName}"; Filename: "{app}\versions\{#PackageHash}\StyxPreview.exe"; WorkingDir: "{app}\versions\{#PackageHash}"; Parameters: "{#AppParameters}"
+#if StateDirectory != ""
+Name: "{userprograms}\{#ProductName}"; Filename: "{app}\versions\{#PackageHash}\StyxPreview.exe"; WorkingDir: "{app}\versions\{#PackageHash}"; Parameters: "--state-dir ""{#StateDirectory}"""
+#else
+Name: "{userprograms}\{#ProductName}"; Filename: "{app}\versions\{#PackageHash}\StyxPreview.exe"; WorkingDir: "{app}\versions\{#PackageHash}"; Parameters: ""
+#endif
 
 ; The App creates this optional entry through Core. Setup only retargets an
 ; existing owned entry; a deleted entry is never recreated by an upgrade.

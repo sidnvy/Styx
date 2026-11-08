@@ -1097,7 +1097,15 @@ enum ProductRestorationPolicy {
     }
     func checkIngress() { perform { [self] in ingress = try await client.write("device-ingress/plan", [:])["ingress"] } }
     func createInvitation() { beginDeviceInvitation() }
-    func loadPending() { perform { [self] in pending = try await client.write("pending/list", ["authorize": .bool(true)])["pending"].array } }
+    func loadPending() {
+        // Core advertises this read only for the owning, unfenced Gateway.
+        // Reading existing requests must never create an invitation or change
+        // which invitation surfaces are open. Failed reads retain prior rows.
+        guard !nativeHost || nativeSupportsOperation("pendingComputers") else { return }
+        perform { [self] in
+            pending = try await client.write("pending/list", ["authorize": .bool(true)])["pending"].array
+        }
+    }
     func approvePending() {
         guard let payload = ProductInvitationPolicy.approval(selectedPending, confirmation: comparisonConfirmation) else { return }
         // Capture only the request the user explicitly compared. Later polling

@@ -118,6 +118,16 @@ fn open_started(snapshot: &Snapshot, dispatch: &str, target: &ResourceTarget) ->
         && snapshot.state == OperationState::Running
         && same_resource(snapshot, target)
 }
+fn open_not_dispatched(snapshot: &Snapshot, dispatch: &str, target: &ResourceTarget) -> bool {
+    dispatch == "not_dispatched"
+        && same_resource(snapshot, target)
+        && matches!(
+            snapshot.state,
+            OperationState::Failed | OperationState::Cancelled
+        )
+        && snapshot.liveness == ExecutionLiveness::NotStarted
+        && snapshot.output_drain == OutputDrain::NotOpened
+}
 fn same_resource(snapshot: &Snapshot, target: &ResourceTarget) -> bool {
     snapshot.operation_id == target.operation_id
         && snapshot.payload_digest == target.payload_digest
@@ -398,9 +408,7 @@ impl PairedGatewayBackend {
                     record.phase = Phase::Ready
                 }
                 Ok(Reply::Start { snapshot, dispatch })
-                    if dispatch == "not_dispatched"
-                        && snapshot.state == OperationState::Failed
-                        && same_resource(&snapshot, &target) =>
+                    if open_not_dispatched(&snapshot, &dispatch, &target) =>
                 {
                     self.retire_computer(owner, &device, &cell);
                     return failure("computer_not_dispatched", None, false);

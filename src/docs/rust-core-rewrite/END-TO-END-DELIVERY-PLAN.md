@@ -6,12 +6,37 @@
 [GUI-CONVERGENCE.md](GUI-CONVERGENCE.md) 保留历史尝试与证据，不能把历史通过当作当前候选通过。
 本文中的计划项不代表已经执行。**交付未完成；Stable NO-GO。**
 
-> 当前阶段：架构核查完成，D0四项
-> [边界决策](DELIVERY-BOUNDARY-DECISIONS.md)已选定，四项有界实现已集成；
-> 受影响合同/FS/签名/TLS、真实Runtime替换/重开参考及旧binary manifest拒绝实证已通过。
-> 两端当前源码编译检查和Windows安装守卫修正已通过；当前进入冻结源码的集成质量检查。
-> 不继续用C23推进缺少入口的完整旅程；不在参考闭合前构建或安装新候选。
-> 原4–8小时及后续9–18小时预测均撤回；按用户要求并行实施，按可验证场景出口报告进度。
+> 当前阶段（2026-11-09）：两端持续项目、工具与缓存归拢和批量清理已完成，
+> 用户确认两端 Project 设置完成；复用原 owner 恢复验收。Windows 当前 target 缓存误删且未恢复，不能称缓存全部保留。四项边界实现已集成，C24（`93fdcdd`）已冻结并产包；
+> P6尚未通过，不能把C23或参考场景成绩继承为C24成绩。
+> 当前修正草稿与已安装C24分开记录；没有新候选构建或安装排队。
+> 原工时预测已撤回，按可验证场景出口报告进度。
+
+| 当前工作 | 已完成 | 下一出口与负责人 |
+| --- | --- | --- |
+| Mac C24 build1133 | 精确DMG签名/安装；一次正常Quit后原App/Core/Tunnel实际退出0；重开后新控制器一次恢复连接成功；真实Exec、Browser及Computer效果独立核对通过 | 原首次连接FAIL及重开后的普通refresh FAIL保留，不能推断startupStatus失败；旧Computer worker在间隔中消失，须另验同worker的安全拒绝恢复 |
+| Mac修正草稿 | 独立pending入口和身份比较弹窗完成；Swift production/testing typecheck通过。运行故障仅投影固定stage/cause；原机Rust检查和纯状态case通过；同源码独立原生参考在正常单命令审核上下文通过，资格/严格读取/受控后续epoch拒绝/首故障锁存及原FD drain均过，零输入 | 原默认exec参考在discovery明确拒绝，保留FAIL；正常审核新参考3.71秒通过，不改变全局沙箱或旧账号围栏。当前C24账号Computer仍失败，原首故障无日志不可追溯；源码参考不算新候选安装或账号恢复 |
+| Gateway重开参考 | 真实签名payload/严格TLS基线失败；有界修复后同场景通过：Gateway仅按自身Running恢复、Stopped负控和Host停止意图/原文件保持；affected检查通过 | 修正尚未打包或安装；这不是Mac历史首次错误原因的证明，不触发立即产包 |
+| Windows C24 .24 | 本次GUI Join仍UNKNOWN；用户正常Quit后原App/Core/conhost不存在、退出码不可得；同profile重开App6536包验证失败、无新Core。2154文件全部匹配，四进程可见token flags一致 | 正常GUI新鲜Retry一次仍FAIL。Codex命令上下文祖先AppData/Local触发原ACL上界拒绝，独立SSH对应10节点均通过且验签exit0；尚未归属具体SID/actor。原CLI状态固定码app_control_peer_or_protocol_refused，Quit0。保留原失败，不放宽ACL；原owner核实正常单命令审核通道，只有状态精确匹配且idle才正常Quit/重开 |
+| Windows安装修正 | 九组真实Node/ISCC预处理及独立argv参考通过；同字节修正已纳入源码草稿 | 后续精确安装器的实际快捷方式仍待验，不继承手工修正成绩 |
+| Linux C24 | 独立安装/配对，真实账号Exec文件42字节与哈希、Browser独立请求1、后台语义输入/点击1均通过；效果后正常退出原Host/能力进程及重开连接通过；原b31最终已恢复rev88 | 账号重开读取两次及Exec只读均Unauthorized；完整恢复未过。真实TLS/WSS源码基线复现旧绑定阻挡新Host，修复/旧业务帧/未知清理负控通过但未安装；审批commit已证、GUIactor未归属，不能称GUI批准PASS |
+| 跨设备及Logo | C24 P1参考已尝试但未通过：新鲜Copy成功并私密直传；原Copy UNKNOWN保留；双边未形成请求身份绑定，拒绝/批准均0 | Root过早安排关闭邀请Sheet暴露无独立pending入口，已修源码未安装；不把邀请过期或无持久记录算拒绝。P2–P4、Linux完整旅程及最终Logo仍待验 |
+
+当前机器收据索引：`/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/candidate-24/candidate-inputs.json`。
+NAB5新任务统一放`D:\Developer\Styx`；现有安装/profile/冻结制品路径保留。
+
+2026-11-09源码出口：`integration-quality6/receipt.json` 的53项全部PASS，154.74秒；
+没有产包或安装。真实TLS/Core/Host/Gateway参考已关闭“明确未派发却保留Opening”
+缺口：原Host只终结精确仍Reserved的记录，Gateway仅接受匹配终结证明；Unknown/
+丢失回应保持封锁，正常owner与transport清理通过。其结果在
+`20261108-architecture-reference/computer-open-refusal/RESULT.md`。
+独立Gateway恢复及干净Host新代际绑定参考也已通过，均尚未安装。
+
+冻结只改变Git归属时，允许独立来源等价证明复用原不可变测试结果，不能修改原
+quality收据或伪称重执行。必须绑定新clean HEAD逐blob与原404项输入，并额外核对
+collector未包含的七个Rust嵌入PNG/技能Markdown/plugin.json：七者须与原93fdcdd
+blob相同且原检查前后无dirty记录。新证明明示原执行revision、原收据SHA和
+`tests_reexecuted=false`；正常制品构建及真机验收照常必需。
 
 ## 1. 完成定义与边界
 
@@ -28,7 +53,7 @@ Codex/Cua/Playwright 和原生桥。不接管浏览器、不增加自动任务�
 不操作 piermini、不重启工作站、不删除正式插件、不修改生产 Tunnel、不关闭
 沙箱、不扩大现有产品/profile/祖先目录权限、不转移签名私钥。
 
-## 2. 当前事实基线
+## 2. 历史C23事实基线（不得作为当前C24验收结果）
 
 | 项目 | 已有证据 | 当前结论 |
 | --- | --- | --- |
@@ -91,9 +116,9 @@ P6内部按 **`首次设置 → P1拒绝 → P2批准/双方效果 → P3退出�
 | P0 已完成 | 根代理只读核实源码、精确包、两端安装/owner/原进程、fixtures、既有授权 | 不重放旧操作/producer | 固定候选与平台事实；测试/包/安装/真机分别记录 |
 | D0 设计已完成 | 根代理完成四项边界状态/合同/复用点/失败分支与工时 | 架构核查已完成，产品草稿冻结 | 见DELIVERY-BOUNDARY-DECISIONS；不是实现或验收PASS |
 | R 进行中 | 先D4来源参考与D1合同场景，再D3安装参考和D2全链路拒绝/reader；根代理共享源码唯一写者，两端owner做本机原生检查 | D0设计已选定 | affected crate检查、跨层持久/TLS/负控场景、Mac原生参考；未知触发不冒称已证明；参考未过不产候选 |
-| P5 待R出口 | 根代理按四项边界的实际改动一次冻结同源码最终候选 | R的合同/持久兼容/安装参考/Mac原生参考已通过；必需路径存在 | 一个集成检查点；精确三平台输入/签名/包收据；不重复已完成producer。必要产物构建与测试分开记录 |
-| P6 待P5出口 | 本地 owner 安装最终精确包；首次设置后按P1–P4完整旅程；Linux完成最新候选安装和真实能力/正常退出恢复 | 同源码候选已冻结；每个安装有精确哈希；Linux服务切换已获具体授权 | 最终候选自身的安装、首次设置、双方真实效果、负控与恢复；不能继承旧 C23、旧 b31、诊断参考或mock结果 |
-| P1 最终候选待验；C23已失败 | 两个本地 owner 完成本次新邀请；Windows 审阅 CA 后一次请求；根代理比对设备身份/验证码；Mac 明确拒绝一次 | P5及P6精确安装/首次设置通过；双方原生路径、fixture、helper **已实际READY**；新邀请未过期；私密传输已明确成功 | Gateway唯一requestID与Windows实际设备ID/公钥指纹/验证码绑定；Mac明确拒绝、Windows观察到拒绝，账号中没有新增已授权设备。Windows GUI不显示requestID，不能伪称双边显示；到期/超时不算拒绝 |
+| P5 C24已完成；后续修正待R出口 | 根代理按实际改动冻结同源码候选 | R的合同/持久兼容/安装参考/Mac原生参考已通过；必需路径存在 | 一个集成检查点；精确三平台输入/签名/包收据；不重复已完成producer。必要产物构建与测试分开记录 |
+| P6 C24进行中，存在阻塞 | 本地 owner 安装最终精确包；首次设置后按P1–P4完整旅程；Linux完成最新候选安装和真实能力/正常退出恢复 | 同源码候选已冻结；每个安装有精确哈希；Linux服务切换已获具体授权 | 最终候选自身的安装、首次设置、双方真实效果、负控与恢复；不能继承旧 C23、旧 b31、诊断参考或mock结果 |
+| P1 最终候选待验；C23已失败 | 两个本地 owner 完成本次新邀请；Windows 审阅 CA 后一次请求；根代理比对设备身份/验证码；Mac 明确拒绝一次 | P5及P6精确安装/首次设置通过；双方原生路径、私密接收槽、helper **已实际READY**；新邀请未过期；私密传输已明确成功。P1不操作fixture，独立fixture在P2实际效果前就绪 | Gateway唯一requestID与Windows实际设备ID/公钥指纹/验证码绑定；Mac明确拒绝、Windows观察到拒绝，账号中没有新增已授权设备。Windows GUI不显示requestID，不能伪称双边显示；到期/超时不算拒绝 |
 | P2 待执行 | 新邀请、新请求；比对后 Mac明确批准；Windows确认并连接；根代理在独立 Custom MCP 上核实两台设备及三类效果 | P1明确收口，无未知请求；当前 CA/设备身份一致 | 本候选双方 Exec续接/独立文件、Browser nonce页面/HTTP日志/关闭、Computer像素/新鲜树/一次输入点击/独立状态；原生负控单列 |
 | P3 待执行 | 各端 owner 记录全部原进程/子进程句柄，正常 Quit 一次；全部明确退出后正常重开一次；根代理检查恢复 | P2效果已核实，原生动作无未知结果 | 原进程实际退出码、worker/监听/socket收口；配置/keys/pairing保留；双方重新连接及新的实际读取。接受 Quit 不等于已退出 |
 | P4 待执行 | Mac GUI撤销精确 Windows设备；根代理对旧设备做无效果负控；用新邀请/新确认重新配对并验证恢复 | P3通过；撤销目标精确匹配，不能是本机 | 撤销明确完成；旧环境/旧 token 不能产生新文件、HTTP或桌面效果；重新配对后实际新读取/效果恢复。wrong-confirmation/self-revoke按当前产品支持入口单列核实，未覆盖不能标PASS |

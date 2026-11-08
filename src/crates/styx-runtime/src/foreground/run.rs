@@ -292,6 +292,14 @@ async fn prepare_computer(
     admitted: &Arc<Admitted>,
     host: &OwnedExecHost,
     custody: &computer_startup::DeferredComputer,
+    runtime_fault: Option<
+        tokio::sync::watch::Sender<
+            Option<(
+                crate::providers::cua::probe_diagnostic::ProbeStage,
+                crate::providers::cua::probe_diagnostic::ProbeCause,
+            )>,
+        >,
+    >,
 ) -> Result<Option<Arc<dyn crate::host::protocol::computer::ComputerBootstrap>>, ForegroundError> {
     let enabled = custody
         .read_before_source(Duration::from_secs(30), || {
@@ -325,7 +333,7 @@ async fn prepare_computer(
                 })
         })
         .await?;
-    let source = crate::host::coordinator::DesktopSource::start()
+    let source = crate::host::coordinator::DesktopSource::start_with_runtime_fault(runtime_fault)
         .await
         .map_err(|e| ForegroundError(e.code()))?;
     custody.retain_source(source.clone());
@@ -595,9 +603,20 @@ pub async fn host_run(
     // its lease, pinned payload or native supervisor. Tokio detaches the worker
     // JoinHandle on waiter drop; the running runtime must remain alive for cleanup.
     let _cancel_on_waiter_drop = stop.clone().drop_guard();
-    tokio::spawn(async move { run_owned(&state, mode, stop, events, RunOwner::Cli).await })
+    tokio::spawn(async move {
+        run_owned(
+            &state,
+            mode,
+            stop,
+            events,
+            RunOwner::Cli,
+            #[cfg(target_os = "macos")]
+            None,
+        )
         .await
-        .map_err(|_| ForegroundError("foreground_worker_failed"))?
+    })
+    .await
+    .map_err(|_| ForegroundError("foreground_worker_failed"))?
 }
 #[cfg(any(
     all(target_os = "linux", target_env = "gnu"),
@@ -609,6 +628,12 @@ pub(crate) async fn host_run_for_app(
     cancel: CancellationToken,
     events: mpsc::Sender<ForegroundEvent>,
     verified_runtime: Option<Arc<crate::release::VerifiedNativeRelease>>,
+    #[cfg(target_os = "macos")] runtime_fault: tokio::sync::watch::Sender<
+        Option<(
+            crate::providers::cua::probe_diagnostic::ProbeStage,
+            crate::providers::cua::probe_diagnostic::ProbeCause,
+        )>,
+    >,
 ) -> Result<ForegroundOutcome, ForegroundError> {
     let state = scope.state_dir().to_owned();
     let stop = cancel.child_token();
@@ -620,6 +645,8 @@ pub(crate) async fn host_run_for_app(
             stop,
             events,
             RunOwner::App(scope, verified_runtime),
+            #[cfg(target_os = "macos")]
+            Some(runtime_fault),
         )
         .await
     })
@@ -653,6 +680,8 @@ pub(crate) async fn host_run_for_service(
             stop,
             events,
             RunOwner::Service(scope),
+            #[cfg(target_os = "macos")]
+            None,
         )
         .await
     })
@@ -665,6 +694,14 @@ async fn run_owned(
     cancel: CancellationToken,
     events: mpsc::Sender<ForegroundEvent>,
     owner: RunOwner,
+    #[cfg(target_os = "macos")] runtime_fault: Option<
+        tokio::sync::watch::Sender<
+            Option<(
+                crate::providers::cua::probe_diagnostic::ProbeStage,
+                crate::providers::cua::probe_diagnostic::ProbeCause,
+            )>,
+        >,
+    >,
 ) -> Result<ForegroundOutcome, ForegroundError> {
     // Independent foreground-run clock. Opt-in closed labels carry no profile,
     // path or credential data and never participate in admission decisions.
@@ -910,6 +947,8 @@ async fn run_owned(
             events.clone(),
             device.clone(),
             cancel.clone(),
+            #[cfg(target_os = "macos")]
+            runtime_fault,
         )
     });
     // Keep this SAME protocol and executor across transport reconnects. In v3,

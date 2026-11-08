@@ -1,5 +1,5 @@
 //! Real TLS/enrollment/WebSocket on loopback plus an assigned private interface.
-//! Synthetic identities; no executor, package, device installation or account.
+//! Synthetic identities; optional isolated executor, no installed device or account.
 use super::*;
 use crate::{
     crypto::{ClaimCapability, DevicePrivateKey, DeviceProofBytes, EnrollmentRequestId},
@@ -128,9 +128,9 @@ fn lan_ip() -> Ipv4Addr {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires sockets and assigned private IPv4; optionally set STYX_TEST_LAN_ADDRESS"]
+#[ignore = "requires sockets, assigned private IPv4 and STYX_TEST_CODEX; isolated owned executor"]
 async fn gateway_two_listeners_lan_join_and_host_link_requires_sockets() {
-    gateway_lan_scenario(vec![lan_ip()]).await;
+    gateway_lan_scenario(vec![lan_ip()], true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -143,10 +143,18 @@ async fn gateway_three_listeners_two_lan_addresses_join_and_host_link_requires_s
         .collect();
     let ips = crate::gateway::auth::lan_addresses(true, None, Some(&addresses)).unwrap();
     assert_eq!(ips.len(), 2);
-    gateway_lan_scenario(ips).await;
+    gateway_lan_scenario(ips, false).await;
 }
 
-async fn gateway_lan_scenario(ips: Vec<Ipv4Addr>) {
+async fn gateway_lan_scenario(ips: Vec<Ipv4Addr>, owner_reopen: bool) {
+    gateway_lan_scenario_inner(ips, owner_reopen, false).await;
+}
+
+async fn gateway_lan_scenario_inner(
+    ips: Vec<Ipv4Addr>,
+    owner_reopen: bool,
+    computer_refusal: bool,
+) {
     let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local = local_listener.local_addr().unwrap();
     let mut lan_listeners = Vec::new();
@@ -195,10 +203,7 @@ async fn gateway_lan_scenario(ips: Vec<Ipv4Addr>) {
         )
         .unwrap(),
     );
-    let root = std::env::current_dir()
-        .unwrap()
-        .join("target")
-        .join(format!("gateway-lan-{}", uuid::Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!("gateway-lan-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let admin = "a".repeat(43);
@@ -230,9 +235,18 @@ async fn gateway_lan_scenario(ips: Vec<Ipv4Addr>) {
     let policy = Arc::new(
         GatewayBearerPolicy::new(model.as_bytes(), vec![local_host.clone()], vec![]).unwrap(),
     );
+    let mut owner_headers = http::HeaderMap::new();
+    owner_headers.insert(http::header::HOST, local_host.parse().unwrap());
+    owner_headers.insert(
+        http::header::AUTHORIZATION,
+        format!("Bearer {model}").parse().unwrap(),
+    );
+    let principal = policy.authorize(&owner_headers).unwrap();
+    let owner = principal.new_mcp_session_owner().unwrap();
+    let unknown_owner = principal.new_mcp_session_owner().unwrap();
     let mcp = GatewayHttp::new(
         policy,
-        backend,
+        backend.clone(),
         HttpBudget::from_reserved_partition(
             Arc::new(Semaphore::new(crate::gateway::http::GATEWAY_HTTP_BYTES))
                 .try_acquire_many_owned(crate::gateway::http::GATEWAY_HTTP_BYTES as u32)
@@ -348,7 +362,7 @@ async fn gateway_lan_scenario(ips: Vec<Ipv4Addr>) {
         platform: "linux".into(),
         cwd: root.to_str().unwrap().into(),
         shell: "/bin/sh".into(),
-        computer_requested: false,
+        computer_requested: computer_refusal,
         browser_requested: Some(false),
         public_key_pem: identity.public_key_pem().into(),
     };
@@ -395,7 +409,7 @@ async fn gateway_lan_scenario(ips: Vec<Ipv4Addr>) {
     .await;
     assert_eq!(pending.0, 200);
     assert_eq!(pending.1[0]["comparison_code"], comparison);
-    let approved = request(&tls, local, &local_host, Method::POST, "/styx/enroll/approve", Some(&admin), json!({"request_id":joined["request_id"],"fingerprint":joined["fingerprint"],"enable_computer":false,"enable_browser":false})).await;
+    let approved = request(&tls, local, &local_host, Method::POST, "/styx/enroll/approve", Some(&admin), json!({"request_id":joined["request_id"],"fingerprint":joined["fingerprint"],"enable_computer":computer_refusal,"enable_browser":false})).await;
     assert_eq!(approved.0, 200);
     let claim_body =
         json!({"request_id":joined["request_id"],"claim_secret":joined["claim_secret"]});
@@ -484,10 +498,18 @@ async fn gateway_lan_scenario(ips: Vec<Ipv4Addr>) {
         SecretBearer::from_protected_reader(std::str::from_utf8(&credential).unwrap().into())
             .unwrap();
     // Recover by reconnecting with the same credential after an observed close.
+    let mut original_binding = None;
+    let mut unknown_binding = None;
     for (attempt, lan) in addresses
         .iter()
         .cycle()
-        .take(2.max(addresses.len()))
+        .take(if computer_refusal {
+            1
+        } else if owner_reopen {
+            3
+        } else {
+            2.max(addresses.len())
+        })
         .enumerate()
     {
         let configured_origin = format!("https://{lan}");
@@ -503,38 +525,66 @@ async fn gateway_lan_scenario(ips: Vec<Ipv4Addr>) {
         // First reproduce the old origin-hash mismatch, then recover with the
         // real profile namespace. HTTP 101 alone must never imply connected.
         for old_origin_namespace in [true, false] {
-            let host_generation = HostGeneration::try_from("lan-host-generation").unwrap();
-            let host = Arc::new(
-                OwnedExecHost::reserve(
-                    host_generation.clone(),
-                    styx_core::policy::AdmissionFacts {
-                        device_id: device.clone(),
-                        grant_revision: 1,
-                        local_policy_allowed: true,
-                        descriptor: CapabilityDescriptor {
-                            contract_version: 1,
-                            capability_id: CapabilityId::ExecRun,
-                            scope: Scope::Host,
-                            provider_id: "codex".try_into().unwrap(),
-                            configured: false,
-                            remote_grant: true,
-                            availability: Availability::Available,
-                            authorization: Authorization::Granted,
-                            target_session: None,
-                            reason: None,
-                            observed_at: 1,
-                            observation_generation: 1,
-                            recovery: Recovery::None,
-                        },
-                        session_state: None,
-                        current_observation: None,
+            let host_generation =
+                HostGeneration::try_from(format!("lan-host-generation-{attempt}")).unwrap();
+            let reservation = OwnedExecHost::reserve(
+                host_generation.clone(),
+                styx_core::policy::AdmissionFacts {
+                    device_id: device.clone(),
+                    grant_revision: 1,
+                    local_policy_allowed: true,
+                    descriptor: CapabilityDescriptor {
+                        contract_version: 1,
+                        capability_id: CapabilityId::ExecRun,
+                        scope: Scope::Host,
+                        provider_id: "codex".try_into().unwrap(),
+                        configured: owner_reopen && !old_origin_namespace,
+                        remote_grant: true,
+                        availability: Availability::Available,
+                        authorization: Authorization::Granted,
+                        target_session: None,
+                        reason: None,
+                        observed_at: 1,
+                        observation_generation: 1,
+                        recovery: Recovery::None,
                     },
-                    2,
-                )
-                .unwrap()
-                .without_executor()
-                .unwrap(),
-            );
+                    session_state: None,
+                    current_observation: None,
+                },
+                2,
+            )
+            .unwrap();
+            let host = if owner_reopen && !old_origin_namespace {
+                let home = root.join(format!("codex-home-{attempt}"));
+                std::fs::create_dir(&home).unwrap();
+                reservation
+                    .spawn(crate::providers::codex::OwnedExecutorConfig {
+                        binary: std::env::var_os("STYX_TEST_CODEX")
+                            .expect("set STYX_TEST_CODEX to an isolated Codex executor")
+                            .into(),
+                        cwd: root.clone(),
+                        environment: BTreeMap::from([
+                            ("PATH".into(), "/usr/bin:/bin".into()),
+                            ("HOME".into(), root.display().to_string()),
+                            ("CODEX_HOME".into(), home.display().to_string()),
+                        ]),
+                        rpc_timeout: Duration::from_secs(5),
+                        retained_process_limit: 4,
+                    })
+                    .await
+                    .unwrap()
+            } else {
+                reservation.without_executor().unwrap()
+            };
+            let host = Arc::new(host);
+            #[cfg(target_os = "linux")]
+            let computer_fixture = if computer_refusal && !old_origin_namespace {
+                Some(computer_refusal_reference::Factory::new(host.coordinator(), &root).await)
+            } else {
+                None
+            };
+            #[cfg(target_os = "linux")]
+            let protocol_computer = computer_fixture.clone();
             let namespace = if old_origin_namespace {
                 format!(
                     "paired.{}",
@@ -570,6 +620,12 @@ async fn gateway_lan_scenario(ips: Vec<Ipv4Addr>) {
             let (ready, mut readiness) = tokio::sync::oneshot::channel();
             let mut protocol_job = tokio::spawn(async move {
                 let protocol = protocol_host.paired_protocol(profile).unwrap();
+                #[cfg(target_os = "linux")]
+                let protocol = if let Some(factory) = protocol_computer {
+                    protocol.with_computer_profiles(factory).unwrap()
+                } else {
+                    protocol
+                };
                 let result = protocol
                     .run_connection_with_readiness(&mut link, &protocol_stop, Some(ready))
                     .await;
@@ -611,14 +667,76 @@ async fn gateway_lan_scenario(ips: Vec<Ipv4Addr>) {
                     );
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                host_stop.cancel();
-                let (result, shutdown) =
-                    tokio::time::timeout(Duration::from_secs(10), protocol_job)
-                        .await
-                        .unwrap()
-                        .unwrap();
-                assert_eq!(result.unwrap(), Some(wire::TransportDrainOutcome::Complete));
-                shutdown.unwrap();
+                #[cfg(target_os = "linux")]
+                if let Some(factory) = computer_fixture {
+                    computer_refusal_reference::exercise(
+                        backend.clone(),
+                        host.coordinator(),
+                        factory,
+                        &principal,
+                        &owner,
+                        &device,
+                    )
+                    .await;
+                }
+                if owner_reopen {
+                    match attempt {
+                        0 => {
+                            original_binding = Some(relay.bind(&owner, &device).await.unwrap());
+                        }
+                        1 => {
+                            let old = original_binding.as_ref().unwrap();
+                            assert!(
+                                old.physically_settled(),
+                                "original cleanup must be proven before replacement"
+                            );
+                            let replacement = relay.bind(&owner, &device).await.expect(
+                                "same owner can open a fresh binding after complete old drain",
+                            );
+                            assert!(replacement.owner_ref() != old.owner_ref());
+                            assert_ne!(replacement.host_generation(), old.host_generation());
+                            let old_frame = || wire::Call::PrepareStart {
+                                owner: old.owner_ref(),
+                                grant_revision: old.grant_revision(),
+                                timeout_ms: 5000,
+                                spec: serde_json::value::RawValue::from_string("{}".into())
+                                    .unwrap(),
+                            };
+                            assert!(matches!(
+                                relay.call(old, old_frame()).await,
+                                Err(crate::gateway::paired::RelayError::Unauthorized)
+                            ));
+                            assert!(matches!(
+                                relay.call(&replacement, old_frame()).await,
+                                Err(crate::gateway::paired::RelayError::Unauthorized)
+                            ));
+                            unknown_binding =
+                                Some(relay.bind(&unknown_owner, &device).await.unwrap());
+                        }
+                        2 => {
+                            assert!(!unknown_binding.as_ref().unwrap().physically_settled());
+                            assert!(
+                                relay.bind(&unknown_owner, &device).await.is_err(),
+                                "unknown old cleanup must not be replaced"
+                            );
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                if owner_reopen && attempt == 1 {
+                    // Abrupt loss deliberately leaves both original owner cleanups unknown.
+                    protocol_job.abort();
+                    assert!(protocol_job.await.unwrap_err().is_cancelled());
+                } else {
+                    host_stop.cancel();
+                    let (result, shutdown) =
+                        tokio::time::timeout(Duration::from_secs(10), protocol_job)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    assert_eq!(result.unwrap(), Some(wire::TransportDrainOutcome::Complete));
+                    shutdown.unwrap();
+                }
             }
             host.shutdown_owned(Duration::from_secs(5)).await.unwrap();
         }
@@ -652,3 +770,7 @@ async fn gateway_lan_scenario(ips: Vec<Ipv4Addr>) {
     drop(relay);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(target_os = "linux")]
+#[path = "computer_refusal_reference.rs"]
+mod computer_refusal_reference;

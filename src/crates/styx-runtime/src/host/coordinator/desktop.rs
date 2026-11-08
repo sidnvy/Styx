@@ -31,6 +31,8 @@ pub(super) struct DesktopLane {
     pub(super) ax_observation: Option<super::desktop_observation::OwnedAxObservation>,
     profiles: BTreeMap<OwnerId, DesktopProfile>,
     pub(super) handles: BTreeMap<OperationId, CuaHandle>,
+    #[cfg(all(test, target_os = "linux"))]
+    open_history: Vec<(OwnerLease, ResourceTarget)>,
 }
 struct DesktopOpenAdmission {
     execution: OwnedRwLockReadGuard<()>,
@@ -266,6 +268,8 @@ impl HostAuthority {
             ax_observation: None,
             profiles: BTreeMap::new(),
             handles: BTreeMap::new(),
+            #[cfg(all(test, target_os = "linux"))]
+            open_history: Vec::new(),
         });
         Ok(binding)
     }
@@ -359,6 +363,37 @@ impl HostCoordinator {
             return Err(ErrorCategory::StateConflict.into());
         }
         Ok(snapshot)
+    }
+    /// Ends only this original never-dispatched desktop-open reservation.
+    /// The caller must already hold a typed pre-dispatch refusal. The ledger
+    /// lock arbitrates against a concurrent dispatch; no executor fact is
+    /// inferred for a record which has left Reserved.
+    pub(crate) fn cancel_refused_desktop_open(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+    ) -> Result<Option<OperationSnapshot>, CoordinatorError> {
+        let mut state = self.inner.state.lock().expect("Host state mutex");
+        if state.ledger.inspect_domain(owner, id, digest)? != ResourceDomain::DesktopAgent
+            || state.ledger.inspect_context(owner, id, digest)?.capability
+                != CapabilityId::DesktopWindowsRead
+        {
+            return Err(ErrorCategory::StateConflict.into());
+        }
+        let snapshot = state.ledger.inspect(owner, id, digest)?;
+        if snapshot.target.is_some() {
+            return Err(ErrorCategory::StateConflict.into());
+        }
+        if snapshot.state != OperationState::Reserved {
+            return Ok(None);
+        }
+        Ok(Some(state.ledger.request_cancel(
+            owner,
+            id,
+            digest,
+            self.now(),
+        )?))
     }
     /// Refreshes through the original collector, not cached environment state.
     /// Failed or changed association permanently fences this source; callers
@@ -493,9 +528,18 @@ impl HostCoordinator {
         }
         validate_context(desktop(&state)?, &context)?;
         let payload = profile(desktop(&state)?, owner)?.payload.clone();
-        Ok(state
+        let snapshot = state
             .ledger
-            .prepare_desktop_agent(owner, context, payload, self.now())?)
+            .prepare_desktop_agent(owner, context, payload, self.now())?;
+        #[cfg(all(test, target_os = "linux"))]
+        state.desktop.as_mut().unwrap().open_history.push((
+            owner.clone(),
+            ResourceTarget {
+                operation_id: snapshot.id.clone(),
+                payload_digest: snapshot.payload_digest,
+            },
+        ));
+        Ok(snapshot)
     }
     /// Wait only for fenced owners' original workers. A live context is a real
     /// capacity refusal. No job/worker permit or execution read gate is held
@@ -1208,9 +1252,88 @@ pub(super) fn test_lane(binding: SessionBinding, budget: Arc<CuaIoBudget>) -> De
         ax_observation: None,
         profiles: BTreeMap::new(),
         handles: BTreeMap::new(),
+        open_history: Vec::new(),
     }
 }
 
 #[cfg(all(test, target_os = "linux"))]
 #[path = "desktop_open_tests.rs"]
 mod open_tests;
+
+// Deliberately unavailable native source for real Core/Host/TLS refusal tests.
+// The fixture never grants a platform capability or starts a native executor.
+#[cfg(all(test, target_os = "linux"))]
+impl HostCoordinator {
+    pub(crate) async fn install_desktop_refusal_fixture(&self) -> SessionBinding {
+        use styx_contracts::{
+            error::Recovery,
+            session::{SessionIdentity, SessionState},
+        };
+        let bytes = Arc::new(Semaphore::new(8 * 1024 * 1024));
+        let budget =
+            CuaIoBudget::from_reserved(bytes.acquire_many_owned(8 * 1024 * 1024).await.unwrap())
+                .unwrap();
+        let mut state = self.inner.state.lock().unwrap();
+        assert!(state.desktop.is_none());
+        let registration = state
+            .sessions
+            .attest(styx_core::session::RegistrationFacts {
+                id: "open-refusal-session".try_into().unwrap(),
+                identity: SessionIdentity::Linux {
+                    uid: nix::unistd::Uid::current().as_raw(),
+                    login_instance: "refusal-fixture-login".into(),
+                    seat: None,
+                    compositor_instance: "refusal-fixture-compositor".into(),
+                    display_identity: "refusal-fixture-display".into(),
+                },
+                agent_instance: "refusal-fixture-agent".try_into().unwrap(),
+                protocol_version: 1,
+                provenance: "synthetic source; no OS acceptance".into(),
+            })
+            .unwrap();
+        let binding = state.sessions.register(registration).unwrap();
+        let binding = state
+            .sessions
+            .set_state(&binding, SessionState::Connecting)
+            .unwrap();
+        state
+            .sessions
+            .provider(
+                &binding,
+                ProviderEvidence {
+                    capability: CapabilityId::DesktopWindowsRead,
+                    provider: "refusal-fixture".try_into().unwrap(),
+                    availability: Availability::Available,
+                    authorization: Authorization::Granted,
+                    provenance: "synthetic pre-dispatch source boundary only".into(),
+                    reason: None,
+                    recovery: Recovery::None,
+                },
+                Duration::from_secs(60),
+            )
+            .unwrap();
+        state.desktop = Some(test_lane(binding.clone(), budget));
+        binding
+    }
+    pub(crate) fn desktop_refusal_records(&self) -> (Vec<OperationSnapshot>, usize) {
+        let state = self.inner.state.lock().unwrap();
+        let records = state
+            .desktop
+            .as_ref()
+            .unwrap()
+            .open_history
+            .iter()
+            .filter_map(|(owner, target)| {
+                state
+                    .ledger
+                    .inspect(owner, &target.operation_id, target.payload_digest)
+                    .ok()
+            })
+            .collect();
+        let workers = state
+            .desktop
+            .as_ref()
+            .map_or(0, |lane| lane.worker.resources().unwrap().len());
+        (records, workers)
+    }
+}

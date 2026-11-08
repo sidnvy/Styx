@@ -151,6 +151,18 @@ struct Binding {
     cleanup: Mutex<drain::BindingCleanup>,
     cleanup_changed: tokio::sync::Notify,
 }
+impl Binding {
+    // Retain the original binding and its receipts; only its exact completed
+    // transport drain permits a separate owner on a new Host incarnation.
+    fn retired_for(&self, entry: &Entry) -> bool {
+        self.entry.host_generation != entry.host_generation
+            && self.revoked.lock().is_ok_and(|revoked| *revoked)
+            && self
+                .cleanup
+                .lock()
+                .is_ok_and(|cleanup| cleanup.result == Some(true) && cleanup.transport_joined)
+    }
+}
 #[derive(Clone)]
 pub struct BoundOwner {
     inner: Arc<Binding>,
@@ -620,6 +632,7 @@ impl RelayHandle {
                 binding.owner.owner_id() == owner.owner_id()
                     && binding.owner.principal_fingerprint() == owner.principal_fingerprint()
                     && binding.entry.device == *device
+                    && !binding.retired_for(&entry)
             }) {
                 Some(binding.clone())
             } else {
@@ -679,6 +692,7 @@ impl RelayHandle {
                                 && existing.owner.principal_fingerprint()
                                     == owner.principal_fingerprint()
                                 && existing.entry.device == *device
+                                && !existing.retired_for(&entry)
                         })
                     {
                         return Err(RelayError::Busy);

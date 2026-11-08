@@ -276,3 +276,122 @@ async fn desktop_open_waits_for_cleanup_gate_without_holding_worker_or_job_slots
     );
     assert!(admission.slot.is_ok());
 }
+
+#[tokio::test]
+async fn desktop_refused_open_cancels_only_the_exact_reserved_resource() {
+    let (host, _authority, owner, other) = fixture().await;
+    let original = prepare(&host, &owner, Duration::from_secs(10));
+    assert!(
+        host.cancel_refused_desktop_open(&other, &original.id, original.payload_digest)
+            .is_err()
+    );
+    assert!(
+        host.cancel_refused_desktop_open(
+            &owner,
+            &original.id,
+            Sha256Digest::of_bytes(b"wrong-digest")
+        )
+        .is_err()
+    );
+    assert_eq!(
+        host.inspect_desktop(&owner, &original.id, original.payload_digest, false)
+            .unwrap()
+            .state,
+        OperationState::Reserved
+    );
+    let cancelled = host
+        .cancel_refused_desktop_open(&owner, &original.id, original.payload_digest)
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancelled.id, original.id);
+    assert_eq!(cancelled.payload_digest, original.payload_digest);
+    assert_eq!(cancelled.state, OperationState::Cancelled);
+    assert_eq!(cancelled.cancellation, Some(Cancellation::NotDispatched));
+    assert_eq!(cancelled.liveness, ExecutionLiveness::NotStarted);
+    assert_eq!(cancelled.output_drain, OutputDrain::NotOpened);
+    assert!(
+        host.cancel_refused_desktop_open(&owner, &original.id, original.payload_digest)
+            .unwrap()
+            .is_none()
+    );
+
+    let next = prepare(&host, &owner, Duration::from_secs(10));
+    assert_ne!(
+        next.id, original.id,
+        "a new explicit request has its own reservation"
+    );
+    let target = ResourceTarget {
+        operation_id: next.id.clone(),
+        payload_digest: next.payload_digest,
+    };
+    let action = {
+        let mut state = host.inner.state.lock().unwrap();
+        let admission = facts(&state, CapabilityId::DesktopWindowsRead).unwrap();
+        assert!(matches!(
+            state
+                .ledger
+                .dispatch(
+                    &owner,
+                    &next.id,
+                    next.payload_digest,
+                    &admission,
+                    host.now()
+                )
+                .unwrap(),
+            DispatchDisposition::ExecuteOnce(_)
+        ));
+        let context = state
+            .ledger
+            .inspect_context(&owner, &next.id, next.payload_digest)
+            .unwrap();
+        state
+            .ledger
+            .prepare_targeted(
+                &owner,
+                target.clone(),
+                context,
+                b"targeted-not-an-open".to_vec(),
+                host.now(),
+            )
+            .unwrap()
+    };
+    assert!(
+        host.cancel_refused_desktop_open(&owner, &action.id, action.payload_digest)
+            .is_err()
+    );
+    assert!(
+        host.cancel_refused_desktop_open(&owner, &next.id, next.payload_digest)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        host.inspect_desktop(&owner, &next.id, next.payload_digest, false)
+            .unwrap()
+            .state,
+        OperationState::Dispatched
+    );
+    host.inner
+        .state
+        .lock()
+        .unwrap()
+        .ledger
+        .mark_result_unknown(&next.id)
+        .unwrap();
+    assert!(
+        host.cancel_refused_desktop_open(&owner, &next.id, next.payload_digest)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        host.inspect_desktop(&owner, &next.id, next.payload_digest, false)
+            .unwrap()
+            .state,
+        OperationState::Unknown
+    );
+    assert_eq!(
+        host.inspect_desktop(&owner, &action.id, action.payload_digest, true)
+            .unwrap()
+            .state,
+        OperationState::Reserved
+    );
+}

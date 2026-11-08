@@ -1,5 +1,8 @@
 //! Real C07 update/recovery and synthetic, legally signed C08 fixtures. No image
 //! execution, user publisher, Host enrollment, service or power-loss acceptance.
+#[path = "native_app_reader7_reference_tests.rs"]
+mod app_reader7_reference;
+
 use super::*;
 use crate::{
     crypto::DevicePrivateKey,

@@ -46,7 +46,13 @@ export function buildInno(config){
   const gate=path.join(outputDirectory,'StyxInstallGate.exe'),script=path.join(here,'product.iss');
   const csc=path.join(process.env.WINDIR,'Microsoft.NET/Framework64/v4.0.30319/csc.exe');
   execFileSync(csc,['/nologo','/warn:4','/warnaserror+','/target:exe','/platform:anycpu','/optimize+','/reference:System.Web.Extensions.dll','/out:'+gate,path.join(here,'InstallGate.cs')],{windowsHide:true,stdio:'pipe'});
-  const defines={NativePackage:native?'1':'0',SourceDir:packageDirectory,OutputDir:outputDirectory,ProductVersion:version,PackageHash:expectedPackageSha256,GateFile:gate,ProductId:productId,ProductName:productName,InstallFolder:installFolder,AppParameters:stateDirectory?'--state-dir ""'+stateDirectory+'""':''};
+  // Keep quotes out of ISCC's command-line defines: Node's Windows argument
+  // escaping and ISCC's parser do not share the same quoting convention.
+  // The ISS template owns the quotes; double terminal slashes for Windows argv.
+  // End the define with a sentinel so Node cannot escape its trailing slashes
+  // a second time. ISPP removes exactly this one appended character.
+  const shortcutStateDirectory=(stateDirectory??'').replace(/\\+$/,slashes=>slashes+slashes)+'X';
+  const defines={NativePackage:native?'1':'0',SourceDir:packageDirectory,OutputDir:outputDirectory,ProductVersion:version,PackageHash:expectedPackageSha256,GateFile:gate,ProductId:productId,ProductName:productName,InstallFolder:installFolder,StateDirectoryArgument:shortcutStateDirectory};
   const log=execFileSync(compiler,[...Object.entries(defines).map(([key,value])=>`/D${key}=${value}`),script],{windowsHide:true,encoding:'utf8',maxBuffer:8*1024*1024});
   fs.writeFileSync(path.join(outputDirectory,'compiler.log'),log);verify();
   const installer=path.join(outputDirectory,`StyxSetup-${version}.exe`);

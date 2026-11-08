@@ -173,6 +173,11 @@
       "input": "STYX_TEST_APP_CONTROL_SELECTION absolute protected NativeRuntimeSelection file; isolated strict-TLS enrollment roots only",
       "required_for": "Stopped App control binding versus execution refusal, Ready/CA integrity and unchanged root/C07; not installed App or release acceptance"
     },
+    "app::control_binding_tests::reopen_resumes_gateway_intent_without_resuming_stopped_host": {
+      "kind": "explicit_signed_native_payload",
+      "input": "STYX_TEST_APP_CONTROL_SELECTION absolute protected NativeRuntimeSelection file; disposable strict-TLS enrollment roots only",
+      "required_for": "Independent Gateway Running resume, Gateway Stopped negative and unchanged stopped Host after normal quit/reopen; manually run reference, not installed App or platform acceptance"
+    },
     "crypto::tests::legacy_node22_bidirectional_crypto_batch": {
       "kind": "explicit_external_runtime",
       "input": "--node22 absolute binary",
@@ -346,8 +351,13 @@
     },
     "gateway::http::lan_tests::gateway_two_listeners_lan_join_and_host_link_requires_sockets": {
       "kind": "assigned_private_lan_interface_fixture",
-      "input": "STYX_TEST_LAN_ADDRESS set to an IPv4 address assigned to this machine in a private or overlay range",
-      "required_for": "a Host joins and connects through the LAN listener while /mcp, admin and control routes return 404 there; not account, App or cross-machine acceptance"
+      "input": "STYX_TEST_LAN_ADDRESS assigned private/overlay IPv4 and STYX_TEST_CODEX explicit native Codex executor; disposable strict-TLS/WSS roots and isolated HOME/CODEX_HOME for three owned executors",
+      "required_for": "LAN join/Host connection and private-route 404; same verified owner across fully drained Host generations, fresh binding only after completed cleanup, old-owner/frame and unknown-cleanup refusal; not account, App or cross-machine acceptance"
+    },
+    "gateway::http::lan_tests::computer_refusal_reference::gateway_computer_refusal_settles_original_reservation_without_replay": {
+      "kind": "assigned_private_lan_interface_fixture",
+      "input": "STYX_TEST_LAN_ADDRESS assigned private/overlay IPv4; disposable strict-TLS/WSS roots and a controlled unavailable Computer source; no native executor or signed package",
+      "required_for": "exact original Core reservation termination after a proven pre-dispatch refusal, independent subsequent request, retained Unknown/lost-response fences and normal owner cleanup; not native effects or platform acceptance"
     },
     "management::tests::actual_legacy_management_raw_import_and_plan_batch": {
       "kind": "owned_private_raw_management_fixture",

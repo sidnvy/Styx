@@ -298,7 +298,7 @@ def execute(args):
         if md["status"] == "PASS":
             gate.semantic(md, metadata_errors(json.loads(gate.read("dependency-metadata")), policy, ROOT))
         gate.run("format", ["cargo", "fmt", "--all", "--", "--check"], timeout=120)
-        clippy = gate.run("clippy", ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--offline", "--", "-D", "warnings"])
+        clippy = gate.run("clippy", ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--offline", "--timings", "--", "-D", "warnings"])
         # Later scenario commands compile this same workspace. Preserve the first
         # failure and report required checks missing; do not repeatedly invoke a
         # known failing build or spend native fixtures on an invalid baseline.
@@ -307,7 +307,7 @@ def execute(args):
         # Real-descriptor fixtures share the libtest process. Isolate unrelated
         # fixture lifetimes from another test's fork/exec descriptor window;
         # scenarios retain their own explicit concurrency and child processes.
-        tests = gate.run("workspace-tests", ["cargo", "test", "--workspace", "--locked", "--offline", "--", "--test-threads=1"])
+        tests = gate.run("workspace-tests", ["cargo", "test", "--workspace", "--locked", "--offline", "--timings", "--", "--test-threads=1"])
         if tests["status"] != "PASS":
             raise ValueError("workspace_regression_precondition_failed")
         # Child helper stdout can interleave with libtest's progress output.
@@ -519,7 +519,7 @@ def execute(args):
             gate.semantic(check, [] if "1 passed; 0 failed" in gate.read("linux-discovery") else ["exact_linux_discovery_case_not_executed"])
             receipt["linux_discovery"] = check["status"]
         gate.run("python-oracles", [sys.executable, "-W", "error::ResourceWarning", "-m", "unittest", "discover", "-s", "src/acceptance/oracles", "-p", "test_oracles.py", "-v"], timeout=120)
-        build = gate.run("cli-build", ["cargo", "build", "-p", "styx", "--locked", "--offline"])
+        build = gate.run("cli-build", ["cargo", "build", "-p", "styx", "--locked", "--offline", "--timings"])
         if build["status"] == "PASS":
             binary = target / "debug" / ("styx.exe" if os.name == "nt" else "styx")
             receipt["cli_binary_sha256"] = sha(binary)

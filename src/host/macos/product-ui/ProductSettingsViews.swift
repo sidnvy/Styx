@@ -199,6 +199,13 @@ struct ProductSettingsView: View {
         } else {
             Button(productText("添加电脑", "Add computer")) { addComputer = true; model.beginDeviceInvitation() }
                 .accessibilityIdentifier("styx-settings-add-computer").disabled(model.busy)
+            if model.nativeHost {
+                Button(productText("检查待连接的电脑", "Check waiting computers")) { model.loadPending() }
+                    .accessibilityIdentifier("styx-settings-check-pending-computers")
+                    .disabled(model.busy || !model.nativeSupportsOperation("pendingComputers"))
+                ProductPendingIdentities(model: model)
+                    .disabled(!model.nativeSupportsOperation("pendingComputers"))
+            }
             ForEach(model.devices.filter { !$0.isLocal }) { device in
                 GroupBox {
                     VStack(alignment: .leading, spacing: 12) {

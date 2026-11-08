@@ -39,6 +39,27 @@ enum SourcePhase {
     Ended,
 }
 
+fn publish_runtime_fault(
+    sender: &tokio::sync::watch::Sender<Option<(ProbeStage, ProbeCause)>>,
+    ready: bool,
+    diagnostic: ProbeDiagnostic,
+) {
+    if ready
+        && diagnostic.stage != ProbeStage::AlreadyFenced
+        && !(diagnostic.stage == ProbeStage::EvidenceLookup
+            && diagnostic.cause == ProbeCause::Fenced)
+    {
+        sender.send_if_modified(|current| {
+            if current.is_some() {
+                false
+            } else {
+                *current = Some((diagnostic.stage, diagnostic.cause));
+                true
+            }
+        });
+    }
+}
+
 pub(crate) struct MacProxySource {
     control: Mutex<BoundMacSource>,
     observations: Mutex<BoundMacSource>,
@@ -47,6 +68,7 @@ pub(crate) struct MacProxySource {
     initial_epoch_advanced: AtomicBool,
     // Diagnostic custody only; no source permission or readiness derives from it.
     probe_failure: Mutex<Option<ProbeDiagnostic>>,
+    runtime_fault: Mutex<Option<tokio::sync::watch::Sender<Option<(ProbeStage, ProbeCause)>>>>,
 }
 impl MacProxySource {
     /// Trusted supervisor setup only. No operation/grant/session can be minted by
@@ -103,6 +125,7 @@ impl MacProxySource {
             phase: AtomicU8::new(SourcePhase::Unqualified as u8),
             initial_epoch_advanced: AtomicBool::new(false),
             probe_failure: Mutex::new(None),
+            runtime_fault: Mutex::new(None),
         }))
     }
     pub(crate) fn fingerprint(&self) -> Sha256Digest {
@@ -158,7 +181,25 @@ impl MacProxySource {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
     }
+    /// Installed once before qualification; this carries diagnostic facts only.
+    pub(crate) fn attach_runtime_fault(
+        &self,
+        sender: tokio::sync::watch::Sender<Option<(ProbeStage, ProbeCause)>>,
+    ) {
+        *self.runtime_fault.lock().unwrap_or_else(|e| e.into_inner()) = Some(sender);
+    }
     pub(crate) fn remember_probe_diagnostic(&self, diagnostic: ProbeDiagnostic) {
+        // This is the first recorded failure after qualification, not a claim
+        // of an atomic first OS event. Shutdown and subsequent fenced reads do
+        // not acquire a new observation or replace the original fact.
+        if let Some(sender) = self
+            .runtime_fault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            publish_runtime_fault(sender, self.ready(), diagnostic);
+        }
         self.probe_failure
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -789,6 +830,68 @@ pub(super) async fn start_proxy(
 mod qualification_reference {
     use super::*;
 
+    #[test]
+    fn runtime_fault_projection_is_first_ready_fact_only() {
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        let diagnostic = |stage, cause| ProbeDiagnostic {
+            stage,
+            cause,
+            elapsed_ms: 123,
+            deadline_expired: true,
+        };
+        publish_runtime_fault(
+            &sender,
+            false,
+            diagnostic(ProbeStage::NativeBeforeBinding, ProbeCause::Peer),
+        );
+        assert!(receiver.borrow().is_none());
+        publish_runtime_fault(
+            &sender,
+            true,
+            diagnostic(ProbeStage::AlreadyFenced, ProbeCause::Fenced),
+        );
+        assert!(receiver.borrow().is_none());
+        publish_runtime_fault(
+            &sender,
+            true,
+            diagnostic(
+                ProbeStage::NativeAfterObservation,
+                ProbeCause::ConsoleEpochChanged,
+            ),
+        );
+        publish_runtime_fault(
+            &sender,
+            true,
+            diagnostic(ProbeStage::ControlMutex, ProbeCause::MutexPoisoned),
+        );
+        let current = *receiver.borrow();
+        assert_eq!(
+            current,
+            Some((
+                ProbeStage::NativeAfterObservation,
+                ProbeCause::ConsoleEpochChanged
+            ))
+        );
+        let (stage, cause) = current.unwrap();
+        let projected = serde_json::json!({"stage":stage,"cause":cause});
+        assert_eq!(projected.as_object().unwrap().len(), 2);
+        assert_eq!(projected["stage"], "native_after_observation");
+        assert_eq!(projected["cause"], "console_epoch_changed");
+
+        // A first failure from the original binding may itself be Fenced;
+        // only an already-fenced follow-up is suppressed.
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        publish_runtime_fault(
+            &sender,
+            true,
+            diagnostic(ProbeStage::NativeBeforeBinding, ProbeCause::Fenced),
+        );
+        assert_eq!(
+            *receiver.borrow(),
+            Some((ProbeStage::NativeBeforeBinding, ProbeCause::Fenced))
+        );
+    }
+
     fn lag_test_baselines(source: &MacProxySource) {
         source.control.lock().unwrap().lag_retained_console_seed();
         source
@@ -806,6 +909,8 @@ mod qualification_reference {
         let source = MacProxySource::discover(Instant::now() + std::time::Duration::from_secs(10))
             .await
             .expect("original_source_discovery");
+        let (runtime_fault, fault_observation) = tokio::sync::watch::channel(None);
+        source.attach_runtime_fault(runtime_fault);
         let original = source.clone();
         let observation = tokio::task::spawn_blocking(move || -> Result<_> {
             assert!(!original.ready(), "discovery_is_not_executor_readiness");
@@ -853,6 +958,16 @@ mod qualification_reference {
         .await
         .expect("original_qualification_task_joined");
         let diagnostic = source.probe_diagnostic();
+        let runtime_fault = *fault_observation.borrow();
+        assert_eq!(
+            runtime_fault.map(|(_, cause)| cause),
+            Some(ProbeCause::ConsoleEpochChanged)
+        );
+        assert_eq!(
+            *fault_observation.borrow(),
+            runtime_fault,
+            "reading status cannot change the latch"
+        );
         let original = source.clone();
         let drained = tokio::task::spawn_blocking(move || {
             original

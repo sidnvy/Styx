@@ -279,6 +279,14 @@ extension ProductModel {
         let alert = NSAlert()
         alert.messageText = productText("两台电脑的配对码是否一致？", "Do both computers show the same pairing code?")
         alert.informativeText = (request["label"].string ?? "Styx") + "\n\n" + code
+        if nativeHost {
+            guard let deviceID = request["device_id"].string, !deviceID.isEmpty,
+                  let fingerprint = request["fingerprint"].string, !fingerprint.isEmpty,
+                  let requestID = request["request_id"].string, !requestID.isEmpty else { return }
+            alert.informativeText += "\n\n" + productText("电脑 ID：", "Device ID: ") + deviceID
+                + "\n" + productText("公钥指纹：", "Public key fingerprint: ") + fingerprint
+                + "\n" + productText("申请 ID：", "Request ID: ") + requestID
+        }
         alert.addButton(withTitle: productText("一致，批准申请", "Match — approve request"))
         let canReject = nativeHost && nativeSupportsOperation("rejectComputer")
         if canReject { alert.addButton(withTitle: productText("拒绝此次申请", "Reject this request")) }
