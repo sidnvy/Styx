@@ -528,10 +528,6 @@ impl HostApp {
         .await
         .map_err(|_| AppError("app_network_interfaces_unavailable"))??;
         let deployment = local_deployment(&input)?;
-        let selection = self
-            .runtime_selection_file
-            .clone()
-            .ok_or(AppError("app_runtime_selection_invalid"))?;
         let choice = JoinInput {
             approved_gateway_origin: String::new(),
             approved_ca_sha256: None,
@@ -542,6 +538,11 @@ impl HostApp {
             persist_login: input.persist_login,
         };
         validate_choice(&choice)?;
+        self.bootstrap_runtime_selection().await?;
+        let selection = self
+            .runtime_selection_file
+            .clone()
+            .ok_or(AppError("app_runtime_selection_invalid"))?;
         let scope = Arc::new(self.scope.gateway_sibling()?);
         if scope.root.get().is_some() {
             return Err(AppError("app_setup_already_exists"));

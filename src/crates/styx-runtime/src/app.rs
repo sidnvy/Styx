@@ -16,6 +16,7 @@ mod network_interfaces;
 pub(crate) mod pairing_link;
 mod plugin;
 mod role_retire;
+mod runtime_bootstrap;
 mod runtime_update;
 mod service;
 mod startup;
@@ -221,6 +222,7 @@ enum Operation {
     InviteComputer,
     PendingComputers,
     ApproveComputer,
+    RejectComputer,
     RevokeComputer,
     TunnelStatus,
     TunnelSave,
@@ -1310,6 +1312,17 @@ impl HostApp {
                 "tunnelStatus",
                 "tunnelSave",
             ]);
+            if let Some(gateway) = self.local_gateway.as_ref()
+                && gateway.validate().is_ok()
+                && crate::management::native_gateway_admin::pairing_rejection_supported_for_app(
+                    gateway.scope.clone(),
+                )
+                .await
+                .unwrap_or(false)
+                && gateway.validate().is_ok()
+            {
+                supported.push("rejectComputer");
+            }
         }
         json!({"schema":1,"maintenance":self.maintenance_status()["maintenance"],"runtimeUpdate":self.runtime_update,"service":self.service,"configuration":configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
     }
@@ -1364,6 +1377,7 @@ impl HostApp {
             operation,
             Operation::InviteComputer
                 | Operation::ApproveComputer
+                | Operation::RejectComputer
                 | Operation::RevokeComputer
                 | Operation::TunnelSave
                 | Operation::PluginSave
@@ -1421,6 +1435,7 @@ impl HostApp {
             | Operation::InviteComputer
             | Operation::PendingComputers
             | Operation::ApproveComputer
+            | Operation::RejectComputer
             | Operation::RevokeComputer
             | Operation::TunnelStatus
             | Operation::TunnelSave => {
@@ -1566,7 +1581,10 @@ impl HostApp {
                     return Err(AppError("app_join_inspection_required"));
                 }
                 if matches!(operation, Operation::Join) {
-                    self.prepare_join_input(decode_input(&input)?)?;
+                    let choice: JoinInput = decode_input(&input)?;
+                    validate_choice(&choice)?;
+                    self.bootstrap_runtime_selection().await?;
+                    self.prepare_join_input(choice)?;
                 }
                 if self.running.is_some() || self.scope.root.get().is_some() {
                     return Err(AppError("app_join_already_exists"));
@@ -1646,6 +1664,7 @@ impl HostApp {
             | Operation::InviteComputer
             | Operation::PendingComputers
             | Operation::ApproveComputer
+            | Operation::RejectComputer
             | Operation::RevokeComputer
             | Operation::TunnelStatus
             | Operation::TunnelSave

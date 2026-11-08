@@ -279,11 +279,37 @@ extension ProductModel {
         let alert = NSAlert()
         alert.messageText = productText("两台电脑的配对码是否一致？", "Do both computers show the same pairing code?")
         alert.informativeText = (request["label"].string ?? "Styx") + "\n\n" + code
-        alert.addButton(withTitle: productText("一致，连接", "Match — connect"))
-        alert.addButton(withTitle: productText("不一致或取消", "Do not match or cancel"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        selectedPending = request; comparisonConfirmation = code
-        approvePending()
+        alert.addButton(withTitle: productText("一致，批准申请", "Match — approve request"))
+        let canReject = nativeHost && nativeSupportsOperation("rejectComputer")
+        if canReject { alert.addButton(withTitle: productText("拒绝此次申请", "Reject this request")) }
+        alert.addButton(withTitle: productText("取消比较", "Cancel comparison"))
+        alert.buttons.last?.keyEquivalent = "\u{1b}"
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            selectedPending = request; comparisonConfirmation = code
+            approvePending()
+        case .alertSecondButtonReturn where canReject:
+            rejectPending(request)
+        default:
+            return // Cancelling comparison never records a rejection.
+        }
+    }
+    func rejectPending(_ request: ProductJSON) {
+        guard nativeHost, nativeSupportsOperation("rejectComputer"), !busy,
+              let requestID = request["request_id"].string, !requestID.isEmpty,
+              let deviceID = request["device_id"].string, !deviceID.isEmpty,
+              let fingerprint = request["fingerprint"].string, !fingerprint.isEmpty,
+              let code = request["comparison_code"].string, !code.isEmpty else { return }
+        // Capture the exact request shown in this comparison. Polling cannot
+        // substitute another pending identity after the user's decision.
+        let rejection: [String: ProductJSON] = ["authorize": .bool(true),
+            "requestId": .string(requestID), "deviceId": .string(deviceID),
+            "fingerprint": .string(fingerprint), "comparisonCode": .string(code)]
+        perform { [self] in
+            _ = try await client.write("pending/reject", rejection)
+            selectedPending = .null; comparisonConfirmation = ""; fingerprintConfirmation = ""
+            pending = try await client.write("pending/list", ["authorize": .bool(true)])["pending"].array
+        }
     }
 
 }

@@ -27,6 +27,8 @@ pub enum ReaderContract {
     NativeServiceRuntimeSelectedStateV1,
     /// Original App-to-service transfer retaining App runtime history.
     NativeAppServiceTransferredStateV1,
+    /// Complete pending rejection lifecycle and its incompatible persistent markers.
+    NativePairingLifecycleStateV1,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

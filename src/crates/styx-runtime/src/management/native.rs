@@ -16,7 +16,7 @@ use std::{
 };
 use styx_contracts::{
     identity::{Sha256Digest, TransactionId},
-    management::{DurableStage, JournalReceipt},
+    management::{DurableStage, JournalReceipt, ReaderContract},
     native_management::*,
 };
 
@@ -780,11 +780,24 @@ mod platform {
             run: NativeRunDesired::Stopped,
             autostart: NativeAutostartDesired::Disabled,
         };
+        let pairing = options.manager != NativeManager::PersistentService
+            || matches!(
+                fresh.marker().root_identity,
+                NativeRootIdentity::Linux { .. }
+            );
         let state = NativeState {
-            schema: NATIVE_STATE_SCHEMA,
+            schema: if pairing {
+                NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA
+            } else {
+                NATIVE_STATE_SCHEMA
+            },
             kind: NativeStateKind::StyxDesiredState,
             runtime_format: NativeRuntimeFormat::NativeRustV1,
-            reader_contract: fresh.marker().reader_floor,
+            reader_contract: if pairing {
+                ReaderContract::NativePairingLifecycleStateV1
+            } else {
+                fresh.marker().reader_floor
+            },
             scope_generation: fresh.marker().scope_generation,
             deployment_raw_sha256: Sha256Digest::of_bytes(deployment.bytes()),
             mode: options.mode,

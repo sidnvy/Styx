@@ -102,7 +102,10 @@ fn load_snapshot(
     snapshot.revalidate().map_err(|_| ProfileError::Changed)?;
     let seed = snapshot.seed();
     let ready = snapshot.ready();
-    if seed.schema != 1
+    // NativeHostSnapshot already binds seed2 to canonical reader7 and the
+    // compatible signed current selection. Retained seed1 Ready profiles may
+    // continue through an original committed runtime update.
+    if !matches!(seed.schema, 1 | 2)
         || ready.schema != 1
         || seed.platform
             != if cfg!(target_os = "windows") {

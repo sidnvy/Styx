@@ -210,6 +210,7 @@ final class ProductCoreClient {
             case "devices": return try await native("computers")
             case "pending/list": return try await native("pendingComputers")
             case "pending/approve": return try await native("approveComputer", body)
+            case "pending/reject": return try await native("rejectComputer", body)
             case "device/revoke": return try await native("revokeComputer", body)
             case "pairing-link/create": return try await native("inviteComputer", ["authorize": .bool(true)])
             case "plugin/profile": return try await native("pluginSave", body)

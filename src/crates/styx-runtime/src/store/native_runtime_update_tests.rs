@@ -100,7 +100,7 @@ fn candidate_reader(
         "minimum_reader": reader,
         "target":"x86_64-unknown-linux-gnu","version":format!("0.4.0-test.{name}"),"entrypoint":"bin/styx",
         "source":{"revision":"1".repeat(40),"inputs_sha256":Sha256Digest::of_bytes(members[2].1)},
-        "contracts":{"control":1,"management_state":match reader { "native_app_service_transferred_v1" => 6, "native_app_runtime_selected_v1" => 4, "native_runtime_selected_v1" => 3, _ => 2 }},"files":files,"external_workers":[]});
+        "contracts":{"control":1,"management_state":match reader { "native_pairing_lifecycle_v1" => 7, "native_app_service_transferred_v1" => 6, "native_app_runtime_selected_v1" => 4, "native_runtime_selected_v1" => 3, _ => 2 }},"files":files,"external_workers":[]});
     let raw = serde_json::to_vec(&manifest).unwrap();
     write(&payload.join("manifest.json"), &raw, false);
     write(
@@ -134,15 +134,34 @@ fn create_for_manager(
     identity: &[u8],
     manager: NativeManager,
 ) -> NativeTransactions {
+    create_for_reader(
+        base,
+        bootstrap,
+        identity,
+        manager,
+        ReaderContract::NativeManagementStateV1,
+    )
+}
+fn create_for_reader(
+    base: &Path,
+    bootstrap: &NativeRuntimeSelection,
+    identity: &[u8],
+    manager: NativeManager,
+    reader: ReaderContract,
+) -> NativeTransactions {
     directory(base);
     let parent = PrivateRoot::open(base).unwrap();
     let fresh = native_root::create_fresh(&parent, OsStr::new("native"))
         .unwrap_or_else(|e| panic!("fresh: {:?}", e.error()));
     let state = NativeState {
-        schema: 2,
+        schema: match reader {
+            ReaderContract::NativeManagementStateV1 => NATIVE_STATE_SCHEMA,
+            ReaderContract::NativePairingLifecycleStateV1 => NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA,
+            _ => panic!("fixture reader"),
+        },
         kind: NativeStateKind::StyxDesiredState,
         runtime_format: NativeRuntimeFormat::NativeRustV1,
-        reader_contract: ReaderContract::NativeManagementStateV1,
+        reader_contract: reader,
         scope_generation: fresh.marker().scope_generation,
         deployment_raw_sha256: Sha256Digest::of_bytes(DEPLOYMENT),
         mode: NativeDeploymentMode::JoinExisting,
@@ -187,6 +206,193 @@ fn complete_chain(tx: &NativeTransactions) {
     let state = tx.readstate().unwrap();
     tx.validate_complete_chain(&state).unwrap();
 }
+
+fn reported_selection(tx: &NativeTransactions, profile: &Path) -> NativeRuntimeSelection {
+    let root = PrivateRoot::open(profile.join("native")).unwrap();
+    let canonical = tx.readstate().unwrap();
+    crate::store::native_host_snapshot::validated_runtime_selection(&root, &canonical, tx.marker())
+        .unwrap()
+}
+
+#[test]
+fn pairing_reader7_real_journal_accepts_fresh_genesis_and_its_first_committed_transaction() {
+    let base = std::env::temp_dir().join(format!("styx-pairing-genesis-{}", uuid::Uuid::new_v4()));
+    directory(&base);
+    let key = SigningKey::from_bytes(&[79u8; 32]);
+    let initial = candidate_reader(&base, "pairing-first", &key, "native_pairing_lifecycle_v1");
+    let next = candidate_reader(&base, "pairing-next", &key, "native_pairing_lifecycle_v1");
+    let profile = base.join("profile");
+    let mut tx = create_for_reader(
+        &profile,
+        &initial,
+        b"synthetic private fixture identity",
+        NativeManager::ForegroundCli,
+        ReaderContract::NativePairingLifecycleStateV1,
+    );
+    complete_chain(&tx);
+    assert_eq!(reported_selection(&tx, &profile), initial);
+
+    // These are valid typed successors with no matching journal. A decoded
+    // schema7 alone must not make either one an admissible fresh genesis.
+    let empty = tx
+        .configuration_root()
+        .with_state(|configuration| {
+            tx.journal.with_directory_locked(configuration, |dir| {
+                crate::store::secure_journal::files::scan(dir, JournalBudget::default())
+            })
+        })
+        .unwrap();
+    assert!(empty.files.is_empty());
+    let fake_desired = successor(&tx, "unrecorded-desired", 1);
+    let fake = native_state::decode_state(&fake_desired, tx.marker()).unwrap();
+    assert!(
+        crate::store::management::validate_readonly_native_tip(&empty, &fake, tx.marker()).is_err()
+    );
+    let mut fake_selected = fake.state().clone();
+    let transaction = fake_selected.last_transaction.clone().unwrap();
+    fake_selected.extensions.insert(
+        NATIVE_RUNTIME_SELECTION_KEY.into(),
+        serde_json::value::to_raw_value(&next).unwrap(),
+    );
+    fake_selected.extensions.insert(
+        NATIVE_RUNTIME_UPDATE_KEY.into(),
+        serde_json::value::to_raw_value(&NativeRuntimeUpdate {
+            schema: 1,
+            bootstrap_runtime: initial.clone(),
+            previous_runtime: initial.clone(),
+            transaction,
+            service_repair: None,
+        })
+        .unwrap(),
+    );
+    fake_selected.extensions.insert(
+        NATIVE_PAIRING_RUNTIME_HISTORY_KEY.into(),
+        serde_json::value::to_raw_value(&NativePairingRuntimeHistory::Foreground).unwrap(),
+    );
+    let fake_selected =
+        native_state::decode_state(&serde_json::to_vec(&fake_selected).unwrap(), tx.marker())
+            .unwrap();
+    assert!(
+        crate::store::management::validate_readonly_native_tip(&empty, &fake_selected, tx.marker())
+            .is_err()
+    );
+    assert_eq!(tx.readstate().unwrap().state().revision, 0);
+
+    // Real coordinator, original writer and real persisted phase chain. No
+    // runtime image is launched by this desired-state transaction.
+    tx.apply_target(&successor(&tx, "pairing-first-desired", 1))
+        .unwrap();
+    complete_chain(&tx);
+    assert_eq!(
+        tx.readstate().unwrap().state().schema,
+        NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA
+    );
+    assert_eq!(reported_selection(&tx, &profile), initial);
+    drop(tx);
+    let mut tx = open(&profile);
+    complete_chain(&tx);
+    assert_eq!(reported_selection(&tx, &profile), initial);
+    tx.recover_original(&"pairing-first-desired".try_into().unwrap())
+        .unwrap();
+    tx.update_runtime(
+        verified(&base, "pairing-first"),
+        verified(&base, "pairing-next"),
+        "pairing-first-selection".try_into().unwrap(),
+        2,
+    )
+    .unwrap();
+    complete_chain(&tx);
+    assert_eq!(reported_selection(&tx, &profile), next);
+    assert_eq!(tx.journal.observe().unwrap().transactions.len(), 2);
+    drop(tx);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn pairing_reader7_real_journal_keeps_promotions_and_refuses_incompatible_rollback_without_writes()
+{
+    let base =
+        std::env::temp_dir().join(format!("styx-pairing-promotions-{}", uuid::Uuid::new_v4()));
+    directory(&base);
+    let key = SigningKey::from_bytes(&[80u8; 32]);
+    let initial = candidate(&base, "old-bootstrap", &key, false);
+    let first = candidate_reader(&base, "pairing-a", &key, "native_pairing_lifecycle_v1");
+    let second = candidate_reader(&base, "pairing-b", &key, "native_pairing_lifecycle_v1");
+    let _incompatible = candidate(&base, "old-selected", &key, true);
+    let profile = base.join("profile");
+    let mut tx = create(&profile, &initial, b"synthetic private fixture identity");
+    tx.update_runtime(
+        verified(&base, "old-bootstrap"),
+        verified(&base, "pairing-a"),
+        "promote-to-pairing".try_into().unwrap(),
+        1,
+    )
+    .unwrap();
+    complete_chain(&tx);
+    assert_eq!(reported_selection(&tx, &profile), first);
+    tx.update_runtime(
+        verified(&base, "pairing-a"),
+        verified(&base, "pairing-b"),
+        "pairing-successor".try_into().unwrap(),
+        2,
+    )
+    .unwrap();
+    complete_chain(&tx);
+    assert_eq!(reported_selection(&tx, &profile), second);
+    assert_eq!(
+        tx.readstate()
+            .unwrap()
+            .state()
+            .runtime_update()
+            .unwrap()
+            .unwrap()
+            .bootstrap_runtime,
+        initial
+    );
+    tx.update_runtime(
+        verified(&base, "pairing-b"),
+        verified(&base, "pairing-a"),
+        "compatible-forward-rollback".try_into().unwrap(),
+        3,
+    )
+    .unwrap();
+    complete_chain(&tx);
+    assert_eq!(reported_selection(&tx, &profile), first);
+
+    let before = fs::read(profile.join("native/state.json")).unwrap();
+    let namespace = profile.join("native/.styx-management-journal-v1");
+    let journal_bytes = || {
+        let mut files: Vec<_> = fs::read_dir(&namespace)
+            .unwrap()
+            .map(|item| {
+                let item = item.unwrap();
+                (item.file_name(), fs::read(item.path()).unwrap())
+            })
+            .collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        files
+    };
+    let original_journal = journal_bytes();
+    assert!(
+        tx.update_runtime(
+            verified(&base, "pairing-a"),
+            verified(&base, "old-selected"),
+            "incompatible-downgrade".try_into().unwrap(),
+            4
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(profile.join("native/state.json")).unwrap(), before);
+    assert_eq!(
+        journal_bytes(),
+        original_journal,
+        "no intent/prepare/phase can be written for a downgrade"
+    );
+    complete_chain(&tx);
+    drop(tx);
+    fs::remove_dir_all(base).unwrap();
+}
+
 fn successor(tx: &NativeTransactions, id: &str, sequence: u64) -> Vec<u8> {
     let mut target = tx.readstate().unwrap().state().clone();
     target.revision += 1;

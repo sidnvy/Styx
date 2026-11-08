@@ -138,6 +138,12 @@ pub struct ApprovalSelection {
     pub enable_computer: bool,
     pub enable_browser: bool,
 }
+pub(crate) struct RejectionSelection {
+    pub request_id: String,
+    pub device_id: DeviceId,
+    pub fingerprint: Sha256Digest,
+    pub comparison_code: String,
+}
 #[derive(Serialize)]
 pub struct AdminReport {
     pub schema: u16,
@@ -206,6 +212,7 @@ enum Action {
     Computers(PathBuf),
     Revoke(PathBuf, DeviceId),
     Approve(PathBuf, ApprovalSelection),
+    Reject(PathBuf, RejectionSelection),
 }
 #[derive(Clone, Copy)]
 pub enum InvitationOrigin {
@@ -296,6 +303,63 @@ pub(crate) async fn revoke_for_app(
     )
     .await
 }
+pub(crate) async fn reject_for_app(
+    scope: Arc<crate::app::HostScope>,
+    selected: RejectionSelection,
+) -> Result<AdminReport> {
+    owned_scoped(
+        Action::Reject(scope.state_dir().into(), selected),
+        Some(scope),
+    )
+    .await
+}
+/// Read-only UI discovery, not a grant or permission to reject. The original
+/// Gateway owns its writer; this path only reuses protected material/C07 reads.
+/// Any unproven file, format or signature omits the operation from discovery.
+pub(crate) async fn pairing_rejection_supported_for_app(
+    scope: Arc<crate::app::HostScope>,
+) -> Result<bool> {
+    let path = scope.state_dir().to_owned();
+    blocking(move || {
+        let material = Material::open_scoped(path, Some(scope))?;
+        // open_scoped already checked the complete original C07 tip, current
+        // signed selection, role/ready binding and original file pins. This
+        // pure projection creates neither a writer nor authorization evidence.
+        let marker = native_state::decode_marker(material.files[0].bytes())
+            .map_err(|_| refused("native_gateway_admin_material"))?;
+        let canonical = native_state::decode_state(material.files[1].bytes(), &marker)
+            .map_err(|_| refused("native_gateway_admin_material"))?;
+        Ok(pairing_rejection_projection(
+            &canonical,
+            &material.candidate,
+        ))
+    })
+    .await
+}
+
+fn pairing_rejection_projection(
+    canonical: &native_state::ValidatedNativeState,
+    candidate: &VerifiedNativeRelease,
+) -> bool {
+    let state = canonical.state();
+    state.schema == 7
+        && state.reader_contract == ReaderContract::NativePairingLifecycleStateV1
+        && state.mode == NativeDeploymentMode::CreateLocal
+        && state.desired.host.is_none()
+        && state.desired.gateway.is_some_and(|gateway| {
+            gateway.manager == NativeManager::AppManaged
+                && gateway.run == NativeRunDesired::Running
+                && gateway.autostart
+                    == styx_contracts::native_management::NativeAutostartDesired::Disabled
+        })
+        && candidate.manifest().scope
+            == styx_contracts::native_release::NativeReleaseScope::RuntimeCandidate
+        && candidate
+            .manifest()
+            .minimum_reader
+            .supports_state_reader(ReaderContract::NativePairingLifecycleStateV1)
+}
+
 /// Read the selection committed by the original native state/journal chain.
 /// This observes configuration DATA; it does not claim a process is healthy.
 pub async fn committed_runtime_selection(state_dir: &Path) -> Result<NativeRuntimeSelection> {
@@ -1040,6 +1104,26 @@ async fn read_pending(material: &Material) -> Result<Vec<PendingDevice>> {
         clock_ms()?,
     )
 }
+fn rejection_body(
+    rows: &[PendingDevice],
+    selected: &RejectionSelection,
+) -> Result<Zeroizing<Vec<u8>>> {
+    let row = rows
+        .iter()
+        .find(|r| r.request_id == selected.request_id)
+        .ok_or_else(|| refused("native_gateway_rejection_binding_mismatch"))?;
+    if row.device_id != selected.device_id
+        || row.fingerprint != selected.fingerprint
+        || row.comparison_code != selected.comparison_code
+    {
+        return Err(refused("native_gateway_rejection_binding_mismatch"));
+    }
+    serde_json::to_vec(&serde_json::json!({"request_id":selected.request_id,
+        "device_id":selected.device_id,"fingerprint":selected.fingerprint,
+        "comparison_code":selected.comparison_code}))
+    .map(Zeroizing::new)
+    .map_err(|_| refused("native_gateway_admin_input"))
+}
 fn accepted_status(status: u16) -> Result<()> {
     match status {
         200 => Ok(()),
@@ -1092,6 +1176,7 @@ async fn perform(action: Action, scope: Option<Arc<crate::app::HostScope>>) -> R
         Action::Invite(p, _, _, _, _)
         | Action::Pending(p)
         | Action::Approve(p, _)
+        | Action::Reject(p, _)
         | Action::Computers(p)
         | Action::Revoke(p, _) => p.clone(),
     };
@@ -1229,6 +1314,48 @@ async fn perform(action: Action, scope: Option<Arc<crate::app::HostScope>>) -> R
             report.origins = Some(origins);
             Ok(report)
         }
+        Action::Reject(path, selected) => {
+            let rows = read_pending(&material).await?;
+            let body = rejection_body(&rows, &selected)?;
+            let material = checked(material).await?;
+            let response = http::exchange_local_rejection(
+                &material.origin,
+                &material.tls,
+                &body,
+                &material.token,
+            )
+            .await
+            .map_err(http_error)?;
+            accepted_status(response.status)?;
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Rejected {
+                status: String,
+                request_id: String,
+                device_id: DeviceId,
+                fingerprint: Sha256Digest,
+            }
+            let result: Rejected = serde_json::from_slice(&response.body).map_err(|_| unknown())?;
+            if result.status != "rejected"
+                || result.request_id != selected.request_id
+                || result.device_id != selected.device_id
+                || result.fingerprint != selected.fingerprint
+                || material
+                    .leaf
+                    .as_ref()
+                    .is_some_and(|leaf| leaf != &response.leaf_pin)
+            {
+                return Err(unknown());
+            }
+            let _material = checked(material).await.map_err(|_| unknown())?;
+            let mut report = AdminReport::new("gateway_reject", path);
+            report.status = Some("rejected");
+            report.request_id = Some(selected.request_id);
+            report.device_id = Some(selected.device_id);
+            report.fingerprint = Some(selected.fingerprint);
+            report.comparison_code = Some(selected.comparison_code);
+            Ok(report)
+        }
         Action::Approve(path, selected) => {
             let rows = read_pending(&material).await?;
             let body = approval_body(&rows, &selected)?; // Binding refusal is BEFORE the unique approval POST.
@@ -1293,3 +1420,7 @@ fn invitation_origin(origins: &[String], selected: Option<InvitationOrigin>) -> 
 #[cfg(test)]
 #[path = "native_gateway_admin_tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "native_gateway_advertisement_tests.rs"]
+mod advertisement_tests;

@@ -344,7 +344,7 @@ mod platform {
     };
     use styx_contracts::{
         management::ReaderContract,
-        native_host::{NativeHostJoinSeed, NativeHostReady},
+        native_host::{NativeHostJoinSeed, NativeHostReady, NativeHostRejected},
         native_management::*,
     };
     use zeroize::Zeroizing;
@@ -821,7 +821,14 @@ mod platform {
             {
                 return Err(bad());
             }
-            if seed.schema != 1
+            if !matches!(seed.schema, 1 | 2)
+                || (seed.schema == 2
+                    && state.state().reader_contract
+                        != ReaderContract::NativePairingLifecycleStateV1)
+                || (seed.schema == 1
+                    && state.state().reader_contract
+                        == ReaderContract::NativePairingLifecycleStateV1
+                    && update.is_none())
                 || seed.root_identity != identity(&root)
                 || seed.scope_generation != state.state().scope_generation
                 || seed.deployment_raw_sha256 != Sha256Digest::of_bytes(&deployment_input.raw)
@@ -901,6 +908,13 @@ mod platform {
             serde_json::from_slice(&selection_input.raw).map_err(|_| bad())?;
         let candidate = release::verify_selected(&selection)
             .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?;
+        if !candidate
+            .manifest()
+            .minimum_reader
+            .supports_state_reader(ReaderContract::NativePairingLifecycleStateV1)
+        {
+            return Err(JoinError::new("native_join_reader_unsupported", 2));
+        }
         // verify_selected already binds the exact original selection. The full
         // release is checked again below at the actual root-creation boundary.
         let ca = Input::open(&d.gateway.ca_file, 128 * 1024)?;
@@ -938,7 +952,7 @@ mod platform {
         }
         let metadata: Result<_> = (|| {
             let seed = NativeHostJoinSeed {
-                schema: 1,
+                schema: styx_contracts::native_host::NATIVE_HOST_JOIN_SEED_SCHEMA,
                 root_identity: fresh.marker().root_identity.clone(),
                 scope_generation: fresh.marker().scope_generation,
                 deployment_raw_sha256: Sha256Digest::of_bytes(&source.raw),
@@ -969,10 +983,10 @@ mod platform {
                 serde_json::value::to_raw_value(&selection).map_err(|_| bad())?,
             );
             let state = NativeState {
-                schema: NATIVE_STATE_SCHEMA,
+                schema: NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA,
                 kind: NativeStateKind::StyxDesiredState,
                 runtime_format: NativeRuntimeFormat::NativeRustV1,
-                reader_contract: ReaderContract::NativeManagementStateV1,
+                reader_contract: ReaderContract::NativePairingLifecycleStateV1,
                 scope_generation: seed.scope_generation,
                 deployment_raw_sha256: seed.deployment_raw_sha256,
                 mode: NativeDeploymentMode::JoinExisting,
@@ -1183,6 +1197,19 @@ mod platform {
                 .map_err(protocol_error)
         }
     }
+    fn validate_rejection(work: &Work, pending: &protocol::PendingJoin, raw: &[u8]) -> Result<()> {
+        let rejected: NativeHostRejected = serde_json::from_slice(raw).map_err(|_| unknown())?;
+        if work.seed.schema != styx_contracts::native_host::NATIVE_HOST_JOIN_SEED_SCHEMA
+            || rejected.schema != 1
+            || rejected.seed_sha256 != Sha256Digest::of_bytes(&work.seed_raw)
+            || rejected.request_id != pending.request_id
+            || rejected.device_id != work.seed.device_id
+            || rejected.fingerprint != work.seed.fingerprint
+        {
+            return Err(unknown());
+        }
+        Ok(())
+    }
     pub(super) async fn inspect(
         path: PathBuf,
         scope: Option<Arc<crate::app::HostScope>>,
@@ -1208,6 +1235,15 @@ mod platform {
             }
             let reply =
                 reply.ok_or_else(|| JoinError::new("native_join_dispatch_unknown_no_retry", 4))?;
+            if let Some(rejected) = w.store.read(File::Rejected).map_err(|_| unknown())? {
+                if credential.is_some() || confirm.is_some() || ready.is_some() {
+                    return Err(unknown());
+                }
+                let pending = pending(w, &reply, true)?;
+                validate_rejection(w, &pending, &rejected)?;
+                w.validate()?;
+                return Ok(w.report("native_host_inspect", "rejected", &pending));
+            }
             let status;
             let observed_pending;
             match (credential, confirm, ready) {
@@ -1258,21 +1294,36 @@ mod platform {
         candidate: Option<Arc<release::VerifiedNativeRelease>>,
     ) -> Result<JoinReport> {
         let work = blocking(move || open_with_candidate(&path, app_scope, candidate)).await?;
-        let (work, (reply, ready_raw, mut credential, confirm_dispatched)) = io(work, |w| {
-            // All local prefix reads complete before any HTTP or append.
-            // No cached prefix is used as authority for a later operation.
-            w.validate()?;
-            let [_, reply, credential, confirm, ready] =
-                w.store.read_prefix().map_err(|_| unknown())?;
-            let reply =
-                reply.ok_or_else(|| JoinError::new("native_join_dispatch_unknown_no_retry", 4))?;
-            let confirm = confirm.is_some();
-            w.validate()?;
-            Ok((reply, ready, credential, confirm))
-        })
-        .await?;
-        let historical = ready_raw.is_some() || (credential.is_some() && confirm_dispatched);
+        let (work, (reply, ready_raw, mut credential, confirm_dispatched, rejected)) =
+            io(work, |w| {
+                // All local prefix reads complete before any HTTP or append.
+                // No cached prefix is used as authority for a later operation.
+                w.validate()?;
+                if w.seed.schema != styx_contracts::native_host::NATIVE_HOST_JOIN_SEED_SCHEMA {
+                    return Err(JoinError::new("native_join_reader_upgrade_required", 2));
+                }
+                let [_, reply, credential, confirm, ready] =
+                    w.store.read_prefix().map_err(|_| unknown())?;
+                let reply = reply
+                    .ok_or_else(|| JoinError::new("native_join_dispatch_unknown_no_retry", 4))?;
+                let confirm = confirm.is_some();
+                let rejected = w.store.read(File::Rejected).map_err(|_| unknown())?;
+                w.validate()?;
+                Ok((reply, ready, credential, confirm, rejected))
+            })
+            .await?;
+        let historical = ready_raw.is_some()
+            || rejected.is_some()
+            || (credential.is_some() && confirm_dispatched);
         let (mut work, mut pending) = io(work, move |w| pending(w, &reply, historical)).await?;
+        if let Some(raw) = rejected {
+            let (_work, report) = io(work, move |w| {
+                validate_rejection(w, &pending, &raw)?;
+                Ok(w.report("native_host_claim", "rejected", &pending))
+            })
+            .await?;
+            return Ok(report);
+        }
         if credential.is_none() {
             let body = match protocol::claim_request(&pending) {
                 Ok(value) => value,
@@ -1309,14 +1360,31 @@ mod platform {
                     },
                 ));
             }
-            let (next, value) = io(work, move |w| {
+            let (next, (original_pending, value)) = io(work, move |w| {
+                if protocol::rejected_claim(&pending, &response.body).map_err(protocol_error)? {
+                    let rejected = NativeHostRejected {
+                        schema: 1,
+                        seed_sha256: Sha256Digest::of_bytes(&w.seed_raw),
+                        request_id: pending.request_id.clone(),
+                        device_id: w.seed.device_id.clone(),
+                        fingerprint: w.seed.fingerprint,
+                    };
+                    let raw = serde_json::to_vec(&rejected).map_err(|_| unknown())?;
+                    w.append(File::Rejected, &raw)?;
+                    validate_rejection(w, &pending, &raw)?;
+                    return Ok((pending, None));
+                }
                 let credential = protocol::decrypt_claim(&w.seed, &w.key, &response.body)
                     .map_err(protocol_error)?;
                 w.append(File::Credential, &credential)?;
-                Ok(credential)
+                Ok((pending, Some(credential)))
             })
             .await?;
             work = next;
+            pending = original_pending;
+            let Some(value) = value else {
+                return Ok(work.report("native_host_claim", "rejected", &pending));
+            };
             credential = Some(value);
         }
         let credential = match credential {

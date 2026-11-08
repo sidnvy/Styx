@@ -31,7 +31,7 @@ impl AxWriteRequest {
         )
     }
 }
-fn validate_token(token: &str) -> Result<()> {
+pub(super) fn validate_token(token: &str) -> Result<()> {
     let (snapshot, row) = token.split_once(':').ok_or(CuaError::InvalidRequest)?;
     if snapshot.len() != 9
         || !snapshot.starts_with('s')

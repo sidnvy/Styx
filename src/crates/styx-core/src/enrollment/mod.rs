@@ -57,6 +57,12 @@ pub struct ApprovalRequest {
     pub comparison: String,
     pub grant: Grant,
 }
+pub struct RejectionRequest {
+    pub request: RequestId,
+    pub device: DeviceId,
+    pub fingerprint: Sha256Digest,
+    pub comparison: String,
+}
 pub struct PreparedCredential {
     brand: Arc<()>,
     target: CredentialTarget,
@@ -177,6 +183,7 @@ pub enum ConnectionObservation {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ClaimView {
     Pending,
+    Rejected,
     Approved {
         credential: CredentialRef,
         sealed: SealedCredentialRef,
@@ -511,6 +518,10 @@ impl EnrollmentLedger {
                 kind: MaterialKind::Profile,
                 digest: pending.facts.profile.0,
             }),
+            Mutation::Reject { target } => refs.push(MaterialRef {
+                kind: MaterialKind::Profile,
+                digest: target.profile.0,
+            }),
             Mutation::Approve { device, sealed, .. } => {
                 refs.push(MaterialRef {
                     kind: MaterialKind::Profile,
@@ -644,10 +655,10 @@ impl EnrollmentLedger {
             return Err(EnrollmentError::Retired);
         }
         if self.pending.contains_key(&f.request)
-            || self
-                .pending
-                .values()
-                .any(|p| p.facts.device == f.device || p.facts.fingerprint == f.fingerprint)
+            || self.pending.values().any(|p| {
+                p.status != PendingStatus::Rejected
+                    && (p.facts.device == f.device || p.facts.fingerprint == f.fingerprint)
+            })
             || self.registered_identity_conflict(&f.device, f.fingerprint)
         {
             return Err(EnrollmentError::Conflict);
@@ -777,6 +788,33 @@ impl EnrollmentLedger {
             },
         )
     }
+    /// Reject this exact pending request without issuing credentials or
+    /// retiring the device key. A fresh invitation may request another review.
+    pub fn reject(
+        &mut self,
+        admin: &EnrollmentAdminAuthority,
+        request: RejectionRequest,
+        now: u64,
+    ) -> Result<PendingIntent> {
+        self.brand(&admin.brand)?;
+        self.ready(now)?;
+        let pending = self
+            .pending
+            .get(&request.request)
+            .ok_or(EnrollmentError::NotFound)?;
+        if pending.expires <= now {
+            return Err(EnrollmentError::Expired);
+        }
+        if pending.status != PendingStatus::Pending
+            || pending.facts.device != request.device
+            || pending.facts.fingerprint != request.fingerprint
+            || pending.facts.comparison != request.comparison
+        {
+            return Err(EnrollmentError::Proof);
+        }
+        let target = Self::target(pending)?;
+        self.stage(now, Mutation::Reject { target })
+    }
     fn verified_claim(&self, proof: &VerifiedClaim, now: u64) -> Result<&Pending> {
         self.available()?;
         self.brand(&proof.brand)?;
@@ -795,6 +833,7 @@ impl EnrollmentLedger {
         let p = self.verified_claim(proof, now)?;
         match &p.status {
             PendingStatus::Pending if p.expires > now => Ok(ClaimView::Pending),
+            PendingStatus::Rejected if p.expires > now => Ok(ClaimView::Rejected),
             PendingStatus::Approved {
                 credential,
                 sealed: Some(sealed),
@@ -954,6 +993,7 @@ impl EnrollmentLedger {
             .is_some_and(|s| match &s.body.mutation {
                 Mutation::Approve { device, .. } => &device.id == id,
                 Mutation::SelfCas { device, .. } | Mutation::Revoke { device, .. } => device == id,
+                Mutation::Reject { target } => &target.device == id,
                 _ => false,
             })
     }
@@ -1000,7 +1040,7 @@ impl EnrollmentLedger {
             .iter()
             .filter_map(|(id, p)| {
                 let expired = match p.status {
-                    PendingStatus::Pending => p.expires <= now,
+                    PendingStatus::Pending | PendingStatus::Rejected => p.expires <= now,
                     PendingStatus::Approved { claim_expires, .. } => claim_expires <= now,
                     PendingStatus::Revoked => true,
                 };
@@ -1158,6 +1198,11 @@ impl EnrollmentLedger {
                     .retain(|i| i.hash != pending.facts.invitation_hash);
                 self.pending
                     .insert(pending.facts.request.clone(), pending.clone());
+            }
+            Mutation::Reject { target } => {
+                if let Some(pending) = self.pending.get_mut(&target.request) {
+                    pending.status = PendingStatus::Rejected;
+                }
             }
             Mutation::Approve {
                 request,

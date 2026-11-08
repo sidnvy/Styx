@@ -6,10 +6,11 @@ use crate::store::ExecutionLeaseGuard;
 use styx_contracts::{
     management::ReaderContract,
     native_management::{
-        NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA, NATIVE_RUNTIME_SELECTED_STATE_SCHEMA,
+        NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA, NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA,
+        NATIVE_PAIRING_RUNTIME_HISTORY_KEY, NATIVE_RUNTIME_SELECTED_STATE_SCHEMA,
         NATIVE_RUNTIME_SELECTION_KEY, NATIVE_RUNTIME_UPDATE_KEY,
-        NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA, NativeRuntimeSelection, NativeRuntimeUpdate,
-        NativeState, NativeStateTransaction,
+        NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA, NativePairingRuntimeHistory,
+        NativeRuntimeSelection, NativeRuntimeUpdate, NativeState, NativeStateTransaction,
     },
 };
 
@@ -294,14 +295,29 @@ impl NativeTransactions {
                 gateway.autostart =
                     styx_contracts::native_management::NativeAutostartDesired::Enabled;
             }
-            target.schema = if service_owned {
+            let pairing = !service_owned
+                && held
+                    .candidate
+                    .manifest()
+                    .minimum_reader
+                    .supports_state_reader(ReaderContract::NativePairingLifecycleStateV1);
+            if before.state().reader_contract == ReaderContract::NativePairingLifecycleStateV1
+                && !pairing
+            {
+                return Err(NativeTransactionError::InvalidInput);
+            }
+            target.schema = if pairing {
+                NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA
+            } else if service_owned {
                 NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA
             } else if app_owned {
                 NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA
             } else {
                 NATIVE_RUNTIME_SELECTED_STATE_SCHEMA
             };
-            target.reader_contract = if service_owned {
+            target.reader_contract = if pairing {
+                ReaderContract::NativePairingLifecycleStateV1
+            } else if service_owned {
                 ReaderContract::NativeServiceRuntimeSelectedStateV1
             } else if app_owned {
                 ReaderContract::NativeAppRuntimeSelectedStateV1
@@ -353,6 +369,18 @@ impl NativeTransactions {
                 serde_json::value::to_raw_value(&update)
                     .map_err(|_| NativeTransactionError::InvalidInput)?,
             );
+            if pairing {
+                let history = if app_owned {
+                    NativePairingRuntimeHistory::App
+                } else {
+                    NativePairingRuntimeHistory::Foreground
+                };
+                target.extensions.insert(
+                    NATIVE_PAIRING_RUNTIME_HISTORY_KEY.into(),
+                    serde_json::value::to_raw_value(&history)
+                        .map_err(|_| NativeTransactionError::InvalidInput)?,
+                );
+            }
             let bytes =
                 serde_json::to_vec(&target).map_err(|_| NativeTransactionError::InvalidInput)?;
             let intent = DesiredStateCommit {

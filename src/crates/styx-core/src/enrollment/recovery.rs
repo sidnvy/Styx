@@ -313,11 +313,23 @@ impl EnrollmentLedger {
                     || self.retired.contains(&f.fingerprint)
                     || self.pending.len() >= self.limits.pending
                     || self.pending.contains_key(&f.request)
-                    || self
-                        .pending
-                        .values()
-                        .any(|p| p.facts.device == f.device || p.facts.fingerprint == f.fingerprint)
+                    || self.pending.values().any(|p| {
+                        p.status != PendingStatus::Rejected
+                            && (p.facts.device == f.device || p.facts.fingerprint == f.fingerprint)
+                    })
                     || self.registered_identity_conflict(&f.device, f.fingerprint)
+                {
+                    return Err(invalid());
+                }
+            }
+            Mutation::Reject { target } => {
+                let pending = self
+                    .pending
+                    .get(&target.request)
+                    .ok_or(EnrollmentError::NotFound)?;
+                if pending.status != PendingStatus::Pending
+                    || pending.expires <= now
+                    || *target != Self::target(pending)?
                 {
                     return Err(invalid());
                 }
@@ -374,7 +386,7 @@ impl EnrollmentLedger {
                     .iter()
                     .filter_map(|(id, p)| {
                         let expired = match p.status {
-                            PendingStatus::Pending => p.expires <= now,
+                            PendingStatus::Pending | PendingStatus::Rejected => p.expires <= now,
                             PendingStatus::Approved { claim_expires, .. } => claim_expires <= now,
                             PendingStatus::Revoked => true,
                         };

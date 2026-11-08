@@ -31,6 +31,7 @@ pub(crate) mod native_observation;
 pub mod native_root;
 pub mod native_state;
 pub mod native_transaction;
+mod pairing_reader;
 mod secure_journal;
 pub use configuration::{ConfigurationMaintenance, OwnedConfigurationRoot};
 #[cfg(any(

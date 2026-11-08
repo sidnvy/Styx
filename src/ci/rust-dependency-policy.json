@@ -113,6 +113,46 @@
   ],
   "source_guard_limit": "lexical defense in depth; imports/aliases/macros/FFI still need review; not a Rust sandbox or a proof of no IO",
   "known_ignored": {
+    "app::runtime_bootstrap::tests::fresh_profile_reopens_from_external_runtime_after_bundle_replacement": {
+      "kind": "explicit_signed_native_payload",
+      "input": "STYX_TEST_APP_CONTROL_SELECTION protected selection with current writer/reader; disposable strict-TLS enrollment",
+      "required_for": "real signed Runtime, enrollment and external Runtime reopening after bundle replacement; manually run reference, not installed App or platform acceptance"
+    },
+    "enrollment::service::tests::actual_strict_tls_rejection_survives_restart_without_reviving_old_claim": {
+      "kind": "owned_tls_crypto_journal_fixture",
+      "input": "STYX_TEST_ENROLLMENT_SERVICE_ROOT, STYX_TEST_TLS_FIXTURES and STYX_TEST_NODE22; fresh owned private root",
+      "required_for": "real TLS rejection, new request and restart reference; manually run reference, not native C07 upgrade or platform acceptance"
+    },
+    "store::native_root::host::tests::native_host_rejection_branch_survives_reopen_and_never_admits_credentials": {
+      "kind": "explicit_owned_filesystem",
+      "input": "STYX_TEST_NATIVE_HOST_ROOT existing private parent",
+      "required_for": "protected fresh reader7, seed2 and synthetic signed reader rejection reopen reference; manually run reference, not remote rejection, worker or platform acceptance"
+    },
+    "host::coordinator::desktop_source::tests::installed_qualification_rejoined_initial_job_takes_strict_read": {
+      "kind": "owner_authorized_installed_mac_reference",
+      "input": "STYX_TEST_INSTALLED_MAC_SOURCE=read-only and owner-authorized installed Mac App",
+      "required_for": "retained read-job reference, no input; not full platform acceptance"
+    },
+    "providers::cua::macos::qualification_reference::installed_qualification_lag_before_preparation": {
+      "kind": "owner_authorized_installed_mac_reference",
+      "input": "STYX_TEST_INSTALLED_MAC_SOURCE=read-only and owner-authorized installed Mac App",
+      "required_for": "original source lag before preparation reference, no input; not full platform acceptance"
+    },
+    "providers::cua::macos::qualification_reference::installed_qualification_lag_before_probe": {
+      "kind": "owner_authorized_installed_mac_reference",
+      "input": "STYX_TEST_INSTALLED_MAC_SOURCE=read-only and owner-authorized installed Mac App",
+      "required_for": "original source lag before probe reference, no input; not full platform acceptance"
+    },
+    "providers::cua::macos_source::installed_source_tests::installed_qualification_strict_baseline_counterexample": {
+      "kind": "owner_authorized_installed_mac_reference",
+      "input": "STYX_TEST_INSTALLED_MAC_SOURCE=read-only and owner-authorized installed Mac App",
+      "required_for": "controlled retained-baseline fault reference; not full platform acceptance"
+    },
+    "providers::cua::macos_source::installed_source_tests::installed_qualification_empty_drain_prevents_late_probe": {
+      "kind": "owner_authorized_installed_mac_reference",
+      "input": "STYX_TEST_INSTALLED_MAC_SOURCE=read-only and owner-authorized installed Mac App",
+      "required_for": "controlled drain-before-probe reference, no input; not full platform acceptance"
+    },
     "enrollment::service::tests::paired_journey::five_connected_computers_exec_requires_sockets": {
       "kind": "explicit_external_runtime",
       "input": "STYX_TEST_PAIRED_ROOT, STYX_TEST_TLS_FIXTURES, STYX_TEST_CODEX_BIN, STYX_TEST_NODE22; isolated owned loopback roots",
@@ -558,8 +598,8 @@
     },
     "app::maintenance_integration_tests::original_app_maintenance_distinguishes_live_c07_from_launch_and_history": {
       "kind": "explicit_signed_native_payload",
-      "input": "STYX_TEST_APP_CONTROL_SELECTION absolute protected signed Linux NativeRuntimeSelection supporting native_app_runtime_selected_v1; new disposable strict-TLS enrollment and C07 runtime staging only",
-      "required_for": "original live App maintenance current-runtime independence, immutable launch/bootstrap history, same-ticket cancel/full Quit and same-bytes input replacement Unknown; no installed App, service registration or native process exit acceptance"
+      "input": "historical pre-bootstrap profile producer and protected signed Linux NativeRuntimeSelection; current default staging does not establish this old App-bound precondition",
+      "required_for": "historical live App maintenance current-runtime independence, immutable launch/bootstrap history, same-ticket cancel/full Quit and same-bytes input replacement Unknown; not a current delivery gate or installed App acceptance"
     },
     "enrollment::service::tests::paired_journey::paired_session_capacity_turnover_requires_sockets": {
       "kind": "explicit_external_runtime",

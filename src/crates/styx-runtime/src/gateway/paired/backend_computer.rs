@@ -3,29 +3,17 @@
 use super::*;
 use crate::{
     host::protocol::wire::{ComputerCommand, Snapshot},
-    providers::cua::CuaAction,
+    providers::cua::{CuaAction, public_contract},
 };
 use styx_contracts::error::{ErrorCategory, ExecutionCertainty};
 const MAX_COMPUTER_CONTEXTS: usize = 64;
 const COMPUTER_STARTUP_WAIT: Duration = Duration::from_secs(20);
 const MAX_COMPUTER_RESULT_BYTES: usize = styx_contracts::DESKTOP_BROWSER_FRAME_BYTES;
 
-/// Only Computer tools already present in the frozen public contract are routed.
-/// Provider validation below independently requires the pinned native schema.
+/// Route only the supported Styx surface. The wider pinned native catalog is
+/// compatibility evidence and never creates an additional public input route.
 pub(super) fn is_public_computer_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "list_apps"
-            | "list_windows"
-            | "get_window_state"
-            | "get_desktop_state"
-            | "click"
-            | "set_value"
-            | "type_text"
-            | "press_key"
-            | "scroll"
-            | "verify_state"
-    ) && PUBLIC.iter().any(|tool| tool.name == name)
+    public_contract::route(name).is_some() && PUBLIC.iter().any(|tool| tool.name == name)
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ComputerBudget {
@@ -59,10 +47,11 @@ impl ComputerRequest {
         let value = Self {
             environment_id,
             budget: ComputerBudget::for_tool(name),
-            action: CuaAction::new(name.into(), arguments)
+            action: public_contract::decode(name, arguments)
                 .map_err(|_| "unsupported_or_invalid_computer_arguments")?,
         };
-        // Reuse frozen Computer schemas and the actual Cua provider validator.
+        // The Styx public schema and exact request shape already passed; retain
+        // the independent native operation/payload boundary before dispatch.
         // No public argument can supply a session authority or native path.
         value
             .action
@@ -571,3 +560,33 @@ impl PairedGatewayBackend {
 #[cfg(test)]
 #[path = "backend_computer_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod public_contract_regressions {
+    use super::*;
+
+    #[test]
+    fn public_contract_gateway_request_uses_published_window_branches_before_context_creation() {
+        for branch in ["include_screenshot", "include_accessibility_tree"] {
+            let mut arguments = json!({"pid":42,"window_id":43,"environment_id":"selected-host"})
+                .as_object()
+                .unwrap()
+                .clone();
+            arguments.insert(branch.into(), Value::Bool(false));
+            let request =
+                ComputerRequest::parse("get_window_state", Some(arguments.clone())).unwrap();
+            assert_eq!(request.environment_id.as_deref(), Some("selected-host"));
+            assert!(request.action.desktop_read_request().unwrap().is_some());
+            let payload: Value =
+                serde_json::from_slice(&request.action.to_operation_payload().unwrap()).unwrap();
+            assert!(payload["arguments"].get("environment_id").is_none());
+
+            arguments.insert("full_output".into(), Value::Bool(true));
+            assert!(ComputerRequest::parse("get_window_state", Some(arguments)).is_err());
+        }
+        for name in ["type_text", "press_key", "scroll"] {
+            assert!(!is_public_computer_tool(name));
+            assert!(ComputerRequest::parse(name, None).is_err());
+        }
+    }
+}

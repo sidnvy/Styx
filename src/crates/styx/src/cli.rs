@@ -2260,7 +2260,7 @@ fn native_build_info() -> serde_json::Value {
     };
     serde_json::json!({
         "schema": 1, "target": target,
-        "minimum_release_reader": styx_contracts::native_release::NativeReleaseReader::NativeAppServiceTransferredV1,
+        "minimum_release_reader": styx_contracts::native_release::NativeReleaseReader::NativePairingLifecycleV1,
         "supported_state_readers": [
             styx_contracts::management::ReaderContract::NativeManagementStateV1,
             styx_contracts::management::ReaderContract::NativeMigratedStateV1,
@@ -2268,7 +2268,8 @@ fn native_build_info() -> serde_json::Value {
             styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1,
             styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1,
             styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1,
-            styx_contracts::management::ReaderContract::NativeAppServiceTransferredStateV1
+            styx_contracts::management::ReaderContract::NativeAppServiceTransferredStateV1,
+            styx_contracts::management::ReaderContract::NativePairingLifecycleStateV1
         ]
     })
 }

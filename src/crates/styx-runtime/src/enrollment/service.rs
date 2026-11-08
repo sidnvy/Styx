@@ -210,6 +210,14 @@ struct Approve {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Reject {
+    request_id: RequestId,
+    device_id: DeviceId,
+    fingerprint: Sha256Digest,
+    comparison_code: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Claim {
     request_id: RequestId,
     claim_secret: String,
@@ -265,6 +273,7 @@ enum Route {
     Devices,
     Join,
     Approve,
+    Reject,
     Claim,
     Confirm,
     Revoke,
@@ -282,6 +291,7 @@ impl Route {
                 | Self::Pending
                 | Self::Devices
                 | Self::Approve
+                | Self::Reject
                 | Self::Revoke
                 | Self::Recover
                 | Self::AdminCas
@@ -308,6 +318,7 @@ fn route(method: &Method, path: &str) -> Result<Route, ServiceError> {
         "/styx/enroll/devices" => (Method::GET, Route::Devices),
         "/styx/enroll/join" => (Method::POST, Route::Join),
         "/styx/enroll/approve" => (Method::POST, Route::Approve),
+        "/styx/enroll/reject" => (Method::POST, Route::Reject),
         "/styx/enroll/claim" => (Method::POST, Route::Claim),
         "/styx/enroll/confirm" => (Method::POST, Route::Confirm),
         "/styx/enroll/revoke" => (Method::POST, Route::Revoke),
@@ -811,6 +822,39 @@ impl EnrollmentService {
                 }
                 Ok((200, Value::Array(result)))
             }
+            Route::Reject => {
+                let req: Reject = decode(body)?;
+                validate_request(&req.request_id)?;
+                // Format/reader admission precedes the Core mutation and even
+                // clock-floor persistence. Journal::prepare rechecks it under
+                // the same writer immediately before its first intent write.
+                self.store
+                    .configuration_root()
+                    .require_pairing_lifecycle_reader()
+                    .map_err(|error| match error {
+                        JournalError::Conflict => {
+                            ServiceError::new(409, "pairing_lifecycle_reader_required")
+                        }
+                        other => other.into(),
+                    })?;
+                let now = self.time()?;
+                let intent = self.ledger.reject(
+                    &self.control.admin(),
+                    styx_core::enrollment::RejectionRequest {
+                        request: req.request_id.clone(),
+                        device: req.device_id.clone(),
+                        fingerprint: req.fingerprint,
+                        comparison: req.comparison_code,
+                    },
+                    now,
+                )?;
+                self.persist(intent, &[])?;
+                Ok((
+                    200,
+                    json!({"status":"rejected","request_id":req.request_id,
+                    "device_id":req.device_id,"fingerprint":req.fingerprint}),
+                ))
+            }
             Route::Approve => {
                 let req: Approve = decode(body)?;
                 validate_request(&req.request_id)?;
@@ -872,13 +916,18 @@ impl EnrollmentService {
                 validate_claim(&req.request_id, &req.claim_secret)?;
                 let now = self.time()?;
                 let proof = self.control.attest_claim(
-                    req.request_id,
+                    req.request_id.clone(),
                     Sha256Digest::of_bytes(req.claim_secret.as_bytes()),
                 );
                 match self.ledger.claim(&proof, now)? {
                     styx_core::enrollment::ClaimView::Pending => {
                         Ok((202, json!({"status":"pending"})))
                     }
+                    styx_core::enrollment::ClaimView::Rejected => Ok((
+                        200,
+                        json!({"status":"rejected","request_id":req.request_id,
+                            "approved_capabilities":capabilities(Grant { computer:false, browser:false },false)}),
+                    )),
                     styx_core::enrollment::ClaimView::Approved {
                         sealed,
                         device,

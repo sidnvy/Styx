@@ -324,7 +324,8 @@ pub(crate) struct BoundMacSource {
     probe_drained: bool,
     // First closed fault facts only; never consulted for source authority.
     probe_failure: Option<ProbeDiagnostic>,
-    // A fully checked initial sample stays fenced until the paired FD commit.
+    // A protocol-complete qualification sample exists on this original FD.
+    // Executor admission is separately blocked by MacProxySource's lifecycle.
     initial_provisional: bool,
 }
 impl BoundMacSource {
@@ -679,6 +680,14 @@ mod installed_source_tests {
         )
         .await
         .expect("original_source_discovery");
+        let preparation_source = source.clone();
+        tokio::task::spawn_blocking(move || {
+            preparation_source
+                .observe_preparation(std::time::Instant::now() + std::time::Duration::from_secs(10))
+        })
+        .await
+        .expect("preparation_task_joined")
+        .expect("unqualified_preparation");
         let original = source.clone();
         let observation = tokio::task::spawn_blocking(move || {
             original.observe_initial_with_windows(
@@ -723,6 +732,81 @@ mod installed_source_tests {
         eprintln!(
             "MAC_SOURCE_READ_ONLY window_read_count={} strict_window_read_count={} initial_epoch_advanced={} original_probe_drain=PASS",
             windows.count, strict_windows.count, advanced
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires owner-authorized installed Mac App; controlled retained-baseline fault only"]
+    async fn installed_qualification_strict_baseline_counterexample() {
+        assert_eq!(
+            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
+            Ok("read-only")
+        );
+        let images = MacAppImages::open_fixed().expect("fixed_signed_App_images");
+        let candidate = MacSourceCandidate::discover(images).expect("original_candidate");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut bound = candidate
+            .connect(deadline)
+            .await
+            .expect("original_connect")
+            .finish_binding()
+            .expect("original_binding");
+        let result = tokio::task::spawn_blocking(move || {
+            let before = bound.observe_native(deadline.into_std());
+            before
+                .as_ref()
+                .map_err(|_| ())
+                .expect("original_native_facts");
+            bound.lag_retained_console_seed();
+            let result = bound.observe_native(deadline.into_std());
+            let diagnostic = bound.probe_diagnostic();
+            let no_sdk_probe = bound.probe_session.is_none();
+            (result.is_err(), diagnostic, no_sdk_probe)
+        })
+        .await
+        .expect("original_fact_task_joined");
+        assert!(result.0 && result.2, "strict_refusal_before_any_SDK_probe");
+        assert_eq!(
+            result.1.map(|v| v.cause),
+            Some(ProbeCause::ConsoleEpochChanged)
+        );
+        eprintln!(
+            "MAC_QUALIFICATION_COUNTEREXAMPLE retained_baseline_lag=CONTROLLED strict_before_probe=REFUSED sdk_dispatches=0 native_seed_mutation=NONE"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires owner-authorized installed Mac App; controlled drain-before-probe boundary, no input"]
+    async fn installed_qualification_empty_drain_prevents_late_probe() {
+        assert_eq!(
+            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
+            Ok("read-only")
+        );
+        let images = MacAppImages::open_fixed().expect("fixed_signed_App_images");
+        let candidate = MacSourceCandidate::discover(images).expect("original_candidate");
+        let until = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut bound = candidate
+            .connect(until)
+            .await
+            .expect("original_connect")
+            .finish_binding()
+            .expect("original_binding");
+        tokio::task::spawn_blocking(move || {
+            bound
+                .observe_native(until.into_std())
+                .expect("original_facts");
+            assert!(bound.probe_session.is_none());
+            assert_eq!(bound.drain_probe(until.into_std()), Ok(true));
+            // A delayed initial step obtains the same FD after empty drain.
+            // No session_begin may be sent after that acknowledged cleanup.
+            assert!(bound.probe_windows(until.into_std()).is_err());
+            assert!(bound.probe_session.is_none() && bound.probe_drained && bound.fenced);
+            assert!(bound.observe_initial_native(until.into_std()).is_err());
+        })
+        .await
+        .expect("original_fact_and_drain_task_joined");
+        eprintln!(
+            "MAC_QUALIFICATION_EMPTY_DRAIN original_empty_drain=PASS late_probe=REFUSED sdk_dispatches=0 admission=FENCED"
         );
     }
 }

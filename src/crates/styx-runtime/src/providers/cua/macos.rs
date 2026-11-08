@@ -14,7 +14,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
 };
 use styx_contracts::{identity::Sha256Digest, session::SessionBinding};
@@ -25,12 +25,25 @@ use tokio::{
     time::{Instant, timeout_at},
 };
 
+/// Preparing/Prepared/Probing are the exclusive substeps of qualification.
+/// Only Ready may back a native executor; transport cleanup remains separate.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum SourcePhase {
+    Unqualified,
+    Preparing,
+    Prepared,
+    Probing,
+    Ready,
+    Fenced,
+    Ended,
+}
+
 pub(crate) struct MacProxySource {
     control: Mutex<BoundMacSource>,
     observations: Mutex<BoundMacSource>,
     fingerprint: Sha256Digest,
-    fenced: AtomicBool,
-    initial_probe_claimed: AtomicBool,
+    phase: AtomicU8,
     initial_epoch_advanced: AtomicBool,
     // Diagnostic custody only; no source permission or readiness derives from it.
     probe_failure: Mutex<Option<ProbeDiagnostic>>,
@@ -87,8 +100,7 @@ impl MacProxySource {
             control: Mutex::new(control),
             observations: Mutex::new(observations),
             fingerprint,
-            fenced: AtomicBool::new(false),
-            initial_probe_claimed: AtomicBool::new(false),
+            phase: AtomicU8::new(SourcePhase::Unqualified as u8),
             initial_epoch_advanced: AtomicBool::new(false),
             probe_failure: Mutex::new(None),
         }))
@@ -97,7 +109,48 @@ impl MacProxySource {
         self.fingerprint
     }
     pub(crate) fn fenced(&self) -> bool {
-        self.fenced.load(Ordering::Acquire)
+        matches!(self.phase.load(Ordering::Acquire), value
+            if value == SourcePhase::Fenced as u8 || value == SourcePhase::Ended as u8)
+    }
+    pub(crate) fn ready(&self) -> bool {
+        self.phase.load(Ordering::Acquire) == SourcePhase::Ready as u8
+    }
+    fn fence(&self) {
+        // An ended original source cannot be reopened by a late observer.
+        let _ = self
+            .phase
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |phase| {
+                (phase != SourcePhase::Ended as u8).then_some(SourcePhase::Fenced as u8)
+            });
+    }
+    fn advance(&self, before: SourcePhase, after: SourcePhase) -> Result<()> {
+        self.phase
+            .compare_exchange(
+                before as u8,
+                after as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| CuaError::PermissionDenied)
+    }
+    /// One read-only preparation before Host registration. No SDK probe or
+    /// target is published here, and the discovery baseline is not committed.
+    pub(crate) fn observe_preparation(
+        &self,
+        until: std::time::Instant,
+    ) -> Result<NativeObservation> {
+        self.advance(SourcePhase::Unqualified, SourcePhase::Preparing)?;
+        let result = self
+            .observe_current_at(until, std::time::Instant::now(), false, true)
+            .and_then(|value| {
+                self.advance(SourcePhase::Preparing, SourcePhase::Prepared)?;
+                Ok(value)
+            });
+        if result.is_err() {
+            self.fence_initial_sources();
+        }
+        result
     }
     pub(crate) fn probe_diagnostic(&self) -> Option<ProbeDiagnostic> {
         *self
@@ -123,13 +176,24 @@ impl MacProxySource {
     /// Caller owns the existing bounded blocking job and joins it; facts never
     /// derive from caller env/descriptor booleans or the proxy's exit status.
     pub(crate) fn observe_current(&self, until: std::time::Instant) -> Result<NativeObservation> {
-        self.observe_current_at(until, std::time::Instant::now(), false)
+        if !self.ready() {
+            return Err(CuaError::PermissionDenied);
+        }
+        self.observe_current_at(until, std::time::Instant::now(), false, false)
+            .and_then(|value| {
+                if self.ready() {
+                    Ok(value)
+                } else {
+                    Err(CuaError::PermissionDenied)
+                }
+            })
     }
     fn observe_current_at(
         &self,
         until: std::time::Instant,
         started: std::time::Instant,
         after: bool,
+        qualifying: bool,
     ) -> Result<NativeObservation> {
         let (binding, observation, final_binding) = if after {
             (
@@ -179,7 +243,12 @@ impl MacProxySource {
                 );
                 CuaError::Unknown
             })?;
-            let value = observations.observe_native(until).map_err(|error| {
+            let response = if qualifying {
+                observations.observe_initial_native(until)
+            } else {
+                observations.observe_native(until)
+            };
+            let value = response.map_err(|error| {
                 let fault = observations.probe_diagnostic().map_or_else(
                     || ProbeDiagnostic::observed(observation, error.probe_cause(), started, until),
                     |fault| ProbeDiagnostic::observed(fault.stage, fault.cause, started, until),
@@ -211,11 +280,12 @@ impl MacProxySource {
             Ok(value)
         })();
         if result.is_err() {
-            self.fenced.store(true, Ordering::Release)
+            self.fence();
         }
         result
     }
 }
+
 impl MacProxySource {
     /// Before-target bootstrap only. Even a failed attempt consumes this claim;
     /// neither a caller retry nor any strict window read can reopen it.
@@ -223,17 +293,14 @@ impl MacProxySource {
         &self,
         until: std::time::Instant,
     ) -> Result<(NativeObservation, super::macos_source::WindowReadEvidence)> {
-        if self.initial_probe_claimed.swap(true, Ordering::AcqRel) {
-            self.fence_initial_sources();
-            self.remember_probe_failure(
-                ProbeStage::SessionBinding,
-                ProbeCause::Fenced,
-                std::time::Instant::now(),
-                until,
-            );
-            return Err(CuaError::PermissionDenied);
-        }
-        self.observe_windows_mode(until, true)
+        self.advance(SourcePhase::Prepared, SourcePhase::Probing)?;
+        self.observe_windows_mode(until, true).and_then(|value| {
+            if let Err(error) = self.advance(SourcePhase::Probing, SourcePhase::Ready) {
+                self.fence_initial_sources();
+                return Err(error);
+            }
+            Ok(value)
+        })
     }
     /// Receipt only; this value is never a readiness or authorization input.
     pub(crate) fn initial_epoch_advanced(&self) -> bool {
@@ -243,8 +310,16 @@ impl MacProxySource {
         &self,
         until: std::time::Instant,
     ) -> Result<(NativeObservation, super::macos_source::WindowReadEvidence)> {
-        self.initial_probe_claimed.store(true, Ordering::Release);
-        self.observe_windows_mode(until, false)
+        if !self.ready() {
+            return Err(CuaError::PermissionDenied);
+        }
+        self.observe_windows_mode(until, false).and_then(|value| {
+            if self.ready() {
+                Ok(value)
+            } else {
+                Err(CuaError::PermissionDenied)
+            }
+        })
     }
     fn observe_windows_mode(
         &self,
@@ -253,7 +328,7 @@ impl MacProxySource {
     ) -> Result<(NativeObservation, super::macos_source::WindowReadEvidence)> {
         let started = std::time::Instant::now();
         let result = (|| {
-            let before = self.observe_current_at(until, started, false)?;
+            let before = self.observe_current_at(until, started, false, initial)?;
             let mut observations = self.observations.lock().map_err(|_| {
                 self.remember_probe_failure(
                     ProbeStage::ObservationMutex,
@@ -355,7 +430,7 @@ impl MacProxySource {
             drop(observations);
             // The read probe may take time. Return ONLY a new original-FD
             // native lock/TCC sample, never retimestamp the pre-probe facts.
-            let after = self.observe_current_at(until, started, true)?;
+            let after = self.observe_current_at(until, started, true, false)?;
             if before.console_identity() != after.console_identity() {
                 self.remember_probe_failure(
                     ProbeStage::ConsoleMatch,
@@ -373,13 +448,13 @@ impl MacProxySource {
             if initial {
                 self.fence_initial_sources();
             } else {
-                self.fenced.store(true, Ordering::Release);
+                self.fence();
             }
         }
         result
     }
     fn fence_initial_sources(&self) {
-        self.fenced.store(true, Ordering::Release);
+        self.fence();
         // Recover poisoned guards only to deny use, never to restore authority.
         self.control
             .lock()
@@ -392,11 +467,18 @@ impl MacProxySource {
     }
 
     pub(crate) fn drain_source_probe(&self, until: std::time::Instant) -> Result<bool> {
-        self.observations
+        self.fence();
+        let result = self
+            .observations
             .lock()
             .map_err(|_| CuaError::Unknown)?
             .drain_probe(until)
-            .map_err(|_| CuaError::CleanupUnconfirmed)
+            .map_err(|_| CuaError::CleanupUnconfirmed);
+        if result == Ok(true) {
+            self.phase
+                .store(SourcePhase::Ended as u8, Ordering::Release);
+        }
+        result
     }
 }
 
@@ -444,7 +526,7 @@ pub(super) fn validate_config(config: &OwnedCuaConfig) -> Result<()> {
         || config.home != config.launch.home_path
         || config.workspace.as_os_str().len() > 4096
         || config.home.as_os_str().len() > 4096
-        || config.launch.source.fenced()
+        || !config.launch.source.ready()
     {
         return Err(CuaError::PermissionDenied);
     }
@@ -701,4 +783,114 @@ pub(super) async fn start_proxy(
         child.take_stdout().ok_or(CuaError::Unknown)?,
         child.take_stderr().ok_or(CuaError::Unknown)?,
     ))
+}
+
+#[cfg(test)]
+mod qualification_reference {
+    use super::*;
+
+    fn lag_test_baselines(source: &MacProxySource) {
+        source.control.lock().unwrap().lag_retained_console_seed();
+        source
+            .observations
+            .lock()
+            .unwrap()
+            .lag_retained_console_seed();
+    }
+
+    async fn lagged_epoch_reference(before_preparation: bool) {
+        assert_eq!(
+            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
+            Ok("read-only")
+        );
+        let source = MacProxySource::discover(Instant::now() + std::time::Duration::from_secs(10))
+            .await
+            .expect("original_source_discovery");
+        let original = source.clone();
+        let observation = tokio::task::spawn_blocking(move || -> Result<_> {
+            assert!(!original.ready(), "discovery_is_not_executor_readiness");
+            if before_preparation {
+                lag_test_baselines(&original);
+            }
+            original.observe_preparation(
+                std::time::Instant::now() + std::time::Duration::from_secs(10),
+            )?;
+            assert!(!original.ready(), "preparation_cannot_authorize_a_worker");
+            if !before_preparation {
+                lag_test_baselines(&original);
+            }
+            let (facts, windows) = original.observe_initial_with_windows(
+                std::time::Instant::now() + std::time::Duration::from_secs(15),
+            )?;
+            assert!(facts.observed_unlocked() && original.ready());
+            assert!(
+                original.initial_epoch_advanced(),
+                "controlled_lag_was_qualified"
+            );
+            // A second initial call is refused before IO and cannot reopen the
+            // one initial claim or disable this already qualified source.
+            assert!(
+                original
+                    .observe_initial_with_windows(
+                        std::time::Instant::now() + std::time::Duration::from_secs(1)
+                    )
+                    .is_err()
+            );
+            assert!(original.ready());
+            let (_, strict_windows) = original.observe_with_windows(
+                std::time::Instant::now() + std::time::Duration::from_secs(15),
+            )?;
+            lag_test_baselines(&original);
+            assert!(
+                original
+                    .observe_current(std::time::Instant::now() + std::time::Duration::from_secs(10))
+                    .is_err(),
+                "Ready_still_requires_exact_epoch"
+            );
+            assert!(original.fenced() && !original.ready());
+            Ok((windows.count, strict_windows.count))
+        })
+        .await
+        .expect("original_qualification_task_joined");
+        let diagnostic = source.probe_diagnostic();
+        let original = source.clone();
+        let drained = tokio::task::spawn_blocking(move || {
+            original
+                .drain_source_probe(std::time::Instant::now() + std::time::Duration::from_secs(10))
+        })
+        .await
+        .expect("original_probe_drain_task_joined");
+        assert_eq!(
+            drained,
+            Ok(true),
+            "original_read_probe_must_settle_even_on_failure"
+        );
+        let (windows, strict_windows) = observation.expect("qualified_and_strict_original_reads");
+        assert_eq!(
+            diagnostic.map(|v| v.cause),
+            Some(ProbeCause::ConsoleEpochChanged)
+        );
+        eprintln!(
+            "MAC_QUALIFICATION_REFERENCE lag_point={} retained_baseline_lag=CONTROLLED qualify=PASS strict_read=PASS strict_later_epoch=REFUSED windows={} strict_windows={} original_drain=PASS input_dispatches=0 native_seed_mutation=NONE",
+            if before_preparation {
+                "before_preparation"
+            } else {
+                "before_probe"
+            },
+            windows,
+            strict_windows
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires owner-authorized installed Mac App; original source read-only reference"]
+    async fn installed_qualification_lag_before_preparation() {
+        lagged_epoch_reference(true).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires owner-authorized installed Mac App; original source read-only reference"]
+    async fn installed_qualification_lag_before_probe() {
+        lagged_epoch_reference(false).await;
+    }
 }

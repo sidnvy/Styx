@@ -41,6 +41,7 @@ mod driver_result;
 pub(crate) mod fake_driver;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) mod permissions;
+pub(crate) mod public_contract;
 pub(crate) use click::ClickRequest;
 pub(crate) mod ax_snapshot;
 mod ax_target;
@@ -257,54 +258,7 @@ pub struct CuaAction {
 }
 impl CuaAction {
     pub fn new(name: String, mut arguments: Map<String, Value>) -> Result<Self> {
-        // Window reads are parsed and re-addressed from the structured elements
-        // list; the markdown view carries native tokens and is always removed.
-        // A default (markdown) read would therefore return nothing actionable.
-        if name == "get_window_state"
-            && arguments.get("include_accessibility_tree") != Some(&Value::Bool(false))
-            && matches!(
-                arguments.get("tree_format").and_then(Value::as_str),
-                None | Some("markdown")
-            )
-        {
-            arguments.insert("tree_format".into(), Value::String("elements".into()));
-        }
-        if name == "get_window_state" {
-            if arguments.get("include_accessibility_tree") == Some(&Value::Bool(false))
-                && arguments.get("include_screenshot") != Some(&Value::Bool(false))
-            {
-                arguments
-                    .entry("include_screenshot")
-                    .or_insert(Value::Bool(true));
-                for (key, default) in [("max_image_dimension", 1024), ("timeout_ms", 1000)] {
-                    arguments.entry(key).or_insert(Value::from(default));
-                }
-            } else if arguments.get("include_screenshot") == Some(&Value::Bool(false))
-                && arguments.get("include_accessibility_tree") != Some(&Value::Bool(false))
-            {
-                arguments
-                    .entry("include_accessibility_tree")
-                    .or_insert(Value::Bool(true));
-                for (key, default) in [
-                    ("max_elements", 250),
-                    ("max_depth", 25),
-                    ("timeout_ms", 1000),
-                ] {
-                    arguments.entry(key).or_insert(Value::from(default));
-                }
-            }
-        }
-        if name == "click" && arguments.contains_key("element_token") {
-            // The public native schema permits explicit defaults. Canonicalize
-            // only defaults here. The exact-target contract separately admits
-            // the explicit Windows foreground context-menu gesture; unsupported
-            // gestures and extra target shapes still fail before any dispatch.
-            for (key, default) in [("button", "left"), ("delivery_mode", "background")] {
-                if arguments.get(key).and_then(Value::as_str) == Some(default) {
-                    arguments.remove(key);
-                }
-            }
-        }
+        public_contract::canonicalize(&name, &mut arguments);
         let value = Self { name, arguments };
         value.validate()?;
         Ok(value)

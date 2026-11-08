@@ -107,6 +107,127 @@ fn cas(
     .unwrap()
 }
 #[test]
+fn rejected_request_is_durable_bound_and_does_not_retire_device_or_revive_old_claim() {
+    let (mut ledger, control) = setup();
+    let (mut payload, code) = pending(&mut ledger, &control);
+    let selected = || RejectionRequest {
+        request: request(),
+        device: payload.device_id.clone(),
+        fingerprint: hash("spki"),
+        comparison: code.clone(),
+    };
+    let (_, foreign) = setup();
+    assert_eq!(
+        ledger.reject(&foreign.admin(), selected(), 3).unwrap_err(),
+        EnrollmentError::Authority
+    );
+    for field in 0..4 {
+        let mut wrong = selected();
+        match field {
+            0 => wrong.request = RequestId::try_from("ffffffffffffffffffffffffffffffff").unwrap(),
+            1 => wrong.device = DeviceId::try_from("another-device").unwrap(),
+            2 => wrong.fingerprint = hash("another-key"),
+            _ => wrong.comparison = "WRONG-CODE".into(),
+        }
+        assert!(ledger.reject(&control.admin(), wrong, 3).is_err());
+    }
+    let old_claim = control.attest_claim(request(), hash("claim"));
+    let reject = ledger.reject(&control.admin(), selected(), 3).unwrap();
+    assert_eq!(
+        ledger.claim(&old_claim, 3).unwrap_err(),
+        EnrollmentError::Busy
+    );
+    assert!(matches!(reject.body().mutation, Mutation::Reject { .. }));
+    assert!(
+        reject
+            .body()
+            .required_materials
+            .iter()
+            .all(|m| m.kind == MaterialKind::Profile)
+    );
+    commit(&mut ledger, &control, &reject);
+    assert_eq!(ledger.claim(&old_claim, 4).unwrap(), ClaimView::Rejected);
+    assert!(
+        ledger
+            .pending_for_admin(&control.admin(), 4)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(ledger.devices.is_empty());
+    assert!(ledger.retired.is_empty());
+    assert!(
+        ledger
+            .approval_target(&control.admin(), &request())
+            .is_err()
+    );
+    assert!(ledger.reject(&control.admin(), selected(), 4).is_err());
+    assert!(
+        ledger
+            .claim(&control.attest_claim(request(), hash("wrong-claim")), 4)
+            .is_err()
+    );
+    assert!(
+        ledger
+            .authentication_target(&control, &payload.device_id)
+            .is_err()
+    );
+
+    // A new invitation reviews the same original device/key independently.
+    payload.invitation = "new-independent-one-use-invitation".into();
+    let invite = ledger
+        .invite(&control.admin(), hash(&payload.invitation), 60, None, 5)
+        .unwrap();
+    commit(&mut ledger, &control, &invite);
+    let next_id = RequestId::try_from("abcdef0123456789abcdef0123456789").unwrap();
+    let proof = control
+        .attest_join(
+            &payload,
+            hash("spki"),
+            next_id.clone(),
+            hash("next-claim"),
+            OpaqueProfileRef(hash("profile")),
+            pairing(),
+        )
+        .unwrap();
+    let next_code = proof.facts.comparison.clone();
+    let join = ledger.join(proof, 6).unwrap();
+    commit(&mut ledger, &control, &join);
+    let next_claim = control.attest_claim(next_id.clone(), hash("next-claim"));
+    assert_eq!(ledger.claim(&next_claim, 7).unwrap(), ClaimView::Pending);
+    assert_eq!(ledger.claim(&old_claim, 7).unwrap(), ClaimView::Rejected);
+    let target = ledger.approval_target(&control.admin(), &next_id).unwrap();
+    let credential = control
+        .attest_prepared_credential(
+            target,
+            CredentialRef(hash("next-token")),
+            hash("next-token"),
+            SealedCredentialRef(hash("next-sealed")),
+        )
+        .unwrap();
+    let grant = Grant {
+        computer: false,
+        browser: false,
+    };
+    let approved = ledger
+        .approve(
+            &control.admin(),
+            ApprovalRequest {
+                request: next_id,
+                fingerprint: hash("spki"),
+                comparison: next_code,
+                grant,
+            },
+            credential,
+            8,
+        )
+        .unwrap();
+    commit(&mut ledger, &control, &approved);
+    assert!(
+        matches!(ledger.claim(&next_claim, 9).unwrap(), ClaimView::Approved { grant: actual, .. } if actual == grant)
+    );
+    assert_eq!(ledger.claim(&old_claim, 9).unwrap(), ClaimView::Rejected);
+}
+#[test]
 fn invite_join_exact_approval_and_same_credential_claim_confirm() {
     let (mut l, c) = setup();
     let p = payload();

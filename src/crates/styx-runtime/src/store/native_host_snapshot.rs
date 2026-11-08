@@ -427,7 +427,17 @@ impl NativeHostSnapshot {
         let ready: NativeHostReady =
             serde_json::from_slice(&ready_raw).map_err(|_| JournalError::Conflict)?;
         if expected_seed != Sha256Digest::of_bytes(&seed_raw)
-            || seed.schema != 1
+            || !matches!(seed.schema, 1 | 2)
+            || (seed.schema == 2
+                && state.reader_contract
+                    != styx_contracts::management::ReaderContract::NativePairingLifecycleStateV1)
+            || (seed.schema == 1
+                && state.reader_contract
+                    == styx_contracts::management::ReaderContract::NativePairingLifecycleStateV1
+                && state
+                    .runtime_update()
+                    .map_err(|_| JournalError::Conflict)?
+                    .is_none())
             || ready.schema != 1
             || seed.platform != native_platform()
             || seed.root_identity != marker.root_identity
@@ -879,8 +889,9 @@ pub(crate) fn validated_runtime_selection(
                 if let Some(update) = state.runtime_update().map_err(|_| JournalError::Conflict)?
                     && (current.publisher_spki_sha256
                         != update.bootstrap_runtime.publisher_spki_sha256
-                        || (state.desired.host.iter().chain(state.desired.gateway.iter()).any(|d| d.manager == NativeManager::AppManaged)
-                            != (state.reader_contract == styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1)))
+                        || (state.reader_contract != styx_contracts::management::ReaderContract::NativePairingLifecycleStateV1
+                            && (state.desired.host.iter().chain(state.desired.gateway.iter()).any(|d| d.manager == NativeManager::AppManaged)
+                                != (state.reader_contract == styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1))))
                 {
                     return Err(JournalError::Conflict);
                 }

@@ -659,6 +659,7 @@ fn expected_method(path: &str) -> Option<Method> {
         "/styx/enroll/invitations"
         | "/styx/enroll/invitations/close"
         | "/styx/enroll/approve"
+        | "/styx/enroll/reject"
         | "/styx/enroll/revoke"
         | "/styx/enroll/recover"
         | "/styx/enroll/capabilities"

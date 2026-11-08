@@ -101,7 +101,7 @@ impl DesktopSource {
         let mut slot = value.inner.job.lock().await;
         *slot = Some(tokio::task::spawn_blocking(move || {
             let native = source
-                .observe_current(Instant::now() + Duration::from_secs(10))
+                .observe_preparation(Instant::now() + Duration::from_secs(10))
                 .map_err(|_| DesktopSourceError::Unavailable)?;
             Ok(Observed {
                 native,
@@ -146,7 +146,7 @@ impl DesktopSource {
         self.inner.source.initial_epoch_advanced()
     }
     pub(crate) fn proxy_source(&self) -> Result<Arc<MacProxySource>> {
-        if self.fenced() {
+        if self.fenced() || !self.inner.source.ready() {
             return Err(DesktopSourceError::Fenced);
         }
         Ok(self.inner.source.clone())
@@ -169,18 +169,11 @@ impl DesktopSource {
                 return Err(DesktopSourceError::Supervisor);
             }
         }
-        // Only the first retained read may establish its post-initialization
-        // console stamp. No window targets or published Computer factory exist
-        // while this observation has no window evidence. Later reads stay strict.
-        let initial_probe = self
-            .inner
-            .observations
-            .lock()
-            .map_err(|_| DesktopSourceError::Supervisor)?
-            .as_ref()
-            .ok_or(DesktopSourceError::Unavailable)?
-            .windows
-            .is_none();
+        // A rejoined initial job may have committed Ready before its caller
+        // disappeared, without publishing the returned windows in this cache.
+        // The source lifecycle owns qualification; a stale projection cannot
+        // reopen its initial claim. Discard old facts and take a strict read.
+        let initial_probe = !self.inner.source.ready();
         let source = self.inner.source.clone();
         *slot = Some(tokio::task::spawn_blocking(move || {
             let until = Instant::now() + Duration::from_secs(10);
@@ -345,6 +338,53 @@ fn native_capability_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires owner-authorized installed Mac App; retained read-job reference, no input"]
+    async fn installed_qualification_rejoined_initial_job_takes_strict_read() {
+        assert_eq!(
+            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
+            Ok("read-only")
+        );
+        let source = DesktopSource::start()
+            .await
+            .expect("original_prepared_source");
+        let original = source.inner.source.clone();
+        // Retain the original job exactly as after its waiter disappeared
+        // before copying its completed observation into the cache.
+        *source.inner.job.lock().await = Some(tokio::task::spawn_blocking(move || {
+            let (native, windows) = original
+                .observe_initial_with_windows(Instant::now() + Duration::from_secs(15))
+                .map_err(|_| DesktopSourceError::Unavailable)?;
+            Ok(Observed {
+                native,
+                windows: Some(windows),
+                at: Instant::now(),
+            })
+        }));
+        assert!(
+            source
+                .inner
+                .observations
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .windows
+                .is_none()
+        );
+        let refreshed = source.fresh().await;
+        let ready_after_refresh = source.inner.source.ready();
+        let stopped = source.stop().await;
+        assert!(
+            refreshed.is_ok() && ready_after_refresh,
+            "rejoined_Ready_source_uses_new_strict_read_not_second_initial_claim"
+        );
+        assert!(stopped.expect("original_read_owner_stopped").complete());
+        eprintln!(
+            "MAC_QUALIFICATION_REJOIN retained_original_job=JOINED new_strict_read=PASS initial_replay=NONE original_drain=PASS input_dispatches=0"
+        );
+    }
 
     #[test]
     fn mac_element_click_capabilities_require_current_window_probe_and_native_ax_permission() {

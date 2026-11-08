@@ -82,6 +82,7 @@ pub struct JoinFacts {
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PendingStatus {
     Pending,
+    Rejected,
     Approved {
         credential: CredentialRef,
         sealed: Option<SealedCredentialRef>,
@@ -127,6 +128,9 @@ pub enum Mutation {
         device: Device,
         sealed: SealedCredentialRef,
         claim_expires: u64,
+    },
+    Reject {
+        target: CredentialTarget,
     },
     Confirm {
         request: RequestId,

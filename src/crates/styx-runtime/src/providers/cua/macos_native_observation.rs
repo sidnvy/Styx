@@ -336,13 +336,24 @@ impl NativeObservation {
 }
 
 impl BoundMacSource {
+    /// Controlled reference fault in this test's retained baseline only.
+    /// Native replies, OS state and the real App are unchanged.
+    #[cfg(test)]
+    pub(in crate::providers::cua) fn lag_retained_console_seed(&mut self) {
+        let original = self
+            .native_console
+            .as_mut()
+            .expect("observed_console_baseline");
+        original.epoch.seed = original.epoch.seed.wrapping_sub(1);
+    }
     /// Entire exchange stays serialized by &mut self on the original FD. No
     /// reconnect, side channel, action, hidden retry, or descriptor boolean.
     pub(crate) fn observe_native(&mut self, deadline: Instant) -> Result<NativeObservation> {
         self.observe_native_mode(deadline, false)
     }
-    /// Initial SDK read qualification only. Success deliberately retains the old
-    /// baseline and leaves this original FD fenced until both FD samples agree.
+    /// Read-only qualification only. A complete sample retains the discovery
+    /// baseline and permits the next qualification step on this same FD. The
+    /// source lifecycle prevents executor use until both FD samples commit.
     pub(in crate::providers::cua) fn observe_initial_native(
         &mut self,
         deadline: Instant,
@@ -431,6 +442,7 @@ impl BoundMacSource {
         }
         if initial {
             self.initial_provisional = true;
+            self.fenced = false;
             return Ok(value);
         }
         self.native_instance = Some(value.daemon_instance.clone());
@@ -459,15 +471,18 @@ impl BoundMacSource {
                 .ok_or(BindingError::Fenced)?;
             if !self.initial_provisional
                 || !control.initial_provisional
-                || !self.fenced
-                || !control.fenced
+                || self.fenced
+                || control.fenced
                 || !Arc::ptr_eq(&self.candidate, &control.candidate)
                 || self.peer_token != control.peer_token
                 || self.native_instance.as_deref() != Some(after.daemon_instance.as_str())
                 || control.native_instance.as_deref()
                     != Some(control_after.daemon_instance.as_str())
-                || self.native_console.as_ref() != Some(&before_identity)
-                || !before.observed_unlocked()
+                || !initial_console_compatible(
+                    self.native_console.as_ref(),
+                    Some(&before_identity),
+                    before.observed_unlocked(),
+                )
                 || !initial_console_compatible(
                     self.native_console.as_ref(),
                     Some(&after_identity),
@@ -487,7 +502,10 @@ impl BoundMacSource {
             if Instant::now() >= deadline {
                 return Err(BindingError::NativeProtocol);
             }
-            let advanced = after_identity.epoch.seed != before_identity.epoch.seed;
+            let advanced = self
+                .native_console
+                .as_ref()
+                .is_some_and(|original| after_identity.epoch.seed != original.epoch.seed);
             self.native_console = Some(after_identity);
             control.native_console = Some(control_identity);
             self.initial_provisional = false;
@@ -781,6 +799,10 @@ impl BoundMacSource {
             return Ok(true);
         }
         if self.probe_session.is_none() {
+            // Even an empty drain ends this original source. A delayed initial
+            // step must not begin an SDK session after successful cleanup.
+            self.probe_drained = true;
+            self.fence_initial_native();
             return Ok(true);
         }
         // Authorization can be fenced while the original transport remains

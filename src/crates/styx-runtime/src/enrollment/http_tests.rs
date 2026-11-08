@@ -26,6 +26,7 @@ fn gateway_lan_routes_exclude_mcp_and_every_admin_route() {
         "/styx/enroll/invitations",
         "/styx/enroll/invitations/close",
         "/styx/enroll/approve",
+        "/styx/enroll/reject",
         "/styx/enroll/revoke",
         "/styx/enroll/recover",
         "/styx/enroll/capabilities",

@@ -1553,9 +1553,9 @@ int main(int argc, char **argv) {
             serde_json::json!({"path":path,"size":bytes.len(),"sha256":Sha256Digest::of_bytes(&bytes),"executable":executable})
         }).collect::<Vec<_>>();
         let mut manifest = serde_json::json!({"schema":2,"runtime_format":"native_rust_v1","component":"styx","scope":"runtime_candidate",
-            "minimum_reader":"native_runtime_selected_v1","target":"x86_64-unknown-linux-gnu","version":"0.4.0-test",
+            "minimum_reader":"native_pairing_lifecycle_v1","target":"x86_64-unknown-linux-gnu","version":"0.4.0-test",
             "entrypoint":"bin/styx","source":{"revision":"a".repeat(40),"inputs_sha256":Sha256Digest::of_bytes(b"{}")},
-            "contracts":{"control":1,"management_state":3},"files":files,"external_workers":[]});
+            "contracts":{"control":1,"management_state":7},"files":files,"external_workers":[]});
         if worker {
             manifest["external_workers"] = serde_json::json!(["tunnel_client"]);
             manifest["worker_closures"] = serde_json::json!([{"kind":"tunnel_client","version":"0.0.17",

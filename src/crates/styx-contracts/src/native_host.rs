@@ -5,6 +5,8 @@ use crate::{
     native_management::{NativeRootIdentity, NativeRuntimeSelection},
 };
 use serde::{Deserialize, Serialize};
+pub const NATIVE_HOST_JOIN_SEED_SCHEMA: u16 = 2;
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeHostJoinSeed {
@@ -37,4 +39,15 @@ pub struct NativeHostReady {
     pub generation: String,
     pub computer_approved: bool,
     pub browser_approved: bool,
+}
+/// Terminal negative observation bound to the original private join seed.
+/// This contains no credential and cannot authorize a Host connection.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeHostRejected {
+    pub schema: u16,
+    pub seed_sha256: Sha256Digest,
+    pub request_id: String,
+    pub device_id: DeviceId,
+    pub fingerprint: Sha256Digest,
 }

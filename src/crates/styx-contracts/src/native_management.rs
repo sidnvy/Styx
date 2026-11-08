@@ -14,6 +14,7 @@ pub const NATIVE_RUNTIME_SELECTED_STATE_SCHEMA: u16 = 3;
 pub const NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA: u16 = 4;
 pub const NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA: u16 = 5;
 pub const NATIVE_APP_SERVICE_TRANSFERRED_STATE_SCHEMA: u16 = 6;
+pub const NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA: u16 = 7;
 pub const NATIVE_MARKER_BYTES: usize = 4096;
 pub const NATIVE_STATE_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +285,15 @@ pub struct NativeRuntimeSelection {
 
 /// Committed runtime-selection history DATA. The same original C07 chain,
 /// configuration/execution custody and signed C08 verifier supply authority.
+/// Distinct schema7 history kind; ordinary desired-state transitions preserve
+/// these opaque canonical bytes and cannot turn App history into foreground.
+pub const NATIVE_PAIRING_RUNTIME_HISTORY_KEY: &str = "pairing_runtime_history_v1";
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativePairingRuntimeHistory {
+    Foreground,
+    App,
+}
 pub const NATIVE_RUNTIME_UPDATE_KEY: &str = "runtime_update_v1";
 pub const NATIVE_RUNTIME_SELECTION_KEY: &str = "runtime_selection_v1";
 /// Persisted repair DATA. Native file pins, manager observations and the
@@ -332,6 +342,17 @@ pub struct NativeRuntimeUpdate {
     pub service_repair: Option<NativeServiceRepairBinding>,
 }
 impl NativeState {
+    pub fn pairing_runtime_history(
+        &self,
+    ) -> Result<Option<NativePairingRuntimeHistory>, serde_json::Error> {
+        if self.reader_contract != ReaderContract::NativePairingLifecycleStateV1 {
+            return Ok(None);
+        }
+        self.extensions
+            .get(NATIVE_PAIRING_RUNTIME_HISTORY_KEY)
+            .map(|raw| serde_json::from_str(raw.get()))
+            .transpose()
+    }
     pub fn runtime_selection(&self) -> Result<Option<NativeRuntimeSelection>, serde_json::Error> {
         self.extensions
             .get(NATIVE_RUNTIME_SELECTION_KEY)
@@ -345,6 +366,7 @@ impl NativeState {
                 | ReaderContract::NativeAppRuntimeSelectedStateV1
                 | ReaderContract::NativeServiceRuntimeSelectedStateV1
                 | ReaderContract::NativeAppServiceTransferredStateV1
+                | ReaderContract::NativePairingLifecycleStateV1
         ) {
             return Ok(None);
         }

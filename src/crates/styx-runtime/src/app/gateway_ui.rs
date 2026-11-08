@@ -22,6 +22,15 @@ struct Revoke {
     device_id: DeviceId,
 }
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Rejection {
+    authorize: bool,
+    request_id: String,
+    device_id: DeviceId,
+    fingerprint: Sha256Digest,
+    comparison_code: String,
+}
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Authorized {
     authorize: bool,
@@ -133,6 +142,25 @@ impl HostApp {
                         comparison_code: choice.comparison_code,
                         enable_computer: choice.enable_computer,
                         enable_browser: choice.enable_browser,
+                    },
+                )
+                .await
+                .map_err(|e| self.gateway_admin_error(e))?;
+                scope.validate()?;
+                serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))
+            }
+            Operation::RejectComputer => {
+                let choice: Rejection = decode_input(&input)?;
+                if !choice.authorize {
+                    return Err(AppError("app_confirmation_required"));
+                }
+                let report = admin::reject_for_app(
+                    scope.clone(),
+                    admin::RejectionSelection {
+                        request_id: choice.request_id,
+                        device_id: choice.device_id,
+                        fingerprint: choice.fingerprint,
+                        comparison_code: choice.comparison_code,
                     },
                 )
                 .await

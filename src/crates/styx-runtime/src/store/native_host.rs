@@ -12,6 +12,18 @@ use styx_contracts::{
 };
 use zeroize::Zeroizing;
 
+fn require_rejection_format(state: &NativeState, raw: &[u8]) -> JournalResult<()> {
+    let seed: styx_contracts::native_host::NativeHostJoinSeed =
+        serde_json::from_slice(raw).map_err(|_| JournalError::Conflict)?;
+    if seed.schema != styx_contracts::native_host::NATIVE_HOST_JOIN_SEED_SCHEMA
+        || state.schema != styx_contracts::native_management::NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA
+        || state.reader_contract
+            != styx_contracts::management::ReaderContract::NativePairingLifecycleStateV1
+    {
+        return Err(JournalError::Conflict);
+    }
+    Ok(())
+}
 const SEED: &str = "host-join-seed-v1.json";
 const SEED_EXTENSION: &str = "fresh_host_seed_v1";
 const MATERIALS: [(&str, usize); 3] = [
@@ -33,6 +45,7 @@ pub(crate) enum NativeHostJoinFile {
     Credential,
     ConfirmDispatched,
     Ready,
+    Rejected,
 }
 impl NativeHostJoinFile {
     const ALL: [Self; 5] = [
@@ -49,6 +62,7 @@ impl NativeHostJoinFile {
             Self::Credential => 2,
             Self::ConfirmDispatched => 3,
             Self::Ready => 4,
+            Self::Rejected => 5,
         }
     }
     fn path(self) -> &'static str {
@@ -58,6 +72,7 @@ impl NativeHostJoinFile {
             Self::Credential => "host-credential.token",
             Self::ConfirmDispatched => "host-confirm-dispatched-v1.json",
             Self::Ready => "host-ready-v1.json",
+            Self::Rejected => "host-rejected-v1.json",
         }
     }
     fn max_bytes(self) -> usize {
@@ -93,6 +108,7 @@ pub(crate) struct NativeHostJoinStore {
     seed: Zeroizing<Vec<u8>>,
     materials: Vec<Pin>,
     phases: Vec<Pin>,
+    rejected: Option<Pin>,
 }
 fn seed_hash(state: &NativeState) -> JournalResult<Sha256Digest> {
     if state.has_migration_binding()
@@ -224,6 +240,7 @@ fn initialize(
             .iter()
             .map(|(n, _)| *n)
             .chain(NativeHostJoinFile::ALL.map(NativeHostJoinFile::path))
+            .chain([NativeHostJoinFile::Rejected.path()])
             .chain(["deployment.json", "state.json"])
         {
             fresh
@@ -374,14 +391,24 @@ impl NativeHostJoinStore {
                         None => missing = true,
                     }
                 }
-                Ok((materials, seed.ok_or(JournalError::Unknown)?, phases))
+                let rejected = optional(&configuration.root, NativeHostJoinFile::Rejected)?;
+                if rejected.is_some() && phases.len() != 2 {
+                    return Err(JournalError::Unknown);
+                }
+                Ok((
+                    materials,
+                    seed.ok_or(JournalError::Unknown)?,
+                    phases,
+                    rejected.as_ref().map(Pin::from_raw),
+                ))
             });
             match captured {
-                Ok((materials, seed, phases)) => Ok(Self {
+                Ok((materials, seed, phases, rejected)) => Ok(Self {
                     binding,
                     seed,
                     materials,
                     phases,
+                    rejected,
                 }),
                 Err(_) => Err(NativeRootFailure {
                     error: NativeRootError::Unknown,
@@ -451,6 +478,9 @@ impl NativeHostJoinStore {
         configuration: &crate::store::configuration::ConfigurationState,
     ) -> JournalResult<ValidatedNativeState> {
         let state = self.validate_base_locked(configuration)?;
+        if self.rejected.is_some() {
+            require_rejection_format(state.state(), &self.seed)?;
+        }
         for file in NativeHostJoinFile::ALL {
             match (
                 optional(&configuration.root, file)?,
@@ -460,6 +490,14 @@ impl NativeHostJoinStore {
                 (None, None) => {}
                 _ => return Err(JournalError::Unknown),
             }
+        }
+        match (
+            optional(&configuration.root, NativeHostJoinFile::Rejected)?,
+            &self.rejected,
+        ) {
+            (Some(raw), Some(pin)) if self.phases.len() == 2 && pin.matches(&raw) => {}
+            (None, None) => {}
+            _ => return Err(JournalError::Unknown),
         }
         Ok(state)
     }
@@ -518,9 +556,22 @@ impl NativeHostJoinStore {
         file: NativeHostJoinFile,
     ) -> JournalResult<Option<Zeroizing<Vec<u8>>>> {
         self.binding.with_binding(|configuration, _| {
-            self.validate_locked(configuration)?;
-            let raw = optional(&configuration.root, file)?;
-            Ok(raw.map(|raw| Zeroizing::new(raw.bytes)))
+            let before = self.validate_locked(configuration)?;
+            let expected = if file == NativeHostJoinFile::Rejected {
+                self.rejected.as_ref()
+            } else {
+                self.phases.get(file.index())
+            };
+            let captured = match (optional(&configuration.root, file)?, expected) {
+                (Some(raw), Some(pin)) if pin.matches(&raw) => Some(Zeroizing::new(raw.bytes)),
+                (None, None) => None,
+                _ => return Err(JournalError::Unknown),
+            };
+            let after = self.validate_locked(configuration)?;
+            if before.raw_bytes() != after.raw_bytes() {
+                return Err(JournalError::Unknown);
+            }
+            Ok(captured)
         })
     }
     pub(crate) fn append(&mut self, file: NativeHostJoinFile, bytes: &[u8]) -> JournalResult<()> {
@@ -534,8 +585,15 @@ impl NativeHostJoinStore {
         ))]
         {
             let pin = self.binding.with_binding(|configuration, _| {
-                self.validate_locked(configuration)?;
-                if file.index() != self.phases.len() {
+                let canonical = self.validate_locked(configuration)?;
+                let rejection = file == NativeHostJoinFile::Rejected;
+                if rejection {
+                    require_rejection_format(canonical.state(), &self.seed)?;
+                }
+                if self.rejected.is_some()
+                    || (rejection && self.phases.len() != 2)
+                    || (!rejection && file.index() != self.phases.len())
+                {
                     return Err(JournalError::Conflict);
                 }
                 configuration
@@ -568,9 +626,21 @@ impl NativeHostJoinStore {
                         _ => return Err(JournalError::Unknown),
                     }
                 }
+                match (
+                    optional(&configuration.root, NativeHostJoinFile::Rejected)?,
+                    rejection,
+                ) {
+                    (Some(raw), true) if new_pin.matches(&raw) => {}
+                    (None, false) => {}
+                    _ => return Err(JournalError::Unknown),
+                }
                 Ok(new_pin)
             })?;
-            self.phases.push(pin);
+            if file == NativeHostJoinFile::Rejected {
+                self.rejected = Some(pin);
+            } else {
+                self.phases.push(pin);
+            }
             Ok(())
         }
         #[cfg(not(any(

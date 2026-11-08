@@ -78,6 +78,33 @@ pub(super) fn validate_observed_native_tip(
     validate_fresh_native_tip(scan, canonical, marker, pending)
 }
 
+/// Genesis has no runtime-update history. The immutable marker remains on its
+/// original base reader; a fresh schema7 canonical state declares its newer
+/// format without manufacturing an initial update transaction.
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+fn fresh_native_genesis(state: &styx_contracts::native_management::NativeState) -> bool {
+    use styx_contracts::{management::ReaderContract, native_management::*};
+    state.revision == 0
+        && state.last_transaction.is_none()
+        && match (state.schema, state.reader_contract) {
+            (NATIVE_STATE_SCHEMA, ReaderContract::NativeManagementStateV1) => true,
+            (
+                NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA,
+                ReaderContract::NativePairingLifecycleStateV1,
+            ) => {
+                !state.extensions.contains_key(NATIVE_RUNTIME_UPDATE_KEY)
+                    && !state
+                        .extensions
+                        .contains_key(NATIVE_PAIRING_RUNTIME_HISTORY_KEY)
+            }
+            _ => false,
+        }
+}
+
 /// Replay every original fresh-root assignment, including the one closed runtime
 /// promotion. A pending tip can be described by inspection or reconciled by
 /// the original coordinator; only the latter can attest durability/admission.
@@ -101,10 +128,7 @@ fn validate_fresh_native_tip(
         return Err(JournalError::Conflict);
     }
     if scan.files.is_empty() {
-        return if canonical.state().revision == 0
-            && canonical.state().last_transaction.is_none()
-            && canonical.state().reader_contract == ReaderContract::NativeManagementStateV1
-        {
+        return if fresh_native_genesis(canonical.state()) {
             Ok(())
         } else {
             Err(JournalError::Conflict)
@@ -133,10 +157,7 @@ fn validate_fresh_native_tip(
             || previous
                 .as_ref()
                 .is_some_and(|prior| prior.raw_bytes() != before.raw_bytes())
-            || (previous.is_none()
-                && (before.state().revision != 0
-                    || before.state().last_transaction.is_some()
-                    || before.state().reader_contract != ReaderContract::NativeManagementStateV1))
+            || (previous.is_none() && !fresh_native_genesis(before.state()))
         {
             return Err(JournalError::Conflict);
         }

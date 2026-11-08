@@ -2290,15 +2290,19 @@ mod tests {
                 .is_err()
         );
     }
-    #[test]
-    fn host_runtime_events_identify_this_computer() {
-        let mut event = styx_runtime::foreground::ForegroundEvent {
-            schema: 1,
-            event: "connecting",
-            reason: None,
-            device_id: Some("setup-computer".to_owned().try_into().unwrap()),
-            connection_generation: None,
-        };
+    #[tokio::test]
+    async fn host_runtime_events_identify_this_computer() {
+        let (send, mut receive) = tokio::sync::mpsc::channel(1);
+        let result = styx_runtime::foreground::gateway_run(
+            Path::new("relative-test-state"),
+            CancellationToken::new(),
+            send,
+        )
+        .await;
+        assert!(matches!(result, Err(error) if error.code() == "absolute_state_directory_required"));
+        let mut event = receive.recv().await.unwrap();
+        event.event = "connecting";
+        event.device_id = Some("setup-computer".to_owned().try_into().unwrap());
         assert_eq!(runtime_event_line(&event), "This computer: connecting");
         event.reason = Some("waiting");
         assert_eq!(

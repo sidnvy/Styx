@@ -37,6 +37,8 @@ pub enum NativeReleaseReader {
     NativeServiceRuntimeSelectedV1,
     /// Retained App owner transfer into the original persistent-service root.
     NativeAppServiceTransferredV1,
+    /// Signed capability for schema7 and complete terminal enrollment rejection.
+    NativePairingLifecycleV1,
 }
 impl NativeReleaseReader {
     /// Signed feature declaration, not evidence of successful migration.
@@ -48,11 +50,25 @@ impl NativeReleaseReader {
                 | Self::NativeAppRuntimeSelectedV1
                 | Self::NativeServiceRuntimeSelectedV1
                 | Self::NativeAppServiceTransferredV1
+                | Self::NativePairingLifecycleV1
         )
     }
 
     /// Signed reader declaration only; no runtime health or activation authority.
     pub fn supports_state_reader(self, reader: ReaderContract) -> bool {
+        if self == Self::NativePairingLifecycleV1 {
+            return matches!(
+                reader,
+                ReaderContract::NativeManagementStateV1
+                    | ReaderContract::NativeMigratedStateV1
+                    | ReaderContract::NativeMigratedStateV2
+                    | ReaderContract::NativeRuntimeSelectedStateV1
+                    | ReaderContract::NativeAppRuntimeSelectedStateV1
+                    | ReaderContract::NativeServiceRuntimeSelectedStateV1
+                    | ReaderContract::NativeAppServiceTransferredStateV1
+                    | ReaderContract::NativePairingLifecycleStateV1
+            );
+        }
         matches!(
             (self, reader),
             (
@@ -379,6 +395,7 @@ impl NativeReleaseManifest {
                     | NativeReleaseReader::NativeAppRuntimeSelectedV1
                     | NativeReleaseReader::NativeServiceRuntimeSelectedV1
                     | NativeReleaseReader::NativeAppServiceTransferredV1
+                    | NativeReleaseReader::NativePairingLifecycleV1
             )
             || !worker_version(&self.version)
             || self.version.contains('+')
@@ -392,6 +409,7 @@ impl NativeReleaseManifest {
             || self.contracts.control != 1
             || self.contracts.management_state
                 != match self.minimum_reader {
+                    NativeReleaseReader::NativePairingLifecycleV1 => 7,
                     NativeReleaseReader::NativeAppServiceTransferredV1 => 6,
                     NativeReleaseReader::NativeServiceRuntimeSelectedV1 => 5,
                     NativeReleaseReader::NativeAppRuntimeSelectedV1 => 4,

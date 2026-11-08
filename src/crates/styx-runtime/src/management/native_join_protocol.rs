@@ -61,7 +61,10 @@ fn token(bytes: &[u8]) -> bool {
 fn verify_seed_key(seed: &NativeHostJoinSeed, key: &DevicePrivateKey) -> Result<()> {
     let public = DevicePublicKey::from_spki_pem(seed.public_key_pem.as_bytes())
         .map_err(|_| ProtocolError("seed_identity"))?;
-    if seed.schema != 1
+    // Cryptographic inspection also reads historical schema1 seeds. This is
+    // not permission to dispatch or append new-format terminal markers; those
+    // entry points separately require the current seed/state reader contract.
+    if !matches!(seed.schema, 1 | 2)
         || public.spki_der() != key.public_key().spki_der()
         || Sha256Digest::of_bytes(public.spki_der()) != seed.fingerprint
     {
@@ -214,6 +217,94 @@ struct ClaimResponse {
     crypto: String,
     encrypted_credential: String,
     approved_capabilities: Capabilities,
+}
+/// A terminal refusal is accepted only for the original authenticated claim;
+/// it can never carry credentials or even one granted capability.
+pub(super) fn rejected_claim(pending: &PendingJoin, raw: &[u8]) -> Result<bool> {
+    #[derive(Deserialize)]
+    struct Decision {
+        status: String,
+    }
+    if parse::<Decision>(raw)?.status != "rejected" {
+        return Ok(false);
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DeniedCapabilities {
+        exec: bool,
+        computer: bool,
+        browser: bool,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Rejected {
+        status: String,
+        request_id: String,
+        approved_capabilities: DeniedCapabilities,
+    }
+    let rejected: Rejected = parse(raw)?;
+    if rejected.status != "rejected"
+        || rejected.request_id != pending.request_id
+        || rejected.approved_capabilities.exec
+        || rejected.approved_capabilities.computer
+        || rejected.approved_capabilities.browser
+    {
+        return Err(ProtocolError("claim_rejection_binding"));
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod rejection_tests {
+    use super::*;
+
+    #[test]
+    fn rejection_reply_is_terminal_only_for_the_original_request_without_grants_or_credentials() {
+        let pending = PendingJoin {
+            request_id: "0123456789abcdef0123456789abcdef".into(),
+            comparison_code: "ABCD-0123-EF45-6789".into(),
+            expires_at: 1,
+            claim_secret: Zeroizing::new("test-only-claim-not-a-real-secret".into()),
+        };
+        let valid = serde_json::json!({"status":"rejected","request_id":pending.request_id,
+            "approved_capabilities":{"exec":false,"computer":false,"browser":false}});
+        assert!(matches!(
+            rejected_claim(&pending, &serde_json::to_vec(&valid).unwrap()),
+            Ok(true)
+        ));
+        // Rejection is historical; its validated original marker remains
+        // readable after expiry. This parser does not authorize another HTTP call.
+        for field in [
+            "request_id",
+            "exec",
+            "computer",
+            "browser",
+            "credential",
+            "missing",
+        ] {
+            let mut invalid = valid.clone();
+            match field {
+                "request_id" => invalid["request_id"] = "ffffffffffffffffffffffffffffffff".into(),
+                "credential" => invalid["encrypted_credential"] = "forbidden".into(),
+                "missing" => {
+                    invalid["approved_capabilities"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("exec");
+                }
+                capability => invalid["approved_capabilities"][capability] = true.into(),
+            }
+            assert!(
+                rejected_claim(&pending, &serde_json::to_vec(&invalid).unwrap()).is_err(),
+                "{field}"
+            );
+        }
+        assert!(matches!(
+            rejected_claim(&pending, br#"{"status":"approved"}"#),
+            Ok(false)
+        ));
+        assert!(rejected_claim(&pending, br#"{"status":"rejected","status":"approved"}"#).is_err());
+    }
 }
 pub(super) fn decrypt_claim(
     seed: &NativeHostJoinSeed,

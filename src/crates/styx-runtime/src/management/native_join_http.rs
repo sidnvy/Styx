@@ -284,6 +284,25 @@ pub(crate) async fn exchange_local_admin(
     )
     .await
 }
+/// Fixed one-shot local-admin rejection. A lost reply remains unknown; this
+/// helper never retries, redirects or turns the request into discovery.
+pub(crate) async fn exchange_local_rejection(
+    origin: &url::Url,
+    tls: &GatewayClientTls,
+    body: &[u8],
+    bearer: &[u8],
+) -> Result<JoinHttpResponse, JoinHttpError> {
+    exchange_once(
+        origin,
+        tls,
+        hyper::Method::POST,
+        "/styx/enroll/reject",
+        body,
+        Some(bearer),
+        MAX_TIMEOUT,
+    )
+    .await
+}
 /// Fixed read-only admin discovery; never retries a failed mutation.
 pub(crate) async fn exchange_local_pending(
     origin: &url::Url,

@@ -71,6 +71,8 @@ test('native reader envelopes bind signed schemas4/5/6 without upgrading old dec
  manifest.contracts.management_state=5;seal();assert.throws(()=>authenticateNativeMacRuntimeEnvelope(input,'x64'),/native_macos_c08_required/);
  manifest.minimum_reader='native_app_service_transferred_v1';seal();assert.throws(()=>authenticateNativeMacRuntimeEnvelope(input,'x64'),/native_macos_c08_required/);
  manifest.contracts.management_state=6;seal();assert.equal(authenticateNativeMacRuntimeEnvelope(input,'x64').manifest.minimum_reader,'native_app_service_transferred_v1');
+ manifest.minimum_reader='native_pairing_lifecycle_v1';seal();assert.throws(()=>authenticateNativeMacRuntimeEnvelope(input,'x64'),/native_macos_c08_required/);
+ manifest.contracts.management_state=7;seal();assert.equal(authenticateNativeMacRuntimeEnvelope(input,'x64').manifest.minimum_reader,'native_pairing_lifecycle_v1');
  manifest.minimum_reader='native_service_runtime_selected_v1';seal();assert.throws(()=>authenticateNativeMacRuntimeEnvelope(input,'x64'),/native_macos_c08_required/);
 });
 

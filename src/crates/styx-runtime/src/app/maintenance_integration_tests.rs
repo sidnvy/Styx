@@ -342,8 +342,16 @@ async fn inside_reference_refused(
     drop(app);
 }
 
+// Historical pre-bootstrap topology reference. Its enroll() helper used to
+// leave the selected Runtime inside the disposable App. Default first setup
+// now stages outside the App, so this historical precondition must first be
+// reproduced by an authenticated pre-bootstrap producer before this test can
+// be used again. Do not add a product skip-bootstrap switch, edit canonical
+// state, or treat this ignored historical scenario as current D3 acceptance.
+// Current default staging/App-replacement coverage lives in
+// runtime_bootstrap_tests::fresh_profile_reopens_from_external_runtime_after_bundle_replacement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires STYX_TEST_APP_CONTROL_SELECTION: real signed Linux native runtime supporting App-selected reader; disposable strict-TLS enrollment/C07/filesystem, no Host executor"]
+#[ignore = "historical pre-bootstrap profile producer required; current default-staging helper no longer establishes the old App-bound precondition; not a current delivery gate"]
 async fn original_app_maintenance_distinguishes_live_c07_from_launch_and_history() {
     let selection_file = PathBuf::from(std::env::var("STYX_TEST_APP_CONTROL_SELECTION").unwrap());
     assert!(selection_file.is_absolute());

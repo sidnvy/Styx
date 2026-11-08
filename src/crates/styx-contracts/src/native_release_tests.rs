@@ -395,3 +395,39 @@ fn tunnel_client_is_optional_and_confined_to_its_fixed_directory() {
         "tunnel_client"
     );
 }
+
+#[test]
+fn pairing_reader7_signed_capability_is_explicit_and_incompatible_with_every_old_reader() {
+    let mut manifest = runtime(NativeReleaseTarget::LinuxX86_64Gnu, &[]);
+    manifest.minimum_reader = NativeReleaseReader::NativePairingLifecycleV1;
+    manifest.contracts.management_state = 7;
+    assert!(manifest.validate().is_ok());
+    assert!(manifest.minimum_reader.supports_host_admission_v2());
+    for reader in [
+        ReaderContract::NativeManagementStateV1,
+        ReaderContract::NativeMigratedStateV1,
+        ReaderContract::NativeMigratedStateV2,
+        ReaderContract::NativeRuntimeSelectedStateV1,
+        ReaderContract::NativeAppRuntimeSelectedStateV1,
+        ReaderContract::NativeServiceRuntimeSelectedStateV1,
+        ReaderContract::NativeAppServiceTransferredStateV1,
+        ReaderContract::NativePairingLifecycleStateV1,
+    ] {
+        assert!(manifest.minimum_reader.supports_state_reader(reader));
+    }
+    for old in [
+        NativeReleaseReader::NativeReleaseV1,
+        NativeReleaseReader::NativeRuntimeV1,
+        NativeReleaseReader::NativeRuntimeMigratedV1,
+        NativeReleaseReader::NativeRuntimeMigratedV2,
+        NativeReleaseReader::NativeRuntimeMigratedV3,
+        NativeReleaseReader::NativeRuntimeSelectedV1,
+        NativeReleaseReader::NativeAppRuntimeSelectedV1,
+        NativeReleaseReader::NativeServiceRuntimeSelectedV1,
+        NativeReleaseReader::NativeAppServiceTransferredV1,
+    ] {
+        assert!(!old.supports_state_reader(ReaderContract::NativePairingLifecycleStateV1));
+    }
+    manifest.contracts.management_state = 6;
+    assert!(manifest.validate().is_err());
+}

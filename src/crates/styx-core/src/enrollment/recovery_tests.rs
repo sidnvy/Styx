@@ -162,6 +162,88 @@ fn seal(
     .unwrap();
 }
 #[test]
+fn rejected_request_survives_recovery_and_changed_target_is_not_replayed() {
+    let mut h = history();
+    h.entries.truncate(2); // The invitation and original pending join only.
+    let highwater = intent_contract::decode(&h.entries[1].bytes)
+        .unwrap()
+        .sequence;
+    let (mut ledger, control) = recovering();
+    replay(&mut ledger, &control, &h);
+    seal(&mut ledger, &control, &h, None, highwater);
+    let pending = ledger
+        .pending_for_admin(&control.admin(), 101)
+        .unwrap()
+        .remove(0);
+    let reject = ledger
+        .reject(
+            &control.admin(),
+            RejectionRequest {
+                request: pending.facts.request.clone(),
+                device: pending.facts.device.clone(),
+                fingerprint: pending.facts.fingerprint,
+                comparison: pending.facts.comparison.clone(),
+            },
+            101,
+        )
+        .unwrap();
+    let mut invalid = reject.body().clone();
+    let Mutation::Reject { target } = &mut invalid.mutation else {
+        unreachable!()
+    };
+    target.fingerprint = hash("different-key");
+    let bytes = intent_contract::encode(&invalid).unwrap();
+    let (mut verifier, verifier_control) = recovering();
+    replay(&mut verifier, &verifier_control, &h);
+    assert!(
+        verifier
+            .recover_committed(
+                verifier_control
+                    .attest_recovery_record(
+                        &bytes,
+                        Sha256Digest::of_bytes(&bytes),
+                        h.entries.last().map(|e| e.receipt),
+                        hash("invalid-record"),
+                    )
+                    .unwrap()
+            )
+            .is_err()
+    );
+    save(&mut ledger, &control, reject, &mut h.entries);
+    let highwater = intent_contract::decode(&h.entries.last().unwrap().bytes)
+        .unwrap()
+        .sequence;
+    let (mut recovered, recovered_control) = recovering();
+    replay(&mut recovered, &recovered_control, &h);
+    recovered
+        .finish_recovery(recovered_control.attest_recovery_closure(
+            h.entries.len() as u64,
+            highwater,
+            h.entries.last().map(|e| e.receipt),
+            None,
+            200,
+            201,
+        ))
+        .unwrap();
+    assert_eq!(
+        recovered
+            .claim(&recovered_control.attest_claim(h.request, h.claim), 202)
+            .unwrap(),
+        ClaimView::Rejected
+    );
+    assert!(
+        recovered
+            .pending_for_admin(&recovered_control.admin(), 202)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        recovered
+            .authentication_target(&recovered_control, &h.device.id)
+            .is_err()
+    );
+}
+#[test]
 fn original_history_all_authority_gates_chain_and_exact_dependencies() {
     let h = history();
     let (mut l, c) = recovering();

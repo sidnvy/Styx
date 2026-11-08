@@ -1,5 +1,10 @@
 # Native GUI delivery convergence — 2026-11-07
 
+> Current execution route (2026-11-08):
+> [END-TO-END-DELIVERY-PLAN.md](END-TO-END-DELIVERY-PLAN.md) is the single plan for
+> remaining work, ownership, phase exits and failure handling. The chronological
+> reports below are evidence history, not a current completion claim.
+
 Owner request: finish the existing product's native GUI and deliver packages that
 can be accepted end to end on PilotMac and NAB5. This is not a new Rust rewrite.
 

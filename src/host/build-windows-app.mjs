@@ -21,7 +21,7 @@ function nativeImage(file){
  regular(file);const fd=fs.openSync(file,'r');try{const mz=Buffer.alloc(64);assert(fs.readSync(fd,mz,0,64,0)===64&&mz.toString('ascii',0,2)==='MZ','native_windows_pe32_plus_required');const offset=mz.readUInt32LE(60),pe=Buffer.alloc(26);assert(offset>=64&&offset<=16*1024*1024&&fs.readSync(fd,pe,0,26,offset)===26&&pe.subarray(0,4).equals(Buffer.from([80,69,0,0]))&&pe.readUInt16LE(4)===0x8664&&pe.readUInt16LE(20)>=2&&pe.readUInt16LE(24)===0x20b&&(pe.readUInt16LE(22)&2)!==0&&(pe.readUInt16LE(22)&0x2000)===0,'native_windows_pe32_plus_required');}finally{fs.closeSync(fd);}
 }
 const nativeRelative=name=>rel(name)&&name.split('/').every(part=>!/[. ]$/.test(part)&&!/[<>"|?*\u0000-\u001f]/.test(part)&&!/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part));
-const nativeStateSchema=Object.freeze({native_runtime_migrated_v1:2,native_runtime_migrated_v2:2,native_runtime_migrated_v3:2,native_runtime_selected_v1:3,native_app_runtime_selected_v1:4,native_service_runtime_selected_v1:5,native_app_service_transferred_v1:6});
+const nativeStateSchema=Object.freeze({native_runtime_migrated_v1:2,native_runtime_migrated_v2:2,native_runtime_migrated_v3:2,native_runtime_selected_v1:3,native_app_runtime_selected_v1:4,native_service_runtime_selected_v1:5,native_app_service_transferred_v1:6,native_pairing_lifecycle_v1:7});
 export function verifyNativeWindowsRuntimeInput(input,arch){
  assert(input&&typeof input==='object'&&!Array.isArray(input)&&Object.keys(input).sort().join(',')==='expectedPublisher,payloadDir,publisherFile','complete_native_runtime_inputs_required');
  for(const file of [input.payloadDir,input.publisherFile])assert(typeof file==='string'&&path.isAbsolute(file),'absolute_native_runtime_inputs_required');

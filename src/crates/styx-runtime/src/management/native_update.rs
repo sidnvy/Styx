@@ -238,7 +238,14 @@ fn require_initialized_profile(
             )
             .map_err(|_| invalid())?;
             let credential = held.files[credential_file].bytes();
-            if seed.schema != 1
+            if !matches!(seed.schema, 1 | 2)
+                || (seed.schema == 2
+                    && state.reader_contract
+                        != styx_contracts::management::ReaderContract::NativePairingLifecycleStateV1)
+                || (seed.schema == 1
+                    && state.reader_contract
+                        == styx_contracts::management::ReaderContract::NativePairingLifecycleStateV1
+                    && state.runtime_update().map_err(|_| invalid())?.is_none())
                 || ready.schema != 1
                 || seed_hash != expected
                 || seed.root_identity != transactions.marker().root_identity

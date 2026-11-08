@@ -144,6 +144,26 @@ mod files {
 }
 
 impl<'a> EnrollmentJournal<'a> {
+    /// Format gate under the caller's existing configuration mutex/writer.
+    /// Never call owner.with_state here: OwnedEnrollmentJournal already holds it.
+    pub(crate) fn require_pairing_lifecycle_reader(&self) -> JournalResult<()> {
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
+        {
+            super::pairing_reader::require(self.root, self.writer)
+        }
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
+        {
+            Err(JournalError::Unsupported)
+        }
+    }
     pub fn open(
         root: &'a PrivateRoot,
         writer: &'a mut ConfigurationWriterGuard,
@@ -250,6 +270,9 @@ impl<'a> EnrollmentJournal<'a> {
             return Err(JournalError::Conflict);
         }
         let body = contract::decode(original_bytes).map_err(|_| JournalError::InvalidInput)?;
+        if matches!(&body.mutation, Mutation::Reject { .. }) {
+            self.require_pairing_lifecycle_reader()?;
+        }
         let binding = IntentBinding {
             transaction: body.transaction,
             epoch: body.gateway_epoch,

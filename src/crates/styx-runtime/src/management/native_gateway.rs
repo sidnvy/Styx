@@ -510,6 +510,13 @@ mod platform {
             release::verify_selected(&selection)
                 .map_err(|_| BootstrapError::new("fresh_gateway_candidate_untrusted", 2))?,
         );
+        if !candidate
+            .manifest()
+            .minimum_reader
+            .supports_state_reader(ReaderContract::NativePairingLifecycleStateV1)
+        {
+            return Err(BootstrapError::new("fresh_gateway_reader_unsupported", 2));
+        }
         // Match the original selection directly. The publication getter would
         // repeat this complete inventory walk twice at the same boundary.
         candidate
@@ -599,10 +606,10 @@ mod platform {
                 serde_json::value::to_raw_value(&selection).map_err(|_| bad())?,
             );
             let state = NativeState {
-                schema: NATIVE_STATE_SCHEMA,
+                schema: NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA,
                 kind: NativeStateKind::StyxDesiredState,
                 runtime_format: NativeRuntimeFormat::NativeRustV1,
-                reader_contract: ReaderContract::NativeManagementStateV1,
+                reader_contract: ReaderContract::NativePairingLifecycleStateV1,
                 scope_generation: fresh.marker().scope_generation,
                 deployment_raw_sha256: ready.deployment_raw_sha256,
                 mode: NativeDeploymentMode::CreateLocal,

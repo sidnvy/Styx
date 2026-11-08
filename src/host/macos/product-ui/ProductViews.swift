@@ -406,7 +406,9 @@ struct ProductView: View {
                         Text(model.status["enrollment"]["fingerprint"].string ?? "").font(.caption).textSelection(.enabled)
                         Button(productText("检查批准", "Check confirmation")) { model.nativeClaim() }
                     }
-                    if model.status["foreground"]["error"].string == "gateway_wss_admission_refused" {
+                    if model.status["enrollment"]["status"].string == "rejected" {
+                        Text(productText("管理电脑已拒绝此次申请，未授予访问权限。更改这台电脑的设置后，可使用新邀请重新申请。", "The Gateway rejected this request. No access was granted. Change this computer's setup to apply again with a new invitation.")).foregroundStyle(.secondary)
+                    } else if model.status["foreground"]["error"].string == "gateway_wss_admission_refused" {
                         Text(productText("网关拒绝了这台电脑的访问。请更改这台电脑的角色并重新配对。", "The Gateway refused this computer's access. Change this computer's role to pair again.")).foregroundStyle(.secondary)
                     } else if model.nativeSupportsOperation("connect") {
                         Button(productText("重新连接", "Reconnect")) { model.resumeForeground() }.disabled(model.busy || model.status["admission_fenced"].bool)
@@ -513,6 +515,7 @@ struct ProductView: View {
         case "not_approved": return productText("尚未获管理电脑批准", "Not approved by the owner")
         case "running", "starting", "connecting": return productText("正在处理", "In progress")
         case "awaiting_approval": return productText("等待管理电脑批准", "Awaiting approval")
+        case "rejected": return productText("申请已被拒绝", "Request rejected")
         case "preflight_passed": return productText("基础检查通过", "Preflight passed")
         case "failed", "uncertain", "blocked", "needs_attention": return productText("需要检查", "Needs attention")
         case "session_unavailable": return productText("需要图形登录会话", "Graphical login required")

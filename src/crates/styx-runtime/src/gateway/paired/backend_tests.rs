@@ -5,7 +5,10 @@ fn args(v: Value) -> Option<Map<String, Value>> {
 }
 #[test]
 fn frozen_tools_and_exec_arguments_preserve_legacy_edges() {
-    assert_eq!(PUBLIC.len(), 38);
+    assert_eq!(PUBLIC.len(), 35);
+    for name in ["type_text", "press_key", "scroll"] {
+        assert!(!PUBLIC.iter().any(|tool| tool.name == name));
+    }
     assert_eq!(PUBLIC[0].name, "exec_command");
     assert_eq!(PUBLIC[1].name, "write_stdin");
     assert_eq!(

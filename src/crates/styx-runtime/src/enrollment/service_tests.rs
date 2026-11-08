@@ -1162,3 +1162,510 @@ async fn actual_strict_tls_enrollment_service_full_journey() {
 
 #[path = "paired_journey.rs"]
 mod paired_journey;
+
+/// Isolated real TLS/crypto/journal rejection closure. This deliberately does
+/// not claim a native C07 reader upgrade or GUI acceptance.
+#[tokio::test]
+#[ignore = "requires STYX_TEST_ENROLLMENT_SERVICE_ROOT, STYX_TEST_TLS_FIXTURES and STYX_TEST_NODE22; actual TLS rejection/new-request/restart"]
+async fn actual_strict_tls_rejection_survives_restart_without_reviving_old_claim() {
+    let parent = PathBuf::from(std::env::var("STYX_TEST_ENROLLMENT_SERVICE_ROOT").unwrap());
+    let _ = PrivateRoot::open(&parent).unwrap();
+    let path = parent.join(uuid::Uuid::new_v4().to_string());
+    let fixture = PathBuf::from(std::env::var("STYX_TEST_TLS_FIXTURES").unwrap());
+    let cert = std::fs::read(fixture.join("cert-a.pem")).unwrap();
+    let ca = std::fs::read(fixture.join("ca-a.pem")).unwrap();
+    let leaf_der = rustls_pemfile::certs(&mut std::io::Cursor::new(&cert))
+        .next()
+        .unwrap()
+        .unwrap();
+    let ca_der = rustls_pemfile::certs(&mut std::io::Cursor::new(&ca))
+        .next()
+        .unwrap()
+        .unwrap();
+    let leaf = GatewayLeafPin::from_certificate_der(leaf_der.as_ref());
+    let anchor = TrustAnchorPin::from_certificate_der(ca_der.as_ref());
+    let key = PrivateKeyPem::from_protected_reader_bytes(
+        std::fs::read(fixture.join("key-a.pem")).unwrap(),
+    )
+    .unwrap();
+    let tls = Arc::new(GatewayServerTls::from_pem(&cert, &key, leaf.clone()).unwrap());
+    let client_tls =
+        Arc::new(GatewayClientTls::from_pinned_ca_pem(&ca, anchor, Some(leaf)).unwrap());
+    drop(key);
+    let node = Arc::new(Mutex::new(NodeClient::start().await));
+    let owner: ServerOwner = Arc::new(Mutex::new(None));
+    let worker_node = node.clone();
+    let worker_owner = owner.clone();
+    let worker = tokio::spawn(async move {
+        let admin = random_token();
+        let mcp = random_token();
+        let mcp_digest = Sha256Digest::of_bytes(mcp.as_bytes());
+        let device = DeviceId::try_from("styx-0123456789abcdef01234567").unwrap();
+        let (public_key, fingerprint) = {
+            let node = worker_node.lock().await;
+            (node.hello.public_a.clone(), node.hello.fingerprint_a)
+        };
+        let old_path = path.with_extension("old-reader");
+        let (old_client, old_app) = start_server(
+            &worker_owner,
+            rejection_signed_store(&old_path, false),
+            tls.clone(),
+            client_tls.clone(),
+            admin.as_bytes(),
+            mcp_digest,
+        )
+        .await;
+        let old_pending =
+            rejection_test_join(&old_client, &worker_node, &admin, &device, &public_key).await;
+        let inventory = rejection_journal_inventory(&old_app);
+        let old_decision = json!({"request_id":old_pending.request_id,"device_id":device,
+            "fingerprint":fingerprint,"comparison_code":old_pending.comparison_code});
+        assert!(
+            old_client
+                .request(
+                    Method::POST,
+                    "/styx/enroll/reject",
+                    Some(&admin),
+                    &encoded(&old_decision)
+                )
+                .await
+                .status
+                >= 400,
+            "an old canonical reader must refuse before a new-format rejection write"
+        );
+        assert_eq!(
+            rejection_journal_inventory(&old_app),
+            inventory,
+            "old-reader refusal cannot append even a partial decision"
+        );
+        drop(old_app);
+        assert_joined(&stop_server(&worker_owner).await.unwrap());
+        let (client, app) = start_server(
+            &worker_owner,
+            rejection_signed_store(&path, true),
+            tls.clone(),
+            client_tls.clone(),
+            admin.as_bytes(),
+            mcp_digest,
+        )
+        .await;
+        let joined = rejection_test_join(&client, &worker_node, &admin, &device, &public_key).await;
+        let old_claim = encoded(&ClaimRequest {
+            request_id: &joined.request_id,
+            claim_secret: joined.claim_secret.expose(),
+        });
+        let rejection = json!({"request_id":joined.request_id,"device_id":device,
+            "fingerprint":fingerprint,"comparison_code":joined.comparison_code});
+        let before = committed(&app);
+        assert_eq!(
+            client
+                .request(
+                    Method::POST,
+                    "/styx/enroll/reject",
+                    Some(&mcp),
+                    &encoded(&rejection)
+                )
+                .await
+                .status,
+            401
+        );
+        for field in ["request_id", "device_id", "fingerprint", "comparison_code"] {
+            let mut wrong = rejection.clone();
+            wrong[field] = match field {
+                "fingerprint" => {
+                    serde_json::to_value(Sha256Digest::of_bytes(b"wrong-key")).unwrap()
+                }
+                "device_id" => "styx-ffffffffffffffffffffffff".into(),
+                "request_id" => "ffffffffffffffffffffffffffffffff".into(),
+                _ => "FFFF-FFFF-FFFF-FFFF".into(),
+            };
+            assert!(
+                client
+                    .request(
+                        Method::POST,
+                        "/styx/enroll/reject",
+                        Some(&admin),
+                        &encoded(&wrong)
+                    )
+                    .await
+                    .status
+                    >= 400,
+                "{field}"
+            );
+        }
+        assert_eq!(
+            committed(&app),
+            before,
+            "wrong binding and MCP authority cannot commit a decision"
+        );
+        assert_eq!(
+            client
+                .request(Method::POST, "/styx/enroll/claim", None, &old_claim)
+                .await
+                .status,
+            202
+        );
+        assert_eq!(
+            client
+                .request(
+                    Method::POST,
+                    "/styx/enroll/reject",
+                    Some(&admin),
+                    &encoded(&rejection)
+                )
+                .await
+                .status,
+            200
+        );
+        assert_eq!(committed(&app), before + 1);
+        let rejected = json!({"status":"rejected","request_id":joined.request_id,
+            "approved_capabilities":{"exec":false,"computer":false,"browser":false}});
+        assert_eq!(
+            client
+                .request(Method::POST, "/styx/enroll/claim", None, &old_claim)
+                .await
+                .decode::<Value>(),
+            rejected
+        );
+        assert_eq!(
+            client
+                .request(Method::GET, "/styx/enroll/devices", Some(&admin), b"")
+                .await
+                .decode::<Value>(),
+            json!([])
+        );
+        assert_eq!(
+            client
+                .request(Method::GET, "/styx/enroll/pending", Some(&admin), b"")
+                .await
+                .decode::<Value>(),
+            json!([])
+        );
+        assert!(
+            client
+                .request(
+                    Method::POST,
+                    "/styx/enroll/reject",
+                    Some(&admin),
+                    &encoded(&rejection)
+                )
+                .await
+                .status
+                >= 400
+        );
+        assert_eq!(
+            committed(&app),
+            before + 1,
+            "terminal rejection is not dispatched twice"
+        );
+
+        drop(app);
+        assert_joined(&stop_server(&worker_owner).await.unwrap());
+        let (client, app) = start_server(
+            &worker_owner,
+            reopen_store(&path),
+            tls,
+            client_tls,
+            admin.as_bytes(),
+            mcp_digest,
+        )
+        .await;
+        assert_eq!(
+            client
+                .request(Method::POST, "/styx/enroll/claim", None, &old_claim)
+                .await
+                .decode::<Value>(),
+            rejected,
+            "actual durable reopen preserves the terminal denial"
+        );
+        let next = rejection_test_join(&client, &worker_node, &admin, &device, &public_key).await;
+        assert_ne!(next.request_id, joined.request_id);
+        let approval = json!({"request_id":next.request_id,"fingerprint":fingerprint,
+            "enable_computer":false,"enable_browser":false});
+        assert_eq!(
+            client
+                .request(
+                    Method::POST,
+                    "/styx/enroll/approve",
+                    Some(&admin),
+                    &encoded(&approval)
+                )
+                .await
+                .status,
+            200
+        );
+        let next_claim = encoded(&ClaimRequest {
+            request_id: &next.request_id,
+            claim_secret: next.claim_secret.expose(),
+        });
+        let approved = client
+            .request(Method::POST, "/styx/enroll/claim", None, &next_claim)
+            .await;
+        assert_eq!(approved.status, 200);
+        let approved: Claimed = approved.decode();
+        let _credential = worker_node
+            .lock()
+            .await
+            .unwrap("a", &approved.encrypted_credential, &next.request_id)
+            .await;
+        assert_eq!(
+            client
+                .request(Method::POST, "/styx/enroll/claim", None, &old_claim)
+                .await
+                .decode::<Value>(),
+            rejected,
+            "approval of a fresh request must never revive the original claim"
+        );
+        let old_approval = json!({"request_id":joined.request_id,"fingerprint":fingerprint,
+            "enable_computer":true,"enable_browser":true});
+        assert!(
+            client
+                .request(
+                    Method::POST,
+                    "/styx/enroll/approve",
+                    Some(&admin),
+                    &encoded(&old_approval)
+                )
+                .await
+                .status
+                >= 400,
+            "the rejected request cannot be approved after a new request succeeded"
+        );
+        let denied_confirmation = URL_SAFE_NO_PAD.encode([0u8; 32]);
+        let old_confirm = ConfirmRequest {
+            request_id: &joined.request_id,
+            claim_secret: joined.claim_secret.expose(),
+            confirmation: &denied_confirmation,
+        };
+        assert!(
+            client
+                .request(
+                    Method::POST,
+                    "/styx/enroll/confirm",
+                    None,
+                    &encoded(&old_confirm)
+                )
+                .await
+                .status
+                >= 400,
+            "a rejected claim never reaches connection confirmation"
+        );
+        assert_eq!(committed(&app), before + 4);
+        println!(
+            "REJECTION_TLS_STATE status=PASS signed_test_reader_floor=PASS wrong_binding_no_commit=PASS actual_restart=PASS fresh_same_key_approval=PASS old_claim_never_revived=PASS installed_reader_activation=NOT_RUN native_GUI=NOT_RUN"
+        );
+    });
+    let outcome = worker.await;
+    if let Some(facts) = stop_server(&owner).await {
+        assert_joined(&facts);
+    }
+    node.lock().await.stop().await;
+    outcome.unwrap();
+}
+
+async fn rejection_test_join(
+    client: &Client,
+    node: &Arc<Mutex<NodeClient>>,
+    admin: &str,
+    device: &DeviceId,
+    public_key: &str,
+) -> Joined {
+    use zeroize::Zeroize;
+    let reply = client
+        .request(Method::POST, "/styx/enroll/invitations", Some(admin), b"{}")
+        .await;
+    assert_eq!(reply.status, 200);
+    let invitation: InvitationReply = reply.decode();
+    let mut payload = JoinPayload {
+        invitation: invitation.invitation.expose().into(),
+        device_id: device.clone(),
+        label: "Owned rejection fixture".into(),
+        platform: "linux".into(),
+        cwd: "/tmp".into(),
+        shell: "/bin/sh".into(),
+        computer_requested: false,
+        browser_requested: Some(false),
+        public_key_pem: public_key.into(),
+    };
+    let signature = node.lock().await.sign_join("a", &payload).await;
+    let wire = encoded(&SignedJoin {
+        payload: &payload,
+        signature: &signature,
+    });
+    let reply = client
+        .request(Method::POST, "/styx/enroll/join", None, &wire)
+        .await;
+    payload.invitation.zeroize();
+    assert_eq!(reply.status, 202);
+    let joined: Joined = reply.decode();
+    let comparison = node
+        .lock()
+        .await
+        .comparison(
+            &format!("https://{}", client.host),
+            reply.leaf,
+            &joined.request_id,
+            joined.fingerprint,
+        )
+        .await;
+    assert_eq!(
+        comparison, joined.comparison_code,
+        "independent actual TLS leaf comparison"
+    );
+    joined
+}
+
+fn rejection_journal_inventory(
+    app: &EnrollmentHttp,
+) -> std::collections::BTreeMap<String, Sha256Digest> {
+    app.with_service(|service| {
+        service.store.with_journal(|journal| {
+            Ok(journal
+                .scan()?
+                .files
+                .into_iter()
+                .map(|file| (file.name.clone(), Sha256Digest::of_bytes(file.bytes())))
+                .collect())
+        })
+    })
+    .unwrap()
+}
+
+/// Protected C07 genesis plus a genuinely signed minimal C08 closure, with a
+/// synthetic publisher. Opaque executable bytes are never run or installed.
+fn rejection_signed_store(path: &Path, pairing_reader: bool) -> OwnedEnrollmentJournal {
+    use crate::{crypto::PublisherVerifyingKey, release, store::native_root};
+    use base64::Engine as _;
+    use ed25519_dalek::{Signer as _, SigningKey, pkcs8::EncodePublicKey as _};
+    use std::{
+        collections::BTreeMap,
+        io::Write as _,
+        os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _},
+    };
+    use styx_contracts::{
+        management::ReaderContract, native_management::*, native_release::NativeReleaseMember,
+    };
+    fn directory(path: &Path) {
+        std::fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+    }
+    fn write(path: &Path, bytes: &[u8], executable: bool) {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(if executable { 0o700 } else { 0o600 })
+            .open(path)
+            .unwrap();
+        file.write_all(bytes).unwrap();
+        file.sync_all().unwrap();
+    }
+    assert!(!path.exists());
+    let container = path.with_file_name(format!(
+        "{}.signed-fixture",
+        path.file_name().unwrap().to_str().unwrap()
+    ));
+    directory(&container);
+    let payload = container.join("payload");
+    directory(&payload);
+    directory(&payload.join("bin"));
+    let sources = [
+        (
+            "LICENSE",
+            b"synthetic reader gate fixture".as_slice(),
+            false,
+        ),
+        (
+            "bin/styx",
+            b"\x7fELF synthetic image; never executed".as_slice(),
+            true,
+        ),
+        (
+            "source-inputs.json",
+            b"{\"synthetic_reader_fixture\":true}".as_slice(),
+            false,
+        ),
+    ];
+    let files: Vec<_> = sources
+        .iter()
+        .map(|(name, bytes, executable)| {
+            write(&payload.join(name), bytes, *executable);
+            NativeReleaseMember {
+                path: (*name).into(),
+                size: bytes.len() as u64,
+                sha256: Sha256Digest::of_bytes(bytes),
+                executable: *executable,
+            }
+        })
+        .collect();
+    let key = SigningKey::from_bytes(&[59; 32]);
+    let pem = format!(
+        "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
+        base64::engine::general_purpose::STANDARD
+            .encode(key.verifying_key().to_public_key_der().unwrap().as_bytes())
+    );
+    let publisher = container.join("publisher.pem");
+    write(&publisher, pem.as_bytes(), false);
+    let expected = PublisherVerifyingKey::from_spki_pem(pem.as_bytes())
+        .unwrap()
+        .fingerprint()
+        .unwrap();
+    let manifest = json!({"schema":2,"runtime_format":"native_rust_v1","component":"styx",
+        "scope":"runtime_candidate","minimum_reader":if pairing_reader {"native_pairing_lifecycle_v1"} else {"native_runtime_migrated_v3"},
+        "target":"x86_64-unknown-linux-gnu","version":"0.4.0-test.pairing","entrypoint":"bin/styx",
+        "source":{"revision":"1".repeat(40),"inputs_sha256":Sha256Digest::of_bytes(sources[2].1)},
+        "contracts":{"control":1,"management_state":if pairing_reader {7} else {2}},"files":files,"external_workers":[]});
+    let raw = serde_json::to_vec(&manifest).unwrap();
+    write(&payload.join("manifest.json"), &raw, false);
+    write(
+        &payload.join("manifest.sig"),
+        &key.sign(&raw).to_bytes(),
+        false,
+    );
+    let selected = release::verify(&payload, &publisher, &expected)
+        .unwrap()
+        .runtime_selection()
+        .unwrap();
+    let parent = PrivateRoot::open(path.parent().unwrap()).unwrap();
+    let fresh = native_root::create_fresh(&parent, path.file_name().unwrap())
+        .unwrap_or_else(|failure| panic!("fresh test root: {:?}", failure.error()));
+    let deployment = b"{\"synthetic_pairing_reader_fixture\":true}";
+    let state = NativeState {
+        schema: if pairing_reader { 7 } else { 2 },
+        kind: NativeStateKind::StyxDesiredState,
+        runtime_format: NativeRuntimeFormat::NativeRustV1,
+        reader_contract: if pairing_reader {
+            serde_json::from_str::<ReaderContract>("\"native_pairing_lifecycle_state_v1\"").unwrap()
+        } else {
+            ReaderContract::NativeManagementStateV1
+        },
+        scope_generation: fresh.marker().scope_generation,
+        deployment_raw_sha256: Sha256Digest::of_bytes(deployment),
+        mode: NativeDeploymentMode::CreateLocal,
+        revision: 0,
+        last_transaction: None,
+        desired: NativeDesired {
+            gateway: Some(NativeComponentDesired {
+                manager: NativeManager::ForegroundCli,
+                run: NativeRunDesired::Stopped,
+                autostart: NativeAutostartDesired::Disabled,
+            }),
+            host: None,
+        },
+        migration: None,
+        extensions: BTreeMap::from([(
+            NATIVE_RUNTIME_SELECTION_KEY.into(),
+            serde_json::value::to_raw_value(&selected).unwrap(),
+        )]),
+    };
+    let binding = fresh
+        .initialize(deployment, &state)
+        .unwrap_or_else(|failure| panic!("initialize test root: {:?}", failure.error()));
+    let mut store = OwnedEnrollmentJournal::from_configuration(
+        binding.configuration_root(),
+        JournalBudget::default(),
+    )
+    .unwrap();
+    store
+        .with_journal(|journal| journal.record_time_floor(now()))
+        .unwrap();
+    store
+}
