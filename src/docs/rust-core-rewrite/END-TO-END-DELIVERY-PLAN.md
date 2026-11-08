@@ -240,6 +240,11 @@ manifest `9cabcb4c6993561fc6725a22b6d81ee1eb6ca4d0c3d4e83faad0a4d3b9216227`；
 Linux完整worker源已合并原已签Browser及修复版Cua/Codex，原signer就地签名、独立验签及
 2148成员校验PASS；manifest `d5645a9471f2f1b851926ef07b6c1d54987b8c1af362fdaa07d58059e0038252`。
 它是必要候选输入，不是新Runtime包、安装或能力验收。旧C23对reader7 root直接启动负控仍待执行。
+phase46原Mac owner正用冻结774c982源码做一次必要debug CLI编译和隔离root激活负控；
+这不触碰已停止C23 App或产品profile，不是重复release producer。
+774c982集成quality3的所有执行场景、lint、ignored分类及输入稳定性PASS，但新增setup
+测试断言的rustfmt格式FAIL；保留失败，仅格式修正后重新冻结并运行最终集成检查。
+phase46参考源码与后续冻结源码的该项差异仅为test断言格式，不影响reader7产品逻辑。
 Windows C盘最新空闲60,633,088字节；O程序树566,629,898字节。现有删除授权不覆盖O，
 不得直接删除。最终包准备后需按实际安装/外部stage峰值形成具体空间方案；profiles/keys保留。
 用户最终要求的安装、首次设置、真实三能力、拒绝/撤销/重配对、进程退出重开、Linux最新

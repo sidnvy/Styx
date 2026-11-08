@@ -2299,7 +2299,9 @@ mod tests {
             send,
         )
         .await;
-        assert!(matches!(result, Err(error) if error.code() == "absolute_state_directory_required"));
+        assert!(
+            matches!(result, Err(error) if error.code() == "absolute_state_directory_required")
+        );
         let mut event = receive.recv().await.unwrap();
         event.event = "connecting";
         event.device_id = Some("setup-computer".to_owned().try_into().unwrap());
