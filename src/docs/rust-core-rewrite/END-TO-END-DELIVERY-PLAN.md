@@ -6,20 +6,34 @@
 [GUI-CONVERGENCE.md](GUI-CONVERGENCE.md) 保留历史尝试与证据，不能把历史通过当作当前候选通过。
 本文中的计划项不代表已经执行。**交付未完成；Stable NO-GO。**
 
-> 当前出口（2026-11-09）：C25 冻结源码为 `1d34f8fc5cc5efb18a92173add4d68f5dd3275df`，
-> 三平台 Core 及完整 Runtime 已产出。质量沿用原 quality6 的不可变 53 项 PASS
-> 与独立来源等价证明，不能称重新执行。Mac build1134 原签 DMG、Windows `.25`
-> Inno 已完成，三平台均完成C25安装阶段；各能力、配对及恢复仍单独验收。
-> 本段是冻结后的交付进度记录，不改变 C25 源码归属或原收据。
-> P1最新状态（2026-11-09 07:33 UTC）：Windows第二轮单次请求明确`awaiting_approval`，
-> Mac逐项核对身份后仅明确Reject一次，随后“操作未完成”且同请求仍Pending，记
-> FAILED_OR_UNKNOWN、不重放、不记PASS。源码确认本地HTTP客户端漏拒绝路径，最小
-> 修复草稿和真实TLS/Core/持久拒绝回归已通过，尚未进入任何新包或安装。
-> 用户明确确认本次操作，并要求同验收范围后续沿用授权。
-> 补充检查：Mac生产/测试Swift检查、精确源码纯隐私断言和Rust增量检查通过；
-> Windows Rust 1.97.1单crate检查实际退出0，103.781秒、4 jobs、原缓存复用。
-> 新增可选诊断仅输出Rust已缓存的首次故障固定stage/cause与四个固定拒绝码，
-> 默认关闭；它不恢复会话、不改变资格。接下来执行一次候选集成检查，再决定冻结产包。
+> 当前出口（2026-11-09 08:51 UTC）：C26 冻结源码 `40d56df476f926d6a28db86af67d4ba149282c16`，
+> 三平台 Core/完整 Runtime、Mac 原签 App/DMG build1135、Windows `.26` Inno 均已完成。
+> 原同 HEAD 集成质量实际执行53项 PASS；打包、安装与账号效果分别记录，不能相互替代。
+> Mac 已精确安装，保留 profile，GUI 选择 C26 committed；两次必要正常退出的原进程
+> 均实际 exit0，冷重开实际 Core6988/父6986/583b96b…已独立核对，账号三连接可用。
+> 首次 generic refresh 失败后单次 GUI Connect 成功，原失败保留；不能称初次启动无故障。
+> Linux C26 独立安装、Exec/Browser初始效果及重开新Exec效果通过；测试Host/fixture正常退出0，
+> 原b31服务恢复rev92 active/running/enabled，旧Gateway连接仍失败，不能称网络恢复通过。
+> Windows C26未安装：C盘约21GB无需清理，原C25正式app status在正常审核上下文明确
+> exit2 `app_control_peer_or_protocol_refused`，Quit0/install0；需要本人正常托盘退出这一实际动作。
+> 原聊天补充指令已执行；另一次直接续做接口的active-writer错误保留，未开第二owner。
+>
+> 当前新增阻塞是**公开工具声明兼容性**。实际账号Mac及Linux的list_windows可用，
+> 但tree/pixels分支返回 `unsupported_or_invalid_computer_arguments`、uncertain=false，未输入。
+> 本会话实际get_window_state声明仅剩branch flags，缺pid/window/environment；click声明缺element_token。
+> 冻结源码root schema字段完整，直接decoder场景通过；尚不能证明实际转发字段如何丢失。
+> 当前有界草稿仅在现有两个oneOf的每个分支显式重声明公共properties和required，
+> 保留root closed-shape、分支const/not、原decoder和权限不变；语义等价与branch-only投影回归
+> 已实际通过；受影响crate增量check退出0（2.12秒），独立旧快照结构审查未见阻断。
+> 接下来仅执行一次候选检查，不能称连接器或真机已修复。
+> 不重复C26 Computer读取、不重放旧P1 Reject UNKNOWN、不为此改系统权限或重启设备。
+>
+> 下一出口：草稿引用通过→冻结下一个同源码候选→检查真实账号新声明含全部目标字段→
+> 三平台最终安装/实际效果/恢复。P1新邀请、请求、拒绝持续授权有效；双方真正READY后才创建。
+> Windows等待实际正常退出时继续共享合同工作；下一候选就绪后只安装最新精确候选，避免无意义中间安装。
+> P1–P4、Mac同worker安全拒绝恢复、Linux完整Computer旅程和最终installed Logo仍OPEN；Stable NO-GO。
+>
+> 以下C25表与后续时间线为原始历史，保留失败/未知和证据，不继承为C26或下一候选结论。
 
 | C25 当前事实 | 已验证出口 | 下一门槛 |
 | --- | --- | --- |

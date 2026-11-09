@@ -25,6 +25,183 @@ fn advertised_schema(name: &str) -> jsonschema::Validator {
 }
 
 #[test]
+fn branch_only_tool_projection_preserves_bound_targets_and_environment() {
+    let public = surface();
+    for (name, branch, input) in [
+        (
+            "get_window_state",
+            0,
+            json!({"pid":42,"window_id":43,"environment_id":"test-host","include_screenshot":false}),
+        ),
+        (
+            "get_window_state",
+            1,
+            json!({"pid":42,"window_id":43,"environment_id":"test-host","include_accessibility_tree":false}),
+        ),
+        (
+            "click",
+            0,
+            json!({"element_token":"s00000001:0","environment_id":"test-host"}),
+        ),
+        (
+            "click",
+            1,
+            json!({"element_token":"s00000001:0","environment_id":"test-host","button":"right","delivery_mode":"foreground"}),
+        ),
+    ] {
+        let tool = public["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap();
+        let schema = &tool["inputSchema"];
+        let variant = &schema["oneOf"][branch];
+        let fields = variant["properties"].as_object().unwrap();
+        for required in schema["required"].as_array().unwrap() {
+            assert!(
+                variant["required"].as_array().unwrap().contains(required),
+                "{name} branch {branch} omitted required target {required}"
+            );
+        }
+        // Model the observed branch-only declaration, not the unavailable
+        // connector implementation. Discarded common fields must fail here
+        // before they can become a misleading native/permission diagnosis.
+        let projected: Map<String, Value> = input
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(key, _)| fields.contains_key(*key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        assert_eq!(
+            Value::Object(projected.clone()),
+            input,
+            "{name} branch {branch} lost caller fields"
+        );
+        let mut arguments = projected;
+        assert_eq!(arguments.remove("environment_id"), Some(json!("test-host")));
+        let action = decode(name, arguments).unwrap();
+        action.to_operation_payload().unwrap();
+    }
+}
+
+#[test]
+fn complete_branch_declarations_keep_the_existing_schema_admission() {
+    let public = surface();
+    for (name, samples) in [
+        (
+            "get_window_state",
+            vec![
+                (
+                    true,
+                    json!({"pid":42,"window_id":43,"include_screenshot":false}),
+                ),
+                (
+                    true,
+                    json!({"pid":42,"window_id":43,"environment_id":"test-host","include_accessibility_tree":false,"max_image_dimension":1024}),
+                ),
+                (
+                    true,
+                    json!({"pid":42,"window_id":43,"include_screenshot":false,"include_accessibility_tree":true,"tree_format":"elements","max_elements":250,"max_depth":25,"timeout_ms":1000}),
+                ),
+                (false, json!({"window_id":43,"include_screenshot":false})),
+                (false, json!({"pid":42,"include_screenshot":false})),
+                (
+                    false,
+                    json!({"pid":"42","window_id":43,"include_screenshot":false}),
+                ),
+                (
+                    false,
+                    json!({"pid":0,"window_id":43,"include_screenshot":false}),
+                ),
+                (
+                    false,
+                    json!({"pid":42,"window_id":43,"include_screenshot":true,"include_accessibility_tree":true}),
+                ),
+                (
+                    false,
+                    json!({"pid":42,"window_id":43,"include_screenshot":false,"include_accessibility_tree":false}),
+                ),
+                (
+                    false,
+                    json!({"pid":42,"window_id":43,"include_screenshot":false,"max_image_dimension":100}),
+                ),
+                (
+                    false,
+                    json!({"pid":42,"window_id":43,"include_accessibility_tree":false,"max_depth":25}),
+                ),
+                (
+                    false,
+                    json!({"pid":42,"window_id":43,"include_screenshot":false,"unknown":true}),
+                ),
+            ],
+        ),
+        (
+            "click",
+            vec![
+                (true, json!({"element_token":"s00000001:0"})),
+                (
+                    true,
+                    json!({"pid":42,"window_id":43,"environment_id":"test-host","element_token":"s00000001:0","button":"left","delivery_mode":"background"}),
+                ),
+                (
+                    true,
+                    json!({"element_token":"s00000001:0","button":"right","delivery_mode":"foreground"}),
+                ),
+                (false, json!({"button":"left"})),
+                (false, json!({"element_token":42})),
+                (
+                    false,
+                    json!({"element_token":"s00000001:0","button":"right","delivery_mode":"background"}),
+                ),
+                (
+                    false,
+                    json!({"element_token":"s00000001:0","button":"left","delivery_mode":"foreground"}),
+                ),
+                (false, json!({"element_token":"s00000001:0","unknown":true})),
+            ],
+        ),
+    ] {
+        let mut previous = public["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap()["inputSchema"]
+            .clone();
+        let current = jsonschema::validator_for(&previous).unwrap();
+        let common = previous["properties"].as_object().unwrap().clone();
+        let required = previous["required"].as_array().unwrap().clone();
+        // Undo only the redundant common declarations. The previous oneOf
+        // constants, exclusions and outer closed shape remain identical.
+        for branch in previous["oneOf"].as_array_mut().unwrap() {
+            branch["properties"]
+                .as_object_mut()
+                .unwrap()
+                .retain(|key, value| common.get(key) != Some(value));
+            branch["required"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|field| !required.contains(field));
+        }
+        let previous = jsonschema::validator_for(&previous).unwrap();
+        for (accepted, input) in samples {
+            assert_eq!(
+                previous.is_valid(&input),
+                accepted,
+                "previous {name}: {input}"
+            );
+            assert_eq!(
+                current.is_valid(&input),
+                accepted,
+                "current {name}: {input}"
+            );
+        }
+    }
+}
+
+#[test]
 fn styx_discovery_is_a_subset_of_the_unchanged_upstream_catalog() {
     let public = surface();
     let native: Value = serde_json::from_str(include_str!(

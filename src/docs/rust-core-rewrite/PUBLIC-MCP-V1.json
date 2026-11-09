@@ -1272,14 +1272,65 @@
         "oneOf": [
           {
             "required": [
+              "pid",
+              "window_id",
               "include_screenshot"
             ],
             "properties": {
+              "pid": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647,
+                "description": "Observed native process ID."
+              },
+              "window_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "Observed exact native window ID."
+              },
+              "environment_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Device from list_execution_environments; select the intended execution environment."
+              },
               "include_screenshot": {
                 "const": false
               },
               "include_accessibility_tree": {
                 "const": true
+              },
+              "tree_format": {
+                "type": "string",
+                "enum": [
+                  "elements"
+                ],
+                "default": "elements"
+              },
+              "max_elements": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2048,
+                "default": 250
+              },
+              "max_depth": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 64,
+                "default": 25
+              },
+              "max_image_dimension": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1024,
+                "default": 1024
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 2000,
+                "default": 1000
               }
             },
             "not": {
@@ -1290,14 +1341,65 @@
           },
           {
             "required": [
+              "pid",
+              "window_id",
               "include_accessibility_tree"
             ],
             "properties": {
-              "include_accessibility_tree": {
-                "const": false
+              "pid": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647,
+                "description": "Observed native process ID."
+              },
+              "window_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "Observed exact native window ID."
+              },
+              "environment_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Device from list_execution_environments; select the intended execution environment."
               },
               "include_screenshot": {
                 "const": true
+              },
+              "include_accessibility_tree": {
+                "const": false
+              },
+              "tree_format": {
+                "type": "string",
+                "enum": [
+                  "elements"
+                ],
+                "default": "elements"
+              },
+              "max_elements": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2048,
+                "default": 250
+              },
+              "max_depth": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 64,
+                "default": 25
+              },
+              "max_image_dimension": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1024,
+                "default": 1024
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 2000,
+                "default": 1000
               }
             },
             "not": {
@@ -1413,25 +1515,77 @@
         "oneOf": [
           {
             "properties": {
+              "pid": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647,
+                "description": "Observed native process ID."
+              },
+              "window_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "Observed exact native window ID."
+              },
+              "element_token": {
+                "type": "string",
+                "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+                "maxLength": 14,
+                "description": "Fresh element_token from the most recent complete Styx element tree. A token must use a nonzero snapshot and canonical row 0–2047; the decoder checks these semantics."
+              },
               "button": {
                 "const": "left"
               },
               "delivery_mode": {
                 "const": "background"
+              },
+              "environment_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Device from list_execution_environments; select the intended execution environment."
               }
-            }
+            },
+            "required": [
+              "element_token"
+            ]
           },
           {
             "required": [
+              "element_token",
               "button",
               "delivery_mode"
             ],
             "properties": {
+              "pid": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647,
+                "description": "Observed native process ID."
+              },
+              "window_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "Observed exact native window ID."
+              },
+              "element_token": {
+                "type": "string",
+                "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+                "maxLength": 14,
+                "description": "Fresh element_token from the most recent complete Styx element tree. A token must use a nonzero snapshot and canonical row 0–2047; the decoder checks these semantics."
+              },
               "button": {
                 "const": "right"
               },
               "delivery_mode": {
                 "const": "foreground"
+              },
+              "environment_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Device from list_execution_environments; select the intended execution environment."
               }
             }
           }
