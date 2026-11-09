@@ -6,7 +6,100 @@
 [GUI-CONVERGENCE.md](GUI-CONVERGENCE.md) 保留历史尝试与证据，不能把历史通过当作当前候选通过。
 本文中的计划项不代表已经执行。**交付未完成；Stable NO-GO。**
 
-> 当前阶段（2026-11-09）：两端持续项目、工具与缓存归拢和批量清理已完成，
+> 当前出口（2026-11-09）：C25 冻结源码为 `1d34f8fc5cc5efb18a92173add4d68f5dd3275df`，
+> 三平台 Core 及完整 Runtime 已产出。质量沿用原 quality6 的不可变 53 项 PASS
+> 与独立来源等价证明，不能称重新执行。Mac build1134 原签 DMG、Windows `.25`
+> Inno 已完成，三平台均完成C25安装阶段；各能力、配对及恢复仍单独验收。
+> 本段是冻结后的交付进度记录，不改变 C25 源码归属或原收据。
+> P1最新状态（2026-11-09 07:33 UTC）：Windows第二轮单次请求明确`awaiting_approval`，
+> Mac逐项核对身份后仅明确Reject一次，随后“操作未完成”且同请求仍Pending，记
+> FAILED_OR_UNKNOWN、不重放、不记PASS。源码确认本地HTTP客户端漏拒绝路径，最小
+> 修复草稿和真实TLS/Core/持久拒绝回归已通过，尚未进入任何新包或安装。
+> 用户明确确认本次操作，并要求同验收范围后续沿用授权。
+> 补充检查：Mac生产/测试Swift检查、精确源码纯隐私断言和Rust增量检查通过；
+> Windows Rust 1.97.1单crate检查实际退出0，103.781秒、4 jobs、原缓存复用。
+> 新增可选诊断仅输出Rust已缓存的首次故障固定stage/cause与四个固定拒绝码，
+> 默认关闭；它不恢复会话、不改变资格。接下来执行一次候选集成检查，再决定冻结产包。
+
+| C25 当前事实 | 已验证出口 | 下一门槛 |
+| --- | --- | --- |
+| PilotMac | C25精确安装、原签/完整闭包/原reader通过；选择C25后一次正常Quit原六进程实际退出0，同配置冷启动的账号list/完整树/截图及独立oracle通过。App等原进程保持；旧fixture实际退出0、旧worker退出0。新fixture91228/window58594同出生存活，基线全0；账号Exec只读ps实际退出0 | 先前三项Computer错误保持Unknown、不重发。07:16首次不同用途verify_state正文明确SESSION_DISCONNECTED/not_dispatched；Gateway无载荷计数正控577→578、该调用578→579，已到Gateway但具体Host分支未定。原owner正做一次已有live状态/日志只读核实。P1精确Reject一次失败/未知；原混合Runtime/refresh失败保留 |
+| NAB5 | C25第二次受控安装由用户真实Explorer打开，原owner一次Install/Finish，主子原句柄实际退出0；原安装器严格Gate接受。真实Explorer打开已核对Start Menu快捷方式，App14816/Core5332一次启动、保留原profile，当前选择C25；三能力+Chrome、未配置正确提示和新独立fixture均READY。第二轮新邀请origin/DER CA匹配，06:57:03单次请求明确awaiting_approval，公开身份齐全 | Mac对同一requestID2167219632394897b4a68049c769caf4明确Reject一次后仍Pending、终态未证，P1未通过，批准0。不做新的请求或假定拒绝。第一轮本地过期、Root复制EOF超时和误排队零动作分开保留。旧安装FAIL与首次点击UNKNOWN保留，未改ACL或沙箱，无新构建/签名 |
+| Linux | 独立安装/原身份选择 C25；真实账号三能力及独立效果核对通过，同代际旧 token 明确 not_dispatched。正常退出0、同配置重开后的三能力正向核对通过；测试 Host/fixture 最终正常退出，旧 b31 原 CLI 恢复到 rev90、active/running/enabled | 跨重开旧 token 额外负控返回 HTTP 传输错误，无原生回执，结果 UNKNOWN；最终状态未见负值但不能证明从未派发，禁止重放。旧 b31 服务运行已恢复，其 Gateway 连接仍报 gateway_connect_failed，不能称网络恢复通过 |
+
+来源索引：`/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/candidate-25/candidate-inputs.json`。
+Mac 原本机保存的 signer 密码已在原设备 SSH 签名上下文实际解锁成功，Core 签名/验证通过；
+原生 Codex 的认证失败和 `CSSMERR_TP_NOT_TRUSTED` 保留为该执行上下文的失败，不据此改密码或转移私钥。
+Windows 同 PE、同原 HANDLE、重叠时段的对照证明：同用户名/卷下的同名 AppData 指向不同文件 ID；
+MSIX 等具体机制尚未证明，不为此修改产品权限策略或新建候选。
+
+本轮变化（2026-11-09）：
+
+| 维度 | 已发生的变化与限制 |
+| --- | --- |
+| Product | 新增一项有界修复草稿：本地admin HTTP客户端准入固定Reject路径；C25安装未变。真实P1精确Reject一次失败/未知；新Computer verify明确SESSION_DISCONNECTED/not_dispatched |
+| Architecture | 确定的客户端路径合同缺口：有Reject helper和服务端路由，但底层允许列表漏项。旧服务测试用generic HTTP绕过产品客户端，现改真实客户端闭合。Swift映射/五字段完整；没有新增管理权威或放宽请求/会话围栏 |
+| Integration | C25仍绑定1d34f8f。草稿限一个Rust产品文件及两个测试、Mac既有可选诊断及隐私测试、本文；disjoint lease已交回，无新checkout。三平台Rust增量check、Mac production/testing及纯隐私断言、严格TLS/Core/持久拒绝基线失败→修复通过、HTTP边界与原服务旅程通过；进入一次集成检查，尚无下一候选包 |
+| Release | 三平台C25均完成安装阶段；Windows受控attempt2实际退出0，旧attempt1实际退出2保留。无Core/Runtime/App/安装器重编或重签 |
+| Reliability | 保留第一轮Runtime准备约100秒耗尽剩余63秒、Root复制/误排队、工具几何前置拒绝及本次真实Reject失败。新verify完整正文与Gateway计数已取得；不把旧单字段INVALID_ARGUMENT改判。隔离回归原服务与Node均正常收口；没有实机动作重放 |
+| Decision | C25无法靠重试补完P1，先收口拒绝修复与Mac会话诊断，再决定同源码下一候选；不立即重复三平台producer。P2–P4/最终Logo仍OPEN，用户持续授权沿用，Stable NO-GO |
+
+本轮源码与原生检查证据：
+`/home/sid/Developer/Artifacts/Styx/20261109-pairing-rejection-client`。
+真实客户端拒绝基线明确`InvalidInput/NotDispatched`；修复后严格TLS、Core拒绝提交、
+错误身份/MCP凭据不提交、实际journal重开、旧claim不可复活及新请求独立性均通过。
+测试监听显式使用localhost首解析地址并要求loopback，不通过地址回退掩盖生产客户端问题。
+Mac首次故障原值现有入口无法读取的限制已由原owner证实，原历史不靠新日志补写。
+新诊断只为下一候选的后续观测留证；原C25四次读取结论各自保留。
+
+P1最新门槛（2026-11-09 06:13 UTC）：用户已明确确认“现在执行本轮P1创建、请求与拒绝”。
+Mac新创建/Copy各一次，私密文件2271字节、0600；Root一次私密直传到NAB5新收件槽成功。
+Windows输入/Review各一次，GUI origin与canonical DER CA均精确匹配；06:10:10.992Z在
+邀请到期前点击请求一次。06:10:53仍Working，无公开deviceID/指纹/验证码/requestID，
+当时结果UNKNOWN。邀请06:11:13.824Z到期，不能记作拒绝。Windows后续新鲜只读观察明确显示
+`Native result pairing_link_expired_or_invalid`、按钮恢复；Mac06:14:17提交后检查未见行，
+但无明确empty/响应成功收据，不能据此证明Gateway从未收到请求。两端无公开身份绑定，
+拒绝/批准均0，本轮P1未通过。原按钮单次Working观察保留，不重提、不新邀、不退出原进程。
+源码显示Join先完成本地Runtime bootstrap校验/复制，再检查邀请期限，之后才写入join输入
+并进入native网络请求。原Core5332实际state-dir父目录的固定bootstrap目录06:10:13创建，
+完成selection于06:11:53发布，晚于邀请期限约40秒；本轮Join输入/seed/dispatched/reply文件均不存在。
+最初误查App外层目录的全不存在结果已作废，不能作为profile证据。源码固定错误与这些时间
+支持本地准备耗尽剩余63秒；并无逐请求网络追踪。已完成bootstrap路径只重验原完成结果，
+不再整包copy。两端原owner已完成新独立P1空输入/接收槽READY，原进程和fixture保持。
+后续“排队新邀请创建/Copy”整条命令曾被自动审批拒绝，未执行；用户随后明确确认
+“执行这次新邀请、请求与拒绝；之后都不用再问了”。同验收范围继续沿用该授权。
+第二轮创建/Copy各一次，changeCount1201→1202，私有文件0600/2271字节，期限06:57:54.430Z。
+Root原复制脚本等待stdin EOF超时，目标未落盘；依赖命令未在失败处停止，误排队到缺失
+指令文件，原Windows owner明确输入/Review/请求均0。原自有复制helper17248核对出生后
+结束，确认无活写者且目标不存在；改定长3028字符复制一次成功、双方实际exit0，未修改
+产品或沙箱。此额外协调耗时不得归到产品失败。后续所有依赖已改为成功才继续。
+Windows对新邀请输入一次，Review几何前置拒绝未派发，滚动/新鲜目标后正常Review；
+origin/DER CA精确匹配。06:57:03.320Z单次请求明确`awaiting_approval`，deviceID
+`styx-462b163e4c907b7e475fbebf`，公钥指纹
+`ff1452d5cc06ccc92ed2bd083c225228181de8ea197197ef048593bf1ea95db3`，
+验证码`9BE8-2A3E-8AEA-A49F`。Windows GUI不显示requestID，原Mac owner将绑定本次
+实际Pending行requestID，按新鲜身份比较仅明确Reject一次。拒绝出口尚待实际证据。
+此后即使成功，仍保留此次首次准备失败，不记为冷首次设置通过。未新增构建/签名/安装。
+原动作时确认的自动审批拒绝保留，不能误记为本次已确认操作未发生。
+Root账号Exec已实际退出0；Computer的窗口列表、首次树、首次像素各一次返回
+INVALID_ARGUMENT，原生派发来源不明。独立OpenAI Tunnel的聚合命令计数有后台活动，
+无法给单次调用归因，不作未派发或产品外故障证明；早先cloudflared指标名假设已作废。
+独立验收连接详情显示Allow all，未改权限；“Refresh tools”点一次后按钮恢复可用，
+此前中间截图可见黑色圆形波纹Logo。进一步浏览器截图被自动审批拒绝：整站
+chatgpt.com观察权限超出仅Styx详情范围；已停止浏览器后续操作，最终Logo重验仍OPEN。
+
+独立证据位于candidate-25/windows-owner-evidence/的
+`installed-read-diagnosis-root.json`与`installed-gate-root-diagnosis.json`；
+原失败与GUI截图保留在NAB5固定project的candidate-25制品目录。
+
+并行顺序记录：此前 Windows 等待人工退出期间，独立 Linux 旅程已并行推进并收口；
+Mac/Windows 的 **P1拒绝 → P2批准与双方效果 → P3退出重开 → P4撤销/重配对** 顺序不变。
+Mac 首次账号只读属于就绪核实，不提前执行 P2 正向输入效果；两端原生App/fixture及私密接收/Copy流程实际READY前不创建新邀请。Mac当前Computer读取问题单列OPEN，管理GUI的P1可在独占GUI租约下推进，不能据此放行Computer或最终交付。
+Linux 测试进程已全退出并恢复原 b31 unit 的运行状态；网络连接未证明恢复，限制单列。
+
+以下 C24 表格与出口说明保留为历史，不代表当前 C25 已验收。
+
+> 历史检查点（2026-11-09，C24）：两端持续项目、工具与缓存归拢和批量清理已完成，
 > 用户确认两端 Project 设置完成；复用原 owner 恢复验收。Windows 当前 target 缓存误删且未恢复，不能称缓存全部保留。四项边界实现已集成，C24（`93fdcdd`）已冻结并产包；
 > P6尚未通过，不能把C23或参考场景成绩继承为C24成绩。
 > 当前修正草稿与已安装C24分开记录；没有新候选构建或安装排队。
@@ -116,8 +209,8 @@ P6内部按 **`首次设置 → P1拒绝 → P2批准/双方效果 → P3退出�
 | P0 已完成 | 根代理只读核实源码、精确包、两端安装/owner/原进程、fixtures、既有授权 | 不重放旧操作/producer | 固定候选与平台事实；测试/包/安装/真机分别记录 |
 | D0 设计已完成 | 根代理完成四项边界状态/合同/复用点/失败分支与工时 | 架构核查已完成，产品草稿冻结 | 见DELIVERY-BOUNDARY-DECISIONS；不是实现或验收PASS |
 | R 进行中 | 先D4来源参考与D1合同场景，再D3安装参考和D2全链路拒绝/reader；根代理共享源码唯一写者，两端owner做本机原生检查 | D0设计已选定 | affected crate检查、跨层持久/TLS/负控场景、Mac原生参考；未知触发不冒称已证明；参考未过不产候选 |
-| P5 C24已完成；后续修正待R出口 | 根代理按实际改动冻结同源码候选 | R的合同/持久兼容/安装参考/Mac原生参考已通过；必需路径存在 | 一个集成检查点；精确三平台输入/签名/包收据；不重复已完成producer。必要产物构建与测试分开记录 |
-| P6 C24进行中，存在阻塞 | 本地 owner 安装最终精确包；首次设置后按P1–P4完整旅程；Linux完成最新候选安装和真实能力/正常退出恢复 | 同源码候选已冻结；每个安装有精确哈希；Linux服务切换已获具体授权 | 最终候选自身的安装、首次设置、双方真实效果、负控与恢复；不能继承旧 C23、旧 b31、诊断参考或mock结果 |
+| P5 C25已完成 | 根代理按实际改动冻结同源码候选 | R参考、quality6及来源等价证明已过；原生构建和三平台完整包分别有收据 | C25提交1d34f8及精确三平台输入/签名/包收据；不重复已完成producer。必要产物构建与测试分开记录 |
+| P6 C25进行中 | Mac已安装并GUI选择C25；Windows已产包待真实桌面退出/安装；独立Linux旅程并行。Mac/Windows首次设置后仍按P1–P4执行 | 同源码候选已冻结；每个安装有精确哈希；Linux服务切换已获具体授权 | 最终候选自身的安装、首次设置、双方真实效果、负控与恢复；不能继承旧 C23/C24、旧 b31、诊断参考或mock结果 |
 | P1 最终候选待验；C23已失败 | 两个本地 owner 完成本次新邀请；Windows 审阅 CA 后一次请求；根代理比对设备身份/验证码；Mac 明确拒绝一次 | P5及P6精确安装/首次设置通过；双方原生路径、私密接收槽、helper **已实际READY**；新邀请未过期；私密传输已明确成功。P1不操作fixture，独立fixture在P2实际效果前就绪 | Gateway唯一requestID与Windows实际设备ID/公钥指纹/验证码绑定；Mac明确拒绝、Windows观察到拒绝，账号中没有新增已授权设备。Windows GUI不显示requestID，不能伪称双边显示；到期/超时不算拒绝 |
 | P2 待执行 | 新邀请、新请求；比对后 Mac明确批准；Windows确认并连接；根代理在独立 Custom MCP 上核实两台设备及三类效果 | P1明确收口，无未知请求；当前 CA/设备身份一致 | 本候选双方 Exec续接/独立文件、Browser nonce页面/HTTP日志/关闭、Computer像素/新鲜树/一次输入点击/独立状态；原生负控单列 |
 | P3 待执行 | 各端 owner 记录全部原进程/子进程句柄，正常 Quit 一次；全部明确退出后正常重开一次；根代理检查恢复 | P2效果已核实，原生动作无未知结果 | 原进程实际退出码、worker/监听/socket收口；配置/keys/pairing保留；双方重新连接及新的实际读取。接受 Quit 不等于已退出 |

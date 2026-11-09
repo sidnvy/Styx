@@ -518,7 +518,16 @@ async fn start_server(
     admin: &[u8],
     mcp: Sha256Digest,
 ) -> (Client, Arc<EnrollmentHttp>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Match the pinned certificate's localhost identity and the production
+    // client's first resolved address instead of relying on its test-only
+    // direct SocketAddr connection to hide an IPv4/IPv6 mismatch.
+    let address = tokio::net::lookup_host(("localhost", 0))
+        .await
+        .unwrap()
+        .next()
+        .unwrap();
+    assert!(address.ip().is_loopback(), "TLS fixture must remain local");
+    let listener = TcpListener::bind(address).await.unwrap();
     let address = listener.local_addr().unwrap();
     let host = format!("localhost:{}", address.port());
     let service = EnrollmentService::recover_existing(
@@ -1305,17 +1314,23 @@ async fn actual_strict_tls_rejection_survives_restart_without_reviving_old_claim
                 .status,
             202
         );
+        // Use the exact native App client, including its private route
+        // admission. The generic test HTTP client previously bypassed that
+        // boundary, so a working Gateway route could conceal a broken GUI.
+        let origin = url::Url::parse(&format!("https://{}/", client.host)).unwrap();
+        let response = crate::management::native_join_http::exchange_local_rejection(
+            &origin,
+            &client.tls,
+            &encoded(&rejection),
+            admin.as_bytes(),
+        )
+        .await
+        .expect("native App rejection client must reach the real TLS Gateway");
+        assert_eq!(response.status, 200);
         assert_eq!(
-            client
-                .request(
-                    Method::POST,
-                    "/styx/enroll/reject",
-                    Some(&admin),
-                    &encoded(&rejection)
-                )
-                .await
-                .status,
-            200
+            serde_json::from_slice::<Value>(&response.body).unwrap(),
+            json!({"status":"rejected","request_id":joined.request_id,
+                "device_id":device,"fingerprint":fingerprint})
         );
         assert_eq!(committed(&app), before + 1);
         let rejected = json!({"status":"rejected","request_id":joined.request_id,

@@ -363,7 +363,10 @@ async fn exchange_once(
             || (bearer.is_some()
                 && matches!(
                     path,
-                    "/styx/enroll/invitations" | "/styx/enroll/approve" | "/styx/enroll/revoke"
+                    "/styx/enroll/invitations"
+                        | "/styx/enroll/approve"
+                        | "/styx/enroll/reject"
+                        | "/styx/enroll/revoke"
                 ))))
         || (method == hyper::Method::GET
             && body.is_empty()

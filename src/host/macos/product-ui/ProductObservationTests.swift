@@ -6,7 +6,7 @@ import Combine
     func require(_ value: Bool, _ message: String) throws {
         if !value { throw NSError(domain: "Styx.ObservationTest", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
     }
-    let knownCodes = ["native_management_invalid_input", "native_management_conflict", "native_management_unavailable", "native_management_unsupported", "native_management_unknown_inspect", "native_management_busy", "app_scope_changed", "app_instance_changed", "app_scope_invalid", "app_service_original_operation_unknown", "app_runtime_update_pending", "app_cleanup_unknown", "app_gateway_fenced", "app_quit_admitted"]
+    let knownCodes = ["native_management_invalid_input", "native_management_conflict", "native_management_unavailable", "native_management_unsupported", "native_management_unknown_inspect", "native_management_busy", "app_scope_changed", "app_instance_changed", "app_scope_invalid", "app_service_original_operation_unknown", "app_runtime_update_pending", "app_cleanup_unknown", "app_gateway_fenced", "app_quit_admitted", "join_http_invalid_input", "native_gateway_rejection_binding_mismatch", "native_gateway_admin_rejected", "native_gateway_admin_result_unknown"]
     for code in knownCodes {
         try require(ProductNativeDiagnostics.rejectionCode(.object(["error": .string(code)])) == code, "Known rejection code was lost")
     }
@@ -16,6 +16,34 @@ import Combine
         try require(ProductNativeDiagnostics.rejectionCode(response) == "other", "Rejection diagnostic disclosed or borrowed response data")
     }
     try require(ProductNativeDiagnostics.rejectionCode(.object(["result": .object(["error": .string("native_management_busy")])])) == "other", "Rejection diagnostic used result")
+    let firstFault: ProductJSON = .object(["stage": .string("session_binding"), "cause": .string("console_epoch_changed")])
+    let firstFaultStatus: ProductJSON = .object(["foreground": .object(["computerRuntimeFirstFault": firstFault])])
+    try require(ProductNativeDiagnostics.computerRuntimeFirstFault(firstFaultStatus) == "computer_runtime_first_fault stage=session_binding cause=console_epoch_changed", "Closed runtime fault was lost without a startup probe")
+    let invalidFaults: [ProductJSON] = [
+        .null, .string("fake-test-secret"),
+        .object(["stage": .string("unknown_stage"), "cause": .string("fenced")]),
+        .object(["stage": .string("session_binding"), "cause": .string("unknown_cause")]),
+        .object(["stage": .string("fake-test-secret"), "cause": .string("fenced")]),
+        .object(["stage": .string("session_binding"), "cause": .string("https://example.invalid/fake-secret")]),
+        .object(["stage": .string("session_binding")]),
+        .object(["cause": .string("fenced")]),
+        .object(["stage": .number(1), "cause": .string("fenced")]),
+        .object(["stage": .string("session_binding"), "cause": .bool(true)])
+    ]
+    for fault in invalidFaults {
+        let status: ProductJSON = .object(["foreground": .object(["computerRuntimeFirstFault": fault, "computerStartupProbe": firstFault])])
+        try require(ProductNativeDiagnostics.computerRuntimeFirstFault(status) == nil, "Runtime fault disclosed an invalid value or borrowed the startup probe")
+    }
+    let wrongLayerStatuses: [ProductJSON] = [
+        .object(["computerRuntimeFirstFault": firstFault]),
+        .object(["result": firstFaultStatus]),
+        .object(["foreground": .object(["computerStartupProbe": firstFault])])
+    ]
+    for status in wrongLayerStatuses {
+        try require(ProductNativeDiagnostics.computerRuntimeFirstFault(status) == nil, "Runtime fault borrowed a field from the wrong layer")
+    }
+    let extraPrivateStatus: ProductJSON = .object(["foreground": .object(["computerRuntimeFirstFault": .object(["stage": .string("session_binding"), "cause": .string("console_epoch_changed"), "body": .string("fake-test-secret")])])])
+    try require(ProductNativeDiagnostics.computerRuntimeFirstFault(extraPrivateStatus) == ProductNativeDiagnostics.computerRuntimeFirstFault(firstFaultStatus), "Runtime fault copied unrelated response fields")
     let model = try ProductModel(sessionURL: sessionURL, permissionReader: { (false, false) })
     await model.bootstrap()
     try require(model.loaded && !model.busy, "Isolated Core bootstrap failed")

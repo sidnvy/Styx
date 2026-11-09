@@ -141,6 +141,47 @@ async fn join_peer(task: tokio::task::JoinHandle<usize>) {
 }
 
 #[tokio::test]
+async fn local_rejection_does_not_admit_anonymous_or_generic_admin_requests() {
+    let f = Fixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = url::Url::parse(&format!("https://{}/", listener.local_addr().unwrap())).unwrap();
+    let bearer = b"synthetic_local_admin_token_12345678".as_slice();
+    for (method, path, token) in [
+        (hyper::Method::POST, "/styx/enroll/reject", None),
+        (
+            hyper::Method::POST,
+            "/styx/enroll/reject/extra",
+            Some(bearer),
+        ),
+        (hyper::Method::GET, "/styx/enroll/reject", Some(bearer)),
+        (hyper::Method::POST, "/styx/enroll/other", Some(bearer)),
+        (
+            hyper::Method::POST,
+            "/styx/enroll/reject",
+            Some(b"".as_slice()),
+        ),
+    ] {
+        let body: &[u8] = if method == hyper::Method::GET {
+            b""
+        } else {
+            b"{}"
+        };
+        let error = exchange_once(&origin, &f.client, method, path, body, token, BUDGET)
+            .await
+            .err()
+            .expect("a fixed local rejection route cannot grant generic admin access");
+        assert_eq!(error.kind, JoinHttpErrorKind::InvalidInput);
+        assert_eq!(error.certainty, JoinHttpCertainty::NotDispatched);
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err(),
+        "refused admin requests must not even open a TCP connection"
+    );
+}
+
+#[tokio::test]
 async fn complete_tls_response_is_final_before_connection_tail_but_incomplete_is_unknown() {
     let f = Fixture::new();
 

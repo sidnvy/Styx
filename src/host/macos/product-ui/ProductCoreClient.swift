@@ -39,7 +39,8 @@ enum ProductNativeDiagnostics {
             "native_management_unsupported", "native_management_unknown_inspect", "native_management_busy",
             "app_scope_changed", "app_instance_changed", "app_scope_invalid",
             "app_service_original_operation_unknown", "app_runtime_update_pending", "app_cleanup_unknown",
-            "app_gateway_fenced", "app_quit_admitted"
+            "app_gateway_fenced", "app_quit_admitted", "join_http_invalid_input",
+            "native_gateway_rejection_binding_mismatch", "native_gateway_admin_rejected", "native_gateway_admin_result_unknown"
         ]
         guard let code = response["error"].string, known.contains(code) else { return "other" }
         return code
@@ -47,6 +48,14 @@ enum ProductNativeDiagnostics {
     static func rejection(operation: String, id: Int, response: ProductJSON) {
         guard CommandLine.arguments.contains("--native-diagnostics"), operationIsSupported(operation) else { return }
         event("rejection operation=" + operation + " id=" + String(id) + " code=" + rejectionCode(response))
+    }
+    private static let computerProbeStages: Set<String> = ["native_before_binding", "native_before_observation", "native_before_final_binding", "session_binding", "session_begin_exchange", "session_begin_reply", "list_windows_exchange", "list_windows_result", "list_windows_rows", "read_binding_after", "read_deadline", "native_after_binding", "native_after_observation", "native_after_final_binding", "console_match", "evidence_lookup", "coordinator_refresh", "observation_mutex", "control_mutex", "already_fenced"]
+    private static let computerProbeCauses: Set<String> = ["not_published", "unavailable", "native_protocol", "invalid_hint", "image_pin", "signature", "peer", "fenced", "mutex_poisoned", "locked", "console_changed", "console_epoch_changed", "deadline", "evidence_missing", "evidence_expired", "coordinator_refused", "reply_json", "reply_refused", "reply_exit_code", "reply_missing_result", "begin_reply_shape", "windows_reply_is_error", "windows_array_missing", "windows_limit", "window_pid_invalid", "window_id_invalid"]
+    static func computerRuntimeFirstFault(_ status: ProductJSON) -> String? {
+        let fault = status["foreground"]["computerRuntimeFirstFault"]
+        guard let stage = fault["stage"].string, computerProbeStages.contains(stage),
+              let cause = fault["cause"].string, computerProbeCauses.contains(cause) else { return nil }
+        return "computer_runtime_first_fault stage=" + stage + " cause=" + cause
     }
     // Closed opt-in startup facts only; never record a response body or echo
     // an arbitrary error string. This discriminates publication timeouts from
@@ -60,11 +69,10 @@ enum ProductNativeDiagnostics {
         if case .bool(let advanced) = status["foreground"]["computerInitialEpochAdvanced"] {
             event("computer_initial_probe epoch_advanced=" + String(advanced))
         }
+        if let fault = computerRuntimeFirstFault(status) { event(fault) }
         let probe = status["foreground"]["computerStartupProbe"]
-        let stages: Set<String> = ["native_before_binding", "native_before_observation", "native_before_final_binding", "session_binding", "session_begin_exchange", "session_begin_reply", "list_windows_exchange", "list_windows_result", "list_windows_rows", "read_binding_after", "read_deadline", "native_after_binding", "native_after_observation", "native_after_final_binding", "console_match", "evidence_lookup", "coordinator_refresh", "observation_mutex", "control_mutex", "already_fenced"]
-        let causes: Set<String> = ["not_published", "unavailable", "native_protocol", "invalid_hint", "image_pin", "signature", "peer", "fenced", "mutex_poisoned", "locked", "console_changed", "console_epoch_changed", "deadline", "evidence_missing", "evidence_expired", "coordinator_refused", "reply_json", "reply_refused", "reply_exit_code", "reply_missing_result", "begin_reply_shape", "windows_reply_is_error", "windows_array_missing", "windows_limit", "window_pid_invalid", "window_id_invalid"]
-        guard let stage = probe["stage"].string, stages.contains(stage),
-              let cause = probe["cause"].string, causes.contains(cause),
+        guard let stage = probe["stage"].string, computerProbeStages.contains(stage),
+              let cause = probe["cause"].string, computerProbeCauses.contains(cause),
               let elapsed = probe["elapsed_ms"].number, elapsed.isFinite, elapsed >= 0, elapsed <= 86_400_000 else { return }
         event("computer_probe stage=" + stage + " cause=" + cause + " elapsed_ms=" + String(UInt64(elapsed)) + " deadline_expired=" + String(probe["deadline_expired"].bool))
     }
