@@ -330,16 +330,10 @@ impl SetupContainerGuard {
             let done = journal.read_raw("done", 64);
             match (begin, done) {
                 (Ok(begin), Ok(done))
-                    if begin.bytes() == b"started\n" && done.bytes() == b"completed\n" =>
-                {
-                    ()
-                }
+                    if begin.bytes() == b"started\n" && done.bytes() == b"completed\n" => {}
                 (Err(_), Err(_))
                     if journal.ensure_absent("begin").is_ok()
-                        && journal.ensure_absent("done").is_ok() =>
-                {
-                    ()
-                }
+                        && journal.ensure_absent("done").is_ok() => {}
                 _ => return Err(RetireError::unknown("setup_retirement_unknown")),
             }
         }
