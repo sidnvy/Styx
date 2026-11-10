@@ -58,6 +58,7 @@ export function appInfoPlist(version,{buildNumber,updateRelease=false,platformUp
 <key>CFBundleExecutable</key><string>Styx</string>
 <key>CFBundleIconFile</key><string>Styx.icns</string>
 <key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
+<key>NSLocalNetworkUsageDescription</key><string>Styx connects to computers you pair on your local network.</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>${xml(version)}</string>
 <key>CFBundleVersion</key><string>${xml(metadata.buildNumber)}</string>

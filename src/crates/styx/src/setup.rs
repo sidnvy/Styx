@@ -133,6 +133,12 @@ impl Failure {
             return Some(hint);
         }
         match self.code {
+            "setup_pairing_rejected" => Some(
+                "The hub rejected this request; no access was granted. To apply again, explicitly retire this stopped Join setup and use a new invitation. Existing records are kept.",
+            ),
+            "setup_retirement_unknown" => Some(
+                "A role change has an unconfirmed result. Existing records are kept. Inspect that result before continuing; setup will not replay the previous attempt.",
+            ),
             "gateway_listen_failed" | "gateway_lan_listen_failed" => Some(
                 "The hub could not open its network port. Check whether another program is using it, then choose a free port.",
             ),
@@ -203,6 +209,14 @@ impl Failure {
             exit: value.exit_code(),
             _owner: Some(Box::new(value)),
         }
+    }
+}
+
+fn setup_guard_failure(error: styx_runtime::management::role_retire::RetireError) -> Failure {
+    if error.code == "setup_retirement_unknown" {
+        Failure::unknown(error.code)
+    } else {
+        Failure::new(error.code)
     }
 }
 impl From<&'static str> for Failure {
@@ -989,6 +1003,9 @@ async fn pair(session: &Session, gateway: Option<&Path>) -> Result<Option<String
             return Ok(Some(device.as_str().to_owned()));
         }
         let report = native_join::inspect(&host).await.map_err(Failure::join)?;
+        if report.status == "rejected" {
+            return Err(rejected_join(session, &report));
+        }
         if !session.input("host-public-identity.json").exists() {
             session.consent(
                 "request",
@@ -1165,6 +1182,9 @@ async fn pair(session: &Session, gateway: Option<&Path>) -> Result<Option<String
         let step = format!("claim-{attempt}");
         session.begin(&step)?;
         let claimed = native_join::claim(&host).await.map_err(Failure::join)?;
+        if claimed.status == "rejected" {
+            return Err(rejected_join(session, &claimed));
+        }
         if matches!(claimed.status, "ready_to_connect" | "already_ready") {
             session.done(&step)?;
             session.done("claim")?;
@@ -1187,6 +1207,32 @@ async fn pair(session: &Session, gateway: Option<&Path>) -> Result<Option<String
             .ok_or_else(|| Failure::new("setup_claim_poll_budget_exhausted"))?;
     }
     Ok(Some(device))
+}
+
+// A native rejected report is backed by the actor's durable seed/request proof.
+// Also bind it to the original setup receipt before classifying the old attempt.
+fn rejected_join(session: &Session, report: &native_join::JoinReport) -> Failure {
+    let bound = inputs::read_private(&session.input("host-public-identity.json"), 16384)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        .zip(serde_json::to_value(report).ok())
+        .is_some_and(|(original, rejected)| rejection_matches(&original, &rejected));
+    if bound {
+        Failure::new("setup_pairing_rejected")
+    } else {
+        Failure::unknown("setup_rejection_binding_unconfirmed")
+    }
+}
+
+fn rejection_matches(original: &Value, rejected: &Value) -> bool {
+    rejected.get("status").and_then(Value::as_str) == Some("rejected")
+        && ["device_id", "fingerprint", "request_id"]
+            .iter()
+            .all(|key| {
+                original
+                    .get(key)
+                    .is_some_and(|value| !value.is_null() && rejected.get(key) == Some(value))
+            })
 }
 
 async fn execute(session: &mut Session, foreground: bool, running: &mut Foreground) -> Result<()> {
@@ -1680,6 +1726,14 @@ pub(super) async fn run(
     if !root.is_absolute() {
         return Err("setup_absolute_root_required".into());
     }
+    let mut container_guard = if root.exists() {
+        Some(
+            styx_runtime::management::role_retire::SetupContainerGuard::acquire(&root)
+                .map_err(setup_guard_failure)?,
+        )
+    } else {
+        None
+    };
     let automated = answers_file.is_some();
     if !automated && !prompt::terminal() {
         return Err("setup_noninteractive_requires_answers".into());
@@ -1792,9 +1846,25 @@ pub(super) async fn run(
     }
     if !intent.exists() {
         session.consent("inputs", "Create protected setup input directories and retain these choices for interruption recovery.")?;
+        if container_guard.is_none() {
+            inputs::private_directory(&session.root)
+                .map_err(|_| Failure::new("setup_private_inputs_failed"))?;
+            container_guard = Some(
+                styx_runtime::management::role_retire::SetupContainerGuard::acquire(&session.root)
+                    .map_err(setup_guard_failure)?,
+            );
+            if intent.exists() {
+                return Err("setup_container_changed".into());
+            }
+        }
         inputs::private_directory(&session.root.join("inputs"))
             .map_err(|_| Failure::new("setup_private_inputs_failed"))?;
     }
+    container_guard
+        .as_ref()
+        .ok_or_else(|| Failure::new("setup_container_refused"))?
+        .validate()
+        .map_err(setup_guard_failure)?;
     if let Some(link) = pasted_link {
         inputs::write_new(
             session
@@ -2177,6 +2247,57 @@ fn running_roles(root: &Path) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rejected_join_requires_exact_recorded_identity() {
+        let original =
+            json!({"device_id":"device", "fingerprint":"fingerprint", "request_id":"request"});
+        let mut rejected = original.clone();
+        rejected["status"] = json!("rejected");
+        assert!(rejection_matches(&original, &rejected));
+        for field in ["device_id", "fingerprint", "request_id", "status"] {
+            let mut different = rejected.clone();
+            different[field] = json!("other");
+            assert!(!rejection_matches(&original, &different));
+        }
+        let mut missing = original.clone();
+        missing["request_id"] = Value::Null;
+        assert!(!rejection_matches(&missing, &rejected));
+        if let Some(path) = std::env::var_os("STYX_TEST_SETUP_PAIR_NEW") {
+            let root = PathBuf::from(path).join("cli");
+            let mut answers: Answers = serde_json::from_value(valid()).unwrap();
+            answers.role = Role::Join;
+            answers.workspace = root.clone();
+            answers.shell = PathBuf::from("/bin/sh");
+            answers.join_link_file = Some(root.join("new-link"));
+            answers
+                .approve
+                .extend(["trust".into(), "request".into(), "claim".into()]);
+            let session = Session {
+                root,
+                answers,
+                automated: true,
+                plan_approved: false,
+                mutation: Default::default(),
+            };
+            assert!(pair(&session, None).await.unwrap().is_some());
+            return;
+        }
+        if let Some(path) = std::env::var_os("STYX_TEST_SETUP_REJECTION_FIXTURE") {
+            let mut answers: Answers = serde_json::from_value(valid()).unwrap();
+            answers.approve.insert("claim".into());
+            let session = Session {
+                root: PathBuf::from(path).join("cli"),
+                answers,
+                automated: true,
+                plan_approved: false,
+                mutation: Default::default(),
+            };
+            let failure = pair(&session, None).await.unwrap_err();
+            assert_eq!(failure.code, "setup_pairing_rejected");
+            assert_eq!(failure.exit, 2);
+        }
+    }
     fn valid() -> Value {
         json!({"schema":1,"role":"hub","payload":{"payload_dir":"/p/runtime","publisher_file":"/p/publisher.pem","expected_publisher":"a".repeat(64)},"label":"workstation","workspace":"/p/work","shell":"/bin/bash","approve":[]})
     }

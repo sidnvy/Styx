@@ -154,11 +154,7 @@ struct ProductSettingsView: View {
             Section(productText("允许 ChatGPT 在这台电脑上做什么", "What ChatGPT can do on this computer")) {
                 ProductCapabilityLabel(kind: .cli)
                 if model.nativeHost {
-                    let selected = model.status["enrollment"]["selected_features"]
-                    if selected != .null {
-                        Label(productText("操作电脑", "Computer Use") + ": " + (selected["computer"].bool ? productText("已选择", "Selected") : productText("未选择", "Not selected")), systemImage: "desktopcomputer")
-                        Label(productText("浏览器自动化", "Browser Automation") + ": " + (selected["browser"].bool ? productText("已选择", "Selected") : productText("未选择", "Not selected")), systemImage: "globe")
-                    }
+                    ProductNativeOptionalCapabilities(selected: model.status["enrollment"]["selected_features"], unconfigured: model.nativeCanCreateLocal)
                     Text(productText("功能在首次设置或加入时选择，不代表已获网关批准或系统权限。此版本更改功能需通过“更改这台电脑的角色”重新设置并配对。", "Features are selected during setup or joining; selection does not confirm Gateway approval or system permissions. To change features in this version, use Change this computer’s role, set up again and re-pair.")).font(.caption).foregroundStyle(.secondary)
                 } else {
                     Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }.disabled(model.joined)

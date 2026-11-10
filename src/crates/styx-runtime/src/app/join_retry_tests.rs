@@ -83,6 +83,53 @@ fn selection(root: &Path) -> PathBuf {
 fn raw(value: Value) -> Box<serde_json::value::RawValue> {
     serde_json::value::to_raw_value(&value).unwrap()
 }
+fn rejection_journal(path: &Path, selection: &Path, now: u64) -> OwnedEnrollmentJournal {
+    use crate::store::native_root;
+    use std::collections::BTreeMap;
+    use styx_contracts::{management::ReaderContract, native_management::*};
+    let selected: NativeRuntimeSelection =
+        serde_json::from_slice(&fs::read(selection).unwrap()).unwrap();
+    let parent = PrivateRoot::open(path.parent().unwrap()).unwrap();
+    let fresh = native_root::create_fresh(&parent, path.file_name().unwrap())
+        .unwrap_or_else(|failure| panic!("fresh reference: {:?}", failure.error()));
+    let deployment = b"{\"synthetic_pairing_reference\":true}";
+    let state = NativeState {
+        schema: 7,
+        kind: NativeStateKind::StyxDesiredState,
+        runtime_format: NativeRuntimeFormat::NativeRustV1,
+        reader_contract: ReaderContract::NativePairingLifecycleStateV1,
+        scope_generation: fresh.marker().scope_generation,
+        deployment_raw_sha256: Sha256Digest::of_bytes(deployment),
+        mode: NativeDeploymentMode::CreateLocal,
+        revision: 0,
+        last_transaction: None,
+        desired: NativeDesired {
+            gateway: Some(NativeComponentDesired {
+                manager: NativeManager::ForegroundCli,
+                run: NativeRunDesired::Stopped,
+                autostart: NativeAutostartDesired::Disabled,
+            }),
+            host: None,
+        },
+        migration: None,
+        extensions: BTreeMap::from([(
+            NATIVE_RUNTIME_SELECTION_KEY.into(),
+            serde_json::value::to_raw_value(&selected).unwrap(),
+        )]),
+    };
+    let binding = fresh
+        .initialize(deployment, &state)
+        .unwrap_or_else(|failure| panic!("reference genesis: {:?}", failure.error()));
+    let mut journal = OwnedEnrollmentJournal::from_configuration(
+        binding.configuration_root(),
+        JournalBudget::default(),
+    )
+    .unwrap();
+    journal
+        .with_journal(|journal| journal.record_time_floor(now))
+        .unwrap();
+    journal
+}
 fn deployment(
     root: &Path,
     selection: &Path,
@@ -130,7 +177,11 @@ async fn invite(origin: &url::Url, client: &GatewayClientTls) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires loopback sockets; synthetic signed payload and disposable real enrollment server"]
 async fn unsent_cli_and_app_join_retry_but_dispatched_join_stays_fenced_requires_sockets() {
-    let root = std::env::temp_dir().join(format!("styx-join-retry-{}", uuid::Uuid::new_v4()));
+    let retained = std::env::var_os("STYX_TEST_SETUP_REJECTION_FIXTURE").map(PathBuf::from);
+    let root = retained.clone().unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("styx-join-retry-{}", uuid::Uuid::new_v4()))
+    });
+    assert!(root.is_absolute() && root.starts_with(std::env::temp_dir()) && !root.exists());
     directory(&root);
     let selection = selection(&root);
     let now = now_ms().unwrap();
@@ -158,15 +209,18 @@ async fn unsent_cli_and_app_join_retry_but_dispatched_join_stays_fenced_requires
         GatewayClientTls::from_pinned_ca_pem(&ca.certificate_pem, ca.anchor_pin.clone(), None)
             .unwrap();
     let store_path = root.join("server");
-    directory(&store_path);
-    let private = PrivateRoot::open(&store_path).unwrap();
-    let mut writer = private.try_configuration_writer().unwrap();
-    EnrollmentJournal::open(&private, &mut writer, JournalBudget::default())
-        .unwrap()
-        .record_time_floor(now)
-        .unwrap();
-    let journal =
-        OwnedEnrollmentJournal::open_existing(private, writer, JournalBudget::default()).unwrap();
+    let journal = if retained.is_some() {
+        rejection_journal(&store_path, &selection, now)
+    } else {
+        directory(&store_path);
+        let private = PrivateRoot::open(&store_path).unwrap();
+        let mut writer = private.try_configuration_writer().unwrap();
+        EnrollmentJournal::open(&private, &mut writer, JournalBudget::default())
+            .unwrap()
+            .record_time_floor(now)
+            .unwrap();
+        OwnedEnrollmentJournal::open_existing(private, writer, JournalBudget::default()).unwrap()
+    };
     let service = EnrollmentService::recover_existing(
         journal,
         "a".repeat(43).as_bytes(),
@@ -228,6 +282,168 @@ async fn unsent_cli_and_app_join_retry_but_dispatched_join_stays_fenced_requires
             .request_id,
         joined.request_id
     );
+
+    if retained.is_some() {
+        let inputs = cli.join("inputs");
+        directory(&inputs);
+        write(
+            &inputs.join("host-public-identity.json"),
+            &serde_json::to_vec(&joined).unwrap(),
+            false,
+        );
+        write(&inputs.join("claim-0.started"), b"dispatched\n", false);
+        let decision = json!({"request_id":joined.request_id,"device_id":joined.device_id,
+            "fingerprint":joined.fingerprint,"comparison_code":joined.comparison_code});
+        let response = native_join_http::exchange_local_rejection(
+            &origin,
+            &client,
+            &serde_json::to_vec(&decision).unwrap(),
+            "a".repeat(43).as_bytes(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, 200);
+        let rejected = native_join::claim(&cli.join("host")).await.unwrap();
+        assert_eq!(rejected.status, "rejected");
+        assert_eq!(rejected.request_id, joined.request_id);
+        if std::env::var_os("STYX_TEST_SETUP_RETIRE_REFERENCE").is_some() {
+            write(
+                &inputs.join("setup-intent.json"),
+                br#"{"role":"join"}"#,
+                false,
+            );
+            write(
+                &inputs.join("runtime-selection.json"),
+                &fs::read(&selection).unwrap(),
+                false,
+            );
+            let retirement =
+                crate::management::role_retire::retire_setup_host(&cli, &cli.join("host")).unwrap();
+            assert_eq!(retirement.outcome, "retired");
+            assert!(!cli.join("host").exists());
+            assert_eq!(
+                fs::read(inputs.join("runtime-selection.json")).unwrap(),
+                fs::read(&selection).unwrap()
+            );
+            let new_invitation = invite(&origin, &client).await;
+            if let Some(binary) = std::env::var_os("STYX_TEST_SETUP_PAIR_BINARY") {
+                let link = pairing_link::build(
+                    &origin.origin().ascii_serialization(),
+                    new_invitation["invitation"].as_str().unwrap(),
+                    new_invitation["expires_at"].as_u64().unwrap(),
+                    ca_pem,
+                    now_ms().unwrap(),
+                )
+                .unwrap();
+                write(&cli.join("new-link"), link.as_bytes(), false);
+                let mut child = tokio::process::Command::new(binary)
+                    .args([
+                        "cli::setup::tests::rejected_join_requires_exact_recorded_identity",
+                        "--exact",
+                        "--test-threads=1",
+                    ])
+                    .env("STYX_TEST_SETUP_PAIR_NEW", &root)
+                    .env_remove("STYX_TEST_SETUP_REJECTION_FIXTURE")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .unwrap();
+                let mut pending = None;
+                for _ in 0..150 {
+                    let response = native_join_http::exchange_local_pending(
+                        &origin,
+                        &client,
+                        "a".repeat(43).as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                    let rows: Vec<Value> = serde_json::from_slice(&response.body).unwrap();
+                    if let Some(row) = rows.into_iter().next() {
+                        pending = Some(row);
+                        break;
+                    }
+                    if child.try_wait().unwrap().is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                let Some(pending) = pending else {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    panic!("formal setup pair did not produce a pending request");
+                };
+                assert_ne!(pending["request_id"].as_str(), joined.request_id.as_deref());
+                let approval = json!({"request_id":pending["request_id"],"fingerprint":pending["fingerprint"],
+                    "enable_computer":false,"enable_browser":false});
+                let response = native_join_http::exchange_local_admin(
+                    &origin,
+                    &client,
+                    true,
+                    &serde_json::to_vec(&approval).unwrap(),
+                    "a".repeat(43).as_bytes(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(response.status, 200);
+                let mut status = None;
+                for _ in 0..150 {
+                    if let Some(value) = child.try_wait().unwrap() {
+                        status = Some(value);
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                if status.is_none() {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                }
+                assert!(
+                    status.is_some_and(|status| status.success()),
+                    "formal setup pair did not complete"
+                );
+                let next = native_join::inspect(&cli.join("host")).await.unwrap();
+                assert_ne!(next.device_id, joined.device_id);
+                assert_eq!(next.status, "ready_to_connect");
+            } else {
+                let new_input_root = cli.join("new-input");
+                directory(&new_input_root);
+                let new_input = deployment(
+                    &new_input_root,
+                    &selection,
+                    &origin.origin().ascii_serialization(),
+                    ca_pem,
+                    pin,
+                    new_invitation["invitation"].as_str().unwrap(),
+                );
+                let next = native_join::request(&cli, std::ffi::OsStr::new("host"), &new_input)
+                    .await
+                    .unwrap();
+                assert_ne!(next.request_id, joined.request_id);
+                assert_ne!(next.device_id, joined.device_id);
+                let approval = json!({"request_id":next.request_id,"fingerprint":next.fingerprint,
+                "enable_computer":false,"enable_browser":false});
+                let response = native_join_http::exchange_local_admin(
+                    &origin,
+                    &client,
+                    true,
+                    &serde_json::to_vec(&approval).unwrap(),
+                    "a".repeat(43).as_bytes(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(response.status, 200);
+                assert_eq!(
+                    native_join::claim(&cli.join("host")).await.unwrap().status,
+                    "ready_to_connect"
+                );
+            }
+        }
+        stop.cancel();
+        let facts = server.await.unwrap().unwrap();
+        assert!(facts.connections_joined && facts.blocking_jobs_joined);
+        return;
+    }
 
     // Exercise the actual App inspectJoin + join operations in the SAME owner.
     let container = root.join("app");

@@ -754,7 +754,7 @@ namespace StyxNative {
    if(rows.Length==0)Explain("Waiting for the other computer to request joining.",45);
    foreach(var row in rows){
     string code=Json.Str(row,"comparison_code"),id=Json.Str(row,"device_id"),fingerprint=Json.Str(row,"fingerprint"),request=Json.Str(row,"request_id");
-    Explain(id+"\nPairing code: "+code,65);
+    Explain(id+"\nPublic key fingerprint: "+fingerprint+"\nPairing code: "+code,120);
     Action("Confirm "+code,async()=>{
      if(MessageBox.Show("Does the other computer show this exact code?\n\n"+code+"\n\nApprove requested features: Commands"+(Json.Yes(row,"browser_requested")?", Browser":"")+(Json.Yes(row,"computer_requested")?", Computer Use":""),"Confirm computer",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;
      await owner.Call("approveComputer",Json.Obj("authorize",true,"requestId",request,"deviceId",id,"fingerprint",fingerprint,"comparisonCode",code,"enableComputer",Json.Yes(row,"computer_requested"),"enableBrowser",Json.Yes(row,"browser_requested")));
@@ -831,6 +831,7 @@ namespace StyxNative {
    if(name=="general"){
     StyxContext.Heading(content,"Startup");
     Explain("Closing the window keeps Styx running in the system tray. Choose Quit Styx to stop this session.");
+    StyxContext.Button(content,"Quit Styx",owner.RequestQuit);
     NativeAction("Login startup…","appLifecycle",async()=>{ShowPage("login-startup");await ReadLogin();});
     StyxContext.Heading(content,"About Styx");Explain("Styx for Windows");
     NativeAction("Change this computer's role…","retireRole",ChangeRole);

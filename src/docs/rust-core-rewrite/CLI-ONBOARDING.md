@@ -72,6 +72,27 @@ only after known awaiting-approval replies. Approve that code on the hub using
 computer never bootstraps or starts a local Gateway. Claim precedes its service
 handover as well.
 
+When the hub explicitly rejects the exact recorded request, setup reports
+`setup_pairing_rejected`; this is a terminal refusal, not an unknown claim.
+Applying again is a new, explicit Join attempt. After normally stopping that
+setup's processes, use the same container:
+
+```sh
+styx role retire --state-dir /absolute/setup-root/host \
+  --setup-root /absolute/setup-root --authorize --json
+styx setup --root /absolute/setup-root --answers /private/new-join-answers.json --foreground
+```
+
+The optional `--setup-root` applies only to a CLI Join setup and must exactly
+contain the selected `host` root. It preserves the old Host and that attempt's
+Join inputs and receipts by exclusive rename; Runtime selection, publisher
+material and other roles remain in place. The new answers must reference a new
+invitation and confirm its actual origin, CA and identity. This does not retry
+an old request or turn a historical unknown into a failure. Concurrent setup,
+ambiguous ownership or an incomplete retirement journal refuses further setup;
+the old records are not deleted. This flag does not reset an App profile or a
+Gateway setup.
+
 **Accepted join-only behavior (review round 2):** Host-only credentials admit
 self-capabilities, not the Gateway's model-only status tool. Joining computers
 verify Exec/Browser connection on the hub with `styx status`. Setup names this

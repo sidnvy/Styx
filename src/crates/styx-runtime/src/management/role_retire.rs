@@ -63,6 +63,14 @@ impl RetireError {
             report: RetireReport::default(),
         }
     }
+    fn unknown(code: &'static str) -> Self {
+        let report = RetireReport {
+            outcome: "unknown",
+            restart_required: true,
+            ..RetireReport::default()
+        };
+        Self { code, report }
+    }
     pub fn exit_code(&self) -> u8 {
         if self.report.outcome == "unknown" {
             4
@@ -284,6 +292,197 @@ pub fn retire_role(
     options: RetireOptions,
 ) -> Result<RetireReport, RetireError> {
     prepare(Some(host), gateway, options)?.retire()
+}
+
+const SETUP_RETIRE_JOURNAL: &str = ".styx-setup-retire-v1";
+fn journal_exists(path: &Path) -> Result<bool, RetireError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        _ => Err(RetireError::unknown("setup_retirement_unknown")),
+    }
+}
+
+/// Serialize CLI setup against explicit retirement of that same container.
+pub struct SetupContainerGuard {
+    path: PathBuf,
+    root: PrivateRoot,
+    lease: ExecutionLeaseGuard,
+}
+impl SetupContainerGuard {
+    pub fn acquire(path: &Path) -> Result<Self, RetireError> {
+        let root =
+            PrivateRoot::open(path).map_err(|_| RetireError::refused("setup_container_refused"))?;
+        let lease = root
+            .try_execution_lease()
+            .map_err(|_| RetireError::refused("setup_container_busy"))?;
+        let guard = Self {
+            path: path.to_owned(),
+            root,
+            lease,
+        };
+        guard.validate()?;
+        let journal = path.join(SETUP_RETIRE_JOURNAL);
+        if journal_exists(&journal)? {
+            let journal = PrivateRoot::open(&journal)
+                .map_err(|_| RetireError::unknown("setup_retirement_unknown"))?;
+            let begin = journal.read_raw("begin", 64);
+            let done = journal.read_raw("done", 64);
+            match (begin, done) {
+                (Ok(begin), Ok(done))
+                    if begin.bytes() == b"started\n" && done.bytes() == b"completed\n" =>
+                {
+                    ()
+                }
+                (Err(_), Err(_))
+                    if journal.ensure_absent("begin").is_ok()
+                        && journal.ensure_absent("done").is_ok() =>
+                {
+                    ()
+                }
+                _ => return Err(RetireError::unknown("setup_retirement_unknown")),
+            }
+        }
+        Ok(guard)
+    }
+    pub fn validate(&self) -> Result<(), RetireError> {
+        self.lease
+            .validate()
+            .map_err(|_| RetireError::refused("setup_container_changed"))?;
+        if PrivateRoot::open(&self.path)
+            .map_err(|_| RetireError::refused("setup_container_changed"))?
+            .identity()
+            != self.root.identity()
+        {
+            return Err(RetireError::refused("setup_container_changed"));
+        }
+        Ok(())
+    }
+}
+
+fn setup_join_input(name: &str) -> bool {
+    matches!(
+        name,
+        "setup-intent.json"
+            | "host-deployment.json"
+            | "host-public-identity.json"
+            | "join-ca.pem"
+            | "invitation"
+            | "join-input.started"
+            | "join-input.done"
+            | "request.started"
+            | "request.done"
+            | "claim.done"
+            | "host-running.started"
+            | "host-running.done"
+    ) || name
+        .strip_prefix("pasted-join-link-")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        || name
+            .strip_prefix("claim-")
+            .and_then(|s| s.split_once('.'))
+            .is_some_and(|(n, suffix)| {
+                !n.is_empty()
+                    && n.bytes().all(|b| b.is_ascii_digit())
+                    && matches!(suffix, "started" | "pending" | "done")
+            })
+        || name
+            .strip_prefix("host-service-")
+            .and_then(|s| s.split_once("-r"))
+            .and_then(|(action, rest)| {
+                rest.split_once('.')
+                    .map(|(revision, suffix)| (action, revision, suffix))
+            })
+            .is_some_and(|(action, revision, suffix)| {
+                matches!(action, "install" | "enable" | "start")
+                    && !revision.is_empty()
+                    && revision.bytes().all(|b| b.is_ascii_digit())
+                    && matches!(suffix, "started" | "done")
+            })
+}
+
+/// Explicitly abandon this CLI Join attempt, retaining every moved byte.
+pub fn retire_setup_host(setup: &Path, host: &Path) -> Result<RetireReport, RetireError> {
+    if !setup.is_absolute() || host != setup.join("host") {
+        return Err(RetireError::refused("role_retire_invalid_roots"));
+    }
+    let guard = SetupContainerGuard::acquire(setup)?;
+    let inputs_path = setup.join("inputs");
+    let inputs = PrivateRoot::open(&inputs_path)
+        .map_err(|_| RetireError::refused("role_retire_setup_inputs_refused"))?;
+    let intent = inputs
+        .read_raw("setup-intent.json", 1024 * 1024)
+        .map_err(|_| RetireError::refused("role_retire_setup_intent_refused"))?;
+    let intent: serde_json::Value = serde_json::from_slice(intent.bytes())
+        .map_err(|_| RetireError::refused("role_retire_setup_intent_refused"))?;
+    if intent.get("role").and_then(serde_json::Value::as_str) != Some("join") {
+        return Err(RetireError::refused("role_retire_setup_not_join"));
+    }
+    let own_link = intent
+        .get("join_link_file")
+        .and_then(serde_json::Value::as_str)
+        .map(Path::new)
+        .filter(|path| path.parent() == Some(inputs_path.as_path()))
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .map(str::to_owned);
+    if own_link
+        .as_deref()
+        .is_some_and(|name| !setup_join_input(name) || !name.starts_with("pasted-join-link-"))
+    {
+        return Err(RetireError::refused("role_retire_setup_inputs_refused"));
+    }
+    let mut prepared = prepare(Some(host), None, RetireOptions::default())?;
+    for entry in std::fs::read_dir(&inputs_path)
+        .map_err(|_| RetireError::refused("role_retire_setup_inputs_refused"))?
+    {
+        let entry = entry.map_err(|_| RetireError::refused("role_retire_setup_inputs_refused"))?;
+        let name = entry.file_name();
+        let name = name
+            .to_str()
+            .ok_or_else(|| RetireError::refused("role_retire_setup_inputs_refused"))?;
+        if setup_join_input(name) || own_link.as_deref() == Some(name) {
+            inputs
+                .read_raw(name, 1024 * 1024)
+                .map_err(|_| RetireError::refused("role_retire_setup_inputs_refused"))?;
+            prepared.add_input(&inputs_path.join(name))?;
+        }
+    }
+    guard.validate()?;
+    let journal_path = setup.join(SETUP_RETIRE_JOURNAL);
+    if journal_exists(&journal_path)? {
+        let backup = destination(&journal_path, &prepared.suffix)?;
+        rename_exclusive(&backup.old_path, &backup.new_path)
+            .map_err(|_| RetireError::refused("role_retire_journal_archive_refused"))?;
+    }
+    let journal = guard
+        .root
+        .create_setup_journal_child(SETUP_RETIRE_JOURNAL)
+        .map_err(|_| RetireError::refused("role_retire_journal_refused"))?;
+    journal
+        .create_setup_export("begin".as_ref(), b"started\n")
+        .map_err(|_| RetireError::refused("role_retire_journal_refused"))?;
+    let mut report = prepared.retire()?;
+    if guard.root.sync_setup_directory().is_err() || inputs.sync_setup_directory().is_err() {
+        report.outcome = "unknown";
+        report.restart_required = true;
+        return Err(RetireError {
+            code: "role_retire_completion_unknown",
+            report,
+        });
+    }
+    if journal
+        .create_setup_export("done".as_ref(), b"completed\n")
+        .is_err()
+    {
+        report.outcome = "unknown";
+        report.restart_required = true;
+        return Err(RetireError {
+            code: "role_retire_completion_unknown",
+            report,
+        });
+    }
+    Ok(report)
 }
 /// Use official platform no-replace rename primitives, including for a name
 /// collision appearing after preflight. There is no overwrite fallback.

@@ -628,6 +628,26 @@ fn cli_tunnel_requires_authorization_and_only_file_credentials() {
 
 #[test]
 fn cli_role_retire_has_explicit_roots_and_authorization_boundary() {
+    let scoped = Cli::try_parse_from([
+        "styx",
+        "role",
+        "retire",
+        "--state-dir",
+        "/owned/host",
+        "--setup-root",
+        "/owned",
+        "--authorize",
+    ])
+    .unwrap();
+    assert!(matches!(
+        scoped.command,
+        Command::Role {
+            command: RoleCommand::Retire {
+                setup_root: Some(_),
+                ..
+            }
+        }
+    ));
     let cli = Cli::try_parse_from([
         "styx",
         "role",

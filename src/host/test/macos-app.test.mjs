@@ -92,6 +92,8 @@ test('stable macOS bundle identity and version reject injected plist values',()=
   assert.ok(plist.includes(`<string>${MAC_BUNDLE_ID}</string>`));
   assert.ok(plist.includes('<key>CFBundleExecutable</key><string>Styx</string>'));
   assert.ok(plist.includes('<key>LSUIElement</key><true/>'));
+  const localNetworkPurpose=plist.match(/<key>NSLocalNetworkUsageDescription<\/key><string>([^<]+)<\/string>/)?.[1];
+  assert.ok(localNetworkPurpose?.trim().length>=16,'Local-network access needs a nonempty user-facing purpose in the main App bundle');
   for(const bad of ['0.1.0<dict>','0.1','v0.1.0','0.1.0-rc.1',null])
     assert.throws(()=>appInfoPlist(bad),/invalid_app_version/);
 });

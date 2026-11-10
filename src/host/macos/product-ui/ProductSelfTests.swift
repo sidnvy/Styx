@@ -14,6 +14,10 @@ func productCoreSelfTest() throws {
     try require(ProductTunnelInputPolicy.tunnelError("https://example.com") != nil, "A server URL became a Tunnel ID")
     try require(ProductTunnelInputPolicy.tunnelError(" tunnel_12345678 ") == nil, "Valid pasted Tunnel ID rejected")
     try require(ProductTunnelInputPolicy.keyError("", saved: true) == nil, "Saved key required secret readback")
+    for code in ["join_http_connect_failed", "join_http_tls_rejected"] {
+        try require(ProductNativeDiagnostics.rejectionCode(.object(["error": .string(code), "detail": .string("private-canary")])) == code, "A fixed join transport diagnosis was discarded")
+    }
+    try require(ProductNativeDiagnostics.rejectionCode(.object(["error": .string("private-canary"), "code": .string("join_http_connect_failed")])) == "other", "An arbitrary error or alternate field escaped diagnostic redaction")
     try require(ProductTunnelInputPolicy.keyError("", saved: false) != nil, "Missing runtime key allowed on first setup")
     try require(ProductTunnelInputPolicy.keyError("sk-valid_" + String(repeating: "a", count: 32), saved: false) == nil, "Valid runtime key rejected")
     for observed in [ProductJSON.null, .string("true")] {
@@ -25,6 +29,10 @@ func productCoreSelfTest() throws {
         try require(device?.indicator == (connected ? .connected : .offline), "Observed connection state was lost")
     }
     try require(ProductSettingsSection.allCases.count == 3, "Local and other computers split into overlapping settings")
+    for (value, expected) in [(ProductJSON.bool(true), ProductFeatureSelection.selected), (.bool(false), .notSelected), (.null, .unknown), (.string("true"), .unknown), (.number(1), .unknown)] {
+        try require(ProductFeatureSelection.observed(value, unconfigured: false) == expected, "Missing or malformed feature selection became permission or denial")
+        try require(ProductFeatureSelection.observed(value, unconfigured: true) == .notConfigured, "Retired setup retained a stale feature selection")
+    }
     let token = String(repeating: "a", count: 43)
     let valid = URL(string: "http://127.0.0.1:12345/#session=" + token)!
     let parsed = ProductCoreClient.bootstrap(valid)

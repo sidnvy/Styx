@@ -134,6 +134,25 @@ import SwiftUI
             @MainActor func views<T: NSView>(_ view: NSView, _ type: T.Type) -> [T] {
                 ((view as? T).map { [$0] } ?? []) + view.subviews.flatMap { views($0, type) }
             }
+            // Render the same rows used by native Settings even when enrollment
+            // is absent after role retirement. No Core or stored profile is used.
+            let capabilities = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 180), styleMask: [.titled], backing: .buffered, defer: false)
+            capabilities.isReleasedWhenClosed = false
+            defer { capabilities.close() }
+            for (name, selected, unconfigured) in [
+                ("unconfigured", ProductJSON.null, true),
+                ("unknown", .null, false),
+                ("selected", .object(["computer": .bool(true), "browser": .bool(false)]), false)
+            ] {
+                capabilities.contentView = NSHostingView(rootView: ProductNativeOptionalCapabilities(selected: selected, unconfigured: unconfigured).padding())
+                capabilities.orderFront(nil)
+                try await Task.sleep(nanoseconds: 200_000_000)
+                for key in ["computer", "browser"] {
+                    try require(find(capabilities, "styx-settings-capability-" + key) != nil, "Native Settings hid a capability in " + name)
+                }
+                try capture(capabilities, "native-capabilities-" + name)
+            }
+            capabilities.orderOut(nil)
             try await Task.sleep(nanoseconds: 300_000_000)
             try capture(panel, "panel")
             try require(model.chatIndicator == .connected && model.chatMenuTitle == "ChatGPT", "Menu mistakes missing manual confirmation for connection failure")

@@ -78,7 +78,7 @@ async fn serve(
 ) -> (
     url::Url,
     oneshot::Sender<()>,
-    tokio::task::JoinHandle<usize>,
+    tokio::task::JoinHandle<Vec<u8>>,
 ) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = url::Url::parse(&format!("https://{}/", listener.local_addr().unwrap())).unwrap();
@@ -126,18 +126,46 @@ async fn serve(
         #[allow(deprecated)] // Test-only real OS RST, no custom socket FFI.
         tls.get_ref().0.set_linger(Some(Duration::ZERO)).unwrap();
         drop(tls);
-        request.len()
+        request
     });
     (origin, release, task)
 }
-async fn join_peer(task: tokio::task::JoinHandle<usize>) {
-    assert!(
-        tokio::time::timeout(Duration::from_secs(8), task)
-            .await
-            .unwrap()
-            .unwrap()
-            > 2
-    );
+async fn join_peer(task: tokio::task::JoinHandle<Vec<u8>>) -> Vec<u8> {
+    let request = tokio::time::timeout(Duration::from_secs(8), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(request.len() > 2);
+    request
+}
+
+#[tokio::test]
+async fn local_rejection_admits_fixed_authenticated_request_over_tls() {
+    let f = Fixture::new();
+    let (origin, release, task) = serve(&f, COMPLETE.to_vec(), Tail::ResetOnClientClose).await;
+    let response = exchange_local_rejection(
+        &origin,
+        &f.client,
+        b"{}",
+        b"synthetic_local_admin_token_12345678",
+    )
+    .await;
+    drop(release);
+    let request = join_peer(task).await;
+    let response = response.expect("fixed authenticated native rejection must reach TLS peer");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body.as_slice(), b"{}");
+    let header_end = request.windows(4).position(|b| b == b"\r\n\r\n").unwrap();
+    let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+    let mut lines = headers.split("\r\n");
+    assert_eq!(lines.next(), Some("POST /styx/enroll/reject HTTP/1.1"));
+    assert!(lines.any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("authorization")
+                && value.trim() == "Bearer synthetic_local_admin_token_12345678"
+        })
+    }));
+    assert_eq!(&request[header_end + 4..], b"{}");
 }
 
 #[tokio::test]

@@ -492,6 +492,9 @@ enum RoleCommand {
     Retire {
         #[arg(long)]
         state_dir: PathBuf,
+        /// Explicitly abandon this Join setup's original inputs and Host.
+        #[arg(long)]
+        setup_root: Option<PathBuf>,
         #[arg(long)]
         gateway_state_dir: Option<PathBuf>,
         #[arg(long)]
@@ -1289,6 +1292,7 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             command:
                 RoleCommand::Retire {
                     state_dir,
+                    setup_root,
                     gateway_state_dir,
                     allow_other_devices,
                     authorize,
@@ -1298,7 +1302,15 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             if !authorize {
                 return error("role_retire_authorization_required");
             }
+            if setup_root.is_some() && (gateway_state_dir.is_some() || allow_other_devices) {
+                return error("role_retire_invalid_options");
+            }
             let result = tokio::task::spawn_blocking(move || {
+                if let Some(root) = setup_root {
+                    return styx_runtime::management::role_retire::retire_setup_host(
+                        &root, &state_dir,
+                    );
+                }
                 styx_runtime::management::role_retire::retire_role(
                     &state_dir,
                     gateway_state_dir.as_deref(),

@@ -432,6 +432,33 @@ impl PrivateRoot {
     pub fn identity(&self) -> RootIdentity {
         self.inner.identity()
     }
+    /// Fresh fixed journal directory with the platform's parent/child durability barrier.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    pub(crate) fn create_setup_journal_child(&self, name: &str) -> Result<Self> {
+        self.inner
+            .create_fresh_child(std::ffi::OsStr::new(name))
+            .map(|inner| Self { inner })
+            .map_err(|failure| failure.cause)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    pub(crate) fn create_setup_journal_child(&self, _: &str) -> Result<Self> {
+        Err(StoreError::Unsupported)
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn sync_setup_directory(&self) -> Result<()> {
+        self.inner.with_readonly_directory(|directory| {
+            directory.sync_all()?;
+            Ok(())
+        })
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(crate) fn sync_setup_directory(&self) -> Result<()> {
+        self.inner.sync_directory()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    pub(crate) fn sync_setup_directory(&self) -> Result<()> {
+        Err(StoreError::Unsupported)
+    }
     /// Runtime scratch only; no configuration/journal or existing ACL repair.
     #[cfg(target_os = "windows")]
     pub(crate) fn open_or_create_private_child(&self, name: &str) -> Result<Self> {

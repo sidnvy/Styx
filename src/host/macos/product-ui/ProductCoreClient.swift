@@ -40,6 +40,9 @@ enum ProductNativeDiagnostics {
             "app_scope_changed", "app_instance_changed", "app_scope_invalid",
             "app_service_original_operation_unknown", "app_runtime_update_pending", "app_cleanup_unknown",
             "app_gateway_fenced", "app_quit_admitted", "join_http_invalid_input",
+            "join_http_invalid_timeout", "join_http_connect_failed", "join_http_tls_rejected",
+            "join_http_leaf_pin_mismatch", "join_http_deadline", "join_http_exchange_failed",
+            "join_http_response_too_large", "join_http_redirect_refused",
             "native_gateway_rejection_binding_mismatch", "native_gateway_admin_rejected", "native_gateway_admin_result_unknown"
         ]
         guard let code = response["error"].string, known.contains(code) else { return "other" }

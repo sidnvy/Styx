@@ -1,52 +1,95 @@
-# Preview quality gates
+# Local development and release checks
 
-From a source checkout, install the four checked-in dependency locks with
-`npm ci --ignore-scripts` in `src` and each Exec, GUI and Browser provider.
-No global dependency install or npm lifecycle scripts are required.
-Prepare the pinned Codex fixture runtime with
-`python3 packages/styx-exec-adapter/prepare-runtime.py` before the full suite;
-the real GUI/Exec integration tests require that input and fail if it is absent.
+Owner policy (2026-11-10): improve and run tests locally. GitHub Actions is not a
+development dependency. Later CI should call these same verified commands; this
+work does not change workflows, add runners or publish. Local tests, packaging
+and real-device acceptance have different boundaries. A PASS names what ran.
 
-`npm run quality -- /absolute/fresh/evidence-directory` is the shared local/CI
-entrypoint. It checks every installed dependency tree, scans every lock for
-moderate-or-higher advisories, emits four CycloneDX SBOMs and runs Gateway,
-Exec contracts, GUI, Host, Windows bridge, Browser, plugin, onboarding and the
-quality runner's own failure tests. Failed commands and missing inputs fail the
-gate. Skipped native cases stay visible. All independent audits are attempted
-even when an earlier audit fails. A lock changed during checking invalidates the
-run; an existing output receipt cannot be overwritten.
+## Daily regression
 
-For a distributable Linux/Windows preview use:
+Use the pinned Rust toolchain and existing Cargo cache. Do not clean or create
+a cache per task. The thin local entry defaults to 8 Cargo jobs on Linux for
+that invocation, preserving an explicit existing setting. Libtest is serial
+because descriptor-owning fixtures must not overlap accidentally.
 
-```
-npm run build:checked -- linux /absolute/build.json /absolute/fresh/build-evidence
-npm run build:checked -- windows /absolute/build.json /absolute/fresh/build-evidence
+Check the affected crate and its changed scenario or package regression:
+
+```sh
+cargo check -p styx-core --locked --offline
+npm run test:unit -- --package styx-core
+npm run test:contracts
 ```
 
-The checked build validates this checkout and its dependency tree before invoking
-the existing platform builder. The configuration is the corresponding builder's
-existing schema; it does not add deployment or role configuration. Linux includes
-the same Core CLI and a signed independent Gateway runtime. Windows may only be
-cross-staged on Linux: `STAGED` is not native compilation. Keep private publisher
-keys outside source, output and artifacts. Low-level builders still support
-isolated engineering fixtures; their success alone is not a checked distribution.
+These are choices by impact, not three mandatory layers after every edit.
+`test:unit` accepts repeated `--package` arguments and runs their non-ignored
+tests. Include affected consumers of shared contracts; compiling a dependency
+does not execute its tests. Unknown packages, toolchain mismatch, command
+failure and zero passed tests fail the entry.
 
-The VNext workflow uses the same quality command and archives its receipts even
-on failure. A checked build PASS is scoped to dependency/contract checks and the
-builder. It does not establish upstream authenticity of every optional input,
-native desktop operation, clean installation, restart recovery, signer trust,
-long-running reliability or ChatGPT account acceptance. In particular, the
-Windows builder's executable-format check alone does not validate Node upstream
-provenance. Separate artifact/native receipts are required for those gates.
+`test:contracts` covers public Computer schema projection/equivalence plus the
+actual fixed native rejection client's legal TLS request and local negative
+admission controls. Synthetic test keys and loopback peers are used, never real
+profiles. This catches a missing client route early; it does not establish a
+persisted Core decision, account connector, OS permission or desktop effect.
 
-## Current boundaries
+```sh
+python3 -I -B src/ci/local-tests.py --dry-run contracts
+python3 -I -B -m unittest discover -s src/ci/test -p test_local_tests.py
+```
 
-The two prototype SDK locks are now pinned to the same patched `1.32.1` version
-as Core. Dependency audits passed on the recorded local check; CI configuration
-is present, but no hosted CI result or branch-protection enforcement is implied.
+Dry-run says NOT RUN, never PASS. The Python checks cover subprocess failure,
+version mismatch, invalid selection, missing inputs and zero-test false passes.
 
-Mac UI development is owned by its local Mac thread. Its existing CI still needs
-the complete product UI build and bundled-resource self-tests wired in. The
-local bundled testing App has a recorded default-profile assertion failure; it
-must not be hidden by running the binary without resources. Mac native/signing,
-TCC, visual and account gates are not inferred from this Linux/Windows command.
+For JS/native-shell/packaging changes use the appropriate existing suite in
+`src/package.json`, or `npm run test:js`. Root `npm test` and `src` `test:all`
+remain JS-only for compatibility: neither means Rust or device acceptance ran.
+
+## Integration checkpoint
+
+Use existing `src/ci/rust-quality.py` once at a shared integration/candidate
+checkpoint, not after each helper or platform-only edit. It includes pinned
+dependency/toolchain checks, fmt, clippy, workspace regression, ignored-test
+inventory and controlled HTTP boundaries.
+
+Replace these example paths with a new external evidence directory and the
+already-owned external Cargo cache recorded in current integration receipts:
+
+```sh
+npm run test:integration -- --evidence /absolute/new/evidence --target-dir /absolute/existing/cargo-cache
+```
+
+This delegates to the same gate as `npm run quality -- --evidence ...`, not a
+second implementation. See `rust-quality.py --help` for explicit synthetic PKI,
+Node, Codex and Browser inputs. Full native-client enrollment and paired
+TLS/MCP/WSS/executor scenarios need their declared inputs/flags. An ignored-test
+inventory is not execution. Missing/unrequested native cases remain NOT_RUN.
+
+The full persisted rejection journey must use the actual App client, including
+its route admission: a generic HTTP test previously hid a broken client. Keep
+that integration regression alongside the fast transport admission regression.
+
+## Native checks and frozen candidates
+
+| Change | Local response |
+| --- | --- |
+| Rust domain or shared contract | Affected crate/consumer and actual cross-layer scenario; full quality at the integration checkpoint. |
+| Swift/C# or GUI state | Original platform owner runs existing check-only compilation and affected native scenario; no release producer per typecheck. |
+| Package/resource/integrity/signing | Affected package/native verification; new candidate only when executable/package inputs change. |
+| Docs or management alias | Syntax/links and affected entry behavior; no installer rebuild or device journey for a doc edit. |
+
+Frozen candidates additionally require exact artifacts, native permission,
+GUI identity/pairing, independent effects, negative controls and normal
+exit/recovery on relevant platform/role paths. Counts, mocks, synthetic windows
+and package verification cannot replace these checks. Preserve FAIL/UNKNOWN;
+never replay unknown actions or relabel them using later success.
+
+Reuse exact-artifact evidence; changes require impact-based verification and a
+consistent final candidate, not silent version mixing. The current role matrix
+and sequence are in [the delivery plan](rust-core-rewrite/END-TO-END-DELIVERY-PLAN.md).
+Keep one short result per platform role plus the aggregate matrix. A device bug
+gets its smallest real-boundary local regression; the device then closes the
+OS/account part, without multiplying full suites.
+
+Signing keys and real account secrets stay on their authorized devices. Future
+hosted CI can reuse these commands with synthetic inputs; ordinary CI must not
+acquire personal profiles or signing private keys.

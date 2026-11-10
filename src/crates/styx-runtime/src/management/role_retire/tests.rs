@@ -37,6 +37,83 @@ pub(crate) fn file(path: &Path, bytes: &[u8]) {
         .unwrap();
     file.write_all(bytes).unwrap();
 }
+
+#[test]
+fn setup_join_retirement_fences_concurrency_and_preserves_shared_inputs() {
+    assert!(setup_join_input("host-service-start-r1.done"));
+    assert!(!setup_join_input(
+        "host-service-start-r1.done.retired-20261110T000000Z"
+    ));
+    let temp = Temp::new();
+    let setup = temp.child("setup");
+    let host = setup.join("host");
+    let inputs = setup.join("inputs");
+    fs::DirBuilder::new().mode(0o700).create(&host).unwrap();
+    fs::DirBuilder::new().mode(0o700).create(&inputs).unwrap();
+    file(&inputs.join("setup-intent.json"), br#"{"role":"join"}"#);
+    file(&inputs.join("runtime-selection.json"), b"shared selection");
+    file(&inputs.join("claim-0.started"), b"dispatched\n");
+    file(&inputs.join("host-public-identity.json"), b"old identity");
+    file(&setup.join("publisher.pem"), b"publisher");
+    let owner = SetupContainerGuard::acquire(&setup).unwrap();
+    assert_eq!(
+        retire_setup_host(&setup, &host).unwrap_err().code,
+        "setup_container_busy"
+    );
+    drop(owner);
+    let report = retire_setup_host(&setup, &host).unwrap();
+    assert_eq!(report.outcome, "retired");
+    assert!(!host.exists());
+    assert!(!inputs.join("setup-intent.json").exists());
+    assert_eq!(
+        fs::read(inputs.join("runtime-selection.json")).unwrap(),
+        b"shared selection"
+    );
+    assert_eq!(fs::read(setup.join("publisher.pem")).unwrap(), b"publisher");
+    assert!(
+        report
+            .retired
+            .iter()
+            .any(|p| p.old_path.ends_with("claim-0.started")
+                && fs::read(&p.new_path).unwrap() == b"dispatched\n")
+    );
+    assert!(
+        report
+            .retired
+            .iter()
+            .any(|p| p.old_path == host && p.new_path.is_dir())
+    );
+    assert!(SetupContainerGuard::acquire(&setup).is_ok());
+}
+
+#[test]
+fn setup_retirement_incomplete_journal_and_wrong_scope_fail_closed() {
+    let temp = Temp::new();
+    let setup = temp.child("setup");
+    let host = setup.join("host");
+    let inputs = setup.join("inputs");
+    fs::DirBuilder::new().mode(0o700).create(&host).unwrap();
+    fs::DirBuilder::new().mode(0o700).create(&inputs).unwrap();
+    file(&inputs.join("setup-intent.json"), br#"{"role":"join"}"#);
+    let other = temp.child("other");
+    assert_eq!(
+        retire_setup_host(&setup, &other).unwrap_err().code,
+        "role_retire_invalid_roots"
+    );
+    assert!(other.is_dir() && host.is_dir());
+    let journal = setup.join(SETUP_RETIRE_JOURNAL);
+    fs::DirBuilder::new().mode(0o700).create(&journal).unwrap();
+    file(&journal.join("begin"), b"started\n");
+    assert_eq!(
+        SetupContainerGuard::acquire(&setup).err().unwrap().code,
+        "setup_retirement_unknown"
+    );
+    assert_eq!(
+        retire_setup_host(&setup, &host).unwrap_err().code,
+        "setup_retirement_unknown"
+    );
+    assert!(host.is_dir() && inputs.join("setup-intent.json").is_file());
+}
 fn hash(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest::of_bytes(bytes)
 }

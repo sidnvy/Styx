@@ -667,7 +667,7 @@ enum ProductRestorationPolicy {
         ProductNativeDiagnostics.event("operation_failed page=" + String(describing: page))
         if let rejected = failure as? ProductOwnedCoreRejection,
            rejected.response["retryable"] == .bool(true), rejected.response["uncertain"] == .bool(false) {
-            error = productText("配对请求尚未发送。请确认两台电脑网络可达，并在网关电脑的系统提示中允许 styx 接受传入连接。处理后粘贴新邀请，再核对并提交；不会自动重试。", "The pairing request was not sent. Check network access and allow styx incoming connections in the hub computer’s system prompt. Then paste a new invitation, review it and submit again. Styx will not retry automatically.")
+            error = productText("配对请求尚未发送。请检查这台 Mac 的“系统设置 → 隐私与安全性 → 本地网络”是否允许 Styx，并确认两台电脑网络可达、网关允许传入连接。处理后粘贴新邀请，再核对并提交；不会自动重试。", "The pairing request was not sent. Check Styx in this Mac’s System Settings → Privacy & Security → Local Network, network access between the computers, and incoming connections on the hub. Then paste a new invitation, review it and submit again. Styx will not retry automatically.")
             return
         }
         if let core = failure as? ProductCoreError, case .loginChangeUnconfirmed = core {

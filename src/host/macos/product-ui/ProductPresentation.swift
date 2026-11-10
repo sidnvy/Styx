@@ -75,6 +75,41 @@ struct ProductCapabilityLabel: View {
         }
     }
 }
+enum ProductFeatureSelection: Equatable {
+    case selected, notSelected, notConfigured, unknown
+    static func observed(_ value: ProductJSON, unconfigured: Bool) -> Self {
+        if unconfigured { return .notConfigured }
+        switch value {
+        case .bool(true): return .selected
+        case .bool(false): return .notSelected
+        default: return .unknown
+        }
+    }
+    var title: String {
+        switch self {
+        case .selected: return productText("已选择", "Selected")
+        case .notSelected: return productText("未选择", "Not selected")
+        case .notConfigured: return productText("尚未设置", "Not configured")
+        case .unknown: return productText("暂时无法获取状态", "Status unavailable")
+        }
+    }
+}
+struct ProductNativeOptionalCapabilities: View {
+    let selected: ProductJSON
+    let unconfigured: Bool
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            row(.computer, key: "computer")
+            row(.browser, key: "browser")
+        }
+    }
+    private func row(_ kind: ProductCapabilityKind, key: String) -> some View {
+        let title = kind.title + ": " + ProductFeatureSelection.observed(selected[key], unconfigured: unconfigured).title
+        return Label(title, systemImage: kind.symbol)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("styx-settings-capability-" + key)
+    }
+}
 enum ProductTunnelInputPolicy {
     static func tunnelError(_ value: String) -> String? {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines)

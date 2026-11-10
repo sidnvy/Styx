@@ -6,6 +6,159 @@
 [GUI-CONVERGENCE.md](GUI-CONVERGENCE.md) 保留历史尝试与证据，不能把历史通过当作当前候选通过。
 本文中的计划项不代表已经执行。**交付未完成；Stable NO-GO。**
 
+## 当前推进检查点（2026-11-10，新候选检查前）
+
+- **Product**：C27 Windows Gateway 的实际账号路由及本机三能力已独立通过；Exec
+  36字节精确文件、Browser HTTP1、Computer输入1/点击1且像素与随机独立oracle匹配。
+  Linux P1的唯一GUI Yes出现工具缓存错误，保留UNKNOWN；随后单次正式claim仍为
+  awaiting_approval，已过期，不能称拒绝通过。Mac Join明确未发送，原失败保留。
+- **Architecture**：Rust仍是唯一管理权威。CLI同根Join退休增加容器互斥和持久
+  begin/done栅栏，保留旧Host/本次输入及未知历史，Runtime selection/publisher/其他
+  角色不动；未完成归档不得被setup当fresh。不增加服务、JS权威或自动重放。
+- **Integration**：上述CLI切片本地严格TLS/签名合成reader7场景实际走正式
+  `setup::pair`，验证明确拒绝、同根退休、新邀请的新身份/请求、批准并ready；
+  并发/碰撞/不完整journal及原有丢回复不重放通过，独立源码复核无阻断项。
+  不是完整setup::run、断电、平台或真实账号验收。
+- **Release**：Mac原owner已检查功能行显示、换行、LAN用途说明、固定错误码和指导；
+  生产/测试类型检查、隔离self-test、plist lint通过。Windows原owner已检查设置页
+  Quit复用原退出逻辑及公开配对指纹，两次编译和QuitLifecycle idle/active/busy通过。
+  尚未打包或安装；源码收敛后只跑一次候选质量检查，再统一冻结新候选。
+- **Reliability**：Mac SSH严格TLS通过、Windows现用程序防火墙已有Allow，均不能
+  证明Styx桌面App的Local Network权限；系统列表中无Styx项，原因未证。当前旧包
+  缺LAN用途说明，下一包补齐；不改系统授权、不把假设当根因。原UNKNOWN/FAIL均保留。
+- **Decision**：继续原测试顺序；已有成绩复用，当前修复均需新候选受影响真机复核。
+  不为工具错误重放旧Yes，不换目录掩盖CLI重配对缺口，不操作生产Tunnel。
+
+> 本地测试执行更新（用户，2026-11-10）：当前先完善本地测试，不依赖或改造
+> GitHub Actions，后续稳定发版时再复用本地入口接 CI。新增明确的
+> `test:unit -- --package …`、`test:contracts`、`test:integration` 入口；保留原 JS
+> 套件兼容性并明确其不等于 Rust 检查。真实固定拒绝客户端的合法 TLS 请求快正控
+> 与原负控、schema 投影/等价共4项通过，5项编排失败/零测试行为检查通过；增量
+> `cargo check -p styx-runtime`、fmt 与 diff 检查通过。未重跑全 quality、未打包，
+> 当前已装 C27 不变。具体命令和覆盖边界见 [本地质量说明](../quality-gates.md)。
+> Windows Gateway 已正式创建并监听 10.0.8.146:22022，本机 Host b939b…实际就绪；
+> Mac 正常角色退休完成，旧 Tunnel 实际退出0，当前停在空 Join。Windows 原 owner
+> 一次 Save and connect 后为 configured/ready；独立账号 list 已实际只返回 connected
+> NAB5-WIN / styx-b939b24a32d1744997cc9122，证明账号切到了 Windows Gateway。
+> 远端加入及该 Gateway 三能力/生命周期仍未覆盖。此前失败、raw signal9 留存。
+> Mac 原生 owner 实看 Settings 仅 CLI，C27/build1136 哈希正确；源码因缺少选择记录
+> 隐藏 Browser/Computer。有界显示修复通过生产/测试两次原生类型检查、隔离编译、
+> self-test 与实际 SwiftUI 三状态可见性回归；Root 已实看未配置导出图。首次截图套件
+> 因隔离程序缺少随包图标失败，保留该记录；补齐既有资源后一次运行退出0、11.631s。
+> 随后窄窗文本换行修正也通过一次隔离编译/渲染回归（8.571s/12.549s、退出0），
+> 原 owner 实看三状态无省略截断，源码租约已释放。
+> 未重建发布包、未安装。用户已撤回过时的手动完整配置归档/重置授权，不得执行。
+
+## 当前产品范围与证据缺口（用户澄清，2026-11-10）
+
+最终目标是兑现既有承诺的成熟产品：macOS、Windows、Linux 均保留 Gateway 与 Host
+能力以及受支持的跨平台连接。用户日常选择 moedeu-apps 集中做 Gateway、电脑做 Host，
+只是适合其网络环境的部署方式，不是缩减产品能力或验收责任。撤回此前“无需补
+Windows/Linux Gateway、只差 Gateway 对齐”的判断。
+
+C27 当前端到端证据如下；“未覆盖”不等于源码未实现，也不能写成通过：
+
+| Gateway 所在平台 → Host 所在平台 | macOS Host | Windows Host | Linux Host |
+| --- | --- | --- | --- |
+| macOS Gateway | 已验证本机三能力及恢复；全新 profile 首设未覆盖 | 已验证配对/三能力/恢复/撤销重配对 | 已验证三能力/负控/恢复 |
+| Windows Gateway | Join明确未发送，未通过 | 本机三能力/独立路由已通过；恢复/安全旅程未闭合 | 一次请求等待批准，GUI拒绝UNKNOWN，未通过 |
+| Linux Gateway | 本候选未覆盖 | 本候选未覆盖 | 本候选未覆盖 |
+
+后续先核对未覆盖角色的已有实现和精确参考证据，再由原平台 owner 通过正常产品
+入口补齐 Gateway 创建、至少一个真实远端 Host 加入、身份批准/拒绝、实际工具路由、
+停止重开及恢复等平台主路径。其余连接方向只补该方向所缺的连接/协议边界与最小
+实际效果，不为每个格子重复全部三能力、安装、P1–P4和旧已通过场景。
+发现实际缺陷才有界修复，必要时产生新候选；文档、参考或历史成绩不能冒充实机通过。
+原平台 owner 继续占有设备 GUI，共享源码只在唯一 develop 集成；先核实各自状态，
+不为换角色擅自清空现有 profile、改生产入口或重放未知操作。
+
+moedeu-apps 的最终日常部署单独收口，不能替代上述产品角色矩阵。此前暂缓 Mac
+全新 profile 场景只记未测，不视为对三平台 Gateway 能力的豁免。持久服务、自动更新、
+legacy 迁移等既有延期项不因“成熟产品”字样自动变成新功能任务；范围变化单独记录。
+
+本次六领域变化：Product 恢复完整承诺范围；Architecture 无变更；Integration 仅纠正
+计划与交接；Release 无新构建/安装；Reliability 新列未覆盖角色与连接方向、保留既有
+失败及 UNKNOWN；Decision 产品能力收敛与个人部署分开，交付未完成、Stable NO-GO。
+
+## 下一轮具体顺序与测试深度（2026-11-10）
+
+按 Gateway 平台集中跑，不按工具或每对电脑分别重建环境。执行顺序是
+**只读就绪 → Windows Gateway → Linux Gateway → Mac 剩余缺口 → 发布检查 → 日常部署**。
+Windows 有已知退出控制拒绝，先闭合其原生角色/生命周期风险，避免先完成其他平台
+后才发现共享修复需要再产候选。Linux 随后提供服务器平台的 Gateway 证据；Mac
+保留已通过的 Gateway 行，只补首次设置及安全入口等尚未覆盖项目。
+
+| 顺序 | 固定被测 Gateway 与参与电脑 | 具体出口 |
+| --- | --- | --- |
+| 0 就绪 | 当前精确包、两端原 owner、Linux 已安装 C27 与原服务状态 | 确认版本/私有状态/无未知在途操作；先证明独立验收入口可指向本轮被测 Gateway，核对身份和实际路由。不可一直通过 Mac Gateway 来冒充测另一个 Gateway；不修改生产 Tunnel/插件。 |
+| 1 Windows Gateway | NAB5 当 Gateway + 本机 Host，Mac 与 Linux 分别作为远端 Host | 正常产品入口创建 Gateway，LAN/VPN 自动选址、邀请与身份核对、三平台清单、角色与权限正确；集中关闭 Windows Gateway 的新主路径及两条跨平台方向。Mac 旧 Gateway 的退休/角色变化依赖新入口实际可用，正常保留状态，不擅自清配置。 |
+| 2 Linux Gateway | 工作站的独立 C27 Gateway + 本机 Host，Mac 与 Windows 分别作为远端 Host | 同样集中覆盖 Linux Gateway 主路径与另两条跨平台方向；正常 CLI/前台运行，无新持久测试服务；保留既有 b31 入口、状态和恢复路径，不先改 moedeu-apps 的运行实例。 |
+| 3 Mac 缺口 | 复用已通过 Mac Gateway 证据 | 补未覆盖的真实首次设置及错误确认/自撤销保护等必要入口，不重跑已通过的整行。首次设置尽量合并正常产品角色切换，但必须确实满足该场景前置，不能将保留 profile 或旧 reader 的运行成绩当新首设。不得执行此前被拒绝的归档命令；如必须迁移当前私有状态，先形成具体可审查方案。 |
+| 4 发布检查 | 同一冻结产品源码的三平台包 | 汇总角色矩阵，正常安装/退出/卸载收口、必要恢复与已有启动指标；随必要启动记录耗时，不另开 benchmark。历史 FAIL/UNKNOWN 与未覆盖项保留，未过门槛不得称成熟交付。 |
+| 5 日常部署 | moedeu-apps Gateway，三端 Host-only | 只读核对服务器版本/pins/入口，具体方案后对齐最终包和账号入口；正常配对三端、最小真实效果与服务器重开恢复；最后刷新已安装插件 Logo。此部署不替代前面的平台能力验收。 |
+
+每个新 Gateway 的测试深度固定如下，不能再无限增加检查：
+
+1. 本机 Gateway + Host 验证真实三能力；选一台远端做三能力完整效果，另一远端
+   复用其已有 Host 三能力证据，只补真实配对、正确选机和一次独立工具效果，验证
+   剩余连接方向与路由隔离。角色矩阵同时记录连接与各工具覆盖深度，不将一次调用
+   冒充该格所有工具都已逐项重测。
+2. 每个 Gateway 只做一组绑定准确目标的生命周期/安全旅程：明确拒绝、随后新请求
+   批准、正常退出重开及既有 Host 恢复、撤销后的无效果与新配对；本机自撤销保护和
+   错误确认入口在其实际支持的 UI/CLI 边界验证。不为每个远端复制整套 P1–P4。
+3. Gateway 重开时两个远端可同时观察恢复；每台电脑一位原 owner 持有 GUI，准备、
+   独立读回和结果汇总可并行。独立验收入口的切换、配对依赖及同一设备角色变更
+   顺序执行，不能让多个 owner 或测试客户端同时改其状态。
+4. 当前包没有新增缺陷就不构建/重装。遇到实际缺陷先最小复现、有界修复和受影响
+   场景；需要新候选时在修复收敛后统一冻结，三平台最终版本来源一致。仅对受影响
+   路径回归，不能靠混用不同候选宣称最终矩阵完成。
+5. 只维护总矩阵和每个平台一份简短角色结果，绑定版本、实际效果、负控、恢复及
+   未测项；复用现有原始证据，不增加每按钮一份报告。每轮给出 PASS/FAIL/未测和
+   一个明确下一动作；10分钟无新产品证据就说明具体阻塞，不以反复轮询代替进展。
+
+本节是执行安排，不代表已派发、已改变设备角色或已经验收通过。Windows/Linux
+Gateway 均仍待验；此前已经通过的 C27 Host 与 Mac Gateway 证据保持原结论。
+
+## 既有部署核实与历史检查点
+
+> 日常部署偏好（不是产品范围）：日常 Gateway 目标是 **moedeu-apps**，
+> PilotMac、NAB5、Linux 工作站是接入的电脑。当前 C27 成绩来自独立验收连接，
+> Gateway 实际运行在 PilotMac（Core31647 实测监听 127.0.0.1/10.0.8.165:22022）。
+> moedeu-apps 只读实测已有独立 Gateway：用户 unit
+> `styx-native-3a6d212c99fdda5a215ba0a9a8fd2eaf-gateway.service` active/running，
+> PID65916，监听 127.0.0.1/10.0.38.8:22026，执行文件位于
+> `~/.local/share/styx-native-releases/0.4.0-dev.20261031.fresh.2/payload/bin/styx`。
+> 该实例与 C27 最终版本/日常插件入口的绑定尚待核对，不能说服务器上没有 Gateway。
+> 这证明临时验收旅程通过，不能证明 moedeu-apps 的最终部署或原日常插件已交付。
+> 先只读核实 moedeu-apps 现有 Gateway、版本、持久状态与入口，再形成具体可审查的
+> 最终部署和三端接入方案。不得把验收连接与生产连接混用，或擅改生产 Tunnel。
+> 用户倾向暂缓 Mac 全新 profile 首设；该项保留未测，之前归档方案未派发。
+> 此前将最终 Gateway 拓扑称为唯一或首要产品缺口的判断已由上面的产品范围澄清纠正。
+
+> 最新检查点（2026-11-10 00:31 +08:00）：C27 精确源码
+> `ca46db609ed2e0a8163f4202189e8bbf3bb85ae4` 的安装后旅程已闭合：
+> Windows 新私有 scope 首设、P1 精确拒绝、P2 双方真实三能力、P3 双方正常退出与
+> 保留配置恢复、P4 精确撤销及新身份重配对后的三能力均已实际核实；Linux 最新
+> C27 独立安装、三能力及正常重开恢复完成，测试进程正常收口，原 b31 服务运行恢复。
+> 已安装独立 Custom MCP 最终 Refresh tools 和详情 reload 后仍显示黑色圆形波纹 Logo。
+> **完整交付仍未完成：Mac C27 沿用原 Rust profile，不能替代全新首次 setup 验收。**
+> 原 Mac owner 的只读最小方案已完成；未重置当前配置、重建或重装。执行方案被
+> 自动审批拒绝：当前完整状态迁移到新本机归档路径及验收 Gateway/Tunnel 中断
+> 尚缺具体授权，已向用户展示完整归档→首次设置→恢复方案，等待答复。
+> 不重跑已闭合的 P1–P4，不为旧错误标签扩大诊断。
+>
+> P4 旧 Computer token 单次返回 `outcome_unknown/uncertain=true`，原样保留，未重放或
+> 改判 NotDispatched。独立效果在调用前后及正常 Pause、原20个 worker 实际退出0后
+> 均未增加；角色更改明确要求 Quit/reopen 后，用户正常 Quit 的 App/Core/console
+> 原句柄均退出0，同安装同 scope 重开才成功新角色设置。新身份
+> `styx-974fae3f5d6e9f283a31a65d` 精确批准/确认后自动连接，三能力新效果独立通过。
+> Windows Browser 正常关闭时原 Node/conhost raw exit1 保留，不伪改0；wrong-confirmation、
+> self-revoke 未覆盖，不标 PASS。Linux 原 b31 Gateway 连接失败基线仍保留。
+>
+> 当前收据：`/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/candidate-27/candidate-inputs.json`；
+> P4与最终 Logo：同目录 `account-connection-evidence/C27-P4-CLOSED.json`、
+> `C27-FINAL-LOGO.json`。以下 C26/C25 表与时间线均为历史，不是当前进度。
+
 > 当前出口（2026-11-09 08:51 UTC）：C26 冻结源码 `40d56df476f926d6a28db86af67d4ba149282c16`，
 > 三平台 Core/完整 Runtime、Mac 原签 App/DMG build1135、Windows `.26` Inno 均已完成。
 > 原同 HEAD 集成质量实际执行53项 PASS；打包、安装与账号效果分别记录，不能相互替代。

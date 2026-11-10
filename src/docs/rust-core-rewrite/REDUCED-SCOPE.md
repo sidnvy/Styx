@@ -2,6 +2,12 @@
 
 Owner decision, 2026-10-27: Styx is installed only on the owner's own devices. Re-pairing them is acceptable. **Legacy migration is out of the release scope.** Existing installs are retired by hand and replaced by a fresh Rust install plus a new pairing.
 
+## Product capability clarification (owner, 2026-11-10)
+
+The target is a mature product with its promised capabilities. The owner's daily deployment uses `moedeu-apps` as a central Gateway and desktops as Hosts because that fits the network; this does not narrow platform support. macOS, Windows and Linux must retain their promised Gateway and Host roles and supported cross-platform connections. Choosing a Host-only acceptance journey on a platform does not establish that platform's Gateway acceptance or remove that responsibility.
+
+The one-journey `Gateway + Host or Host-only` definition below was a minimum first-usable-release evidence budget, not a statement that unexercised product roles can be dropped from mature-product delivery. The current [delivery plan](END-TO-END-DELIVERY-PLAN.md) tracks the missing platform/role and connection evidence. Keep passed evidence and close missing boundaries without replaying the full suite for every topology. Existing legacy cuts and explicitly deferred features remain separate decisions; this clarification does not silently enable them.
+
 This page overrides SPEC §7, EXECUTION-PLAN milestones M4/M6 migration parts, and the migration/interop scenarios in ACCEPTANCE.json and WORK-ITEMS.json wherever they conflict. The earlier handoff's "resume sequence" (HANDOFF-20261027-PAUSED.md §8) is superseded by the sequence below.
 
 ## What is cut
