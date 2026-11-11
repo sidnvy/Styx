@@ -38,6 +38,14 @@ enum ProductNativeDiagnostics {
             "native_management_invalid_input", "native_management_conflict", "native_management_unavailable",
             "native_management_unsupported", "native_management_unknown_inspect", "native_management_busy",
             "app_scope_changed", "app_instance_changed", "app_scope_invalid",
+            "app_scope_refused", "app_container_is_configuration", "app_instance_busy",
+            "app_role_scope_conflict", "app_deployment_invalid", "app_runtime_selection_invalid",
+            "app_host_binding_reader_failed", "app_runtime_original_input_invalid",
+            "app_runtime_original_input_changed", "app_runtime_input_budget",
+            "app_startup_observation_changed", "app_not_configured", "app_response_invalid",
+            "native_release_platform_unsupported", "native_release_input_invalid", "native_release_publisher_untrusted",
+            "native_release_payload_integrity", "native_release_observation_changed", "native_release_input_unavailable",
+            "native_release_capacity", "native_release_busy", "native_release_observation_unknown",
             "app_service_original_operation_unknown", "app_runtime_update_pending", "app_cleanup_unknown",
             "app_gateway_fenced", "app_quit_admitted", "join_http_invalid_input",
             "join_http_invalid_timeout", "join_http_connect_failed", "join_http_tls_rejected",
@@ -47,6 +55,21 @@ enum ProductNativeDiagnostics {
         ]
         guard let code = response["error"].string, known.contains(code) else { return "other" }
         return code
+    }
+    // The CLI serializes exactly these two fields in this canonical order.
+    // Comparing the entire line also rejects duplicate keys and extra fields.
+    static func coreStderrCode(_ line: Data) -> String? {
+        guard line.count <= 512, let value = try? JSONDecoder().decode(ProductJSON.self, from: line),
+              Set(value.object.keys) == Set(["schema", "error"]), value["schema"] == .number(1) else { return nil }
+        let code = rejectionCode(value)
+        guard code != "other", line == Data("{\"error\":\"\(code)\",\"schema\":1}".utf8) else { return nil }
+        return code
+    }
+    static func coreStarted(pid: Int32) { event("core_started pid=" + String(pid)) }
+    static func coreExited(pid: Int32, status: Int32, reason: Process.TerminationReason) {
+        let label: String
+        switch reason { case .exit: label = "exit"; case .uncaughtSignal: label = "signal"; @unknown default: label = "other" }
+        event("core_exited pid=" + String(pid) + " status=" + String(status) + " reason=" + label)
     }
     static func rejection(operation: String, id: Int, response: ProductJSON) {
         guard CommandLine.arguments.contains("--native-diagnostics"), operationIsSupported(operation) else { return }
@@ -83,6 +106,27 @@ enum ProductNativeDiagnostics {
         guard CommandLine.arguments.contains("--native-diagnostics") else { return }
         let line = "STYX_NATIVE " + message + "\n"
         FileHandle.standardError.write(Data(line.utf8))
+    }
+}
+
+// A bounded transient line buffer; oversized lines are discarded through their
+// newline. Only the first approved code survives, never stderr bytes.
+struct ProductCoreStderrScanner {
+    private var line = Data()
+    private var overflow = false
+    private(set) var code: String?
+    mutating func consume(_ data: Data) {
+        guard code == nil else { return }
+        for byte in data {
+            if byte == 10 {
+                if !overflow { code = ProductNativeDiagnostics.coreStderrCode(line) }
+                line.removeAll(keepingCapacity: false); overflow = false
+                if code != nil { return }
+            } else if !overflow {
+                if line.count < 512 { line.append(byte) }
+                else { line.removeAll(keepingCapacity: false); overflow = true }
+            }
+        }
     }
 }
 

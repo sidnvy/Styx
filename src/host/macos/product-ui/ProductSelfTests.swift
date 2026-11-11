@@ -8,6 +8,41 @@ func productCoreSelfTest() throws {
     func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw NSError(domain: "Styx.ProductSelfTest", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
     }
+    #if STYX_TESTING
+    let invalidCoreLines = [
+        "{\"error\":\"fake-test-secret\",\"schema\":1}",
+        "{\"error\":\"app_scope_refused\",\"schema\":1,\"body\":\"fake-test-secret\"}",
+        "{\"error\":\"app_scope_refused\",\"error\":\"app_scope_refused\",\"schema\":1}",
+        "{\"error\":\"app_scope_refused\",\"schema\":true}",
+        "{\"error\":7,\"schema\":1}"
+    ]
+    for line in invalidCoreLines {
+        try require(ProductNativeDiagnostics.coreStderrCode(Data(line.utf8)) == nil, "Invalid Core stderr was accepted")
+    }
+    var splitScanner = ProductCoreStderrScanner()
+    splitScanner.consume(Data(repeating: 65, count: 300))
+    splitScanner.consume(Data(repeating: 65, count: 300))
+    splitScanner.consume(Data("\n{\"error\":\"app_scope_".utf8))
+    splitScanner.consume(Data("refused\",\"schema\":1}".utf8))
+    try require(splitScanner.code == nil, "Unterminated Core stderr was accepted")
+    splitScanner.consume(Data("\n".utf8))
+    try require(splitScanner.code == "app_scope_refused", "Split Core stderr or oversized-line recovery failed")
+    let child = Process(), childError = Pipe()
+    defer { try? childError.fileHandleForReading.close() }
+    child.executableURL = URL(fileURLWithPath: "/bin/sh")
+    child.arguments = ["-c", "printf '%0700d\\n' 0 >&2; printf '%s\\n' '{\"error\":\"fake-test-secret\",\"schema\":1}' '{\"error\":\"app_scope_refused\",\"schema\":1}' '{\"error\":\"app_scope_changed\",\"schema\":1}' >&2; exit 2"]
+    child.standardInput = FileHandle.nullDevice; child.standardOutput = FileHandle.nullDevice; child.standardError = childError
+    try child.run()
+    try childError.fileHandleForWriting.close()
+    var scanner = ProductCoreStderrScanner()
+    while true {
+        let data = childError.fileHandleForReading.availableData
+        if data.isEmpty { break }
+        scanner.consume(data)
+    }
+    child.waitUntilExit()
+    try require(child.terminationReason == .exit && child.terminationStatus == 2 && scanner.code == "app_scope_refused", "Core stderr drain or actual child exit was lost")
+    #endif
     let spaceBudget = ProductJSON.object(["volumes": .array([.object(["requiredBytes": .number(2147483648), "availableBytes": .number(1073741824)])])])
     try require(productSpaceFeedback(spaceBudget, preflight: true).contains("2.00") && productSpaceFeedback(spaceBudget, preflight: true).contains("1.00"), "Space budget missing from feedback")
     try require(productSpaceFeedback(spaceBudget, preflight: true) != productSpaceFeedback(spaceBudget, preflight: false), "Recovery incorrectly described as not started")

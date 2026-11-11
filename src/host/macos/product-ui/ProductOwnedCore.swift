@@ -49,6 +49,7 @@ final class ProductOwnedCore: @unchecked Sendable {
         var started = false
         do {
             try child.run(); started = true
+            ProductNativeDiagnostics.coreStarted(pid: child.processIdentifier)
             try stdin.fileHandleForReading.close(); try stdout.fileHandleForWriting.close(); try err.fileHandleForWriting.close()
         } catch {
             if started {
@@ -59,13 +60,21 @@ final class ProductOwnedCore: @unchecked Sendable {
                     joined.enter(); DispatchQueue.global().async { defer { joined.leave() }; while !(handle.availableData.isEmpty) {} }
                 }
                 child.waitUntilExit(); joined.wait()
+                ProductNativeDiagnostics.coreExited(pid: child.processIdentifier, status: child.terminationStatus, reason: child.terminationReason)
             }
             throw error
         }
-        let handle = stderr, group = stderrJoined
+        let handle = stderr, group = stderrJoined, pid = child.processIdentifier
+        let diagnosticsEnabled = CommandLine.arguments.contains("--native-diagnostics")
         group.enter(); DispatchQueue.global().async {
             defer { group.leave() }
-            while !(handle.availableData.isEmpty) {} // discard; never log bodies
+            var scanner = ProductCoreStderrScanner()
+            while true {
+                let data = handle.availableData
+                if data.isEmpty { break }
+                if diagnosticsEnabled { scanner.consume(data) }
+            }
+            if let code = scanner.code { ProductNativeDiagnostics.event("core_error pid=" + String(pid) + " code=" + code) }
         }
     }
     private func eof(operation: String? = nil, id: Int? = nil) {
@@ -135,6 +144,7 @@ final class ProductOwnedCore: @unchecked Sendable {
                     // process; no timer is evidence that its role stopped.
                     ProductNativeDiagnostics.lifecycle(.callFailed, operation: operation)
                     eof(operation: operation); while !(output.availableData.isEmpty) {}; child.waitUntilExit(); stderrJoined.wait()
+                    ProductNativeDiagnostics.coreExited(pid: child.processIdentifier, status: child.terminationStatus, reason: child.terminationReason)
                     ProductNativeDiagnostics.lifecycle(.childJoined, operation: operation)
                     continuation.resume(throwing: error)
                 }
@@ -236,6 +246,7 @@ final class ProductOwnedCore: @unchecked Sendable {
                     return
                 }
                 eof(operation: "quitAdmission"); while !(output.availableData.isEmpty) {}; child.waitUntilExit(); stderrJoined.wait()
+                ProductNativeDiagnostics.coreExited(pid: child.processIdentifier, status: child.terminationStatus, reason: child.terminationReason)
                 ProductNativeDiagnostics.lifecycle(.childJoined, operation: "quitAdmission")
                 guard child.terminationReason == .exit, child.terminationStatus == 0 else {
                     continuation.resume(throwing: ProductOwnedCoreError.cleanupUnknown); return
@@ -246,7 +257,7 @@ final class ProductOwnedCore: @unchecked Sendable {
         }
     }
     // Async teardown without a completion claim; queued work retains custody.
-    func requestEOF() { eof(); queue.async { [self] in eof(); while !(output.availableData.isEmpty) {}; child.waitUntilExit(); stderrJoined.wait(); ProductNativeDiagnostics.lifecycle(.childJoined) } }
+    func requestEOF() { eof(); queue.async { [self] in eof(); while !(output.availableData.isEmpty) {}; child.waitUntilExit(); stderrJoined.wait(); ProductNativeDiagnostics.coreExited(pid: child.processIdentifier, status: child.terminationStatus, reason: child.terminationReason); ProductNativeDiagnostics.lifecycle(.childJoined) } }
 
     private static func existingPrivateDirectory(_ url: URL) throws -> Bool {
         var st = stat()

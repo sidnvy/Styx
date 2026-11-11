@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | 生产与安装 | C30 集成质量、三端 Core/完整 Runtime、Mac App/DMG、Windows 安装器及精确安装已有收据 | 制品通过与真机验收分开，不能据此宣布交付完成 |
 | Linux Gateway → Windows Host | C30 拒绝/批准、三类独立效果、Host及Gateway正常恢复、撤销负控与新身份重配效果已闭合 | 保留原退出非零与负控 `offline/uncertain:false` 原文，不改写成所有进程 exit0 或更强的 revoked 错误分类 |
-| Linux Gateway → Mac Host | C30 拒绝客户端确认、新身份批准及 Exec/Browser/Computer 三类独立效果通过 | 本轮正常退出重开、同原 worker 的 Sheet 读取安全拒绝及恢复仍待闭合 |
+| Linux Gateway → Mac Host | C30 拒绝客户端确认、新身份批准及三类独立效果通过；P3 原13个产品进程正常 Quit 全部实际 exit0 | 单次重开后 bootstrap_failed、Core 未存活、账号 disconnected，恢复 FAIL；同 worker Sheet 读取边界仍待闭合 |
 | Windows Gateway → Mac Host | C28 的 Windows Gateway 本机三能力及 Linux 连接旅程保留；C30 已创建本地 Gateway | C30 网络权限及该方向真实连接/最小工具效果未闭合；本地创建不是公网账号连接 |
 | Mac Gateway 首次设置 | C27 的 Mac Gateway 三端 Host 历史成绩保留 | 全新设置入口未完成，不能由保留旧配置的成绩替代 |
 | moedeu-apps 日常部署 | C30 Debian12 包兼容/验签/独立安装、私有测试输入已准备 | 新 C30 Gateway 未设置或启动；旧服务未替换，三端最终接入和恢复未验收 |
@@ -26,14 +26,22 @@
 
 1. 完成用户本轮要求的三端持续目录、入口、缓存归拢；受保护密钥和活引用例外单列，
    不因目录整理重新构建或重装。记录见 `Developer/Artifacts/Styx/workspace-consolidation-20261111`。
+   已收口的平台可并行恢复既定验收；私钥/活引用和 Windows staging 祖先 ACL 例外单列，不擅改祖先权限。
 2. Mac 原 owner 收口当前 Host 恢复/读取边界；Windows 原 owner 关闭其 Gateway→Mac 的缺失方向。
    用同一项目、同一原聊天，仅补缺失边界，不重新跑 Windows 已通过的完整旅程。
 3. Mac 原 owner 补全新 Gateway 设置；复用已有合同/能力证据，仅对新设置与路由做实际核对。
 4. 正常收口独立测试 Tunnel 后切到 moedeu-apps 新 Gateway，接入三台 Host，验证每端最小
    真实效果及连接恢复，刷新最终插件详情，按最终证据决定发布。生产 Tunnel 和旧服务器服务不动。
 
-Product：本轮没有新增产品行为；已通过范围如上。Architecture：Rust 边界不变。
-Integration：只改开发入口与缓存默认路径，并保留源码清单/签名屏障；不全量重跑质量。
+Mac P3 的失败收据在 `mac-host-p3/`：新 App91645 存活，当前已知启动路径均存在且没有
+指向归档 Documents，不能据此归因于路径迁移。一次只读采样主线程在正常 AppKit 事件等待，
+不能宣称死锁。现有 Swift 客户端丢弃 Core stderr，未保留原始退出事实；原错误无法事后恢复。
+有界源码草稿仅增加 opt-in 闭合错误码、原 child PID 和实际 wait 后退出状态，保持持续排空、
+超时、EOF和无重试语义；先做原机 check-only/隔离 self-test，再决定受控参考与必要修复。
+诊断草稿不是根因修复，更不是 C30 已安装行为。不会为目录整理启动新候选生产。
+
+Product：三能力已有实际效果，Mac 恢复出现明确失败；新增诊断草稿未安装。Architecture：Rust 边界不变。
+Integration：开发入口/缓存修正已提交；Mac 诊断草稿另做必要场景检查，保留源码清单/签名屏障，不全量重跑质量。
 Release：C30 冻结制品不变，无新候选。Reliability：UNKNOWN、非零退出及目录权限失败原记录保留。
 Decision：先完成已授权归拢，再继续上述缺口；Stable NO-GO。
 
