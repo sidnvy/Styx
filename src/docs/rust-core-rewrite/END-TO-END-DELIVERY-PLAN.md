@@ -43,16 +43,25 @@ Mac P3 的失败收据在 `mac-host-p3/`：新 App91645 存活，当前已知启
 隔离真实文件系统参考已复现另一项确定缺陷：完成双角色 runtime update 后，正式角色退役
 没有同时退役 `runtime-updates`，同容器的新 Host 身份会被旧记录以 `app_runtime_input_changed`
 拒绝。原双角色 cold-open 和干净父容器为对照；这不是原 Mac P3 根因证明。
-修复仅面向新的正式退役：完整准备集合、持久 begin/done、部分失败继续封锁；不追认旧 UNKNOWN，
-不迁移或清除现有设备配置。先闭合参考与故障场景，再决定一次统一候选，不逐补丁生产。
+源码修复已实现且仅面向新的正式退役：完整准备集合、持久 begin/done、部分失败继续封锁；
+不追认旧 UNKNOWN，不迁移或清除现有设备配置。有效完成后允许正常归档清理。
+原签双角色参考通过（166.55秒）；新增 begin 后根变化负控验证当次 Unknown 与重开封锁。
+独立审阅发现的 begin 后错误分类已修正并复核。该长参考早于随后 Windows 只读 snapshot
+句柄释放及测试夹具适配，未保留当次完整源码哈希，不能冒称最终哈希已执行该参考。
+Mac 原机增量编译与5项 FS/history 测试、Windows 原机增量编译与4项 FS/history 测试通过。
+Mac 首次测试因系统 `/var` 符号链接被拒绝；改用固定项目内物理 TMPDIR 后通过，原失败保留。
+Windows check 42.219秒、首次测试含依赖编译214.406秒，实际场景0.44秒；两端均4 jobs、复用固定缓存。
+收据在 `/home/sid/Developer/Artifacts/Styx/native-checks/role-retire/20261112`。
+其后根集成仅按 Clippy 建议改3处等价闭包，affected-crate strict Clippy 已通过；当前进入一次集成质量检查。
+通过后再冻结统一候选，不逐补丁生产。已安装 C30 与原 Mac P3 FAIL 均不改变。
 
 `25d26c9` 将 Host 命令通道 Closed 从 Busy 修正为 Offline，真实 bounded-mpsc 满队列、
 关闭及丢回复三个场景通过；此项没有部署，也尚不能归因用户未提供原始字段的 capacity busy。
 `35bd5ba` 的 Mac opt-in 启动诊断通过原机 check-only 与隔离 self-test，同样未安装。
 Windows 防火墙后的独立网络收据为 `windows-gateway-firewall/root-lan-tls-probe.json`。
 
-Product：三能力已有实际效果，Mac 恢复出现明确失败；启动历史缺陷已隔离复现，修复中。Architecture：Rust 边界不变。
-Integration：开发入口/缓存、闭合诊断及通道分类修正已提交并做变更场景检查；保留源码清单/签名屏障，不全量重跑质量。
+Product：三能力已有实际效果，Mac 恢复出现明确失败；启动历史缺陷源码修复已通过变更场景，未部署。Architecture：Rust 边界不变。
+Integration：开发入口/缓存、闭合诊断及通道分类修正已提交，角色退役修复进入集成；保留源码清单/签名屏障，仅在此检查点跑一次集成质量。
 Release：C30 冻结制品不变，无新候选。Reliability：UNKNOWN、非零退出及目录权限失败原记录保留。
 Decision：先完成已授权归拢，再继续上述缺口；Stable NO-GO。
 

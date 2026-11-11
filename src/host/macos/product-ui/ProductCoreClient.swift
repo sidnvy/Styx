@@ -39,7 +39,7 @@ enum ProductNativeDiagnostics {
             "native_management_unsupported", "native_management_unknown_inspect", "native_management_busy",
             "app_scope_changed", "app_instance_changed", "app_scope_invalid",
             "app_scope_refused", "app_container_is_configuration", "app_instance_busy",
-            "app_role_scope_conflict", "app_deployment_invalid", "app_runtime_selection_invalid",
+            "app_role_scope_conflict", "app_role_retire_unknown", "app_deployment_invalid", "app_runtime_selection_invalid",
             "app_host_binding_reader_failed", "app_runtime_original_input_invalid",
             "app_runtime_original_input_changed", "app_runtime_input_budget",
             "app_runtime_input_changed", "app_runtime_input_invalid", "app_runtime_input_writer_changed",

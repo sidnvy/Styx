@@ -2,6 +2,155 @@ use super::*;
 use crate::management::role_retire::{self, RetireError, RetireOptions};
 
 impl HostApp {
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
+    fn prove_retiring_runtime_history(&self, gateway: &HostScope) -> Result<(), AppError> {
+        use super::runtime_update::{OriginalInput, SelectionPin, root_digest, same_file};
+        use styx_contracts::{
+            identity::{Sha256Digest, TransactionId},
+            management::DurableStage,
+        };
+        let parent = &self.scope.container.parent;
+        if parent.ensure_absent("runtime-updates").is_ok() {
+            return Ok(());
+        }
+        let host_root = self
+            .scope
+            .root
+            .get()
+            .ok_or(AppError("role_retire_history_unproven"))?;
+        let directory = self.scope.container.parent_path.join("runtime-updates");
+        let updates =
+            PrivateRoot::open(&directory).map_err(|_| AppError("role_retire_history_unproven"))?;
+        let mut names = std::collections::BTreeSet::new();
+        for item in
+            std::fs::read_dir(&directory).map_err(|_| AppError("role_retire_history_unproven"))?
+        {
+            if names.len() >= 64 {
+                return Err(AppError("role_retire_history_unproven"));
+            }
+            let name = item
+                .map_err(|_| AppError("role_retire_history_unproven"))?
+                .file_name()
+                .into_string()
+                .map_err(|_| AppError("role_retire_history_unproven"))?;
+            if !names.insert(name) {
+                return Err(AppError("role_retire_history_unproven"));
+            }
+        }
+        if names.is_empty() {
+            return Err(AppError("role_retire_history_unproven"));
+        }
+        let mut pins = Vec::new();
+        for name in &names {
+            let id: TransactionId = name
+                .strip_suffix(".json")
+                .and_then(|s| s.try_into().ok())
+                .ok_or(AppError("role_retire_history_unproven"))?;
+            let raw = updates
+                .read_raw(name, 65536)
+                .map_err(|_| AppError("role_retire_history_unproven"))?;
+            let input: OriginalInput = serde_json::from_slice(raw.bytes())
+                .map_err(|_| AppError("role_retire_history_unproven"))?;
+            input.validate_shape(&id)?;
+            if input.container_sha256 != root_digest(parent)?
+                || input.roles.len() != if gateway.root.get().is_some() { 2 } else { 1 }
+            {
+                return Err(AppError("role_retire_history_unproven"));
+            }
+            let selection = SelectionPin::open(
+                &self
+                    .scope
+                    .container
+                    .parent_path
+                    .join("runtime-versions")
+                    .join(&input.selection_file),
+            )?;
+            if selection.selection != input.selection
+                || Sha256Digest::of_bytes(selection.file.bytes()) != input.selection_sha256
+            {
+                return Err(AppError("role_retire_history_unproven"));
+            }
+            for (index, role) in input.roles.iter().enumerate() {
+                let (root, path) = if index == 0 {
+                    (host_root, &self.scope.state_dir)
+                } else {
+                    (
+                        gateway
+                            .root
+                            .get()
+                            .ok_or(AppError("role_retire_history_unproven"))?,
+                        &gateway.state_dir,
+                    )
+                };
+                if root_digest(root)? != role.root_sha256 {
+                    return Err(AppError("role_retire_history_unproven"));
+                }
+                let observed = crate::store::native_observation::read(path)
+                    .map_err(|_| AppError("role_retire_history_unproven"))?;
+                let inventory = observed.inventory;
+                if !inventory.orphans.is_empty()
+                    || inventory.transactions.iter().any(|t| {
+                        t.phase_receipts
+                            .last()
+                            .is_none_or(|r| r.stage != DurableStage::Committed)
+                    })
+                    || !inventory.transactions.iter().any(|t| {
+                        t.intent.transaction_id == role.select_transaction
+                            && t.intent.sequence == role.select_sequence
+                            && t.phase_receipts
+                                .last()
+                                .is_some_and(|r| r.stage == DurableStage::Committed)
+                    })
+                {
+                    return Err(AppError("role_retire_history_unproven"));
+                }
+            }
+            same_file(&updates, &raw)?;
+            selection.validate()?;
+            pins.push((raw, selection));
+        }
+        for (raw, selection) in &pins {
+            same_file(&updates, raw)?;
+            selection.validate()?;
+        }
+        let after: std::collections::BTreeSet<_> = std::fs::read_dir(&directory)
+            .map_err(|_| AppError("role_retire_history_unproven"))?
+            .map(|e| e.ok().and_then(|v| v.file_name().into_string().ok()))
+            .collect();
+        if after != names.iter().cloned().map(Some).collect()
+            || PrivateRoot::open(&directory)
+                .map_err(|_| AppError("role_retire_history_unproven"))?
+                .identity()
+                != updates.identity()
+        {
+            return Err(AppError("role_retire_history_unproven"));
+        }
+        self.scope.validate()?;
+        gateway.validate()?;
+        Ok(())
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    )))]
+    fn prove_retiring_runtime_history(&self, _: &HostScope) -> Result<(), AppError> {
+        if self
+            .scope
+            .container
+            .parent
+            .ensure_absent("runtime-updates")
+            .is_ok()
+        {
+            Ok(())
+        } else {
+            Err(AppError("role_retire_history_unproven"))
+        }
+    }
     fn retire_error(&mut self, error: RetireError) -> AppError {
         let code = error.code;
         self.retire_failure = Some(error);
@@ -15,6 +164,35 @@ impl HostApp {
         if self.login.pending() {
             return Err(AppError("app_login_in_progress"));
         }
+        // A live/staged/retained Work owns its original writer and pins. Do not
+        // drop it or acquire a replacement owner during retirement.
+        if self.runtime_update.is_some() {
+            return Err(AppError("role_retire_runtime_owner_retained"));
+        }
+        let name = self
+            .scope
+            .state_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or(AppError("role_retire_invalid_roots"))?
+            .to_owned();
+        if [
+            "gateway",
+            "runtime-updates",
+            "runtime-versions",
+            "migration-candidates",
+            ".styx-app-role-retire-v1",
+            "app-join-input-v1.json",
+            "app-join-ca-v1.pem",
+            "app-join-invitation-v1",
+            "app-local-gateway-input-v1.json",
+        ]
+        .contains(&name.as_str())
+            || name.starts_with('.')
+            || name.contains(".retired-")
+        {
+            return Err(AppError("role_retire_invalid_roots"));
+        }
         // The UI stops both roles through QuitAdmission first. Its ticket may
         // authorize quitting, but does not prevent this explicit fresh setup.
         self.quit_ticket = None;
@@ -26,6 +204,9 @@ impl HostApp {
             .root
             .get()
             .map(|_| gateway_scope.state_dir.clone());
+        if host.is_none() && gateway.is_none() {
+            return Err(AppError("role_retire_history_unproven"));
+        }
         drop(gateway_scope);
         let mut prepared = tokio::task::spawn_blocking(move || {
             role_retire::prepare(host.as_deref(), gateway.as_deref(), options)
@@ -46,6 +227,7 @@ impl HostApp {
         } else {
             None
         };
+        self.prove_retiring_runtime_history(&self.scope.gateway_sibling()?)?;
         for name in [
             "app-join-input-v1.json",
             "app-join-ca-v1.pem",
@@ -63,17 +245,41 @@ impl HostApp {
                     .map_err(|error| self.retire_error(error))?;
             }
         }
+        let history = self.scope.container.parent_path.join("runtime-updates");
+        if self
+            .scope
+            .container
+            .parent
+            .ensure_absent("runtime-updates")
+            .is_err()
+        {
+            prepared
+                .add_runtime_history(&history)
+                .map_err(|error| self.retire_error(error))?;
+        }
         let container = self.scope.container.clone();
+        let retire_container = container.clone();
         let state_dir = self.scope.state_dir.clone();
         // Release Windows child name pins, retaining the original container
         // instance and input writer. PreparedRetire still owns the root leases.
         self.local_gateway = None;
+        // This is a read-only snapshot, not a retained coordinator. Its root
+        // handle must not prevent the original Windows no-replace rename.
+        self.startup_profile = None;
         self.scope = Arc::new(HostScope {
             container: container.clone(),
             state_dir: state_dir.clone(),
             root: OnceLock::new(),
         });
-        let result = tokio::task::spawn_blocking(move || prepared.retire()).await;
+        let host_name = name;
+        let result = tokio::task::spawn_blocking(move || {
+            prepared.retire_app(
+                &retire_container.parent,
+                &retire_container.parent_path,
+                &host_name,
+            )
+        })
+        .await;
         let report = match result {
             Ok(Ok(report)) => report,
             other => {

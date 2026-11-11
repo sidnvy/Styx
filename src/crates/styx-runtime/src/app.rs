@@ -109,6 +109,11 @@ impl HostScope {
             parent,
             instance,
         });
+        crate::management::role_retire::check_app_retire_journal(
+            &container.parent,
+            &container.parent_path,
+        )
+        .map_err(|_| AppError("app_role_retire_unknown"))?;
         Self::in_container(container, state_dir.to_owned())
     }
     fn in_container(container: Arc<AppContainer>, state_dir: PathBuf) -> Result<Self, AppError> {
@@ -1410,6 +1415,24 @@ impl HostApp {
         operation: Operation,
         input: Box<serde_json::value::RawValue>,
     ) -> Result<Value, AppError> {
+        if matches!(
+            operation,
+            Operation::CreateLocal
+                | Operation::ResumeLocal
+                | Operation::InspectJoin
+                | Operation::Join
+                | Operation::RequestJoin
+                | Operation::ClaimJoin
+                | Operation::Connect
+                | Operation::RetireRole
+        ) {
+            self.scope.validate()?;
+            crate::management::role_retire::check_app_retire_journal(
+                &self.scope.container.parent,
+                &self.scope.container.parent_path,
+            )
+            .map_err(|_| AppError("app_role_retire_unknown"))?;
+        }
         if !matches!(
             operation,
             Operation::InviteComputer

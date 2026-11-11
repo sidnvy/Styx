@@ -10,6 +10,7 @@ func productCoreSelfTest() throws {
     }
     #if STYX_TESTING
     try require(ProductNativeDiagnostics.coreStderrCode(Data("{\"error\":\"app_runtime_input_changed\",\"schema\":1}".utf8)) == "app_runtime_input_changed", "Closed historical runtime-input failure code was lost")
+    try require(ProductNativeDiagnostics.coreStderrCode(Data("{\"error\":\"app_role_retire_unknown\",\"schema\":1}".utf8)) == "app_role_retire_unknown", "Closed role-retirement fence failure code was lost")
     let invalidCoreLines = [
         "{\"error\":\"fake-test-secret\",\"schema\":1}",
         "{\"error\":\"app_scope_refused\",\"schema\":1,\"body\":\"fake-test-secret\"}",

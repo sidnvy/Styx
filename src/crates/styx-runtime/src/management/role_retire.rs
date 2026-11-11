@@ -265,6 +265,216 @@ impl PreparedRetire {
         self.paths.push(destination(path, &self.suffix)?);
         Ok(())
     }
+    pub(crate) fn add_runtime_history(&mut self, path: &Path) -> Result<(), RetireError> {
+        PrivateRoot::open(path).map_err(|_| RetireError::refused("role_retire_input_refused"))?;
+        self.paths.push(destination(path, &self.suffix)?);
+        Ok(())
+    }
+    /// App-only retirement: the begin record precedes every rename and the
+    /// completion record is published only after exact identity revalidation.
+    pub(crate) fn retire_app(
+        self,
+        parent: &PrivateRoot,
+        parent_path: &Path,
+        host_name: &str,
+    ) -> Result<RetireReport, RetireError> {
+        self.retire_app_inner(parent, parent_path, host_name, None)
+    }
+    #[cfg(test)]
+    pub(crate) fn retire_app_fault_after(
+        self,
+        parent: &PrivateRoot,
+        parent_path: &Path,
+        host_name: &str,
+        after: usize,
+    ) -> Result<RetireReport, RetireError> {
+        self.retire_app_inner(parent, parent_path, host_name, Some(after))
+    }
+    fn retire_app_inner(
+        mut self,
+        parent: &PrivateRoot,
+        parent_path: &Path,
+        host_name: &str,
+        fail_after: Option<usize>,
+    ) -> Result<RetireReport, RetireError> {
+        let unknown = || RetireError::unknown("role_retire_completion_unknown");
+        self.roots.iter().try_for_each(Root::validate)?;
+        check_app_retire_journal(parent, parent_path).map_err(|_| unknown())?;
+        let mut entries = Vec::new();
+        for path in &self.paths {
+            if path.old_path.parent() != Some(parent_path)
+                || path.new_path.parent() != Some(parent_path)
+            {
+                return Err(RetireError::refused("role_retire_invalid_roots"));
+            }
+            let old = path
+                .old_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .ok_or_else(&unknown)?
+                .to_owned();
+            let new = path
+                .new_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .ok_or_else(&unknown)?
+                .to_owned();
+            if new != format!("{old}{}", self.suffix)
+                || entries
+                    .iter()
+                    .any(|e: &AppRetireEntry| e.old == old || e.new == new)
+            {
+                return Err(RetireError::refused("role_retire_invalid_roots"));
+            }
+            let identity = app_entry_identity(parent, parent_path, &old).map_err(|_| unknown())?;
+            if entries
+                .iter()
+                .any(|e: &AppRetireEntry| e.identity == identity)
+            {
+                return Err(RetireError::refused("role_retire_invalid_roots"));
+            }
+            parent
+                .ensure_absent(&new)
+                .map_err(|_| RetireError::refused("role_retire_backup_exists"))?;
+            entries.push(AppRetireEntry { old, new, identity });
+        }
+        let allowed = [
+            host_name,
+            "gateway",
+            "runtime-updates",
+            "app-join-input-v1.json",
+            "app-join-ca-v1.pem",
+            "app-join-invitation-v1",
+            "app-local-gateway-input-v1.json",
+        ];
+        if allowed
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != allowed.len()
+            || entries.iter().any(|e| !allowed.contains(&e.old.as_str()))
+        {
+            return Err(RetireError::refused("role_retire_invalid_roots"));
+        }
+        let mut absent = Vec::new();
+        for name in allowed {
+            if !entries.iter().any(|e| e.old == name) {
+                parent.ensure_absent(name).map_err(|_| unknown())?;
+                absent.push(name.to_owned());
+            }
+        }
+        let record = AppRetireBegin {
+            schema: 1,
+            container: serde_json::to_value(parent.identity()).map_err(|_| unknown())?,
+            suffix: self.suffix.clone(),
+            host_name: host_name.to_owned(),
+            entries,
+            absent,
+        };
+        let bytes = serde_json::to_vec(&record).map_err(|_| unknown())?;
+        let ledger_path = parent_path.join(APP_RETIRE_JOURNAL);
+        let ledger = match PrivateRoot::open(&ledger_path) {
+            Ok(root) => root,
+            Err(_) => {
+                parent
+                    .ensure_absent(APP_RETIRE_JOURNAL)
+                    .map_err(|_| unknown())?;
+                parent
+                    .create_setup_journal_child(APP_RETIRE_JOURNAL)
+                    .map_err(|_| unknown())?
+            }
+        };
+        let entry_name = self
+            .suffix
+            .strip_prefix(".retired-")
+            .ok_or_else(&unknown)?;
+        let journal = ledger
+            .create_setup_journal_child(entry_name)
+            .map_err(|_| unknown())?;
+        journal
+            .create_setup_export("begin".as_ref(), &bytes)
+            .map_err(|_| unknown())?;
+        ledger.sync_setup_directory().map_err(|_| unknown())?;
+        parent.sync_setup_directory().map_err(|_| unknown())?;
+        // The journal is now a persistent fence on every subsequent failure.
+        #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+        if fail_after == Some(usize::MAX) {
+            std::fs::rename(
+                &self.paths[0].old_path,
+                parent_path.join("test-root-changed"),
+            )
+            .map_err(|_| unknown())?;
+        }
+        self.roots
+            .iter()
+            .try_for_each(Root::validate)
+            .map_err(|_| unknown())?;
+        for entry in &record.entries {
+            if app_entry_identity(parent, parent_path, &entry.old).map_err(|_| unknown())?
+                != entry.identity
+            {
+                return Err(unknown());
+            }
+        }
+        for name in &record.absent {
+            parent.ensure_absent(name).map_err(|_| unknown())?;
+        }
+        #[cfg(target_os = "windows")]
+        self.roots.clear();
+        for (index, path) in self.paths.iter().enumerate() {
+            if fail_after == Some(index) {
+                return Err(unknown());
+            }
+            rename_exclusive(&path.old_path, &path.new_path).map_err(|_| unknown())?;
+            self.report.retired.push(path.clone());
+        }
+        parent.sync_setup_directory().map_err(|_| unknown())?;
+        for entry in &record.entries {
+            parent.ensure_absent(&entry.old).map_err(|_| unknown())?;
+            if app_entry_identity(parent, parent_path, &entry.new).map_err(|_| unknown())?
+                != entry.identity
+            {
+                return Err(unknown());
+            }
+        }
+        for name in &record.absent {
+            parent.ensure_absent(name).map_err(|_| unknown())?;
+        }
+        if PrivateRoot::open(parent_path)
+            .map_err(|_| unknown())?
+            .identity()
+            != parent.identity()
+            || PrivateRoot::open(&ledger_path)
+                .map_err(|_| unknown())?
+                .identity()
+                != ledger.identity()
+            || PrivateRoot::open(ledger_path.join(entry_name))
+                .map_err(|_| unknown())?
+                .identity()
+                != journal.identity()
+            || journal
+                .read_raw("begin", 65536)
+                .map_err(|_| unknown())?
+                .bytes()
+                != bytes
+        {
+            return Err(unknown());
+        }
+        let done = AppRetireDone {
+            schema: 1,
+            begin_sha256: styx_contracts::identity::Sha256Digest::of_bytes(&bytes).to_hex(),
+        };
+        journal
+            .create_setup_export(
+                "done".as_ref(),
+                &serde_json::to_vec(&done).map_err(|_| unknown())?,
+            )
+            .map_err(|_| unknown())?;
+        journal.sync_setup_directory().map_err(|_| unknown())?;
+        self.report.outcome = "retired";
+        Ok(self.report)
+    }
     pub(crate) fn retire(mut self) -> Result<RetireReport, RetireError> {
         for root in &self.roots {
             root.validate()?;
@@ -295,6 +505,201 @@ pub fn retire_role(
     options: RetireOptions,
 ) -> Result<RetireReport, RetireError> {
     prepare(Some(host), gateway, options)?.retire()
+}
+
+const APP_RETIRE_JOURNAL: &str = ".styx-app-role-retire-v1";
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppRetireEntry {
+    old: String,
+    new: String,
+    identity: serde_json::Value,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppRetireBegin {
+    schema: u8,
+    container: serde_json::Value,
+    suffix: String,
+    host_name: String,
+    entries: Vec<AppRetireEntry>,
+    absent: Vec<String>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppRetireDone {
+    schema: u8,
+    begin_sha256: String,
+}
+fn app_entry_identity(
+    parent: &PrivateRoot,
+    parent_path: &Path,
+    name: &str,
+) -> Result<serde_json::Value, ()> {
+    let path = parent_path.join(name);
+    let metadata = std::fs::symlink_metadata(&path).map_err(|_| ())?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        let root = PrivateRoot::open(&path).map_err(|_| ())?;
+        if name == "runtime-updates" || name.starts_with("runtime-updates.retired-") {
+            let names = app_retire_names(&path)?;
+            let mut files = Vec::new();
+            for name in &names {
+                let raw = root.read_raw(name, 65536).map_err(|_| ())?;
+                let obs = raw.observation();
+                files.push(serde_json::json!({"name":name,"device":obs.device,"inode":obs.inode,"length":obs.byte_len,"sha256":raw.sha256()}));
+            }
+            for (name, expected) in names.iter().zip(&files) {
+                let raw = root.read_raw(name, 65536).map_err(|_| ())?;
+                let obs = raw.observation();
+                if *expected
+                    != serde_json::json!({"name":name,"device":obs.device,"inode":obs.inode,"length":obs.byte_len,"sha256":raw.sha256()})
+                {
+                    return Err(());
+                }
+            }
+            if app_retire_names(&path)? != names
+                || PrivateRoot::open(&path).map_err(|_| ())?.identity() != root.identity()
+            {
+                return Err(());
+            }
+            Ok(serde_json::json!({"directory":root.identity(), "files":files}))
+        } else {
+            Ok(serde_json::json!({"directory":root.identity()}))
+        }
+    } else if metadata.is_file() && !metadata.file_type().is_symlink() {
+        let raw = parent.read_raw(name, 1024 * 1024).map_err(|_| ())?;
+        let obs = raw.observation();
+        Ok(
+            serde_json::json!({"file":{"device":obs.device,"inode":obs.inode,"length":obs.byte_len,"sha256":raw.sha256()}}),
+        )
+    } else {
+        Err(())
+    }
+}
+fn app_retire_suffix_valid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 16
+        && bytes[8] == b'T'
+        && bytes[15] == b'Z'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 8 || i == 15 || b.is_ascii_digit())
+}
+fn app_retire_names(path: &Path) -> Result<std::collections::BTreeSet<String>, ()> {
+    let mut names = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(path).map_err(|_| ())? {
+        if names.len() >= 64 {
+            return Err(());
+        }
+        let name = entry
+            .map_err(|_| ())?
+            .file_name()
+            .into_string()
+            .map_err(|_| ())?;
+        if !names.insert(name) {
+            return Err(());
+        }
+    }
+    Ok(names)
+}
+/// Existing-only check. Empty ledger is neutral; a started but incomplete or
+/// unrecognised entry permanently fences new setup until separately repaired.
+pub(crate) fn check_app_retire_journal(parent: &PrivateRoot, parent_path: &Path) -> Result<(), ()> {
+    let path = parent_path.join(APP_RETIRE_JOURNAL);
+    if parent.ensure_absent(APP_RETIRE_JOURNAL).is_ok() {
+        return Ok(());
+    }
+    let ledger = PrivateRoot::open(&path).map_err(|_| ())?;
+    let names = app_retire_names(&path)?;
+    for name in &names {
+        if !app_retire_suffix_valid(name) {
+            return Err(());
+        }
+        let entry_path = path.join(name);
+        let journal = PrivateRoot::open(&entry_path).map_err(|_| ())?;
+        if app_retire_names(&entry_path)?
+            != ["begin".to_owned(), "done".to_owned()]
+                .into_iter()
+                .collect()
+        {
+            return Err(());
+        }
+        let begin = journal.read_raw("begin", 65536).map_err(|_| ())?;
+        let done = journal.read_raw("done", 4096).map_err(|_| ())?;
+        let record: AppRetireBegin = serde_json::from_slice(begin.bytes()).map_err(|_| ())?;
+        let completed: AppRetireDone = serde_json::from_slice(done.bytes()).map_err(|_| ())?;
+        if record.schema != 1
+            || completed.schema != 1
+            || record.container != serde_json::to_value(parent.identity()).map_err(|_| ())?
+            || record.suffix != format!(".retired-{name}")
+            || record.entries.is_empty()
+            || record.entries.len() > 7
+            || completed.begin_sha256
+                != styx_contracts::identity::Sha256Digest::of_bytes(begin.bytes()).to_hex()
+        {
+            return Err(());
+        }
+        let mut old = std::collections::BTreeSet::new();
+        let mut new = std::collections::BTreeSet::new();
+        for item in &record.entries {
+            if item.old.is_empty()
+                || Path::new(&item.old).components().count() != 1
+                || item.old == "."
+                || item.old == ".."
+                || item.old.contains('/')
+                || item.old.contains('\\')
+                || item.new != format!("{}{}", item.old, record.suffix)
+                || !old.insert(&item.old)
+                || !new.insert(&item.new)
+                || item.identity.is_null()
+            {
+                return Err(());
+            }
+        }
+        let allowed = [
+            record.host_name.as_str(),
+            "gateway",
+            "runtime-updates",
+            "app-join-input-v1.json",
+            "app-join-ca-v1.pem",
+            "app-join-invitation-v1",
+            "app-local-gateway-input-v1.json",
+        ];
+        let expected: std::collections::BTreeSet<_> = allowed.into_iter().collect();
+        let absent: std::collections::BTreeSet<_> =
+            record.absent.iter().map(String::as_str).collect();
+        let included: std::collections::BTreeSet<_> =
+            record.entries.iter().map(|e| e.old.as_str()).collect();
+        if expected.len() != 7
+            || absent.len() != record.absent.len()
+            || !absent.is_disjoint(&included)
+            || absent
+                .union(&included)
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                != expected
+        {
+            return Err(());
+        }
+        for raw in [&begin, &done] {
+            let after = journal
+                .read_raw(raw.relative_path(), 65536)
+                .map_err(|_| ())?;
+            if raw.observation() != after.observation() || raw.bytes() != after.bytes() {
+                return Err(());
+            }
+        }
+        if PrivateRoot::open(&entry_path).map_err(|_| ())?.identity() != journal.identity() {
+            return Err(());
+        }
+    }
+    if app_retire_names(&path)? != names
+        || PrivateRoot::open(&path).map_err(|_| ())?.identity() != ledger.identity()
+    {
+        return Err(());
+    }
+    Ok(())
 }
 
 const SETUP_RETIRE_JOURNAL: &str = ".styx-setup-retire-v1";
