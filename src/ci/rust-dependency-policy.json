@@ -113,6 +113,11 @@
   ],
   "source_guard_limit": "lexical defense in depth; imports/aliases/macros/FFI still need review; not a Rust sandbox or a proof of no IO",
   "known_ignored": {
+    "app::startup::tests::retired_dual_history_archives_before_new_root_cold_open": {
+      "kind": "explicit_signed_runtime_history_retirement_reference",
+      "input": "STYX_HISTORY_C29 and STYX_HISTORY_C30 signed payload directories; disposable private roots and loopback TLS only",
+      "required_for": "Original dual-role C07 update and cold-open, bound history retirement, foreign-input refusal, clean-parent comparison, archive removal and tampered completion fence; empty-root filesystem reference, not completed Host enrollment or native acceptance"
+    },
     "app::runtime_bootstrap::tests::fresh_profile_reopens_from_external_runtime_after_bundle_replacement": {
       "kind": "explicit_signed_native_payload",
       "input": "STYX_TEST_APP_CONTROL_SELECTION protected selection with current writer/reader; disposable strict-TLS enrollment",
