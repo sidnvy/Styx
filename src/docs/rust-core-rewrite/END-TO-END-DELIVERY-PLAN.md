@@ -6,7 +6,7 @@
 [GUI-CONVERGENCE.md](GUI-CONVERGENCE.md) 保留历史尝试与证据，不能把历史通过当作当前候选通过。
 本文中的计划项不代表已经执行。**交付未完成；Stable NO-GO。**
 
-## 最新检查点（2026-11-11，C30；以下旧检查点为历史）
+## 最新检查点（2026-11-12，C30；以下旧检查点为历史）
 
 冻结运行时源码为 `dce8d24d599924c88e0f177fbfb92cf07ff7fd58`，证据根为
 `/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/candidate-30`。
@@ -17,7 +17,7 @@
 | 生产与安装 | C30 集成质量、三端 Core/完整 Runtime、Mac App/DMG、Windows 安装器及精确安装已有收据 | 制品通过与真机验收分开，不能据此宣布交付完成 |
 | Linux Gateway → Windows Host | C30 拒绝/批准、三类独立效果、Host及Gateway正常恢复、撤销负控与新身份重配效果已闭合 | 保留原退出非零与负控 `offline/uncertain:false` 原文，不改写成所有进程 exit0 或更强的 revoked 错误分类 |
 | Linux Gateway → Mac Host | C30 拒绝客户端确认、新身份批准及三类独立效果通过；P3 原13个产品进程正常 Quit 全部实际 exit0 | 单次重开后 bootstrap_failed、Core 未存活、账号 disconnected，恢复 FAIL；同 worker Sheet 读取边界仍待闭合 |
-| Windows Gateway → Mac Host | C28 的 Windows Gateway 本机三能力及 Linux 连接旅程保留；C30 已创建本地 Gateway | C30 网络权限及该方向真实连接/最小工具效果未闭合；本地创建不是公网账号连接 |
+| Windows Gateway → Mac Host | C28 的 Windows Gateway 本机三能力及 Linux 连接旅程保留；C30 本地 Gateway 就绪，人工防火墙 Allow 后原 owner 核对监听/精确规则，Linux 独立 TCP/TLS1.3、公有 CA DER 指纹、证书链与 IP 核对通过 | Mac Core 恢复阻塞该方向真实配对/最小工具效果；网络就绪不是账号工具连接 |
 | Mac Gateway 首次设置 | C27 的 Mac Gateway 三端 Host 历史成绩保留 | 全新设置入口未完成，不能由保留旧配置的成绩替代 |
 | moedeu-apps 日常部署 | C30 Debian12 包兼容/验签/独立安装、私有测试输入已准备 | 新 C30 Gateway 未设置或启动；旧服务未替换，三端最终接入和恢复未验收 |
 | Custom MCP | C30 已执行工具刷新与安装详情重新加载，黑色圆形波纹 Logo 可见 | 最终 Gateway 切换完成后再确认一次最终详情和实际工具路由 |
@@ -40,8 +40,19 @@ Mac P3 的失败收据在 `mac-host-p3/`：新 App91645 存活，当前已知启
 超时、EOF和无重试语义；先做原机 check-only/隔离 self-test，再决定受控参考与必要修复。
 诊断草稿不是根因修复，更不是 C30 已安装行为。不会为目录整理启动新候选生产。
 
-Product：三能力已有实际效果，Mac 恢复出现明确失败；新增诊断草稿未安装。Architecture：Rust 边界不变。
-Integration：开发入口/缓存修正已提交；Mac 诊断草稿另做必要场景检查，保留源码清单/签名屏障，不全量重跑质量。
+隔离真实文件系统参考已复现另一项确定缺陷：完成双角色 runtime update 后，正式角色退役
+没有同时退役 `runtime-updates`，同容器的新 Host 身份会被旧记录以 `app_runtime_input_changed`
+拒绝。原双角色 cold-open 和干净父容器为对照；这不是原 Mac P3 根因证明。
+修复仅面向新的正式退役：完整准备集合、持久 begin/done、部分失败继续封锁；不追认旧 UNKNOWN，
+不迁移或清除现有设备配置。先闭合参考与故障场景，再决定一次统一候选，不逐补丁生产。
+
+`25d26c9` 将 Host 命令通道 Closed 从 Busy 修正为 Offline，真实 bounded-mpsc 满队列、
+关闭及丢回复三个场景通过；此项没有部署，也尚不能归因用户未提供原始字段的 capacity busy。
+`35bd5ba` 的 Mac opt-in 启动诊断通过原机 check-only 与隔离 self-test，同样未安装。
+Windows 防火墙后的独立网络收据为 `windows-gateway-firewall/root-lan-tls-probe.json`。
+
+Product：三能力已有实际效果，Mac 恢复出现明确失败；启动历史缺陷已隔离复现，修复中。Architecture：Rust 边界不变。
+Integration：开发入口/缓存、闭合诊断及通道分类修正已提交并做变更场景检查；保留源码清单/签名屏障，不全量重跑质量。
 Release：C30 冻结制品不变，无新候选。Reliability：UNKNOWN、非零退出及目录权限失败原记录保留。
 Decision：先完成已授权归拢，再继续上述缺口；Stable NO-GO。
 
