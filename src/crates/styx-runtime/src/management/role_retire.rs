@@ -385,10 +385,7 @@ impl PreparedRetire {
                     .map_err(|_| unknown())?
             }
         };
-        let entry_name = self
-            .suffix
-            .strip_prefix(".retired-")
-            .ok_or_else(&unknown)?;
+        let entry_name = self.suffix.strip_prefix(".retired-").ok_or_else(&unknown)?;
         let journal = ledger
             .create_setup_journal_child(entry_name)
             .map_err(|_| unknown())?;
