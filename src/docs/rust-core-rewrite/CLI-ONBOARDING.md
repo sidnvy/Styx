@@ -72,6 +72,19 @@ only after known awaiting-approval replies. Approve that code on the hub using
 computer never bootstraps or starts a local Gateway. Claim precedes its service
 handover as well.
 
+To explicitly refuse a pending device, select its exact four public identity
+fields from `gateway pending` and compare them with the joining computer:
+
+```sh
+styx gateway reject --state-dir /absolute/hub/gateway \
+  --request-id <request-id> --device-id <device-id> \
+  --fingerprint <device-fingerprint> --comparison-code <original-code> \
+  --authorize --json
+```
+
+This invokes the existing protected rejection transaction once. A result with
+an unknown outcome must not be replayed. Expiration is not an explicit rejection.
+
 When the hub explicitly rejects the exact recorded request, setup reports
 `setup_pairing_rejected`; this is a terminal refusal, not an unknown claim.
 Applying again is a new, explicit Join attempt. After normally stopping that

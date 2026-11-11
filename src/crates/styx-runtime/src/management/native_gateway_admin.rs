@@ -138,7 +138,7 @@ pub struct ApprovalSelection {
     pub enable_computer: bool,
     pub enable_browser: bool,
 }
-pub(crate) struct RejectionSelection {
+pub struct RejectionSelection {
     pub request_id: String,
     pub device_id: DeviceId,
     pub fingerprint: Sha256Digest,
@@ -257,6 +257,9 @@ pub async fn pending(state_dir: &Path) -> Result<AdminReport> {
 }
 pub async fn approve(state_dir: &Path, selection: ApprovalSelection) -> Result<AdminReport> {
     owned(Action::Approve(state_dir.into(), selection)).await
+}
+pub async fn reject(state_dir: &Path, selection: RejectionSelection) -> Result<AdminReport> {
+    owned(Action::Reject(state_dir.into(), selection)).await
 }
 
 /// Read the local Gateway's inventory, including historical revoked records.

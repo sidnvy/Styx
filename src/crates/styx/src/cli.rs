@@ -641,6 +641,23 @@ enum GatewayCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Reject exactly one explicitly compared pending identity.
+    Reject {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        device_id: String,
+        #[arg(long)]
+        fingerprint: String,
+        #[arg(long)]
+        comparison_code: String,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Initialize fresh Gateway-only foreground configuration; no service launch or legacy adoption.
     Bootstrap {
         #[arg(long)]
@@ -852,7 +869,10 @@ fn gateway_admin_result(
             }
             if write_json(&report).is_ok() {
                 ExitCode::SUCCESS
-            } else if matches!(report.operation, "gateway_invite" | "gateway_approve") {
+            } else if matches!(
+                report.operation,
+                "gateway_invite" | "gateway_approve" | "gateway_reject"
+            ) {
                 eprintln!(
                     "{}",
                     serde_json::json!({"schema":1,"error":"native_gateway_admin_response_unknown","outcome":"unknown","operations_replayed":false})
@@ -2024,6 +2044,36 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             };
             gateway_admin_result(
                 styx_runtime::management::native_gateway_admin::approve(&state_dir, selected).await,
+                json,
+            )
+        }
+        Command::Gateway {
+            command:
+                GatewayCommand::Reject {
+                    state_dir,
+                    request_id,
+                    device_id,
+                    fingerprint,
+                    comparison_code,
+                    json,
+                    ..
+                },
+        } => {
+            let Ok(device_id) = styx_contracts::identity::DeviceId::try_from(device_id) else {
+                return error("native_gateway_admin_input");
+            };
+            let Ok(fingerprint) = styx_contracts::identity::Sha256Digest::try_from(fingerprint)
+            else {
+                return error("native_gateway_admin_input");
+            };
+            let selected = styx_runtime::management::native_gateway_admin::RejectionSelection {
+                request_id,
+                device_id,
+                fingerprint,
+                comparison_code,
+            };
+            gateway_admin_result(
+                styx_runtime::management::native_gateway_admin::reject(&state_dir, selected).await,
                 json,
             )
         }

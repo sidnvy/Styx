@@ -1,6 +1,61 @@
 //! Argument boundaries only. Subprocess/OS effects belong to interop acceptance.
 use super::*;
 #[test]
+fn cli_gateway_reject_requires_exact_identity_and_explicit_authorization() {
+    let fields = [
+        ("--state-dir", "/private/gateway"),
+        ("--request-id", "0123456789abcdef0123456789abcdef"),
+        ("--device-id", "styx-device"),
+        (
+            "--fingerprint",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+        ("--comparison-code", "123456"),
+    ];
+    let args = || {
+        ["styx", "gateway", "reject"]
+            .into_iter()
+            .chain(fields.into_iter().flat_map(|(flag, value)| [flag, value]))
+            .chain(["--authorize", "--json"])
+            .collect::<Vec<_>>()
+    };
+    let cli = Cli::try_parse_from(args()).unwrap();
+    let Command::Gateway {
+        command:
+            GatewayCommand::Reject {
+                state_dir,
+                request_id,
+                device_id,
+                fingerprint,
+                comparison_code,
+                authorize,
+                json,
+            },
+    } = cli.command
+    else {
+        panic!("expected reject")
+    };
+    assert_eq!(state_dir, PathBuf::from("/private/gateway"));
+    assert_eq!(request_id, fields[1].1);
+    assert_eq!(device_id, fields[2].1);
+    assert_eq!(fingerprint, fields[3].1);
+    assert_eq!(comparison_code, fields[4].1);
+    assert!(authorize && json);
+    for (omitted, _) in fields {
+        let remaining = ["styx", "gateway", "reject"]
+            .into_iter()
+            .chain(
+                fields
+                    .into_iter()
+                    .filter(|(flag, _)| *flag != omitted)
+                    .flat_map(|(flag, value)| [flag, value]),
+            )
+            .chain(["--authorize", "--json"]);
+        assert!(Cli::try_parse_from(remaining).is_err(), "missing {omitted}");
+    }
+    assert!(Cli::try_parse_from(args().into_iter().filter(|a| *a != "--authorize")).is_err());
+}
+#[test]
 fn cli_guided_setup_status_and_invite_preserve_low_level_status() {
     assert!(Cli::try_parse_from(["styx", "setup"]).is_ok());
     assert!(

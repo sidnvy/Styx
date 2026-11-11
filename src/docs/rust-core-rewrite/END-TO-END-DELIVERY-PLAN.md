@@ -6,6 +6,27 @@
 [GUI-CONVERGENCE.md](GUI-CONVERGENCE.md) 保留历史尝试与证据，不能把历史通过当作当前候选通过。
 本文中的计划项不代表已经执行。**交付未完成；Stable NO-GO。**
 
+## 当前关键路径补正（2026-11-11，C29实际角色验收后）
+
+- Linux C29 正式安装、旧Hub本地过期尝试退役及新固定Hub单次完整setup通过；账号
+  Exec41B/精确SHA、Browser nonce GET1、Computer独立随机视觉和input/result/各1次变化点击均通过。
+- Windows C28 Host首次Runtime准备已完成，一次GUI Request正常返回awaiting_approval，
+  原回复与Linux唯一pending四字段已逐值匹配；之前空pending只是一张更早的快照。
+- **当前产品阻塞是 Linux 正式 CLI 没有 `gateway reject`，不是缺用户授权。**
+  底层已有精确RejectionSelection/Action::Reject、严格TLS/C07/reader7和无重放路径；
+  已补公开CLI到现有路径接线及公开surface回归，不新建拒绝协议、权限或事务。
+  增量检查、参数/admin及TLS正负控通过；新debug CLI在原pending有效期内精确拒绝一次、
+  actualexit0/rejected/no replay，仅计开发参考，不冒称新候选安装验收。
+- 本入口本应在候选生产前核实；本轮安排遗漏已纠正。C29原Core/Runtime成功收据不改标，
+  Mac/Windows App生产在已开始工作的确定收口点暂缓；接线参考已通过，集成检查后统一冻结下一候选。
+  不为未收敛的每项修改再次生产全平台，不冒称修改已安装生效。
+- Windows客户端唯一Check发生在原pending期限之后，结果未确认且零效果；服务端拒绝
+  另计PASS，客户端不算终结通过，不重放Check或放宽时效。Root调度时机不足单独记录；
+  按正式正常退出/生命周期收口后再开新尝试。Mac原聊天授权边界单独挂起。
+- C29 Mac/Windows Core及Runtime签名验证、Debian12 Gateway-only包与离线正式验证已通过；
+  Mac App准备曾因private_directory_permissions明确exit2，全树新输入权限/ACL归因与收紧已完成，原CLI正式只读verify通过，无App/DMG产出。
+  这些是制品/参考事实，不是已安装最终候选或服务器部署。Stable NO-GO。
+
 ## 当前推进检查点（2026-11-11）
 
 以下为最新状态，后文日期较早的检查点保留为历史。
