@@ -492,7 +492,7 @@ enum RoleCommand {
     Retire {
         #[arg(long)]
         state_dir: PathBuf,
-        /// Explicitly abandon this Join setup's original inputs and Host.
+        /// Explicitly retire a Join attempt, or an unfinished Hub local pairing on POSIX.
         #[arg(long)]
         setup_root: Option<PathBuf>,
         #[arg(long)]

@@ -83,15 +83,38 @@ styx role retire --state-dir /absolute/setup-root/host \
 styx setup --root /absolute/setup-root --answers /private/new-join-answers.json --foreground
 ```
 
-The optional `--setup-root` applies only to a CLI Join setup and must exactly
+For a CLI Join setup, optional `--setup-root` must exactly
 contain the selected `host` root. It preserves the old Host and that attempt's
 Join inputs and receipts by exclusive rename; Runtime selection, publisher
 material and other roles remain in place. The new answers must reference a new
 invitation and confirm its actual origin, CA and identity. This does not retry
 an old request or turn a historical unknown into a failure. Concurrent setup,
 ambiguous ownership or an incomplete retirement journal refuses further setup;
-the old records are not deleted. This flag does not reset an App profile or a
-Gateway setup.
+the old records are not deleted. This flag does not reset an App profile.
+
+On POSIX, the same command also supports explicitly abandoning an unfinished
+**local pairing inside a Hub setup**. This is recovery for a stopped Hub whose
+Gateway endpoint changed before approval; it does not relax the original TLS
+leaf or comparison-code checks. The original Host request must be complete and
+exactly match the protected Gateway pending record, including its ingress and
+expiry. Any approval/claim dispatch, issued credential, unresolved record or
+ambiguous ownership refuses this narrow recovery. Windows Hub recovery through
+this flag remains unsupported; it refuses before preparation or enrollment
+writes. Existing Join retirement is unchanged.
+
+The Hub recovery retains the setup intent, Gateway, CA, Tunnel, Runtime and
+other devices. Under the original container and role locks, it durably rejects
+the exact unexpired request, or records a trusted clock floor for an already
+expired request without rewriting that pending record. It then archives only
+the old local Host and this local pairing attempt's inputs. The report's
+`pairingOutcome` distinguishes `rejected` from `expired`; the original journal
+and any historical failures remain preserved. Partial retirement fences
+further setup and is never replayed automatically.
+
+After a completed Hub retirement, rerun `styx setup` with the **same root and
+Hub answers**. The normal flow creates a new local invitation and identity;
+the old request is not reused. Interactive Hub setup compares its own public
+bindings internally and does not require a user to manually trust itself.
 
 **Accepted join-only behavior (review round 2):** Host-only credentials admit
 self-capabilities, not the Gateway's model-only status tool. Joining computers
@@ -329,7 +352,7 @@ Public runtime-selection and enrollment reports are inputs/evidence, not grants.
 | Foreground Gateway startup | Include starting the existing foreground root in the approved plan. Reconcile only its exactly committed C07 tip under the original writer. A setup start without completion, an uncommitted native tip or a mismatched service manager is refused. |
 | Invitation publication | Reuse the published original link. A missing/uncertain original publication is not replaced with another invitation. |
 | Join input publication | Reuse the protected deployment, CA and invitation; never silently overwrite partial inputs. |
-| Host request | Inspect the original persisted enrollment prefix. Complete pending/ready prefixes are resumed; lost/partial replies stop without another request. |
+| Host request | Inspect the original persisted enrollment prefix. Ready prefixes and pending requests whose original endpoint binding is still valid are resumed; lost/partial replies stop without another request. A stopped Hub whose endpoint changed can use the explicit local-pairing retirement above, subject to its stricter preconditions. |
 | Exact approval | Keep its completion receipt; if the request disappeared without a known result, stop for reconciliation. |
 | Awaiting remote approval | Each known 202 reply gets its own durable pending receipt. Only that receipt permits another claim poll; an unanswered dispatch is not replayed. |
 | Claim/confirm | A validated ready prefix skips claim. Partial/uncertain claim/confirm stops; no replacement request is minted. |

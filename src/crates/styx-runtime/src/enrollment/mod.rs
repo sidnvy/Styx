@@ -4,6 +4,7 @@
 pub mod http;
 mod profile;
 mod recovery;
+pub(crate) mod retirement;
 pub mod service;
 pub mod shared;
 

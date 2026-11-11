@@ -6,6 +6,33 @@
 [GUI-CONVERGENCE.md](GUI-CONVERGENCE.md) 保留历史尝试与证据，不能把历史通过当作当前候选通过。
 本文中的计划项不代表已经执行。**交付未完成；Stable NO-GO。**
 
+## 当前推进检查点（2026-11-11）
+
+以下为最新状态，后文日期较早的检查点保留为历史。
+
+| 工作流 | 已验证变化 | 下一出口 |
+| --- | --- | --- |
+| Windows Gateway | C28 本机三能力、Linux 拒绝/批准/撤销/重配对和正常恢复已有真实证据；本轮正常退出后又从原入口恢复，账号实际列出 b939 connected | 保留原配置与通过证据；配合 Linux Gateway 的远端 Host 验收 |
+| Linux Gateway | 首次实际 Hub 的分阶段同根恢复触发 `native_gateway_pending_binding_mismatch`；重开换叶证书，旧 pending 严格绑定旧叶，批准/claim/Host 均未派发 | 新签名候选仅恢复这个已知失败的本地尝试，再完成本机及 Windows 远端能力与正常恢复 |
+| Mac | 原 owner 仍停在授权边界；两次过期邀请均未提交请求 | 只接受原聊天可用的本人授权，不改用其他通道绕过；此阻塞不阻止 Linux 独立推进 |
+| 发布与日常部署 | C28 Debian 12 包仅完成原机兼容/验签，未替换服务器；最终 Logo 刷新未完成 | 角色缺口关闭后统一发布检查，再部署 moedeu-apps Gateway + 三端 Host |
+
+本次有界修复保留严格 TLS 身份绑定，增加 **POSIX 上明确退役未完成 Hub 本地 Join**：
+核对精确请求/身份/上下文并持有原写锁；未过期走已有拒绝事务，过期只持久推进可信时间下界，
+不伪造拒绝或全局清理；只归档本次本地 Host/attempt，保留 Hub、Gateway、CA、Runtime 和其他设备。
+Windows 对这条新增 Hub 退役路径明确拒绝，原 Join 退役行为不变；不宣称通用跨平台恢复已完成。
+
+- Product：真实 Linux 首设恢复缺陷已复现；修复尚未安装。
+- Architecture：沿用原 Core/Runtime/CLI 边界与严格证书检查，无新管理权威或持久服务。
+- Integration：实际签名 reader7 的同根退役→新身份→连接、旧绑定拒绝以及过期保留参考均 PASS；
+  独立写锁交接审阅已闭合；本次集成 quality2 的 53 项 PASS，输入稳定。
+- Release：尚无新 release 编译、签名、安装；下一步冻结单一新源码候选，复用各端缓存。
+- Reliability：保留 C28 原失败、退出 UNKNOWN 及质量首轮两个 lint FAIL；禁止重放旧请求。
+- Decision：Linux 路径独立推进，Mac 授权单独挂起；已有通过项目不全量重跑。Stable NO-GO。
+
+证据根：`/home/sid/Developer/Artifacts/Styx/20261111-hub-resume-recovery`；
+原 C28 真实账号/平台证据：`/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/candidate-28`。
+
 ## 当前推进检查点（2026-11-10，新候选检查前）
 
 - **Product**：C27 Windows Gateway 的实际账号路由及本机三能力已独立通过；Exec

@@ -14,6 +14,7 @@
     "test:unit": "python3 -I -B src/ci/local-tests.py unit",
     "test:contracts": "python3 -I -B src/ci/local-tests.py contracts",
     "test:integration": "python3 -I -B src/ci/local-tests.py integration --",
+    "test:hub-recovery": "python3 -I -B src/ci/local-tests.py hub-recovery",
     "quality": "python3 -I -B src/ci/rust-quality.py",
     "build:checked": "python3 src/tools/release/build-native-runtime.py",
     "styx": "cargo run --locked --package styx --",

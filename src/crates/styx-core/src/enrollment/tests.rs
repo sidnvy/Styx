@@ -58,6 +58,151 @@ fn pending(l: &mut EnrollmentLedger, c: &EnrollmentControl) -> (JoinPayload, Str
     commit(l, c, &join);
     (p, code)
 }
+
+#[test]
+fn abandonment_requires_original_ingress_and_durable_rejection_for_live_request() {
+    let (mut ledger, control) = setup();
+    let (payload, code) = pending(&mut ledger, &control);
+    let selected = || RejectionRequest {
+        request: request(),
+        device: payload.device_id.clone(),
+        fingerprint: hash("spki"),
+        comparison: code.clone(),
+    };
+    let (_, foreign) = setup();
+    assert_eq!(
+        ledger
+            .abandon_pending(&foreign.admin(), selected(), &pairing(), 3)
+            .unwrap_err(),
+        EnrollmentError::Authority
+    );
+    for field in 0..4 {
+        let mut wrong = pairing();
+        match field {
+            0 => wrong.origin = "https://another.test".into(),
+            1 => wrong.leaf = hash("replacement leaf under same CA"),
+            2 => wrong.ingress_generation = PairingIngressGeneration::try_from("other").unwrap(),
+            _ => wrong.window = Some(PairingWindowId::try_from("other").unwrap()),
+        }
+        assert_eq!(
+            ledger
+                .abandon_pending(&control.admin(), selected(), &wrong, 3)
+                .unwrap_err(),
+            EnrollmentError::Proof
+        );
+    }
+    let old_claim = control.attest_claim(request(), hash("claim"));
+    let intent = ledger
+        .abandon_pending(&control.admin(), selected(), &pairing(), 3)
+        .unwrap()
+        .expect("live request requires a durable rejection");
+    assert!(matches!(intent.body().mutation, Mutation::Reject { .. }));
+    assert_eq!(
+        ledger.claim(&old_claim, 3).unwrap_err(),
+        EnrollmentError::Busy
+    );
+    assert_eq!(
+        ledger
+            .abandon_pending(&control.admin(), selected(), &pairing(), 3)
+            .unwrap_err(),
+        EnrollmentError::Busy
+    );
+    commit(&mut ledger, &control, &intent);
+    assert_eq!(ledger.claim(&old_claim, 4).unwrap(), ClaimView::Rejected);
+    assert!(ledger.devices.is_empty());
+    assert_eq!(
+        ledger
+            .abandon_pending(&control.admin(), selected(), &pairing(), 4)
+            .unwrap_err(),
+        EnrollmentError::Proof
+    );
+}
+
+#[test]
+fn expired_abandonment_preserves_all_pending_facts_and_fences_clock_rollback() {
+    let (mut ledger, control) = setup();
+    let (payload, code) = pending(&mut ledger, &control);
+    let mut peer = payload.clone();
+    peer.device_id = DeviceId::try_from("another-pending-device").unwrap();
+    peer.invitation = "another-one-use-invitation".into();
+    let invite = ledger
+        .invite(&control.admin(), hash(&peer.invitation), 60, None, 3)
+        .unwrap();
+    commit(&mut ledger, &control, &invite);
+    let peer_join = control
+        .attest_join(
+            &peer,
+            hash("peer spki"),
+            RequestId::try_from("11111111111111111111111111111111").unwrap(),
+            hash("peer claim"),
+            OpaqueProfileRef(hash("peer profile")),
+            pairing(),
+        )
+        .unwrap();
+    let join = ledger.join(peer_join, 4).unwrap();
+    commit(&mut ledger, &control, &join);
+    let before = ledger.pending.clone();
+    let expiry = ledger.pending[&request()].expires;
+    let selected = || RejectionRequest {
+        request: request(),
+        device: payload.device_id.clone(),
+        fingerprint: hash("spki"),
+        comparison: code.clone(),
+    };
+    assert!(
+        ledger
+            .abandon_pending(&control.admin(), selected(), &pairing(), expiry)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(ledger.pending, before);
+    assert!(ledger.pending_intent().is_none());
+    assert!(ledger.devices.is_empty());
+    assert_eq!(
+        ledger
+            .claim(&control.attest_claim(request(), hash("claim")), expiry)
+            .unwrap_err(),
+        EnrollmentError::Expired
+    );
+    assert_eq!(
+        ledger
+            .abandon_pending(&control.admin(), selected(), &pairing(), expiry - 1)
+            .unwrap_err(),
+        EnrollmentError::Clock
+    );
+}
+
+#[test]
+fn abandonment_cannot_discard_an_approved_credential_even_after_request_expiry() {
+    let (mut ledger, control) = setup();
+    let device = approved(&mut ledger, &control);
+    let original = ledger.pending[&request()].clone();
+    let before_devices = ledger.devices.clone();
+    let selection = RejectionRequest {
+        request: request(),
+        device,
+        fingerprint: hash("spki"),
+        comparison: original.facts.comparison.clone(),
+    };
+    assert_eq!(
+        ledger
+            .abandon_pending(&control.admin(), selection, &pairing(), original.expires)
+            .unwrap_err(),
+        EnrollmentError::Proof
+    );
+    assert_eq!(ledger.pending[&request()], original);
+    assert_eq!(ledger.devices, before_devices);
+    assert!(ledger.pending_intent().is_none());
+    assert!(matches!(
+        ledger
+            .claim(
+                &control.attest_claim(request(), hash("claim")),
+                original.expires
+            )
+            .unwrap(),
+        ClaimView::Approved { .. }
+    ));
+}
 fn approved(l: &mut EnrollmentLedger, c: &EnrollmentControl) -> DeviceId {
     let (p, code) = pending(l, c);
     let approve = l

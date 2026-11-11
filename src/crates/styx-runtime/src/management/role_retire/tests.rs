@@ -114,6 +114,63 @@ fn setup_retirement_incomplete_journal_and_wrong_scope_fail_closed() {
     );
     assert!(host.is_dir() && inputs.join("setup-intent.json").is_file());
 }
+
+#[test]
+fn hub_join_step_fence_preserves_shared_hub_inputs_and_refuses_dispatched_approval() {
+    for name in [
+        "local-invite.started",
+        "local-invite.done",
+        "join-link",
+        "invitation-source",
+        "host-deployment.json",
+        "request.done",
+    ] {
+        assert!(setup_hub_join_input(name), "{name}");
+    }
+    for name in [
+        "setup-intent.json",
+        "runtime-selection.json",
+        "gateway-deployment.json",
+        "tunnel.done",
+        "invite-export-1.token",
+        "join-link.retired-20261111T000000Z",
+    ] {
+        assert!(!setup_hub_join_input(name), "{name}");
+    }
+    let temp = Temp::new();
+    let path = temp.child("inputs");
+    for step in ["local-invite", "join-input", "request"] {
+        file(&path.join(format!("{step}.started")), b"dispatched\n");
+        file(&path.join(format!("{step}.done")), b"completed\n");
+    }
+    for name in [
+        "host-deployment.json",
+        "host-public-identity.json",
+        "join-ca.pem",
+        "invitation",
+        "invitation-source",
+        "join-link",
+    ] {
+        file(&path.join(name), b"fixture");
+    }
+    let inputs = PrivateRoot::open(&path).unwrap();
+    assert!(validate_hub_join_steps(&inputs, &[]).is_ok());
+    for name in [
+        "approve.started",
+        "approve.done",
+        "claim-0.started",
+        "claim.done",
+        "host-running.started",
+        "host-service-start-r1.done",
+    ] {
+        assert!(
+            validate_hub_join_steps(&inputs, &[name.into()]).is_err(),
+            "{name}"
+        );
+    }
+    fs::remove_file(path.join("request.done")).unwrap();
+    assert!(validate_hub_join_steps(&inputs, &[]).is_err());
+}
 fn hash(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest::of_bytes(bytes)
 }

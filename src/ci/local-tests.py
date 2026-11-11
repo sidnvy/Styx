@@ -15,6 +15,11 @@ CONTRACTS = (
     "management::native_join_http::transport_tests::local_rejection_admits_fixed_authenticated_request_over_tls",
     "management::native_join_http::transport_tests::local_rejection_does_not_admit_anonymous_or_generic_admin_requests",
 )
+HUB_RECOVERY = (
+    "management::setup_pending_restart_reference_tests::hub_pending_across_foreground_restart_is_refused_without_approval_or_claim",
+    "management::setup_pending_restart_reference_tests::hub_explicit_retire_preserves_gateway_then_pairs_new_identity_in_same_root",
+    "enrollment::retirement::tests::linux::signed_reader7_expired_pending_only_advances_durable_floor",
+)
 
 
 def packages():
@@ -32,6 +37,11 @@ def main():
     subs.add_parser("contracts", help="fast schema and local native-client admission regressions")
     integration = subs.add_parser("integration", help="pass explicit arguments to the existing full quality gate")
     integration.add_argument("quality_args", nargs=argparse.REMAINDER)
+    recovery = subs.add_parser("hub-recovery", help="explicit signed-payload Hub recovery references; no device acceptance")
+    recovery.add_argument("--cli", type=Path, required=True)
+    recovery.add_argument("--payload", type=Path, required=True)
+    recovery.add_argument("--publisher", type=Path, required=True)
+    recovery.add_argument("--publisher-pin", required=True)
     args = parser.parse_args()
     if args.profile == "unit":
         unknown = set(args.package) - packages()
@@ -44,6 +54,18 @@ def main():
                      "--", "--exact", "--test-threads=1"] for case in CONTRACTS]
         print("Scope: schema projection/equivalence and local rejection admission; no device acceptance. "
               "Full TLS enrollment rejection is an ignored fixture-dependent integration scenario.", flush=True)
+    elif args.profile == "hub-recovery":
+        if not sys.platform.startswith("linux"):
+            parser.error("hub-recovery references require Linux")
+        for path, directory in ((args.cli, False), (args.payload, True), (args.publisher, False)):
+            if not path.is_absolute() or not (path.is_dir() if directory else path.is_file()):
+                parser.error("hub-recovery requires existing absolute CLI, payload and public publisher paths")
+        if not re.fullmatch(r"[a-f0-9]{64}", args.publisher_pin):
+            parser.error("publisher-pin must be an externally trusted lowercase SHA256 pin")
+        commands = [["cargo", "test", "--locked", "--offline", "-p", "styx-runtime", "--lib", case,
+                     "--", "--ignored", "--exact", "--test-threads=1", "--nocapture"] for case in HUB_RECOVERY]
+        print("Scope: isolated loopback, real signed reader7 inputs and synthetic identities; "
+              "no Tunnel, service, account or native device acceptance. Build the current CLI explicitly first.", flush=True)
     else:
         forwarded = args.quality_args
         if forwarded and forwarded[0] == "--":
@@ -61,6 +83,9 @@ def main():
         print("NOT RUN (dry-run)")
         return 0
     env = os.environ.copy()
+    if args.profile == "hub-recovery":
+        env.update(STYX_SETUP_TEST_CLI=str(args.cli), STYX_SETUP_TEST_PAYLOAD=str(args.payload),
+                   STYX_SETUP_TEST_PUBLISHER=str(args.publisher), STYX_SETUP_TEST_PIN=args.publisher_pin)
     if sys.platform.startswith("linux"):
         env.setdefault("CARGO_BUILD_JOBS", "8")
     if args.profile != "integration":

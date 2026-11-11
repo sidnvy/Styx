@@ -815,6 +815,40 @@ impl EnrollmentLedger {
         let target = Self::target(pending)?;
         self.stage(now, Mutation::Reject { target })
     }
+    /// Explicitly abandon this exact, unapproved request in its original
+    /// ingress context. Never approve, rebind or replay an enrollment.
+    ///
+    /// An expired request needs no rejection mutation: `None` means only that
+    /// its exact pending facts are expired at `now`. The trusted runtime must
+    /// durably retain that clock floor before using this result for retirement.
+    /// In particular, this does not collect other expired requests or change
+    /// the historical CollectPending contract.
+    pub fn abandon_pending(
+        &mut self,
+        admin: &EnrollmentAdminAuthority,
+        request: RejectionRequest,
+        expected_pairing: &PairingContext,
+        now: u64,
+    ) -> Result<Option<PendingIntent>> {
+        self.brand(&admin.brand)?;
+        self.ready(now)?;
+        let pending = self
+            .pending
+            .get(&request.request)
+            .ok_or(EnrollmentError::NotFound)?;
+        if pending.status != PendingStatus::Pending
+            || pending.facts.device != request.device
+            || pending.facts.fingerprint != request.fingerprint
+            || pending.facts.comparison != request.comparison
+            || &pending.facts.pairing != expected_pairing
+        {
+            return Err(EnrollmentError::Proof);
+        }
+        if pending.expires <= now {
+            return Ok(None);
+        }
+        self.reject(admin, request, now).map(Some)
+    }
     fn verified_claim(&self, proof: &VerifiedClaim, now: u64) -> Result<&Pending> {
         self.available()?;
         self.brand(&proof.brand)?;

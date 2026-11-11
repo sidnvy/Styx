@@ -631,3 +631,6 @@ pub async fn inspect_deployment(state_dir: &Path) -> Result<ManagementInspection
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod setup_pending_restart_reference_tests;

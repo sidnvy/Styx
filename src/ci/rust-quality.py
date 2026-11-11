@@ -204,7 +204,7 @@ class Gate:
     def __init__(self, directory, target):
         self.directory, self.target = directory, target
         self.checks = []
-        allowed = {"PATH", "HOME", "USERPROFILE", "SystemRoot", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "CARGO_HOME", "RUSTUP_HOME", "LD_LIBRARY_PATH", "LIBRARY_PATH", "LANG", "LC_ALL", "TERM"}
+        allowed = {"PATH", "HOME", "USERPROFILE", "SystemRoot", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "CARGO_HOME", "RUSTUP_HOME", "CARGO_BUILD_JOBS", "LD_LIBRARY_PATH", "LIBRARY_PATH", "LANG", "LC_ALL", "TERM"}
         self.env = {k: v for k, v in os.environ.items() if k in allowed}
         self.env.update(CARGO_TARGET_DIR=str(target), CARGO_NET_OFFLINE="true", CARGO_TERM_COLOR="never", PYTHONDONTWRITEBYTECODE="1", GIT_OPTIONAL_LOCKS="0")
 
@@ -272,7 +272,7 @@ def execute(args):
     target.mkdir(parents=True, exist_ok=True)
     policy = json.loads(POLICY.read_text())
     gate = Gate(evidence, target)
-    receipt = {"schema": 1, "kind": "rust_foundation_development_quality", "started_at": now(), "status": "RUNNING", "root": str(ROOT), "target_dir": str(target), "checks": gate.checks, "native_platform_acceptance": "NOT_RUN", "package": "NOT_BUILT", "deployment": "NOT_RUN", "final_release_gate": False}
+    receipt = {"schema": 1, "kind": "rust_foundation_development_quality", "started_at": now(), "status": "RUNNING", "root": str(ROOT), "target_dir": str(target), "cargo_build_jobs": gate.env.get("CARGO_BUILD_JOBS"), "checks": gate.checks, "native_platform_acceptance": "NOT_RUN", "package": "NOT_BUILT", "deployment": "NOT_RUN", "final_release_gate": False}
     initial = None
     management_fixture = None
     try:

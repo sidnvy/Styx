@@ -93,3 +93,37 @@ OS/account part, without multiplying full suites.
 Signing keys and real account secrets stay on their authorized devices. Future
 hosted CI can reuse these commands with synthetic inputs; ordinary CI must not
 acquire personal profiles or signing private keys.
+## Hub pairing recovery references
+
+The ordinary unit suite covers exact target/ingress checks, expired-request
+preservation, rollback refusal and protection of already approved credentials.
+The following local integration entry point additionally uses a real signed
+reader7 payload, strict loopback TLS and a current explicitly built CLI:
+
+```sh
+CARGO_BUILD_JOBS=8 cargo build --locked --offline -p styx --timings
+npm run test:hub-recovery -- \
+  --cli /absolute/current/debug/styx \
+  --payload /absolute/signed-runtime/payload \
+  --publisher /absolute/public-publisher.pem \
+  --publisher-pin EXTERNALLY_TRUSTED_64_LOWERCASE_HEX_DIGITS
+```
+
+It verifies the original binding refusal after restart, explicit retirement and
+new identity in the same Hub root, and the expired path's durable clock floor
+with unchanged pending records. Each reference owns a fresh temporary fixture;
+it opens no Tunnel or persistent service. These are local references, not
+account effects, device acceptance or a release gate. Missing inputs, failed
+commands and zero selected tests fail rather than count as a pass.
+
+For the existing TLS quality scenarios, generate new **test-only** certificates
+for each fresh quality run; do not overwrite or reuse expired evidence:
+
+```sh
+python3 src/ci/test-tls-fixtures.py --output /absolute/new/private-test-pki
+```
+
+Pass this directory as the quality runner's `--tls-fixtures`. The generator
+requires a new directory, verifies both chains and cross-CA refusals, records
+OpenSSL and certificate inputs, and keeps generated test keys private. It does
+not read publisher, installed Gateway or device signing keys.

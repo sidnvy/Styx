@@ -36,6 +36,8 @@ pub struct RetireReport {
     pub other_devices: Vec<OtherDevice>,
     pub retired: Vec<RetiredPath>,
     pub restart_required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pairing_outcome: Option<&'static str>,
 }
 impl Default for RetireReport {
     fn default() -> Self {
@@ -47,6 +49,7 @@ impl Default for RetireReport {
             other_devices: vec![],
             retired: vec![],
             restart_required: false,
+            pairing_outcome: None,
         }
     }
 }
@@ -395,6 +398,67 @@ fn setup_join_input(name: &str) -> bool {
             })
 }
 
+// Only the local Join attempt is retired from a Hub. In particular its
+// original setup intent, runtime selection, Gateway and Tunnel inputs remain.
+#[allow(dead_code)] // Wired only after both retained-owner admission APIs exist.
+fn setup_hub_join_input(name: &str) -> bool {
+    (setup_join_input(name) && name != "setup-intent.json")
+        || matches!(
+            name,
+            "local-invite.started"
+                | "local-invite.done"
+                | "invitation-source"
+                | "join-link"
+                | "approve.started"
+                | "approve.done"
+        )
+}
+
+/// This is a preliminary fence only; it does not authenticate a Host prefix
+/// or Gateway ledger and does not authorize retirement or another request.
+#[allow(dead_code)]
+fn validate_hub_join_steps(inputs: &PrivateRoot, names: &[String]) -> Result<(), RetireError> {
+    let fail = || RetireError::refused("role_retire_hub_join_unproven");
+    for step in ["local-invite", "join-input", "request"] {
+        for (suffix, expected) in [
+            ("started", b"dispatched\n".as_slice()),
+            ("done", b"completed\n".as_slice()),
+        ] {
+            let raw = inputs
+                .read_raw(format!("{step}.{suffix}"), 64)
+                .map_err(|_| fail())?;
+            if raw.bytes() != expected {
+                return Err(fail());
+            }
+        }
+    }
+    for name in [
+        "host-deployment.json",
+        "host-public-identity.json",
+        "join-ca.pem",
+        "invitation",
+        "invitation-source",
+        "join-link",
+    ] {
+        let raw = inputs.read_raw(name, 1024 * 1024).map_err(|_| fail())?;
+        if raw.bytes().is_empty() {
+            return Err(fail());
+        }
+    }
+    // Any approval, claim, running or service dispatch invalidates this narrow
+    // preflight, including unmatched/partial started files and odd suffixes.
+    if names.iter().any(|name| {
+        name.starts_with("approve.")
+            || name.starts_with("claim-")
+            || name.starts_with("claim.")
+            || name.starts_with("host-running.")
+            || name.starts_with("host-service-")
+    }) {
+        return Err(fail());
+    }
+    Ok(())
+}
+
 /// Explicitly abandon this CLI Join attempt, retaining every moved byte.
 pub fn retire_setup_host(setup: &Path, host: &Path) -> Result<RetireReport, RetireError> {
     if !setup.is_absolute() || host != setup.join("host") {
@@ -409,6 +473,9 @@ pub fn retire_setup_host(setup: &Path, host: &Path) -> Result<RetireReport, Reti
         .map_err(|_| RetireError::refused("role_retire_setup_intent_refused"))?;
     let intent: serde_json::Value = serde_json::from_slice(intent.bytes())
         .map_err(|_| RetireError::refused("role_retire_setup_intent_refused"))?;
+    if intent.get("role").and_then(serde_json::Value::as_str) == Some("hub") {
+        return retire_setup_hub_join(guard, &inputs_path, inputs, host);
+    }
     if intent.get("role").and_then(serde_json::Value::as_str) != Some("join") {
         return Err(RetireError::refused("role_retire_setup_not_join"));
     }
@@ -477,6 +544,256 @@ pub fn retire_setup_host(setup: &Path, host: &Path) -> Result<RetireReport, Reti
         });
     }
     Ok(report)
+}
+
+#[cfg(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+))]
+fn retire_setup_hub_join(
+    guard: SetupContainerGuard,
+    inputs_path: &Path,
+    inputs: PrivateRoot,
+    host: &Path,
+) -> Result<RetireReport, RetireError> {
+    use crate::management::native_join::retirement_host_preflight;
+    use styx_core::enrollment::RejectionRequest;
+    // The Windows store denies DELETE sharing. Dropping its original writer
+    // before rename would let an independent native writer enter the gap.
+    // This new Hub recovery remains refused there until an equivalent atomic
+    // ownership handoff exists; the pre-existing Join retirement is unchanged.
+    if cfg!(target_os = "windows") {
+        return Err(RetireError::refused(
+            "role_retire_hub_join_platform_unsupported",
+        ));
+    }
+    let refuse = || RetireError::refused("role_retire_hub_join_unproven");
+    let unknown = || RetireError::unknown("setup_retirement_unknown");
+    let setup = &guard.path;
+    if host != setup.join("host") {
+        return Err(refuse());
+    }
+    let gateway_path = setup.join("gateway");
+    let mut prepared = prepare(Some(host), None, RetireOptions::default())?;
+    let host_root = prepared.roots.pop().ok_or_else(refuse)?;
+    let mut gateway = Root::open(&gateway_path)?;
+    if host_root.root.identity() == gateway.root.identity() {
+        return Err(refuse());
+    }
+    let host_identity = host_root.root.identity();
+    let gateway_identity = gateway.root.identity();
+    let Root {
+        path: _,
+        parent: _,
+        root,
+        lease: host_lease,
+        writer,
+    } = host_root;
+    let proof = retirement_host_preflight(host, root, writer).map_err(|_| refuse())?;
+    let gateway_ca = gateway
+        .root
+        .read_raw("gateway-ca.pem", 128 * 1024)
+        .map_err(|_| refuse())?;
+    proof
+        .validate_gateway_ca(gateway_ca.bytes())
+        .map_err(|_| refuse())?;
+    EnrollmentBootstrap::validate_retirement_reader(&gateway.root, &mut gateway.writer)
+        .map_err(|_| refuse())?;
+
+    let mut names: Vec<String> = std::fs::read_dir(inputs_path)
+        .map_err(|_| refuse())?
+        .map(|entry| {
+            entry
+                .map_err(|_| refuse())
+                .and_then(|e| e.file_name().into_string().map_err(|_| refuse()))
+        })
+        .collect::<Result<_, _>>()?;
+    names.sort();
+    validate_hub_join_steps(&inputs, &names)?;
+    let public = inputs
+        .read_raw("host-public-identity.json", 16384)
+        .map_err(|_| refuse())?;
+    let report: serde_json::Value = serde_json::from_slice(public.bytes()).map_err(|_| refuse())?;
+    if report.get("schema").and_then(|v| v.as_u64()) != Some(1)
+        || report.get("operation").and_then(|v| v.as_str()) != Some("native_host_request")
+        || report.get("status").and_then(|v| v.as_str()) != Some("awaiting_approval")
+        || report.get("state_dir").and_then(|v| v.as_str()) != host.to_str()
+        || report.get("device_id").and_then(|v| v.as_str()) != Some(proof.selection.device.as_str())
+        || report.get("fingerprint").and_then(|v| v.as_str())
+            != Some(proof.selection.fingerprint.to_hex().as_str())
+        || report.get("request_id").and_then(|v| v.as_str())
+            != Some(proof.selection.request.as_str())
+        || report.get("comparison_code").and_then(|v| v.as_str())
+            != Some(proof.selection.comparison.as_str())
+        || report.get("expires_at").and_then(|v| v.as_u64()) != Some(proof.expires_at)
+    {
+        return Err(refuse());
+    }
+    let mut pinned = Vec::new();
+    let intent = inputs
+        .read_raw("setup-intent.json", 1024 * 1024)
+        .map_err(|_| refuse())?;
+    let intent_value: serde_json::Value =
+        serde_json::from_slice(intent.bytes()).map_err(|_| refuse())?;
+    if intent_value.get("role").and_then(|v| v.as_str()) != Some("hub") {
+        return Err(refuse());
+    }
+    pinned.push(intent);
+    for name in &names {
+        if setup_hub_join_input(name) {
+            let raw = inputs.read_raw(name, 1024 * 1024).map_err(|_| refuse())?;
+            prepared.add_input(&inputs_path.join(name))?;
+            pinned.push(raw);
+        }
+    }
+    let revalidate = |gateway: &Root,
+                      pinned: &[crate::store::RawFile]|
+     -> Result<(), RetireError> {
+        guard.validate()?;
+        if PrivateRoot::open(inputs_path)
+            .map_err(|_| refuse())?
+            .identity()
+            != inputs.identity()
+        {
+            return Err(refuse());
+        }
+        host_lease.validate().map_err(|_| refuse())?;
+        gateway.validate()?;
+        proof.validate().map_err(|_| refuse())?;
+        let mut current: Vec<String> = std::fs::read_dir(inputs_path)
+            .map_err(|_| refuse())?
+            .map(|entry| {
+                entry
+                    .map_err(|_| refuse())
+                    .and_then(|e| e.file_name().into_string().map_err(|_| refuse()))
+            })
+            .collect::<Result<_, _>>()?;
+        current.sort();
+        if current != names {
+            return Err(refuse());
+        }
+        let after = gateway
+            .root
+            .read_raw("gateway-ca.pem", 128 * 1024)
+            .map_err(|_| refuse())?;
+        if after.observation() != gateway_ca.observation() || after.bytes() != gateway_ca.bytes() {
+            return Err(refuse());
+        }
+        for before in pinned {
+            let after = inputs
+                .read_raw(before.relative_path(), 1024 * 1024)
+                .map_err(|_| refuse())?;
+            if after.observation() != before.observation() || after.bytes() != before.bytes() {
+                return Err(refuse());
+            }
+        }
+        Ok(())
+    };
+    revalidate(&gateway, &pinned)?;
+    let journal_path = setup.join(SETUP_RETIRE_JOURNAL);
+    if journal_exists(&journal_path)? {
+        let backup = destination(&journal_path, &prepared.suffix)?;
+        rename_exclusive(&backup.old_path, &backup.new_path).map_err(|_| unknown())?;
+    }
+    let journal = guard
+        .root
+        .create_setup_journal_child(SETUP_RETIRE_JOURNAL)
+        .map_err(|_| unknown())?;
+    journal
+        .create_setup_export("begin".as_ref(), b"started\n")
+        .map_err(|_| unknown())?;
+    let input_pins: Vec<_> = pinned.iter().map(|p| serde_json::json!({"path":p.relative_path(), "sha256":p.sha256(), "observation":p.observation()})).collect();
+    let target = serde_json::json!({"schema":1,"setup":guard.root.identity(),"inputs_root":inputs.identity(),"host":host_identity,
+        "gateway":gateway_identity,"request_id":proof.selection.request,"device_id":proof.selection.device,
+        "fingerprint":proof.selection.fingerprint,"comparison_code":proof.selection.comparison,
+        "pairing":proof.pairing,"expires_at":proof.expires_at,"seed_sha256":proof.seed_sha256,"dispatch_sha256":proof.dispatch_sha256,
+        "reply_sha256":proof.reply_sha256,"gateway_ca_sha256":gateway_ca.sha256(),"inputs":input_pins,"paths":prepared.paths});
+    let target = serde_json::to_vec(&target).map_err(|_| unknown())?;
+    journal
+        .create_setup_export("target.json".as_ref(), &target)
+        .map_err(|_| unknown())?;
+    guard.root.sync_setup_directory().map_err(|_| unknown())?;
+    revalidate(&gateway, &pinned).map_err(|_| unknown())?;
+    let selection = RejectionRequest {
+        request: proof.selection.request.clone(),
+        device: proof.selection.device.clone(),
+        fingerprint: proof.selection.fingerprint,
+        comparison: proof.selection.comparison.clone(),
+    };
+    let bootstrap = EnrollmentBootstrap::recover_existing_for_retirement(
+        &gateway.root,
+        &mut gateway.writer,
+        Limits::default(),
+    )
+    .map_err(|_| unknown())?;
+    bootstrap
+        .retirement_preflight(&selection, &proof.pairing, proof.expires_at)
+        .map_err(|_| unknown())?;
+    let receipt = bootstrap
+        .abandon_pending_for_retirement(selection, &proof.pairing, proof.expires_at)
+        .map_err(|_| unknown())?;
+    let pairing_outcome = match receipt.outcome {
+        crate::enrollment::retirement::RetirementOutcome::Rejected => "rejected",
+        crate::enrollment::retirement::RetirementOutcome::Expired => "expired",
+    };
+    let receipt = serde_json::to_vec(&serde_json::json!({
+        "schema":1,
+        "target_sha256":styx_contracts::identity::Sha256Digest::of_bytes(&target),
+        "outcome":pairing_outcome,
+        "intent_digest":receipt.intent_digest,
+        "durable_receipt":receipt.durable_receipt,
+        "durable_clock_floor":receipt.durable_clock_floor,
+        "revision":receipt.revision
+    }))
+    .map_err(|_| unknown())?;
+    journal
+        .create_setup_export("settled".as_ref(), &receipt)
+        .map_err(|_| unknown())?;
+    revalidate(&gateway, &pinned).map_err(|_| unknown())?;
+    // POSIX rename works with the original files open: retain the Host writer
+    // and its exact prefix pins through every rename and completion receipt.
+    // Releasing only an execution lease is insufficient for native Join writers.
+    #[cfg(target_os = "windows")]
+    drop(proof);
+    #[cfg(target_os = "windows")]
+    drop(host_lease);
+    let mut report = prepared.retire().map_err(|_| unknown())?;
+    report.pairing_outcome = Some(pairing_outcome);
+    if guard.root.sync_setup_directory().is_err()
+        || inputs.sync_setup_directory().is_err()
+        || journal
+            .create_setup_export("done".as_ref(), b"completed\n")
+            .is_err()
+    {
+        report.outcome = "unknown";
+        report.restart_required = true;
+        return Err(RetireError {
+            code: "role_retire_completion_unknown",
+            report,
+        });
+    }
+    Ok(report)
+}
+
+#[cfg(not(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+)))]
+fn retire_setup_hub_join(
+    _: SetupContainerGuard,
+    _: &Path,
+    _: PrivateRoot,
+    _: &Path,
+) -> Result<RetireReport, RetireError> {
+    Err(RetireError::refused("role_retire_hub_unsupported"))
 }
 /// Use official platform no-replace rename primitives, including for a name
 /// collision appearing after preflight. There is no overwrite fallback.
