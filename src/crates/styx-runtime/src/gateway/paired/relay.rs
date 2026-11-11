@@ -441,14 +441,25 @@ impl RelayHandle {
         gate: Option<Arc<Mutex<bool>>>,
     ) -> Result<Reply, RelayError> {
         self.authorization_lane(e, &call).await?;
+        Self::exchange_command(&e.tx, call, gate).await
+    }
+    async fn exchange_command(
+        queue: &mpsc::Sender<Command>,
+        call: Call,
+        gate: Option<Arc<Mutex<bool>>>,
+    ) -> Result<Reply, RelayError> {
         let response_budget = call.response_budget();
         let (tx, rx) = oneshot::channel();
-        e.tx.try_send(Command {
-            call,
-            result: tx,
-            gate,
-        })
-        .map_err(|_| RelayError::Busy)?;
+        queue
+            .try_send(Command {
+                call,
+                result: tx,
+                gate,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => RelayError::Busy,
+                mpsc::error::TrySendError::Closed(_) => RelayError::Offline,
+            })?;
         match tokio::time::timeout(response_budget, rx).await {
             Ok(Ok(r)) => r,
             _ => Err(RelayError::Unknown),
@@ -1205,6 +1216,119 @@ impl RelayHandle {
             self.inner.shutdown_failed.store(true, Ordering::Release);
             Err(RelayError::Unknown)
         }
+    }
+}
+
+#[cfg(test)]
+mod command_queue_tests {
+    use super::*;
+
+    fn owner() -> OwnerRef {
+        OwnerRef {
+            owner_id: "queue-admission-fixture".try_into().unwrap(),
+            owner_epoch: "queue-admission-epoch".try_into().unwrap(),
+        }
+    }
+
+    fn open(revision: u64) -> Call {
+        Call::OwnerOpen {
+            owner: owner(),
+            grant_revision: revision,
+        }
+    }
+
+    fn acknowledge(command: Command, expected_revision: u64) {
+        let Call::OwnerOpen {
+            owner: received_owner,
+            grant_revision,
+        } = command.call
+        else {
+            panic!("the original queued command must be retained");
+        };
+        assert!(received_owner == owner());
+        assert_eq!(grant_revision, expected_revision);
+        assert!(
+            command
+                .result
+                .send(Ok(Reply::OwnerOpened {
+                    owner: received_owner,
+                    grant_revision,
+                }))
+                .is_ok(),
+            "the original exchange must still own its reply receiver"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_queue_is_busy_without_displacing_the_original_exchange() {
+        let (queue, mut receiver) = mpsc::channel(1);
+        let original = RelayHandle::exchange_command(&queue, open(7), None);
+        tokio::pin!(original);
+        assert!(futures_util::poll!(original.as_mut()).is_pending());
+        assert_eq!(receiver.len(), 1);
+
+        let refused = RelayHandle::exchange_command(&queue, open(99), None).await;
+        assert!(matches!(refused, Err(RelayError::Busy)));
+        assert_eq!(receiver.len(), 1);
+        acknowledge(receiver.try_recv().unwrap(), 7);
+        assert!(matches!(
+            original.await,
+            Ok(Reply::OwnerOpened {
+                grant_revision: 7,
+                ..
+            })
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        // Released capacity accepts a distinct later command, not the refusal.
+        let next = RelayHandle::exchange_command(&queue, open(8), None);
+        tokio::pin!(next);
+        assert!(futures_util::poll!(next.as_mut()).is_pending());
+        acknowledge(receiver.try_recv().unwrap(), 8);
+        assert!(matches!(
+            next.await,
+            Ok(Reply::OwnerOpened {
+                grant_revision: 8,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn closed_queue_is_offline_and_preserves_the_already_queued_reply() {
+        let (queue, mut receiver) = mpsc::channel(1);
+        let original = RelayHandle::exchange_command(&queue, open(7), None);
+        tokio::pin!(original);
+        assert!(futures_util::poll!(original.as_mut()).is_pending());
+        receiver.close();
+
+        let refused = RelayHandle::exchange_command(&queue, open(99), None).await;
+        assert!(matches!(refused, Err(RelayError::Offline)));
+        assert_eq!(receiver.len(), 1);
+        acknowledge(receiver.try_recv().unwrap(), 7);
+        assert!(matches!(
+            original.await,
+            Ok(Reply::OwnerOpened {
+                grant_revision: 7,
+                ..
+            })
+        ));
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn accepted_command_with_lost_reply_remains_unknown() {
+        let (queue, mut receiver) = mpsc::channel(1);
+        let exchange = RelayHandle::exchange_command(&queue, open(7), None);
+        tokio::pin!(exchange);
+        assert!(futures_util::poll!(exchange.as_mut()).is_pending());
+        // Acceptance happened; loss of its reply cannot prove non-dispatch.
+        drop(receiver.try_recv().unwrap());
+        assert!(!queue.is_closed());
+        assert!(matches!(exchange.await, Err(RelayError::Unknown)));
     }
 }
 
