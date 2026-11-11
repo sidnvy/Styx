@@ -11,13 +11,13 @@
   "scripts": {
     "test": "npm --prefix src run test:all",
     "test:js": "npm --prefix src run test:all",
-    "test:unit": "python3 -I -B src/ci/local-tests.py unit",
-    "test:contracts": "python3 -I -B src/ci/local-tests.py contracts",
-    "test:integration": "python3 -I -B src/ci/local-tests.py integration --",
-    "test:hub-recovery": "python3 -I -B src/ci/local-tests.py hub-recovery",
-    "quality": "python3 -I -B src/ci/rust-quality.py",
-    "build:checked": "python3 src/tools/release/build-native-runtime.py",
-    "styx": "cargo run --locked --package styx --",
-    "gateway": "cargo run --locked --package styx -- gateway run"
+    "test:unit": "python3 -I -B src/ci/dev-env.py python3 -I -B src/ci/local-tests.py unit",
+    "test:contracts": "python3 -I -B src/ci/dev-env.py python3 -I -B src/ci/local-tests.py contracts",
+    "test:integration": "python3 -I -B src/ci/dev-env.py python3 -I -B src/ci/local-tests.py integration --",
+    "test:hub-recovery": "python3 -I -B src/ci/dev-env.py python3 -I -B src/ci/local-tests.py hub-recovery",
+    "quality": "python3 -I -B src/ci/dev-env.py python3 -I -B src/ci/rust-quality.py",
+    "build:checked": "python3 -I -B src/ci/dev-env.py python3 -I -B src/tools/release/build-native-runtime.py",
+    "styx": "python3 -I -B src/ci/dev-env.py cargo run --locked --package styx --",
+    "gateway": "python3 -I -B src/ci/dev-env.py cargo run --locked --package styx -- gateway run"
   }
 }

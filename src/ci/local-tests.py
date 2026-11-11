@@ -83,6 +83,7 @@ def main():
         print("NOT RUN (dry-run)")
         return 0
     env = os.environ.copy()
+    env.setdefault("CARGO_TARGET_DIR", str(ROOT / "target"))
     if args.profile == "hub-recovery":
         env.update(STYX_SETUP_TEST_CLI=str(args.cli), STYX_SETUP_TEST_PAYLOAD=str(args.payload),
                    STYX_SETUP_TEST_PUBLISHER=str(args.publisher), STYX_SETUP_TEST_PIN=args.publisher_pin)

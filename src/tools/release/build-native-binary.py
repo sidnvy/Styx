@@ -318,7 +318,10 @@ def main():
         require(path.is_absolute() and path.resolve(strict=True) == path, 'canonical_existing_input_required')
     require(args.output.is_absolute() and not args.output.exists() and not args.output.is_symlink()
             and not args.output.is_relative_to(ROOT), 'fresh_external_output_required')
-    require(not args.target_dir.is_relative_to(ROOT), 'external_build_target_required')
+    require(not args.target_dir.is_relative_to(ROOT) or args.target_dir == ROOT / 'target',
+            'canonical_build_target_required')
+    require(args.source_archive_manifest is None or not args.target_dir.is_relative_to(ROOT),
+            'archive_requires_external_build_target')
     args.output.mkdir(mode=0o700)
     receipt = {'schema': 1, 'status': 'FAIL', 'source_revision': args.source_revision,
                'producer': PRODUCER, 'profile': 'release', 'installed': False,

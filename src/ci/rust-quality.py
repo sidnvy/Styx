@@ -266,9 +266,12 @@ class Gate:
 
 def execute(args):
     evidence = private_new_dir(Path(args.evidence))
-    target = Path(args.target_dir) if args.target_dir else evidence / "target"
-    if not target.is_absolute() or target.resolve() != target.absolute() or target == ROOT or target.is_relative_to(ROOT):
-        raise ValueError("external_absolute_target_required")
+    # Match ordinary Cargo and the local test entry point. Evidence is immutable;
+    # a new evidence directory must never silently create another build cache.
+    target = Path(args.target_dir or os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target")))
+    if (not target.is_absolute() or target.resolve() != target.absolute()
+            or (target.is_relative_to(ROOT) and target != ROOT / "target")):
+        raise ValueError("canonical_cargo_target_required")
     target.mkdir(parents=True, exist_ok=True)
     policy = json.loads(POLICY.read_text())
     gate = Gate(evidence, target)
@@ -614,7 +617,7 @@ def execute(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", required=True, help="fresh absolute external evidence directory")
-    parser.add_argument("--target-dir", help="absolute external Cargo build cache; reused only by explicit choice")
+    parser.add_argument("--target-dir", help="canonical Cargo cache (default: CARGO_TARGET_DIR, otherwise workspace target/); never evidence/target")
     parser.add_argument("--management-import", action="store_true", help="owned Linux raw legacy management import and CLI plan only; no transaction/migration claim")
     parser.add_argument("--browser-references", action="store_true", help="actual owned Browser opaque references/navigation/tab/reopen scene; requires --browser-host, not platform acceptance")
     parser.add_argument("--browser-host", action="store_true", help="actual Linux headless Browser Host scenario; requires Node22, Codex and browser executable; no desktop/account/package claim")

@@ -6,6 +6,41 @@
 [GUI-CONVERGENCE.md](GUI-CONVERGENCE.md) 保留历史尝试与证据，不能把历史通过当作当前候选通过。
 本文中的计划项不代表已经执行。**交付未完成；Stable NO-GO。**
 
+## 最新检查点（2026-11-11，C30；以下旧检查点为历史）
+
+冻结运行时源码为 `dce8d24d599924c88e0f177fbfb92cf07ff7fd58`，证据根为
+`/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/candidate-30`。
+开发工具归拢的工作区修改不改变这个已安装候选，不为目录整理重新生产候选。
+
+| 工作流 | 已验证 | 仍缺的出口 |
+| --- | --- | --- |
+| 生产与安装 | C30 集成质量、三端 Core/完整 Runtime、Mac App/DMG、Windows 安装器及精确安装已有收据 | 制品通过与真机验收分开，不能据此宣布交付完成 |
+| Linux Gateway → Windows Host | C30 拒绝/批准、三类独立效果、Host及Gateway正常恢复、撤销负控与新身份重配效果已闭合 | 保留原退出非零与负控 `offline/uncertain:false` 原文，不改写成所有进程 exit0 或更强的 revoked 错误分类 |
+| Linux Gateway → Mac Host | C30 拒绝客户端确认、新身份批准及 Exec/Browser/Computer 三类独立效果通过 | 本轮正常退出重开、同原 worker 的 Sheet 读取安全拒绝及恢复仍待闭合 |
+| Windows Gateway → Mac Host | C28 的 Windows Gateway 本机三能力及 Linux 连接旅程保留；C30 已创建本地 Gateway | C30 网络权限及该方向真实连接/最小工具效果未闭合；本地创建不是公网账号连接 |
+| Mac Gateway 首次设置 | C27 的 Mac Gateway 三端 Host 历史成绩保留 | 全新设置入口未完成，不能由保留旧配置的成绩替代 |
+| moedeu-apps 日常部署 | C30 Debian12 包兼容/验签/独立安装、私有测试输入已准备 | 新 C30 Gateway 未设置或启动；旧服务未替换，三端最终接入和恢复未验收 |
+| Custom MCP | C30 已执行工具刷新与安装详情重新加载，黑色圆形波纹 Logo 可见 | 最终 Gateway 切换完成后再确认一次最终详情和实际工具路由 |
+
+当前顺序固定为：
+
+1. 完成用户本轮要求的三端持续目录、入口、缓存归拢；受保护密钥和活引用例外单列，
+   不因目录整理重新构建或重装。记录见 `Developer/Artifacts/Styx/workspace-consolidation-20261111`。
+2. Mac 原 owner 收口当前 Host 恢复/读取边界；Windows 原 owner 关闭其 Gateway→Mac 的缺失方向。
+   用同一项目、同一原聊天，仅补缺失边界，不重新跑 Windows 已通过的完整旅程。
+3. Mac 原 owner 补全新 Gateway 设置；复用已有合同/能力证据，仅对新设置与路由做实际核对。
+4. 正常收口独立测试 Tunnel 后切到 moedeu-apps 新 Gateway，接入三台 Host，验证每端最小
+   真实效果及连接恢复，刷新最终插件详情，按最终证据决定发布。生产 Tunnel 和旧服务器服务不动。
+
+Product：本轮没有新增产品行为；已通过范围如上。Architecture：Rust 边界不变。
+Integration：只改开发入口与缓存默认路径，并保留源码清单/签名屏障；不全量重跑质量。
+Release：C30 冻结制品不变，无新候选。Reliability：UNKNOWN、非零退出及目录权限失败原记录保留。
+Decision：先完成已授权归拢，再继续上述缺口；Stable NO-GO。
+
+账号效果证据位于 `account-linux-gateway/`；服务器准备证据位于
+`server-debian12/target-{install,private-input}-dispatch.json`；Logo 证据位于
+`plugin-final-refresh/receipt.json`。这些路径均相对于上面的 C30 证据根。
+
 ## 当前关键路径补正（2026-11-11，C29实际角色验收后）
 
 - Linux C29 正式安装、旧Hub本地过期尝试退役及新固定Hub单次完整setup通过；账号
