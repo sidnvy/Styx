@@ -9,6 +9,7 @@ func productCoreSelfTest() throws {
         if !condition() { throw NSError(domain: "Styx.ProductSelfTest", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
     }
     #if STYX_TESTING
+    try require(ProductNativeDiagnostics.coreStderrCode(Data("{\"error\":\"app_runtime_input_changed\",\"schema\":1}".utf8)) == "app_runtime_input_changed", "Closed historical runtime-input failure code was lost")
     let invalidCoreLines = [
         "{\"error\":\"fake-test-secret\",\"schema\":1}",
         "{\"error\":\"app_scope_refused\",\"schema\":1,\"body\":\"fake-test-secret\"}",
