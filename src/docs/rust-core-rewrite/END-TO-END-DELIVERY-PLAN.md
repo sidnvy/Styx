@@ -12,10 +12,14 @@
 
 | 出口 | 当前证据 | 下一动作 |
 | --- | --- | --- |
-| 固定项目指导 | 三端 source 同步至 `997ad83`；Mac/Windows 父项目 AGENTS 薄入口与 Skills 发现链接均有 READY 收据 | 按需使用指导，不再每次加载历史或新建项目/聊天 |
+| 固定项目指导 | 指导引入于 `997ad83`；Mac/Windows 父项目 AGENTS 薄入口与 Skills 发现链接均有 READY 收据 | 按需使用指导，不再每次加载历史或新建项目/聊天；产物后正常快进源码，旧构建收据不改写 |
 | Windows staging 归拢 | 四祖先限定 ACL 完成；4326 文件复制/哈希一致，新树权限验证通过，正式 C30 reader 实际 exit0；新 Developer staging 指针已启用，旧树保留 | 此项收口，不再审计或复制一次 |
-| Mac 真实开发入口 | 固定运行位置/隔离持久 dev profile 改动已集成；原机 Swift/Node 及 Root Node 合同通过；App 构建/原签实际 exit0（31.172秒），独立严格验签 exit0；旧 App91645 实际退出0，新 App27564/Core27569 到首次设置，startupStatus ok/bootstrap_completed | 当前已进入同 dev profile 正常重开验证，不重建或重签 |
-| Mac 完整 Runtime | 复用已完成的 `5618911` Core 与原 workers，prepare/finalize 实际 exit0；原 publisher manifest 签名及独立验签通过；packet 已送到固定项目 | 供上述真实运行使用，不再重编 Core 或制作 DMG |
+| Mac 真实开发入口 | 固定运行位置/隔离持久 dev profile 已集成；原机及 Root 检查通过，原签 App 构建32秒；全新 Gateway 设置、三类真实效果、Sheet安全拒绝与同worker恢复、Windows Gateway→Mac三能力及双方恢复均通过 | 当前新角色确认被原端自动审批拒绝，等待本次可信本人确认；随后加入服务器，不重跑旧完整旅程 |
+| Mac 正式包 | 复用 `5618911` Core/完整 Runtime；正式 App 编译29秒，原钥匙串签封/DMG51秒均PASS，Root已独立匹配公开DMG/收据SHA | 尚未安装/验收；当前运行的隔离 dev profile 成绩单列，不冒称生产默认配置验收 |
+| 四平台冻结制品 | Core同源 `5618911`；Mac/Linux/Windows/Debian12 Runtime原签与独立验签通过；Windows App22.9秒、Inno112.2秒均PASS，尚未安装 | 完成剩余真机/最终App安装验收，不能将制品通过计为交付完成 |
+| moedeu-apps集中Gateway | C31正式安装、首次setup、严格LAN TLS、测试Tunnel及同profile正常退出恢复通过；旧服务保持 | 等Mac和Windows接入，最终刷新Custom MCP详情/Logo |
+| Linux最终路线 | 最新C31已正式独立安装；服务器→Linux三能力独立效果、同profile Host恢复、旧token无效果、Gateway恢复后新Exec均通过 | 保持连接，复用已通过场景 |
+| NAB5桌面与清理 | 临时737文件/96目录已清退；Windows→Mac方向已通过；同SID既有Session2已由标准tscon恢复console Active/UNLOCKED | Moonlight捕获仍失败；旧SSH owner7368未接桌面17108，C31安装/GUI验收挂起 |
 
 Mac 新 dev Gateway 通过实际 GUI createLocal/tunnelSave 各一次，三能力/自动 LAN/系统权限
 已核对；独立验收 MCP 实际列出 `styx-7c7a313ee112506335705652` connected。
@@ -24,15 +28,79 @@ Mac 新 dev Gateway 通过实际 GUI createLocal/tunnelSave 各一次，三能�
 同上下文后续主窗读取成功；旧消费token负控同样明确未派发且原输入保持。
 fixture为29600/66165，真实5小时TTL，不因便利偏好再编译夹具。
 正常Quit后原6个产品进程（含SDK worker30288）均由原观察器记录实际exit0；
-同一App/同一dev profile重开尚待结果与Root新账号读取。独立效果计数/同worker收据随原owner归档。
+同一App/同一dev profile现已观察到恢复：新App31657/Core31662、同设备身份自动连接，
+Root实际新Exec文件34B/精确SHA、Browser第二次nonce GET200/正常关闭、Computer新树及PNG均通过；
+重开前旧token写入负控明确not_dispatched，独立fixture输入/提交仍各1、Sheet开关各1。
+原退出后新App的启动来源未证明，且未带诊断参数，故仅关闭功能恢复出口，不冒称受控单次启动通过。
+Root原始账号收据见 `native-checks/macos-development-entry-20261112/account-recovery-results.json`；
+独立效果计数/原进程退出收据随原owner归档。
 开发配置结果不能回填原 C30 同配置 P3 恢复 FAIL。旧 App/配置/keys 保留。
 为满足现有 Runtime 组装器的精确 Git HEAD 要求，使用过一次记录租约的冻结组装工作树；
 无源码修改或编译，签包完成后已清退并保存 HEAD ref，当前集成 checkout/缓存不变。
 Windows 原 App/Core 本轮新鲜核实已不存在、22022 无监听，原退出原因未知；
-当前只有Session0 SSH app-server，无Sid桌面/Explorer/原生Computer Use pipe，产品启动0次。
+当时只有Session0 SSH app-server，无可用Sid console桌面/原生Computer Use pipe，产品启动0次。
 Session0的新fixture不算交互GUI READY。用户仅能使用Moonlight，Sunshine已正常重启一次；
-显示捕获仍需验证。仅启用既有微软兼容签名的Virtual Desktop Monitor（Code22→0），
-未改另一未签名虚拟驱动、Intel、配对、安全策略或重启电脑；客户端复测待用户结果。
+显示捕获仍失败。仅启用既有微软兼容签名的Virtual Desktop Monitor（Code22→0），
+并备份后把Sunshine过期output_name改为其本次自身枚举的显示器GUID；正常服务重启后仍有
+DuplicateOutput 0x80070005，不能称Moonlight恢复。未改另一未签名虚拟驱动、Intel、配对、
+安全策略或重启电脑；客户端复测待用户结果，GUI验收单独挂起。
+为继续缺失方向，原owner复用已安装C30正式CLI及原Runtime建立独立Gateway-only profile；
+首次run因bootstrap默认desired=stopped明确失败，正式plan/apply提交running后run实际监听。
+Core6436在127.0.0.1及10.0.8.146:22022就绪；Root从公有CA独立核对canonical DER指纹
+`60584d3d358120f6d6bdd817309e80607c117403959e29075afecade37ead1e6`、TLS1.3/证书链/IP通过。
+此为无桌面Gateway参考，不替代Windows GUI。Mac正式GUI退役已返回空Join，原Tunnel/Exec/SDK
+均实际退出0，App/Core不变；Windows Gateway正常退出0、所有drain确认后配置独立测试Tunnel并重开。
+新邀请经私密文件递送，Mac正式GUI发起1次请求；Root核对双方request/device/fingerprint/code
+四字段完全一致，Windows正式approve1实际exit0/approved/operations_replayed=false。
+账号新Mac身份 `styx-3bb05b295ecae5f583257489` 已connected；本方向三类真实效果独立读回PASS：
+Exec42B/SHA `a1e40f732e2c8589a0f84d84b4311685d39c63d58afc990b1f7e9af5ce013d87`，
+Browser本轮目标GET1/200，Computer变化/提交本轮各1且原视觉标记匹配，负控保持无效果。
+随后Mac Host正常Quit1，原5进程actualexit0，退出后未调用CUA；同App/profile显式带诊断启动1，
+同Gateway/identity/三能力自动恢复、Reconnect0，新App38702/Core38705/SDK39024。
+恢复后新Exec46B/SHA `d12ee7c8f5589badde71da22252fed28aa83b039f679395dffe2dd464d2ba44d`
+及完整新AX读取通过，独立fixture计数保持2/2、HTTP累计3。此处受控启动已明确，不改写早先
+Gateway恢复启动来源未证明或原C30失败。账号原始效果见 `native-checks/windows-mac-route-20261112`。
+Mac固定Python的TCP探测errno65保留；正常系统curl严格证书校验0，SSH子进程严格TLS也通过，
+不归因为Gateway证书失败，也不以更改网络权限解决执行上下文差异。
+Windows Gateway随后原PTY正常退出，原Core/Tunnel/console actual退出分别0/1/1，Gateway四项drain
+确认、未确认数0；同profile重开为Core896/Tunnel2600，同CA/原配对保留，Mac自动连回。
+Root新Exec42B及独立读回SHA `be935b6f398ad3bba1859700b68e40656c6594ce3bdfa27a22135ef849981806` 通过。
+Windows C31 Core原机一次编译PASS（235秒），Debian12 Core一次离线编译PASS（75秒）；
+两端固定缓存/原release-only屏障和timings均保留。四平台C31 Runtime均prepare/sign/finalize通过，
+原publisher公钥及独立OpenSSL验签均通过，汇总为 `candidate-31/four-runtime-result.json`。
+冻结组装临时工作树干净清退，canonical develop不变。Windows原清理批次及限定到737文件/空目录
+的清理均在CreateProcess之前被原端自动审核以 `blocked by policy` 拒绝；本人在Root主聊明确批准后，
+Root正常审批接受同一限定动作，逐项核737原hash/no-reparse/单链接后删除737文件及96空目录，
+持续source/原tar/gate/Core收据保留，无ACL改动；原端三次拒绝保留。
+Linux工作站和moedeu-apps已用正式CLI独立verify/install C31通过，后续实际验收如下；
+旧默认入口/旧服务状态保留，服务器旧测试入口已可恢复归档。
+moedeu-apps C31已完成一次正式首次Gateway setup并以原监督器前台持有：Core2941095/birth92844536，
+127.0.0.1与10.0.38.8:22027监听，tunnel_ready；原Windows测试组已正常全退，旧服务器服务不改。
+公有CA DER `0cb0c23b33c673deb292c6ad088d75483ef47269ed38e7b96132c41c55d334d9`，Root严格TLS1.3/链/IP通过。
+Linux C31新Host `styx-1eb7f66a3e5c793eefe45b72` 经双端四字段核对、正式approve/claim连接成功；
+服务器账号三能力独立效果PASS：Exec39B/SHA `ad5ef75d6611899c4313e922cc0078a559d247ea51aba5035c2c272e6c7fce14`，
+Browser nonce GET1/200且正常关闭，Computer真实PNG随机视觉与独立oracle匹配，input/result一致、变化/点击各1。
+一次过期观察写入明确not_dispatched/uncertain:false，刷新观察后正常效果成功；原拒绝不改写。
+Linux同profile正常退出/恢复已PASS：原Host actualexit0、原workers/unit gone；同root重开跳过已完成配对，
+新Host2444237/start37237656 connected。旧Host token在新观察前明确not_dispatched/uncertain:false，
+新Exec43B/SHA `5157f68ff9fe5ee7343044d8934ee65c7717dcbc72e1b2c8928b9bfff6ad2b1f` 与fresh树独立通过，
+fixture变化/点击保持1/1；remote drain枚举未单独输出，不据exit0宣称更强的远端Complete。
+Mac角色退役碰到 `app_cleanup_unknown`，本机Exec/SDK已退，
+按产品要求正常Quit（原3进程actualexit0）并显式重开后继续fresh角色变更；不重放旧操作或删除配置。
+服务器Gateway也已正常恢复：原2941095 actualexit0、测试payload进程与22027监听全退；
+同profile显式重开为2954416/birth92942814，Gateway/Tunnel ready、同CA、Linux自动连回。
+Root新Exec46B/SHA `26528bff70b0cb737e2d21cd263f2b0c54e169751a5588bc25491f9cee32858f` 独立读回PASS。
+当前Mac新角色确认“继续”被自动审批明确拒绝（缺本次可信本人确认，按钮未派发），Root主聊精确问题待答；
+Windows C31 App/Inno已生成且未安装/启动，Sid交互桌面/Moonlight仍未恢复。
+后续只读发现同SID已认证的Sid/Session2 Disconnected及Explorer/Codex GUI；一次标准tscon actualexit0，
+Session2现为console Active/UNLOCKED，Sunshine worker自动迁移，服务未额外重启，但捕获仍0x80070005。
+现有原生队列只读探针实际仍由SSH7368/Session0消费，非GUI17108/14952/Session2；不能把队列成功称GUI恢复。
+原SSH owner还持有的两个旧Session0测试fixture后台已经既有normal-close接口正常退出，两原PTY actualexit0，
+未终止Codex或改pipe/client身份；继续尝试正常原聊天上下文交接。
+Mac正式App编译29.091秒后，仅对现成prepared签封，实际51.016秒/exit0，原钥匙串解锁1次；
+DMG SHA `8435d4f2d652bc8684b58e3965aeffc5bb169321d65104f738f723b4a7f753c7`，
+原收据SHA `edb9c580129413c7184f66ce55d1b5fe931a0b131cb0ea5d2ae6a433cd79596c`，Root已取回并独立匹配。
+Windows安装器SHA `255368f859bc6cddc394ffd22650c086aac46635359ff06ca097934924c145f4`，127692872B。
 Linux原验收前台通过原监督器正常Ctrl-C退出，实际exit4且Tunnel/主进程已消失；
 保留setup_host_cleanup_unconfirmed，不冒称exit0。只读审阅定位本机清理已settled，
 远端drain仍Unknown/Unsupported，具体子类未保留，不能归因于泛化watch_stream_ended。
