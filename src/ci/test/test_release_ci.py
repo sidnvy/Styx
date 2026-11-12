@@ -115,6 +115,17 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(archive.extractfile('publisher.pem').read(), b'public pin fixture')
                 self.assertIn(b'./payload/bin/styx setup', archive.extractfile('README.txt').read())
 
+    def test_disposable_runner_cleanup_does_not_wait_for_security_dialogs(self):
+        folder = self.root / 'signing'
+        folder.mkdir()
+        (folder / 'signing.keychain-db').write_bytes(b'private fixture')
+        (folder / 'ephemeral-code-sign-trust').touch()
+        with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}), \
+             patch.object(ci, 'security', side_effect=AssertionError('cleanup opened an interactive Security API')), \
+             patch.object(ci.subprocess, 'run', side_effect=AssertionError('cleanup launched a dialog')):
+            ci.mac_keychain_clean(argparse.Namespace(directory=folder))
+        self.assertFalse(folder.exists())
+
     def test_publisher_secret_must_match_compiled_pin_and_is_removed_on_failure(self):
         key = subprocess.check_output(['openssl', 'genpkey', '-algorithm', 'ED25519'])
         public = subprocess.check_output(['openssl', 'pkey', '-pubout', '-outform', 'DER'], input=key)

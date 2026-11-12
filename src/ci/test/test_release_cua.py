@@ -72,7 +72,10 @@ class CuaReleaseTests(unittest.TestCase):
             return types.SimpleNamespace(returncode=0)
 
         with mock.patch.object(self.module['subprocess'], 'run', side_effect=cargo), \
-                mock.patch.object(self.module['subprocess'], 'check_output', return_value='cua-driver 0.36.0\n'):
+                mock.patch.object(self.module['subprocess'], 'check_output', return_value='cua-driver 0.36.0\n'), \
+                mock.patch.dict(self.state, workspace_cache=mock.Mock(return_value={
+                    'target': 'x86_64-unknown-linux-gnu', 'recipe_sha256': 'f' * 64,
+                    'previous_recipe_matches': True, 'workspace_clean': None})):
             receipt = self.module['native_build'](args, source, prepared)
         self.assertEqual(receipt['status'], 'PASS')
         self.assertTrue(receipt['compiler_artifact_fresh'])
@@ -98,7 +101,14 @@ class CuaReleaseTests(unittest.TestCase):
         with mock.patch.dict(self.state, ARCHIVE_SHA=self.module['digest'](archive)):
             first = self.module['source_cache_times'](archive, source, expected)
             file.touch()
-            with mock.patch.object(self.module['os'], 'supports_follow_symlinks', set()):
+            native_utime = self.module['os'].utime
+
+            def portable_utime(*args, **kwargs):
+                self.assertNotIn('follow_symlinks', kwargs)
+                return native_utime(*args, **kwargs)
+
+            with mock.patch.object(self.module['os'], 'supports_follow_symlinks', set()), \
+                    mock.patch.object(self.module['os'], 'utime', side_effect=portable_utime):
                 second = self.module['source_cache_times'](archive, source, expected)
             self.assertEqual(first, second)
             self.assertEqual(file.stat().st_mtime_ns, 1792135295 * 1_000_000_000)
@@ -106,6 +116,56 @@ class CuaReleaseTests(unittest.TestCase):
             file.write_bytes(b'changed source cannot inherit a cached timestamp')
             with self.assertRaisesRegex(ValueError, 'changed_before_cache_times'):
                 self.module['source_cache_times'](archive, source, expected)
+
+    def workspace_fixture(self):
+        source = self.root / 'source'
+        workspace = source / 'libs/cua-driver/rust'
+        packages = []
+        for name in ('cua-driver', 'platform-linux'):
+            manifest = workspace / f'crates/{name}/Cargo.toml'
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(f'[package]\nname="{name}"\nversion="0.36.0"\n')
+            packages.append(dict(id=f'path+{manifest.parent}#{name}@0.36.0',
+                                 name=name, manifest_path=str(manifest)))
+        metadata = dict(workspace_members=[package['id'] for package in packages],
+                        packages=packages + [dict(id='registry+crates.io#serde@1.0.0',
+                                                  name='serde', manifest_path='/not-a-workspace/Cargo.toml')])
+        args = types.SimpleNamespace(platform='linux', target_dir=self.root / 'target', jobs=8)
+        return source, args, metadata
+
+    def test_cache_recipe_match_skips_clean_but_requires_new_success_marker(self):
+        source, args, metadata = self.workspace_fixture()
+        env = self.module['build_environment'](args)
+        with mock.patch.object(self.module['subprocess'], 'check_output',
+                               return_value=json.dumps(metadata)) as inspect, \
+                mock.patch.object(self.module['subprocess'], 'run') as clean:
+            first = self.module['workspace_cache'](args, source, env)
+            self.assertFalse(first['previous_recipe_matches'])
+            self.module['mark_workspace_success'](args, first)
+            second = self.module['workspace_cache'](args, source, env)
+        self.assertTrue(second['previous_recipe_matches'])
+        self.assertIsNone(second['workspace_clean'])
+        self.assertTrue(second['actual_build_still_required'])
+        self.assertEqual(inspect.call_count, 1)
+        self.assertEqual(clean.call_count, 1)
+        self.assertFalse((args.target_dir / '.styx-cua-workspace-recipe.json').exists())
+
+    def test_different_recipe_cleans_only_metadata_workspace_release_target(self):
+        source, args, metadata = self.workspace_fixture()
+        env = self.module['build_environment'](args)
+        with mock.patch.object(self.module['subprocess'], 'check_output', return_value=json.dumps(metadata)), \
+                mock.patch.object(self.module['subprocess'], 'run') as clean:
+            first = self.module['workspace_cache'](args, source, env)
+            self.module['mark_workspace_success'](args, first)
+            changed = self.module['workspace_cache'](args, source, dict(env, RUSTFLAGS='-Copt-level=2'))
+        self.assertFalse(changed['previous_recipe_matches'])
+        self.assertNotEqual(first['recipe_sha256'], changed['recipe_sha256'])
+        self.assertEqual(clean.call_count, 2)
+        for call in clean.call_args_list:
+            self.assertEqual(call.args[0], ['cargo', 'clean', '--release', '--target',
+                                           'x86_64-unknown-linux-gnu', '--package', 'cua-driver',
+                                           '--package', 'platform-linux'])
+        self.assertTrue(changed['dependency_cache_preserved'])
 
 
 if __name__ == '__main__':

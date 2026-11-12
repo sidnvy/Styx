@@ -232,8 +232,11 @@ def publisher_key(args):
 
 def security(*arguments):
     # Credentials are passed directly to Apple's tool and never echoed in errors.
-    result = subprocess.run(['/usr/bin/security', *map(str, arguments)],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        result = subprocess.run(['/usr/bin/security', *map(str, arguments)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise ValueError('temporary keychain operation timed out; outcome unknown; not replayed') from None
     require(result.returncode == 0, 'temporary macOS signing keychain operation failed')
 
 
@@ -286,6 +289,15 @@ def mac_keychain(args):
 
 
 def mac_keychain_clean(args):
+    if os.environ.get('GITHUB_ACTIONS') == 'true' and os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted':
+        # This VM is destroyed after the job. Security's trust-removal API can
+        # wait for GUI authorization indefinitely; never block the pipeline on
+        # that dialog. Remove our credential files now. VM teardown removes the
+        # transient codeSign policy and any in-memory Security references.
+        if args.directory.exists():
+            shutil.rmtree(args.directory)
+        print('Temporary credential files removed; disposable runner teardown retires codeSign trust.')
+        return
     keychain = args.directory / 'signing.keychain-db'
     if (args.directory / 'ephemeral-code-sign-trust').exists():
         result = subprocess.run(['sudo', '-n', '/usr/bin/security', 'remove-trusted-cert', '-d',

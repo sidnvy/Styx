@@ -38,7 +38,8 @@ Credentials are materialized only under `RUNNER_TEMP`; they are excluded from ev
 cache and artifact and removed during cleanup. Only the sealing job uses the
 publisher key. Only native Mac signing steps use the P12. On disposable GitHub-hosted
 Mac runners, the exact self-signed certificate receives temporary codeSign-only trust,
-removed during cleanup. Owner devices receive no trust change. A P12 import alone
+retired when GitHub destroys that disposable VM. Cleanup removes temporary credential
+files without waiting on Security trust-removal dialogs. Owner devices receive no trust change. A P12 import alone
 cannot make a self-signed identity valid for `codesign`.
 
 GitHub can decrypt Secrets in authorized jobs; uploading them deliberately extends
@@ -70,7 +71,10 @@ the original download digest. Sealed payload bytes are never signed again.
 Native Core caches keep explicit target, release profile and existing LTO/codegen
 settings. `--reuse-workspace-cache` preserves native Git-checkout outputs; archive
 source production retains its original correctness cleanup. Cua has a separate
-persistent target cache keyed by platform/toolchain/source/patch. No whole-cache clean
+persistent target cache keyed by platform/toolchain/source/patch. A broader dependency
+cache fallback uses a recipe marker: changed or missing recipes clean only the Cua
+workspace packages, preserving third-party crates. Verified Cua/download caches save
+before later signing steps, so an unrelated signing failure does not discard compilation. No whole-cache clean
 runs. Rust registry caches store compressed downloads/index and git objects, avoiding
 redundant expanded registry trees. Each producer uses allocated CPU jobs unless the
 owner explicitly overrides `CARGO_BUILD_JOBS`. Swift modules are cached against the
