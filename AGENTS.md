@@ -29,6 +29,7 @@ Read a skill only when its trigger applies; do not load all references or histor
 ## Ownership and safety
 
 - Give parallel writers disjoint paths/devices. The integrator owns shared contracts, manifests/locks and Git integration; native owners operate their platform clients in the same persistent project/chat.
+- Serialize shared Gateway shutdown/replacement with client Runtime updates and lifecycle acceptance. Build independent devices in parallel, but keep their common connection stable while draining or updating a client. Installing a new App does not prove its persisted Runtime selection changed; report completion only after the selected manifest and actual running Core match the intended release.
 - Default to no new worktree. If isolation is necessary, record owner, reason and retirement; use only /home/sid/Developer/worktrees/Styx, at most two additional trees including retained historical S. Before removal, preserve HEAD and owned dirty inputs; protect live paths.
 - Preserve profiles, pairing, signing identities and publisher pins. Never transfer signing private keys, disable the sandbox, modify production Tunnel/plugin state, operate piermini or reboot the development workstation.
 - Do not automatically replay a state-changing operation with an unknown outcome. Resolve it with fresh read-only evidence; an established not-dispatched result permits a fresh authorized attempt. This does not prohibit read-only diagnosis or rerunning isolated local tests. Native actions need a fresh target-bound observation.

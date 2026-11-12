@@ -4,11 +4,116 @@
 [REDUCED-SCOPE.md](REDUCED-SCOPE.md) 决定，架构由
 [README.md](README.md) 和冻结合同决定。
 [GUI-CONVERGENCE.md](GUI-CONVERGENCE.md) 保留历史尝试与证据，不能把历史通过当作当前候选通过。
-本文中的计划项不代表已经执行。**交付未完成；Stable NO-GO。**
+本文中的计划项不代表已经执行；当前状态以最新检查点为准。**本轮预览交付完成；Stable NO-GO。**
 
 ## 当前开发检查点（2026-11-12）
 
-### 最新：Windows/Linux收口；仅继续Mac正式入口（21:30 上海时间）
+### 最新：同源 .33 剩余验收与 P7 核对完成（23:53 上海时间）
+
+四个目标均以产品源码 `9104d6a84c69b89cb81537ef7aad26099ed870e4` 正式生产并完成实际选择/部署；
+当前Linux、Windows与正式Mac三Host由独立账号确认connected，既有身份/配对/密钥保持。
+
+| 目标 | 本轮实际补齐 |
+| --- | --- |
+| Linux | 原foreground入口卸载/装回、正常exit0、同profile恢复、独立Exec91；默认服务不动 |
+| Windows | .33实际Runtime选择已Committed；官方卸载一次实际清空入口/shortcut/HKCU/产品进程；同SHA原位恢复；正常退出/自动重开与Exec21新文件通过 |
+| Mac | 同签名DMG/build1142，标准Trash真实卸载后原位恢复；同身份自动重连及Exec90通过 |
+| Debian12 Gateway | 同profile正式seq2/3/4更新；新版正常exit0、未确认owner/transport均0，同原测试Tunnel重开 |
+
+已过三能力、安全及其它连接方向复用，未重跑完整矩阵；源码质量门24项和四目标producer均PASS。
+最终插件在新版Gateway路由后单次Refresh恢复可用，Logo实见；无成功toast，不编造。
+Windows首次Update在Host settle前置失败、没有写C07；原实例正常退出后新明确事务提交成功。
+原官方卸载审批拒绝未派发，用户随后明确授权才执行；辅助Gate exit-code采样null如实保留，
+未新增产品门槛。Root已将共享Gateway生命周期与客户端更新串行、App安装不等于Runtime切换
+写入AGENTS，避免再由并行断连或仅看包版本误报完成。
+
+KVM只读RCA以核显VFIO/MMIO映射竞态为主要假设，根因仍未证实；本轮未改动或重启宿主。
+旧失败/Unknown不改写，新版正常退出证据单列；没有遗留本轮尚待操作的预览验收格。
+**本轮预览交付完成；Stable仍NO-GO，须依既有Stable门槛另行明确核验放行。**
+
+简短六领域结果、包/选择/安装/独立效果/卸载/恢复与原位恢复材料见
+[最终结果](/home/sid/Developer/Artifacts/Styx/native-checks/startup-check-removal-20261112/final-source-9104/RESULT.md)；逐SHA原始证据索引见
+[交付索引](/home/sid/Developer/Artifacts/Styx/native-checks/startup-check-removal-20261112/final-source-9104/final-delivery-index.json)。产品冻结后仅补交付文档，不把文档提交当成重编理由。
+
+### 此前：NAB5已恢复，三台Host均在线（22:40 上海时间）
+
+用户已完成Sid登录并授权继续。新鲜前置确认console1 Active、原C32包/Runtime/host-ready一致，
+没有已有Styx实例；只通过原快捷方式启动一次，未重建、重装、重配或点击Reconnect。
+实际新App8344/Core10308，GUI明确Connected；原device617c、fingerprint、grants/generation及
+host-ready SHA `aadce0bbfb6d2cc971b3b5f2070c2fc44c699d7defdbfb5d956e8aea42c30ab8`保持。
+独立账号list确认Linux1eb7、Windows617c、正式Mac6dd0均connected（旧Mac dev9623离线为保留历史）。
+Windows独立新Exec session89实际exit0，本地38字节新文件精确匹配，
+SHA `ee9973f909fd3a247de1810ecfba7e3190d3c31ff8387a0580d083459f2f1267`，mtime晚于新App/Core出生。
+宿主仍连续运行30天；VM150 QMP running，重置后至22:39未再观察到kvm run failed。
+**恢复已完成；原KVM Bad address的底层触发原因仍未确定，不把恢复当成根因修复。**
+原始证据 `windows-postboot-effect-c32-01.json`，派生索引 `windows-postboot-c32-index.json`；
+当前三Host状态已追加进 `final-independent-account-results.json`，旧离线/失败收据保留。
+本轮功能与当前部署复通均收口；本次没有发布Stable或将其宣告GO。
+
+### 此前：本轮功能验收收口；NAB5当时离线（22:20 上海时间）
+
+| 设备/出口 | 已实际完成 | 当前状态 |
+| --- | --- | --- |
+| Linux C32 / de3 | 原profile更新、正常exit0、同身份重开、两轮独立新Exec | 同env `styx-1eb7f66a3e5c793eefe45b72` connected |
+| Windows C32 / de3 | 原位安装、首次配对、三能力独立真实效果、7原进程正常exit0、同身份重开和新Exec | **历史验收PASS；当前IP10.0.8.146不可达、SSH No route to host、账号disconnected** |
+| Mac C33 build1142 / 9104 | 真实默认配置启动修复、正常GUI角色退役/保留旧配置、正式默认首设/四字段批准、独立Exec与Computer完整树/截图、5原进程正常exit0、同profile重开和新Exec | 新正式env `styx-6dd0c1e6845ade63440fe4d0` connected |
+| 独立验收插件 | 最终路由后已安装详情读取、单次Refresh tools完成回到可用、黑色圆形波纹Logo实见 | 生产Tunnel/plugin未改；未观察到成功toast，不编造刷新回执 |
+
+Mac修复已集成在 `9104d6a84c69b89cb81537ef7aad26099ed870e4`，原项目/缓存/证书，
+实际Runtime manifest `8e63174602aae9c3142a0d2479de19e7aea92755458cdcc8d6d6605d6cb664c7`。
+原1141失败App已正常exit0；1142同位置更新后 `bootstrap_completed`，旧启动拒绝消失。
+产品正常Change role将原profile/runtime-updates备份为 `.retired-20261112T135519Z`，
+没有手工搬整个Library或清空身份；旧dev profile同样保留。
+新请求 `29d56faaf10e45ed99d3f891ae661bb2` 只提交/批准/Claim各一次，
+实际label仍为 `Corporate的MacBook Air`；AX字段曾读回PilotMac但提交模型未持久化该改名，未重放请求迁就名称。
+首次独立Exec87实际exit0，Computer树22项完整且实际截图显示Host/Exec connected；
+正常Quit后5个原进程由kqueue独立确认exit0（客户端因daemon退出断连，未用此断连推断退出）。
+同profile重开App12052/Core12054，root/identity/pairing/ready逐字节不变；
+独立Exec88实际exit0，新文件SHA `787e2ef52a2930afa85737a43155c2ad95a4657147e980f29cacc1a9319224ef`，时间晚于新进程。
+Mac旧Browser/安全旅程及其它未受影响方向复用既有证据，不再扩矩阵。
+
+当前唯一现场可用性缺口：UTC14:10只读核实NAB5单机不可达，同站网关10.0.8.1及Wenden10.0.8.12可达。
+未能读到Windows进程/睡眠/锁屏/断连日志，**不能断言睡眠、关机或Styx故障**；
+没有重连、重开、改OS电源/路由或重装。已询问用户设备电源状态，答复前不擅自唤醒。
+NAB5恢复管理可达后只补当前同身份连接确认与必要新效果，不重跑已通过矩阵。
+
+用户随后授权检查宿主10.0.8.12。22:23–22:26只读定位VM150（win）：
+QEMU原始日志在**22:00:09上海时间**记录 `error: kvm run failed Bad address`；
+标准QMP `query-status`实际为 `internal-error` / `running:false`。
+PVE显示running只代表QEMU进程仍在，不能据此当Windows仍执行；Guest Agent无响应。
+宿主无同期内核OOM/I/O错误，swap使用0，两个虚拟磁盘io-status均ok/失败读写flush均0，
+thin pool数据88.15%、metadata4.08%。直接故障层已定位到VM执行异常停止，
+**底层Bad address的具体触发原因尚未确定**，没有将其归因为Styx、睡眠或物理内存损坏。
+未执行cont/resume/reset/stop、未重启宿主或改VM配置；原始诊断摘要在
+`windows-host-vm150-diagnosis-20261112.json`。宿主PVE9.2.2、kernel7.0.2-6-pve、QEMU11.0.0-3。
+
+后续恢复：用户先授权resume，22:28单次 `qm resume 150`明确exit255，QEMU返回
+`Resetting the Virtual Machine is required`；未自动重试或擅自reset。
+用户随后明确批准重置VM150。22:29单次 `qm reset 150`实际exit0，VM进入prelaunch；
+针对该新状态执行一次resume实际exit0，QMP恢复running。
+Windows实际boot为22:30:18上海时间，Guest Agent ping成功、SSH以Sid应答；
+宿主仍连续运行30天、QEMU原PID3050124保持，无宿主重启/配置变更。
+原host-ready SHA `aadce0bbfb6d2cc971b3b5f2070c2fc44c699d7defdbfb5d956e8aea42c30ab8`及device617c均不变。
+22:32实际仅LogonUI/无Sid交互会话、无Explorer/Styx；**VM已恢复，Styx仍待用户登录Sid后正常启动**，不清配置代替恢复。
+原始重置/后续resume及只读核对见 `windows-vm150-approved-reset-result-20261112.json`。
+
+本机原始/派生证据均在既有 `native-checks/startup-check-removal-20261112/`：
+`windows-c32-install-join-summary.json`、`windows-drift-readonly-20261112-1410Z.json`、
+`linux-c32-normal-recovery-account-effect.json`、`mac-history-fix/MAC-FORMAL-ACCEPTANCE-INDEX.json`（25份原证据逐hash）、
+`final-independent-account-results.json`、`final-plugin-detail-20261112.png`。
+新9104基础质量门24项全PASS、input/git稳定；Mac真实配置纯观察1项PASS且343输入不变；
+受影响Node检查及Windows原生私有创建7项PASS。未把已撤的复杂夹具FAIL或旧C31 exit4改写成通过。
+
+| 领域 | 本轮结论 |
+| --- | --- |
+| Product | 三平台多余启动整包扫描已移除；正式Mac首设/恢复补齐；既有能力边界不变 |
+| Architecture | Gateway/Host/Core、成熟执行器、安装更新签名及私有凭据边界保持 |
+| Integration | 既有develop集成de3及9104；不新增worktree/项目/cache；未push |
+| Release | Linux/Windows C32，Mac C33/build1142，各自精确源/签名/实际安装绑定；未宣称同一全平台新冻结包 |
+| Reliability | 已过矩阵复用；真实启动、正常退出和独立效果闭合；NAB5当前整机离线单列 |
+| Decision | 本轮功能验收完成，统一三Host当前在线仍待NAB5恢复确认；**Stable NO-GO** |
+
+### 此前：Windows/Linux收口；仅继续Mac正式入口（21:30 上海时间）
 
 用户再次要求避免验证实现偏离主线。已停止扩展新的Linux双角色验收夹具，保留实际失败原因，
 不重跑Windows/Linux已通过矩阵；只完成Mac真实配置问题及正式App首设/恢复。
