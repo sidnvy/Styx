@@ -23,14 +23,16 @@ try {
   report.source_image_sha256=digest(binary);report.source_image_bytes=fs.statSync(binary).size;
   report.helper_sha256=digest(fileURLToPath(import.meta.url));
   report.planner_sha256=digest(fileURLToPath(new URL('../../host/build-macos-app.mjs',import.meta.url)));
-  // Fixed payload executables only: the CLI and the pinned upstream tunnel worker
-  // (shipped unsigned upstream), each at its eventual packaged App location.
+  // Fixed payload executables only, each at its eventual packaged App location.
+  // Fresh CI upstream workers are signed before their publisher manifests.
   const packaged=new Map([['styx','Contents/Resources/native/bin/styx'],
+    ['codex','Contents/Resources/native/workers/codex-exec/bin/codex'],
+    ['node','Contents/Resources/native/workers/browser-node22/bin/node'],
     ['tunnel-client-runtime','Contents/Resources/native/workers/tunnel-client/tunnel-client-runtime']]).get(path.basename(binary));
   need(packaged!==undefined,'fixed_native_cli_required');
   const raw=fs.readFileSync(configuration),local=normalizeMacLocalSigning(JSON.parse(raw));
-  need(local.identitySha1==='cb50cee601419f28b43756f4fc8aefdbf60abae2' &&
-    local.certificateSha256==='90792ed11f23a00f0107450dbc184f992016569ca188454cfa286fe0022c2c1e',
+  need(local.identitySha1==='9a4c8c7e15d006f9d0a576b137c7696f143f46d8' &&
+    local.certificateSha256==='f5a143072e85e8e393f199811937ceff4c884d2b74cf2509e08e9e53a4d0c1a9',
     'original_macos_identity_required');
   report.certificate=verifyMacLocalSigning(local);
   // This logical App never exists. It chooses the SAME eventual packaged CLI

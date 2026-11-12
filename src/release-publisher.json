@@ -5,6 +5,6 @@
   "publicKey": "release-publisher.pub",
   "establishedOn": "2026-11-01",
   "scope": "Styx native runtime releases on Linux macOS and Windows",
-  "privateKeyDistributed": false,
-  "keyCustody": "Workstation owner-private publisher directory"
+  "privateKeyDistributed": true,
+  "keyCustody": "Workstation original plus sidnvy/Styx GitHub Actions release environment Secret; owner-authorized 2026-11-13"
 }

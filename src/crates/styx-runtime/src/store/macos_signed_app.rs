@@ -22,7 +22,7 @@ use std::{
 use styx_contracts::identity::Sha256Digest;
 
 const APP: &str = "/Applications/Styx.app";
-const CERT: &str = "cb50cee601419f28b43756f4fc8aefdbf60abae2";
+const CERT: &str = "9a4c8c7e15d006f9d0a576b137c7696f143f46d8";
 const DIRECTORIES: [&str; 4] = ["Applications", "Styx.app", "Contents", "MacOS"];
 // The existing payload per-file cap; this factory is not a new tuning knob.
 const MAX_IMAGE_BYTES: u64 = 1024 * 1024 * 1024;

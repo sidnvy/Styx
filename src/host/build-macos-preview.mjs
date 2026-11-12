@@ -13,6 +13,20 @@ const ROOT=fileURLToPath(new URL('../',import.meta.url));
 const assert=(x,code)=>{if(!x)throw Error(code)};
 const sha=p=>createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 const ABS=p=>typeof p==='string'&&path.isAbsolute(p)&&path.normalize(p)===p;
+// The App/CLI identity was deliberately rotated for exportable CI signing.
+// Fresh CI workers are signed before their publisher manifests. New App output
+// requires the same pinned certificate for every declared native member.
+const CURRENT_MAC_CERT='9a4c8c7e15d006f9d0a576b137c7696f143f46d8';
+const NATIVE_MAC_WORKERS=new Set(['workers/codex-exec/bin/codex','workers/browser-node22/bin/node','workers/tunnel-client/tunnel-client-runtime']);
+export function nativeMacPayloadCertificate(relative){
+ if(relative==='bin/styx')return CURRENT_MAC_CERT;
+ assert(NATIVE_MAC_WORKERS.has(relative),'unexpected_native_macho_member');
+ return CURRENT_MAC_CERT;
+}
+function nativeMacCodeCertificate(app,file){
+ const root=path.join(app,'Contents/Resources/native')+path.sep;
+ return file.startsWith(root)?nativeMacPayloadCertificate(path.relative(root,file).split(path.sep).join('/')):CURRENT_MAC_CERT;
+}
 function tree(source,destination,{skip=()=>false}={}){
  const st=fs.lstatSync(source);assert(!st.isSymbolicLink(),'distribution_symlink_forbidden');
  if(st.isDirectory()){fs.mkdirSync(destination,{recursive:true});for(const name of fs.readdirSync(source).sort())if(!skip(name))tree(path.join(source,name),path.join(destination,name),{skip});}
@@ -142,7 +156,7 @@ function nativeMacArtifacts({destination,app,metadata,expectedPublisherSha256,cr
  const check=target=>{
   assertNativeMacAppInventory(target,files);
   run('/usr/bin/codesign',['--verify','--deep','--strict',target]);
-  run('/usr/bin/codesign',['--verify','--strict','-R',`=identifier "${MAC_BUNDLE_ID}" and certificate leaf = H"cb50cee601419f28b43756f4fc8aefdbf60abae2"`,target]);
+  run('/usr/bin/codesign',['--verify','--strict','-R',`=identifier "${MAC_BUNDLE_ID}" and certificate leaf = H"9a4c8c7e15d006f9d0a576b137c7696f143f46d8"`,target]);
   const copied=authenticateNativeMacRuntimeEnvelope(inputFor(target),metadata.arch);
   assert(copied.manifestSha256===original.manifestSha256&&copied.signatureSha256===original.signatureSha256&&copied.cliSha256===original.cliSha256&&copied.publisherSha256===original.publisherSha256,'native_archive_c08_changed');
   assertNativeMacAppInventory(target,files);
@@ -184,9 +198,9 @@ export function finalizeNativeMacPreview(config){
  const relative=path.relative(nativePreparedSource,destination),reverse=path.relative(destination,nativePreparedSource),outside=p=>p==='..'||p.startsWith('..'+path.sep)||path.isAbsolute(p);
  assert(outside(relative)&&outside(reverse),'native_app_destination_overlap');
  const local=normalizeMacLocalSigning(localSigning);
- // This bridge preserves the exact retained rc12 identity; no replacement
- // signing certificate or new publisher is inferred from candidate bytes.
- assert(local.identitySha1==='cb50cee601419f28b43756f4fc8aefdbf60abae2'&&local.certificateSha256==='90792ed11f23a00f0107450dbc184f992016569ca188454cfa286fe0022c2c1e'&&expectedPublisherSha256==='bbb49c2626c3d4ef3cf9e1679db5305b100cee4a8c41c29c958ede82fb868bed','original_native_app_identity_required');
+ // Only the explicitly rotated CI identity is valid for new App/CLI output;
+ // the Ed25519 publisher identity is unchanged.
+ assert(local.identitySha1==='9a4c8c7e15d006f9d0a576b137c7696f143f46d8'&&local.certificateSha256==='f5a143072e85e8e393f199811937ceff4c884d2b74cf2509e08e9e53a4d0c1a9'&&expectedPublisherSha256==='bbb49c2626c3d4ef3cf9e1679db5305b100cee4a8c41c29c958ede82fb868bed','original_native_app_identity_required');
  const receiptPath=path.join(nativePreparedSource,'prepared-native-app.json');assert(sha(receiptPath)===preparedReceiptSha256,'prepared_native_app_receipt_changed');
  const metadata=JSON.parse(fs.readFileSync(receiptPath,'utf8')),originalApp=path.join(nativePreparedSource,'image-root/Styx.app');
  assert(metadata.schema===1&&metadata.kind==='prepared_native_rust_app'&&metadata.delivery==='NOT FINALIZED'&&(crossArchSignOnly?metadata.arch==='x64'&&process.arch==='arm64':metadata.arch===process.arch)&&metadata.readerActualWait===true&&metadata.readerExitCode===0&&metadata.nativeRuntime.publisherSpkiSha256===expectedPublisherSha256&&JSON.stringify(preparedPreviewInventory(originalApp))===JSON.stringify(metadata.files),'prepared_native_app_changed');
@@ -208,7 +222,7 @@ export function finalizeNativeMacPreview(config){
  const native=machOFiles(app),sealed=native.filter(file=>file.startsWith(nativeRoot+path.sep)),unsigned=native.filter(file=>!file.startsWith(nativeRoot+path.sep));
  // A publisher-sealed runtime is immutable. All nested Mach-O must already have
  // the original platform signature; reject instead of codesigning sealed bytes.
- for(const file of sealed)execFileSync('/usr/bin/codesign',['--verify','--strict','-R',`=certificate leaf = H"${local.identitySha1}"`,file],{stdio:'pipe',timeout:30000});
+ for(const file of sealed)execFileSync('/usr/bin/codesign',['--verify','--strict','-R',`=certificate leaf = H"${nativeMacCodeCertificate(app,file)}"`,file],{stdio:'pipe',timeout:30000});
  executeMacPreviewSigningPlan(macLocalSigningPlan({app,localSigning,files:unsigned,sealApp:false}));
  const copied=inspect(inputFor(app),metadata.arch);
  assert(copied.manifestSha256===original.manifestSha256&&copied.signatureSha256===original.signatureSha256&&copied.cliSha256===original.cliSha256,'sealed_native_payload_changed');
@@ -249,7 +263,7 @@ export function completeNativeMacPreview(config){
  const metadata=JSON.parse(fs.readFileSync(receiptPath,'utf8')),originalApp=path.join(signedPendingSource,'image-root/Styx.app');
  assert(metadata.schema===1&&metadata.kind==='signed_native_rust_app_pending_native_verification'&&metadata.status==='SIGNED_PENDING_NATIVE_VERIFICATION'&&metadata.delivery==='NOT FINALIZED'&&metadata.arch===process.arch&&metadata.nativeReaderActualWait===false&&metadata.nativeReaderExitCode===null&&metadata.nativeRuntime.publisherSpkiSha256===expectedPublisherSha256&&JSON.stringify(preparedPreviewInventory(originalApp))===JSON.stringify(metadata.files),'signed_pending_app_changed');
  const local=metadata.local_signing;
- assert(local?.schema===1&&local.certificateSha1==='cb50cee601419f28b43756f4fc8aefdbf60abae2'&&local.certificateSha256==='90792ed11f23a00f0107450dbc184f992016569ca188454cfa286fe0022c2c1e','original_native_app_identity_required');
+ assert(local?.schema===1&&local.certificateSha1==='9a4c8c7e15d006f9d0a576b137c7696f143f46d8'&&local.certificateSha256==='f5a143072e85e8e393f199811937ceff4c884d2b74cf2509e08e9e53a4d0c1a9','original_native_app_identity_required');
  const inputFor=app=>({payloadDir:path.join(app,'Contents/Resources/native'),publisherFile:path.join(app,'Contents/Resources/native-publisher.pem'),expectedPublisher:expectedPublisherSha256});
  const requirement=`=identifier "${MAC_BUNDLE_ID}" and certificate leaf = H"${local.certificateSha1}"`;
  const observations=[];
@@ -257,7 +271,7 @@ export function completeNativeMacPreview(config){
  // Verify the original App before executing even its authenticated reader.
  run('/usr/bin/codesign',['--verify','--deep','--strict',originalApp]);
  run('/usr/bin/codesign',['--verify','--strict','-R',requirement,originalApp]);
- for(const file of machOFiles(originalApp))run('/usr/bin/codesign',['--verify','--strict','-R',`=certificate leaf = H"${local.certificateSha1}"`,file]);
+ for(const file of machOFiles(originalApp))run('/usr/bin/codesign',['--verify','--strict','-R',`=certificate leaf = H"${nativeMacCodeCertificate(originalApp,file)}"`,file]);
  fs.mkdirSync(destination,{mode:0o700});
  const prefix=path.join(destination,'app-signing-certificate-');run('/usr/bin/codesign',['-d','--extract-certificates='+prefix,originalApp]);
  const certificate=prefix+'0',st=fs.lstatSync(certificate);

@@ -14,7 +14,7 @@ struct ProductOwnedCoreRejection: Error, Sendable {
     let response: ProductJSON
 }
 private let productOriginalMacPublisher = "bbb49c2626c3d4ef3cf9e1679db5305b100cee4a8c41c29c958ede82fb868bed"
-private let productOriginalAppRequirement = "identifier \"app.styx.host\" and certificate leaf = H\"cb50cee601419f28b43756f4fc8aefdbf60abae2\""
+private let productOriginalAppRequirement = "identifier \"app.styx.host\" and certificate leaf = H\"9a4c8c7e15d006f9d0a576b137c7696f143f46d8\""
 private func productDigest(_ raw: Data) -> String { SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined() }
 
 // No command-line/environment switch can redirect a production build. The

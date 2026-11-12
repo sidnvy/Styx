@@ -229,8 +229,8 @@ def complete_external_macos_signature(args, output, receipt, target, inputs):
             and type(signed.get('sign_exit_code')) is int and signed['sign_exit_code'] == 0
             and type(signed.get('verify_exit_code')) is int and signed['verify_exit_code'] == 0,
             'original_signing_report_binding_mismatch')
-    identity = 'cb50cee601419f28b43756f4fc8aefdbf60abae2'
-    certificate_hash = '90792ed11f23a00f0107450dbc184f992016569ca188454cfa286fe0022c2c1e'
+    identity = '9a4c8c7e15d006f9d0a576b137c7696f143f46d8'
+    certificate_hash = 'f5a143072e85e8e393f199811937ceff4c884d2b74cf2509e08e9e53a4d0c1a9'
     # Existing App planner's fixed Resources/native/bin/styx identifier. Do not
     # accept a remote caller-selected signing identity or executable identity.
     identifier = 'app.styx.host.code.234ae9e3c9e0237f929adc7841ecb090'
@@ -289,6 +289,8 @@ def main():
     parser.add_argument('--jobs', type=cargo_jobs,
                         default=os.environ.get('CARGO_BUILD_JOBS', '2'),
                         help='Cargo jobs, 1..256 (default: CARGO_BUILD_JOBS, otherwise 2)')
+    parser.add_argument('--reuse-workspace-cache', action='store_true',
+                        help='retain native Git-checkout Cargo artifacts; never permitted with source archive input')
     for name in ['source-revision', 'gate-receipt', 'target-dir', 'output']:
         parser.add_argument('--' + name, required=True, type=str if name == 'source-revision' else Path)
     parser.add_argument('--source-archive-manifest', type=Path,
@@ -312,6 +314,8 @@ def main():
             'macos_signing_inputs_required_together')
     require(bool(args.source_archive_manifest) == bool(args.expected_source_archive_sha256),
             'archive_manifest_and_expected_sha256_required_together')
+    require(not args.reuse_workspace_cache or args.source_archive_manifest is None,
+            'workspace_cache_reuse_requires_git_checkout')
     os.umask(0o077)
     require(re.fullmatch('[a-f0-9]{40}', args.source_revision) is not None, 'full_source_revision_required')
     for path in [args.gate_receipt, args.target_dir, args.output.parent]:
@@ -377,21 +381,24 @@ def main():
             clean = {'command': clean_argv, 'actual_wait': False,
                      'exit_code': None, 'scope': 'workspace_packages_release_target_only'}
             receipt['workspace_clean'] = clean
+            if args.reuse_workspace_cache:
+                clean.update(command=None, scope='retained_native_git_checkout_cache', skipped=True)
             clean_started = time.monotonic()
             clean_log = args.output / 'cargo-clean.log'
             try:
                 with clean_log.open('x') as log:
                     try:
-                        cleaned = subprocess.run(clean_argv, cwd=ROOT, env=env,
+                        cleaned = None if args.reuse_workspace_cache else subprocess.run(clean_argv, cwd=ROOT, env=env,
                                                  stdin=subprocess.DEVNULL, stdout=log,
                                                  stderr=subprocess.STDOUT, timeout=900)
-                        clean.update(actual_wait=True, exit_code=cleaned.returncode)
+                        if cleaned is not None:
+                            clean.update(actual_wait=True, exit_code=cleaned.returncode)
                     except subprocess.TimeoutExpired:
                         # Like the build below, run kills and actually waits its
                         # original direct child before reporting timeout; not PASS.
                         clean.update(actual_wait=True, timeout=True)
                         raise RuntimeError('native_workspace_clean_timeout') from None
-                require(cleaned.returncode == 0, 'native_workspace_clean_failed')
+                require(cleaned is None or cleaned.returncode == 0, 'native_workspace_clean_failed')
             finally:
                 clean['elapsed_seconds'] = time.monotonic() - clean_started
                 if clean_log.is_file():

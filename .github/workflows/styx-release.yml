@@ -1,0 +1,467 @@
+name: Styx release
+
+on:
+  push:
+    tags: ['v[0-9]*']
+    branches: [develop]
+    paths: ['.github/workflows/styx-release.yml', 'src/ci/release-*', 'src/tools/release/**', 'src/host/build-*', 'src/host/windows/platform-update/**', 'src/host/macos/product-ui/ProductOwnedCore.swift']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish the matching version tag after all packages succeed'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+concurrency:
+  group: styx-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: '0'
+  PYTHONDONTWRITEBYTECODE: '1'
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    container: debian:bookworm-slim
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      marketing: ${{ steps.meta.outputs.marketing }}
+      revision: ${{ steps.meta.outputs.revision }}
+      publish: ${{ steps.meta.outputs.publish }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      build_number: ${{ steps.meta.outputs.build_number }}
+    steps:
+      - name: Debian 12 build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates curl python3 build-essential cmake clang libclang-dev pkg-config libssl-dev xz-utils
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.23.3'
+          cache: npm
+          cache-dependency-path: src/providers/browser-worker/package-lock.json
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        if: runner.os != 'Linux'
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: '1.97.1'
+          components: clippy,rustfmt
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+            target
+          key: quality-linux-rust1971-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            quality-linux-rust1971-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
+      - name: Version and source
+        id: meta
+        env:
+          PUBLISH: ${{ inputs.publish || false }}
+        run: |
+          python3 src/ci/release-ci.py metadata --build-number "$((1142 + GITHUB_RUN_NUMBER))" $(test "$PUBLISH" != true || printf '%s' '--publish')
+      - name: Locked dependencies and available CPU budget
+        run: |
+          echo "CARGO_BUILD_JOBS=$(nproc)" >> "$GITHUB_ENV"
+          cargo fetch --locked --target x86_64-unknown-linux-gnu
+          npm --prefix src/providers/browser-worker ci --ignore-scripts --no-audit --no-fund
+      - name: Shared integration gate (once)
+        run: python3 -I -B src/ci/rust-quality.py --evidence "$RUNNER_TEMP/quality" --target-dir "$CARGO_TARGET_DIR"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: quality-receipt
+          path: ${{ runner.temp }}/quality/receipt.json
+          if-no-files-found: error
+          retention-days: 14
+
+  dependencies:
+    # Public dependencies/Cua can build while the shared Rust gate runs.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-24.04
+            container: debian:bookworm-slim
+            target: x86_64-unknown-linux-gnu
+          - platform: windows
+            runner: windows-2025
+            container: null
+            target: x86_64-pc-windows-msvc
+          - platform: macos
+            runner: macos-15
+            container: null
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    environment: release
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Debian 12 native desktop build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates curl python3 build-essential cmake clang libclang-dev pkg-config libssl-dev xz-utils patch libx11-dev libxi-dev libxtst-dev libxkbcommon-dev libwayland-dev
+      - name: Preserve tracked source bytes on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        if: runner.os != 'Linux'
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.23.3'
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: '1.97.1'
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cache/styx-public-dependencies
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: public-workers-${{ matrix.platform }}-${{ hashFiles('src/host/prepare-codex.py', 'src/host/prepare-node.py', 'src/ci/release-tunnel.json', 'src/providers/cua-native/**', 'src/providers/browser-worker/package-lock.json') }}
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/styx-cua-target
+          key: cua-${{ matrix.target }}-rust1971-${{ hashFiles('src/providers/cua-native/**', 'src/host/windows/cua-window-dpi-capture.rs', 'src/tools/release/*cua*.py', 'src/ci/release-cua.py') }}-${{ github.sha }}
+          restore-keys: |
+            cua-${{ matrix.target }}-rust1971-${{ hashFiles('src/providers/cua-native/**', 'src/host/windows/cua-window-dpi-capture.rs', 'src/tools/release/*cua*.py', 'src/ci/release-cua.py') }}-
+      - name: Source version
+        id: meta
+        run: python3 src/ci/release-ci.py metadata --build-number "$((1142 + GITHUB_RUN_NUMBER))"
+      - name: Build the existing pinned Cua source and patch
+        run: python3 src/ci/release-cua.py --platform '${{ matrix.platform }}' --source-revision '${{ steps.meta.outputs.revision }}' --cache "$HOME/.cache/styx-public-dependencies" --target-dir "$HOME/.cache/styx-cua-target" --output "$RUNNER_TEMP/cua"
+      - name: Fetch pinned public executors and locked Browser dependencies
+        env:
+          STYX_PLATFORM: ${{ matrix.platform }}
+          STYX_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          suffix=''
+          if [ "$STYX_PLATFORM" = windows ]; then suffix='.exe'; fi
+          python3 src/ci/release-workers.py prepare --platform "$STYX_PLATFORM" --cache "$HOME/.cache/styx-public-dependencies" --output "$RUNNER_TEMP/workers" --version "$STYX_VERSION" --cua-binary "$RUNNER_TEMP/cua/bin/cua-driver$suffix" --cua-receipt "$RUNNER_TEMP/cua/receipt.json"
+          python3 src/ci/release-tunnel.py --platform "$STYX_PLATFORM" --cache "$HOME/.cache/styx-public-dependencies" --output "$RUNNER_TEMP/workers/tunnel"
+      - name: Import macOS release identity
+        if: matrix.platform == 'macos'
+        env:
+          STYX_MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.STYX_MACOS_CERTIFICATE_P12_BASE64 }}
+          STYX_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.STYX_MACOS_CERTIFICATE_PASSWORD }}
+        run: python3 src/ci/release-ci.py mac-keychain --directory "$RUNNER_TEMP/mac-signing"
+      - name: Sign fresh macOS worker copies before publisher sealing
+        if: matrix.platform == 'macos'
+        run: |
+          python3 src/ci/release-macos.py sign-workers --source-revision '${{ steps.meta.outputs.revision }}' --input-dir "$RUNNER_TEMP/workers" --local-signing "$RUNNER_TEMP/mac-signing/local-signing.json"
+          python3 src/ci/release-workers.py manifest --platform macos --version '${{ steps.meta.outputs.version }}' --worker-release "$RUNNER_TEMP/workers/worker-release"
+      - name: Archive workers for this run only
+        run: python3 src/ci/release-ci.py bundle --source "$RUNNER_TEMP/workers" --output "$RUNNER_TEMP/workers-${{ matrix.platform }}.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: workers-${{ matrix.platform }}
+          path: ${{ runner.temp }}/workers-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove temporary macOS keychain and codeSign trust
+        if: always() && matrix.platform == 'macos'
+        run: python3 src/ci/release-ci.py mac-keychain-clean --directory "$RUNNER_TEMP/mac-signing"
+      - name: Preserve failed Cua build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: cua-failure-${{ matrix.platform }}
+          path: |
+            ${{ runner.temp }}/cua/native-build/*.log
+            ${{ runner.temp }}/cua/native-build/*.jsonl
+            ${{ runner.temp }}/cua/native-build/receipt.json
+          retention-days: 7
+
+  build:
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-24.04
+            container: debian:bookworm-slim
+            target: x86_64-unknown-linux-gnu
+          - platform: windows
+            runner: windows-2025
+            container: null
+            target: x86_64-pc-windows-msvc
+          - platform: macos
+            runner: macos-15
+            container: null
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    # Only macOS native code signing needs a credential during its native build.
+    environment: release
+    steps:
+      - name: Debian 12 build tools
+        if: matrix.platform == 'linux'
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates curl python3 build-essential cmake clang libclang-dev pkg-config libssl-dev xz-utils
+      - name: Preserve tracked source bytes on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.23.3'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        if: runner.os != 'Linux'
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: '1.97.1'
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+            target
+          key: release-${{ matrix.platform }}-${{ matrix.target }}-rust1971-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            release-${{ matrix.platform }}-${{ matrix.target }}-rust1971-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: quality-receipt
+          path: ${{ runner.temp }}/gate
+      - name: Prepare native cache and dependencies
+        run: |
+          mkdir -p "$CARGO_TARGET_DIR"
+          cargo fetch --locked --target '${{ matrix.target }}'
+      - name: Import existing macOS signing identity
+        if: matrix.platform == 'macos'
+        env:
+          STYX_MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.STYX_MACOS_CERTIFICATE_P12_BASE64 }}
+          STYX_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.STYX_MACOS_CERTIFICATE_PASSWORD }}
+        run: python3 src/ci/release-ci.py mac-keychain --directory "$RUNNER_TEMP/mac-signing"
+      - name: Build Linux native Core
+        if: matrix.platform == 'linux'
+        run: python3 src/ci/release-linux.py build --source-revision '${{ needs.quality.outputs.revision }}' --gate-receipt "$RUNNER_TEMP/gate/receipt.json" --target-dir "$CARGO_TARGET_DIR" --output "$RUNNER_TEMP/native" --reuse-workspace-cache
+      - name: Build Windows native Core
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: ./src/ci/release-windows.ps1 -Stage Build -SourceRevision '${{ needs.quality.outputs.revision }}' -GateReceipt "$env:RUNNER_TEMP/gate/receipt.json" -TargetDirectory "$env:CARGO_TARGET_DIR" -OutputDirectory "$env:RUNNER_TEMP/native"
+      - name: Build and sign macOS native Core
+        if: matrix.platform == 'macos'
+        run: python3 src/ci/release-macos.py build --source-revision '${{ needs.quality.outputs.revision }}' --gate-receipt "$RUNNER_TEMP/gate/receipt.json" --target-dir "$CARGO_TARGET_DIR" --output "$RUNNER_TEMP/native" --local-signing "$RUNNER_TEMP/mac-signing/local-signing.json"
+      - name: Archive native output, retaining modes and original producer receipt
+        run: python3 src/ci/release-ci.py bundle --source "$RUNNER_TEMP/native" --output "$RUNNER_TEMP/native-${{ matrix.platform }}.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-${{ matrix.platform }}
+          path: ${{ runner.temp }}/native-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove temporary macOS keychain
+        if: always() && matrix.platform == 'macos'
+        run: python3 src/ci/release-ci.py mac-keychain-clean --directory "$RUNNER_TEMP/mac-signing"
+
+  seal:
+    needs: [quality, build, dependencies]
+    runs-on: ubuntu-24.04
+    environment: release
+    timeout-minutes: 30
+    steps:
+      - name: Preserve tracked source bytes on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: native-*
+          path: ${{ runner.temp }}/downloads
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: workers-*
+          path: ${{ runner.temp }}/downloads
+          merge-multiple: true
+      - name: Restore native outputs and public-source worker outputs
+        run: |
+          for platform in linux windows macos; do
+            python3 src/ci/release-ci.py extract --source "$RUNNER_TEMP/downloads/native-$platform.tar.gz" --output "$RUNNER_TEMP/native/$platform"
+            python3 src/ci/release-ci.py extract --source "$RUNNER_TEMP/downloads/workers-$platform.tar.gz" --output "$RUNNER_TEMP/workers/$platform"
+          done
+      - name: Sign full Runtime payloads with the existing publisher
+        env:
+          STYX_PUBLISHER_PRIVATE_KEY_PEM: ${{ secrets.STYX_PUBLISHER_PRIVATE_KEY_PEM }}
+        run: |
+          python3 src/ci/release-ci.py publisher-key --output "$RUNNER_TEMP/publisher-private.pem"
+          trap 'rm -f "$RUNNER_TEMP/publisher-private.pem"' EXIT
+          python3 src/ci/release-ci.py sign --native "$RUNNER_TEMP/native" --workers "$RUNNER_TEMP/workers" --key "$RUNNER_TEMP/publisher-private.pem" --version '${{ needs.quality.outputs.version }}' --output "$RUNNER_TEMP/sealed"
+      - name: Stage Linux and Gateway release assets
+        run: |
+          python3 src/ci/release-ci.py linux-assets --sealed "$RUNNER_TEMP/sealed" --output "$RUNNER_TEMP/assets" --version '${{ needs.quality.outputs.version }}'
+          for platform in windows macos; do
+            python3 src/ci/release-ci.py bundle --source "$RUNNER_TEMP/sealed/$platform" --output "$RUNNER_TEMP/sealed-$platform.tar.gz"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: assets-linux
+          path: ${{ runner.temp }}/assets/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sealed-runtimes
+          path: ${{ runner.temp }}/sealed-*.tar.gz
+          if-no-files-found: error
+
+  package:
+    needs: [quality, seal]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            runner: windows-2025
+          - platform: macos
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    environment: release
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Preserve tracked source bytes on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.23.3'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: sealed-runtimes
+          path: ${{ runner.temp }}/sealed
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: matrix.platform == 'windows'
+        with:
+          path: ~/.cache/styx-release-inputs
+          key: styx-inno-${{ hashFiles('src/host/windows/platform-update/toolchain.json') }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: matrix.platform == 'macos'
+        with:
+          name: workers-macos
+          path: ${{ runner.temp }}/worker-artifact
+      - name: Identify Swift compiler and SDK cache inputs
+        if: matrix.platform == 'macos'
+        id: sdk
+        run: |
+          xcrun swiftc --version > "$RUNNER_TEMP/swift-sdk.txt"
+          xcrun --show-sdk-path >> "$RUNNER_TEMP/swift-sdk.txt"
+          echo "key=$(shasum -a 256 "$RUNNER_TEMP/swift-sdk.txt" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: matrix.platform == 'macos'
+        with:
+          path: ~/.cache/styx-swift-modules
+          key: styx-swift-${{ steps.sdk.outputs.key }}-${{ github.sha }}
+          restore-keys: |
+            styx-swift-${{ steps.sdk.outputs.key }}-
+      - name: Restore full Runtime and exact source archive
+        run: |
+          python3 src/ci/release-ci.py extract --source "$RUNNER_TEMP/sealed/sealed-${{ matrix.platform }}.tar.gz" --output "$RUNNER_TEMP/runtime"
+          python3 src/ci/release-ci.py source-archive --output "$RUNNER_TEMP/source-archive"
+      - name: Package Windows installer with normal Styx identity
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: ./src/ci/release-windows.ps1 -Stage Package -SourceRevision '${{ needs.quality.outputs.revision }}' -RuntimeDirectory "$env:RUNNER_TEMP/runtime" -SourceArchiveDirectory "$env:RUNNER_TEMP/source-archive" -OutputDirectory "$env:RUNNER_TEMP/package" -Version '${{ needs.quality.outputs.marketing }}' -RuntimeVersion '${{ needs.quality.outputs.version }}' -BuildNumber '${{ needs.quality.outputs.build_number }}'
+      - name: Import macOS signing identity
+        if: matrix.platform == 'macos'
+        env:
+          STYX_MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.STYX_MACOS_CERTIFICATE_P12_BASE64 }}
+          STYX_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.STYX_MACOS_CERTIFICATE_PASSWORD }}
+        run: python3 src/ci/release-ci.py mac-keychain --directory "$RUNNER_TEMP/mac-signing"
+      - name: Package macOS App and DMG with normal Styx identity
+        if: matrix.platform == 'macos'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 src/ci/release-ci.py extract --source "$RUNNER_TEMP/worker-artifact/workers-macos.tar.gz" --output "$RUNNER_TEMP/workers"
+          python3 src/ci/release-macos.py package --source-revision '${{ needs.quality.outputs.revision }}' --runtime-dir "$RUNNER_TEMP/runtime" --output "$RUNNER_TEMP/package" --version '${{ needs.quality.outputs.marketing }}' --runtime-version '${{ needs.quality.outputs.version }}' --build-number '${{ needs.quality.outputs.build_number }}' --local-signing "$RUNNER_TEMP/mac-signing/local-signing.json" --cua-binary "$RUNNER_TEMP/workers/cua-driver" --module-cache "$HOME/.cache/styx-swift-modules"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: assets-${{ matrix.platform }}
+          path: ${{ runner.temp }}/package/assets/*
+          if-no-files-found: error
+      - name: Remove temporary macOS keychain
+        if: always() && matrix.platform == 'macos'
+        run: python3 src/ci/release-ci.py mac-keychain-clean --directory "$RUNNER_TEMP/mac-signing"
+
+  release:
+    needs: [quality, seal, package]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    timeout-minutes: 10
+    steps:
+      - name: Preserve tracked source bytes on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: assets-*
+          path: ${{ runner.temp }}/release
+          merge-multiple: true
+      - name: Require all four assets and generate checksums
+        run: python3 src/ci/release-ci.py checksums --version '${{ needs.quality.outputs.version }}' --output "$RUNNER_TEMP/release"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: complete-release
+          path: ${{ runner.temp }}/release/*
+          if-no-files-found: error
+      - name: Publish complete Release
+        if: needs.quality.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.quality.outputs.version }}
+          PRERELEASE: ${{ needs.quality.outputs.prerelease }}
+        run: |
+          args=()
+          if [ "$PRERELEASE" = true ]; then args+=(--prerelease); fi
+          gh release create "v$VERSION" "$RUNNER_TEMP/release/"* --draft --verify-tag --title "Styx $VERSION" --notes-file src/docs/github-release-notes.md "${args[@]}"
+          gh release edit "v$VERSION" --draft=false

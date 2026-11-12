@@ -39,7 +39,7 @@ pub(crate) use native_observation::{
 const APP: &str = "/Applications/Styx.app";
 const APP_IMAGE: &str = "/Applications/Styx.app/Contents/MacOS/Styx";
 const DAEMON_IMAGE: &str = "/Applications/Styx.app/Contents/MacOS/cua-driver";
-const ORIGINAL_CERT: &str = "cb50cee601419f28b43756f4fc8aefdbf60abae2";
+const ORIGINAL_CERT: &str = "9a4c8c7e15d006f9d0a576b137c7696f143f46d8";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum BindingError {

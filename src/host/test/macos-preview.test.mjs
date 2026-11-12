@@ -7,10 +7,18 @@ import {execFileSync,spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {createHash,generateKeyPairSync,sign} from 'node:crypto';
 import {macAdhocSigningPlan,macSigningPlan,macLocalSigningPlan,publicMacLocalSigning} from '../build-macos-app.mjs';
-import {buildMacPreview,machOFiles,preparedPreviewInventory,assertNativeMacAppInventory,withNativeMacDmgMount} from '../build-macos-preview.mjs';
+import {buildMacPreview,machOFiles,preparedPreviewInventory,assertNativeMacAppInventory,withNativeMacDmgMount,nativeMacPayloadCertificate} from '../build-macos-preview.mjs';
 import {authenticateNativeMacRuntimeEnvelope} from '../build-macos-native-runtime.mjs';
 const hash=b=>createHash('sha256').update(b).digest('hex');
 function scratch(t){const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'styx-preview-test-')));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));return root;}
+test('fresh CLI and three sealed upstream workers require the pinned CI signer',()=>{
+ const current='9a4c8c7e15d006f9d0a576b137c7696f143f46d8';
+ assert.equal(nativeMacPayloadCertificate('bin/styx'),current);
+ for(const name of ['workers/codex-exec/bin/codex','workers/browser-node22/bin/node','workers/tunnel-client/tunnel-client-runtime'])
+  assert.equal(nativeMacPayloadCertificate(name),current);
+ for(const name of ['workers/codex-exec/bin/styx','workers/browser-node22/bin/node.backup','workers/tunnel-client/../bin/styx','workers/extra/addon.node','bin/cua-driver','/bin/styx','./bin/styx'])
+  assert.throws(()=>nativeMacPayloadCertificate(name),/unexpected_native_macho_member/);
+});
 test('ad-hoc preview signs all contained nested code before final app, separate from Developer ID',()=>{
  const app='/build/Styx.app',files=[app+'/Contents/MacOS/Styx',app+'/Contents/Resources/host-bundle/bin/node'];
  const steps=macAdhocSigningPlan({app,files});assert.equal(steps[0][1].at(-1),files[1]);assert.equal(steps.at(-2)[1].at(-1),app);

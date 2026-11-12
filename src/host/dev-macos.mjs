@@ -6,13 +6,15 @@ import {fileURLToPath} from 'node:url';
 import {execFileSync,spawnSync} from 'node:child_process';
 import {buildMacApp,MAC_LOCAL_DEVELOPMENT,normalizeMacLocalSigning,verifyMacLocalSigning,macLocalSigningPlan} from './build-macos-app.mjs';
 import {verifyNativeMacRuntime,copyNativeMacRuntime} from './build-macos-native-runtime.mjs';
-import {preparedPreviewInventory,machOFiles} from './build-macos-preview.mjs';
+import {preparedPreviewInventory,machOFiles,nativeMacPayloadCertificate} from './build-macos-preview.mjs';
 const need=(ok,code)=>{if(!ok)throw Error(code)};
 const PROJECT='/Users/it-bootstrap/Developer/Styx';
 const PUBLISHER='bbb49c2626c3d4ef3cf9e1679db5305b100cee4a8c41c29c958ede82fb868bed';
-const CERT='90792ed11f23a00f0107450dbc184f992016569ca188454cfa286fe0022c2c1e';
-const LEAF='cb50cee601419f28b43756f4fc8aefdbf60abae2';
-const SIGNING='/Users/it-bootstrap/Developer/Artifacts/Styx/20261108-gui-boundaries-c24/local-signing.json';
+const CERT='f5a143072e85e8e393f199811937ceff4c884d2b74cf2509e08e9e53a4d0c1a9';
+const LEAF='9a4c8c7e15d006f9d0a576b137c7696f143f46d8';
+const SIGNING_ROOT='/Users/it-bootstrap/Library/Application Support/Styx/ReleaseSigning-20261113';
+const SIGNING=SIGNING_ROOT+'/identity.json';
+const RETAINED_CUA_INPUT_CERT='cb50cee601419f28b43756f4fc8aefdbf60abae2';
 export function macLocalDevelopmentConfig(config){
  need(config&&Object.getPrototypeOf(config)===Object.prototype&&Object.keys(config).every(k=>['nativeRuntime','cuaBinary','sdkPath'].includes(k)),'local_development_config_required');
  const input=config.nativeRuntime;
@@ -45,7 +47,21 @@ function noOpenFiles(p){
  const result=spawnSync('/usr/sbin/lsof',['-nP','+D',p],{encoding:'utf8',timeout:15000,maxBuffer:1024*1024});
  need(result.status===1&&!result.error&&!result.stdout&&!result.stderr,'development_app_still_in_use_or_unobservable');
 }
-function originalCode(p){run('/usr/bin/codesign',['--verify','--strict','-R',`=certificate leaf = H"${LEAF}"`,p]);}
+function originalCode(p,certificate=LEAF){run('/usr/bin/codesign',['--verify','--strict','-R',`=certificate leaf = H"${certificate}"`,p]);}
+function nativeCode(root,file){originalCode(file,nativeMacPayloadCertificate(path.relative(root,file).split(path.sep).join('/')));}
+function existingReleaseSigning(){
+ physical(SIGNING_ROOT,true);physical(SIGNING);
+ need(!(fs.statSync(SIGNING).mode&0o077),'private_development_identity_required');
+ const identity=JSON.parse(fs.readFileSync(SIGNING,'utf8'));
+ const local=normalizeMacLocalSigning({identitySha1:identity.identitySha1,certificateSha256:identity.certificateSha256,keychain:identity.keychain});
+ need(local.identitySha1===LEAF&&local.certificateSha256===CERT&&local.keychain===SIGNING_ROOT+'/styx-release.keychain-db','rotated_development_identity_required');
+ const helper=fileURLToPath(new URL('./macos/local-signing-identity.py',import.meta.url));
+ // Only unlock the explicitly provisioned identity. Never create a keychain or
+ // rotate a key during a development build; no password enters process argv.
+ run('python3',['-I','-B','-c',
+  'import runpy,sys\nfrom pathlib import Path\nm=runpy.run_path(sys.argv[1])\nr=Path(sys.argv[2])\np=r/"keychain-password"\nm["private_file"](p)\nk=r/"styx-release.keychain-db"\nm["private_file"](k)\nm["unlock_existing_keychain"](k,p.read_text().strip())',helper,SIGNING_ROOT]);
+ return local;
+}
 export function macLocalDevelopmentInstalledApp(){
  // /Applications is a system-admin writable execution parent, not a private
  // profile/input directory. Use the original fixed path + code signature
@@ -68,12 +84,12 @@ export function buildLocalMacDevelopment(config){
  // repair existing ownership/permissions. The runner never touches /Applications.
  physical(PROJECT,true);physical(root,true);
  for(const p of [input.nativeRuntime.payloadDir,input.nativeRuntime.publisherFile,input.cuaBinary])physical(p,fs.statSync(p).isDirectory());
- const local=normalizeMacLocalSigning(JSON.parse(fs.readFileSync(SIGNING,'utf8')));
- need(local.identitySha1===LEAF&&local.certificateSha256===CERT,'original_development_identity_required');verifyMacLocalSigning(local);originalCode(input.cuaBinary);
+ const local=existingReleaseSigning();
+ verifyMacLocalSigning(local);originalCode(input.cuaBinary,RETAINED_CUA_INPUT_CERT);
  const verified=verifyNativeMacRuntime(input.nativeRuntime);
  need(verified.readerActualWait===true&&verified.readerExitCode===0,'development_runtime_verification_required');
  // No new Runtime is signed here, and no sealed nested byte is re-signed.
- for(const file of machOFiles(input.nativeRuntime.payloadDir))originalCode(file);
+ for(const file of machOFiles(input.nativeRuntime.payloadDir))nativeCode(input.nativeRuntime.payloadDir,file);
  const receiptFile=path.join(root,'development-app.json'),previous=path.join(root,'previous');
  need(!fs.existsSync(previous),'previous_development_attempt_requires_inspection');
  let old;
@@ -90,7 +106,7 @@ export function buildLocalMacDevelopment(config){
  fs.writeFileSync(path.join(resources,'macos-runtime.json'),JSON.stringify({schema:1,nativeRuntime:runtime})+'\n',{flag:'wx',mode:0o600});
  privateDirectory(path.join(root,'state'));
  const native=path.join(resources,'native');
- for(const file of machOFiles(native))originalCode(file);
+ for(const file of machOFiles(native))nativeCode(native,file);
  const files=machOFiles(app).filter(file=>!file.startsWith(native+path.sep));
  for(const [command,args]of macLocalSigningPlan({app,localSigning:local,files,sealApp:true}))run(command,args);
  const after=verifyNativeMacRuntime({payloadDir:native,publisherFile:path.join(resources,'native-publisher.pem'),expectedPublisher:PUBLISHER});
