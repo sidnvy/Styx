@@ -33,6 +33,12 @@ Reuse its pinned SDK/tool paths and one Cargo cache. PilotMac's logical Swift PC
 may alias the same physical cache; changing that path can invalidate PCM files.
 The Debian container uses a separate pinned environment.
 
+Native chats open the parent project, outside the source/ Git root. Its AGENTS.md is
+the thin pointer in src/ci/native-project-AGENTS.md; its .agents/skills links to
+source/.agents/skills (symlink on Mac, junction on Windows). Read source/AGENTS.md
+when taking over an existing chat. Resolve skill references in that source checkout.
+Do not assume instructions in a child repository are loaded from a parent cwd.
+
 Use check-only for syntax/type diagnosis and real App/Core execution for runtime behavior.
 A directly built desktop App still needs its valid full Runtime, original signing identity
 and normal qualification checks. Source, caches and outputs live in Developer; the trusted
