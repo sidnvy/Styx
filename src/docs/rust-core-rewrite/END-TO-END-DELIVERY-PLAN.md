@@ -4,11 +4,28 @@
 [REDUCED-SCOPE.md](REDUCED-SCOPE.md) 决定，架构由
 [README.md](README.md) 和冻结合同决定。
 [GUI-CONVERGENCE.md](GUI-CONVERGENCE.md) 保留历史尝试与证据，不能把历史通过当作当前候选通过。
-本文中的计划项不代表已经执行；当前状态以最新检查点为准。**本轮预览交付完成；Stable NO-GO。**
+本文中的计划项不代表已经执行；当前状态以最新检查点为准。**本轮交付完成；Stable GO（既定自用 v1 范围）。**
 
 ## 当前开发检查点（2026-11-12）
 
-### 最新：同源 .33 剩余验收与 P7 核对完成（23:53 上海时间）
+### 最新：Stable v1 已放行（2026-11-13，上海时间）
+
+用户要求复用已通过证据并直接收尾。此前“Stable需另行核验”未列具体缺口，现已完成明确审查；
+**Stable GO，限既定自用v1范围，复用产品冻结9104的四目标.33，构件/签名/安装均不重做。**
+
+唯一补测是当前Linux启动计时：完整空配置本地Hub+Host创建至Gateway确认Exec连通并setup完成
+上界1.270957624秒（目标<10），同profile重开上界0.457574077秒（目标<3），各一份样本；
+后续独立Exec40 actual exit0。前者正常退出0且临时资料清理，后者保留原身份并保持在线。
+已过功能矩阵不重跑：53条原PASS/106份日志摘要及9104当前24项Gate完成适用性核对；
+Mac旧fresh Gateway业务通过与1142默认入口实跑按24份GUI源及Rust改动路径明确映射，
+不把旧producer伪称有sourceFiles，也不声称又跑了一次.33默认Gateway。
+
+16项必需场景的证据层级和适用范围已明确；旧SPEC移除/延期项不重新变成门槛。
+原失败/Unknown与KVM只读未确定假设继续保留，不将历史记录改写为成功。
+[Stable放行决定](/home/sid/Developer/Artifacts/Styx/native-checks/startup-check-removal-20261112/final-source-9104/STABLE-DECISION.md)；
+[逐源/日志/场景证据映射](/home/sid/Developer/Artifacts/Styx/native-checks/startup-check-removal-20261112/final-source-9104/stable-decision.json)。没有剩余本次Stable阻塞项。
+
+### 此前：同源 .33 剩余验收与 P7 核对完成（23:53 上海时间）
 
 四个目标均以产品源码 `9104d6a84c69b89cb81537ef7aad26099ed870e4` 正式生产并完成实际选择/部署；
 当前Linux、Windows与正式Mac三Host由独立账号确认connected，既有身份/配对/密钥保持。
