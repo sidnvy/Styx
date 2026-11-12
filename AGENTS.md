@@ -1,28 +1,35 @@
-# Styx Rust core rewrite and release convergence
+# Working on Styx
 
-- The owner has chosen a Rust rewrite of the Styx-owned core. The execution baseline is `src/docs/rust-core-rewrite/README.md`; the earlier no-Rust decision is superseded. Do not reopen the language choice or keep a hidden JS Gateway/Host/Core as the final runtime.
-- Rewrite by frozen contracts and vertical slices. Mature Codex/Cua/Playwright executors and native Swift/C# OS/UI bridges may remain; Node is allowed only for an explicitly bounded Browser worker, never a second management/policy authority.
-- Follow official Rust/library idioms and use mature dependencies for async I/O, crypto, TLS, HTTP/MCP, serialization and OS bindings. Keep Styx code focused on domain boundaries and adapters; do not hand-roll standard protocols or replace upstream executors. Dependency choice still requires pinned inputs and scenario evidence.
-- Quality is required scenario closure with independent effects, negative controls, recovery and exact artifact evidence. Test/assertion counts and mocks are not platform acceptance. Plan files do not mean implementation or verification has happened.
-- Parallel agents/threads must lease disjoint paths and devices. The integrator owns shared contracts, manifests/locks and Git integration; use the work-item DAG, single writer and immutable candidate policy.
+## Product boundaries
 
-- `src/` is the only product source. Root npm commands are management aliases; do not restore a legacy runtime or add a second configuration authority.
-- On the owner's workstation, the only integration checkout is `/home/sid/Developer/Styx` on `develop`; GitHub is `origin`. Never create product source checkouts under Documents/Codex task folders.
-- Worktrees, when explicitly justified, live only under `/home/sid/Developer/worktrees/Styx`. Default to zero new worktrees; at most two additional leased worktrees, including the explicitly retained historical S. Record owner, paths, purpose and retirement before creation. Historical archives are not active development sources.
-- Read root `WORKSPACE.md` for the current layout and handoff. Future build/evidence directories use the stable project artifact location; keep existing validated toolchain/cache and signed/installed paths until a separate scoped migration is verified.
-- Use the persistent project's development entry and one native Cargo target: workstation `src/ci/dev-env.py` / `target/`, native owners' `tools/dev-env` / `cache/cargo-target`. Never default to an evidence/candidate target or recreate Documents/drive-root development paths. Candidate directories hold immutable outputs, not new toolchains/caches/projects. Shared registered SDKs and live runtime profiles are not development remnants; retirement exceptions need a concrete process or cache-format dependency and an exit condition.
-- Integrate validated changes into the existing `develop` checkout. Reuse assigned checkouts; do not automatically create a worktree per task, build, candidate or subagent.
-- A new worktree needs a concrete conflict/isolation reason, a recorded owner and a cleanup outcome. Builds and test evidence belong outside tracked source, not in new worktrees.
-- Before checkout removal, save its HEAD in a durable ref and record dirty/untracked/ignored input ownership. Never force-remove unknown work. Preserve live process paths and cross-tree dependency symlinks.
-- Keep Gateway/Host/Core boundaries and existing product scope. No new UI redesign, tenants, Browser takeover modes or autonomous-task features during convergence.
-- Release scope is `src/docs/rust-core-rewrite/REDUCED-SCOPE.md` (owner decision 2026-10-27). Legacy migration, mixed-runtime interop and old-install cutover are out of scope: devices get a fresh Rust install and re-pair. Keep each machine's publisher signing keys and pins; never transfer private keys. Persistent OS services, the custom App maintenance protocol and auto-update are deferred until v1 ships.
-- Unknown outcomes are not replayed. Native actions require fresh target-bound observation. Never operate piermini or reboot the development Workstation.
-- Report Product, Architecture, Integration, Release, Reliability and Decision as changes from the prior report, with evidence. Tests, packages, installation and real acceptance are distinct. Stable remains NO-GO until its explicit gates close.
+- Product source is only src/. Rust owns Gateway, Host, Core, state and policy. Retain mature Codex/Cua/Playwright executors and native Swift/C# bridges; Node is limited to the Browser worker. Use mature, pinned libraries rather than rebuilding standard protocols.
+- Preserve Gateway/Host/Core boundaries and the owner's chosen scope in src/docs/rust-core-rewrite/REDUCED-SCOPE.md. Do not add product features or restore a legacy management runtime during convergence.
 
-## Development iteration and build budget
+## Default development loop
 
-- Daily edits use incremental `cargo check -p <affected crate>` plus the changed capability/contract scenario. Run workspace-wide quality once at an integration/candidate checkpoint, not after every helper or platform-only correction. Final release gates and independent native effects remain required. Do not wait for cloud CI to unblock local development.
-- Native development checks default to check-only. Release compilation, signing and packaging are explicit candidate steps after the reference scenario and shared source converge; do not couple every native typecheck to a release producer.
-- Reuse one owned per-platform Cargo cache. Do not clean all workspace artifacts for routine diagnosis. Archive/source hashes must still match; refresh changed source mtimes and require compiler evidence that affected targets rebuilt, or stop on uncertain reuse. Release producers keep their existing conservative cache-correctness barrier until a measured replacement is verified.
-- For the current machines start local Linux Cargo at 8 jobs (16 logical CPUs, about 20 GiB available at inspection), pho at 4 Cargo jobs and 2 CMake jobs (16 logical CPUs, 16 GiB total). Record the actual setting and memory pressure; reduce only for observed contention. NAB5 remains separately bounded pending a native resource measurement. These are invocation settings, not global machine configuration.
-- Use Cargo `--timings` on necessary builds to distinguish scheduling, compiler critical path and link time. Do not run extra clean builds merely to produce benchmark numbers, alter release optimizations without evidence, or install a new build-cache service during convergence.
+- Work in the existing project and native cache. WORKSPACE.md maps paths and commands; read only the relevant section. On the workstation, integrate into /home/sid/Developer/Styx on develop; origin is GitHub.
+- Develop and reproduce locally before release production: incremental affected-crate check, the changed scenario, and actual native execution when runtime behavior needs it. A typecheck is sufficient for a typecheck task, not for a startup/recovery fix.
+- A candidate freezes release outputs; it is not a development project, cache or prerequisite for every GUI run. Run workspace quality at integration/release checkpoints. Reuse unaffected evidence; rerun when a relevant change, failure or uncertainty justifies it.
+- Continue authorized implementation and verification to the requested outcome. Reuse existing authorization; do not invent per-step approval gates. Respect tool permissions and ask only for genuinely missing authorization or a required human-only action; keep independent work moving.
+
+## Task-specific guidance
+
+Read a skill only when its trigger applies; do not load all references or historical checkpoints.
+
+| Task | Workflow |
+| --- | --- |
+| Native GUI/Core behavior, lifecycle bugs, or desktop build/run wiring | .agents/skills/styx-native-development/SKILL.md |
+| Release freeze, signing/packaging, installation or cross-device/account acceptance | .agents/skills/styx-release-acceptance/SKILL.md |
+| Architecture or interface changes | src/docs/rust-core-rewrite/README.md routes to current contracts and decisions |
+| Delivery status or next acceptance exit | Latest checkpoint in src/docs/rust-core-rewrite/END-TO-END-DELIVERY-PLAN.md |
+
+## Ownership and safety
+
+- Give parallel writers disjoint paths/devices. The integrator owns shared contracts, manifests/locks and Git integration; native owners operate their platform clients in the same persistent project/chat.
+- Default to no new worktree. If isolation is necessary, record owner, reason and retirement; use only /home/sid/Developer/worktrees/Styx, at most two additional trees including retained historical S. Before removal, preserve HEAD and owned dirty inputs; protect live paths.
+- Preserve profiles, pairing, signing identities and publisher pins. Never transfer signing private keys, disable the sandbox, modify production Tunnel/plugin state, operate piermini or reboot the development workstation.
+- Do not automatically replay a state-changing operation with an unknown outcome. Resolve it with fresh read-only evidence; an established not-dispatched result permits a fresh authorized attempt. This does not prohibit read-only diagnosis or rerunning isolated local tests. Native actions need a fresh target-bound observation.
+
+## Evidence
+
+Report what changed, what actually ran, and the remaining blocker. Separate checks, packages, installation and real independent effects. Keep plans and history out of completion claims. Stable remains NO-GO until its explicit gates close.
