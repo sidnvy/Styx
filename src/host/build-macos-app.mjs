@@ -32,7 +32,10 @@ export function validateMacModuleCache({localDevelopment=false,app,moduleCachePa
     assert(fs.realpathSync(moduleCachePath)===MAC_LOCAL_DEVELOPMENT.physicalCache&&fs.realpathSync(MAC_LOCAL_DEVELOPMENT.physicalCache)===MAC_LOCAL_DEVELOPMENT.physicalCache,'local_development_cache_alias_changed');
     const st=fs.statSync(moduleCachePath);
     assert(st.isDirectory()&&st.uid===process.getuid()&&!(st.mode&0o022),'private_local_development_cache_required');
-  }else if(moduleCachePath!==undefined)assert(!fs.existsSync(moduleCachePath),'fresh_swift_module_cache_required');
+  }else if(moduleCachePath!==undefined&&fs.existsSync(moduleCachePath)){
+    const st=fs.statSync(moduleCachePath);
+    assert(st.isDirectory()&&typeof process.getuid==='function'&&st.uid===process.getuid()&&!(st.mode&0o022),'private_swift_module_cache_required');
+  }
 }
 const SOURCE=fileURLToPath(new URL('./macos/Styx.swift',import.meta.url));
 const UPDATER=fileURLToPath(new URL('./macos/StyxUpdater.swift',import.meta.url));
@@ -251,7 +254,7 @@ export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=fal
   fs.mkdirSync(path.dirname(app),{recursive:true});
   fs.mkdirSync(app);
   try{
-    if(moduleCachePath!==undefined&&!localDevelopment)fs.mkdirSync(moduleCachePath,{mode:0o700});
+    if(moduleCachePath!==undefined&&!fs.existsSync(moduleCachePath))fs.mkdirSync(moduleCachePath,{mode:0o700});
     const notices=path.join(app,'Contents/Resources/licenses');
     fs.mkdirSync(notices,{recursive:true});
     if(localSigning!==undefined){
@@ -268,7 +271,7 @@ export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=fal
     const iconEntry=path.join(iconSource,'main.swift'),iconBinary=path.join(iconSource,'render-icons');
     fs.copyFileSync(ICON_RENDERER,iconEntry);
     execFileSync('/usr/bin/xcrun',macSwiftBuildArguments({source:iconEntry,additionalSources:[GLYPH],output:iconBinary,sdkPath,
-      ...(localDevelopment?{moduleCachePath}:sdkPath?{moduleCachePath:path.join(buildRoot,'icon-module-cache')}:{})}),{stdio:'inherit',timeout:180000});
+      ...(moduleCachePath?{moduleCachePath}:{})}),{stdio:'inherit',timeout:180000});
     execFileSync(iconBinary,[path.join(BRAND,'styx-icon-light-source.jpg'),brand,iconset],{stdio:'pipe',timeout:30000});
     const pluginIcon=path.join(brand,'styx-plugin-icon.png');
     fs.writeFileSync(pluginIcon,prepareMacPluginIcon(fs.readFileSync(pluginIcon)));

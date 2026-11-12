@@ -17,6 +17,18 @@ impl HostApp {
         if parent.ensure_absent("runtime-updates").is_ok() {
             return Ok(());
         }
+        if gateway.root.get().is_none()
+            && let Ok(current) =
+                crate::store::native_host_snapshot::NativeHostSnapshot::observe_for_app(
+                    self.scope.state_dir(),
+                    self.scope.clone(),
+                )
+            && self
+                .completed_runtime_history(&current)
+                .map_err(|_| AppError("role_retire_history_unproven"))?
+        {
+            return Ok(());
+        }
         let host_root = self
             .scope
             .root

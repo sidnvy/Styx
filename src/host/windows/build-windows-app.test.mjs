@@ -6,7 +6,7 @@ import path from 'node:path';
 import {execFileSync,spawnSync} from 'node:child_process';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {createHash,generateKeyPairSync,sign} from 'node:crypto';
-import {buildWindowsApp} from '../build-windows-app.mjs';
+import {buildWindowsApp,createNativeOutputDirectory,windowsNativeOutputCommand} from '../build-windows-app.mjs';
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 function fixture(t){
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'styx-windows-builder-')));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
@@ -39,6 +39,40 @@ test('native staging refuses foreign target, unexpected member and source overla
 });
 
 test('missing native selection never silently falls back to Node management',()=>{assert.throws(()=>buildWindowsApp({}),/native_runtime_required_for_product_app/);});
+
+test('fresh native output refuses existing directories and files without changing their contents',t=>{
+ const parent=fs.mkdtempSync(path.join(os.tmpdir(),'styx-native-output-'));t.after(()=>fs.rmSync(parent,{recursive:true,force:true}));
+ const existing=path.join(parent,'existing'),file=path.join(parent,'existing-file');fs.mkdirSync(existing,{mode:0o750});fs.writeFileSync(path.join(existing,'keep.txt'),'preserve directory');fs.writeFileSync(file,'preserve file');
+ const before=fs.statSync(existing),parentMode=fs.statSync(parent).mode;
+ assert.throws(()=>createNativeOutputDirectory(existing));assert.throws(()=>createNativeOutputDirectory(file));
+ assert.equal(fs.readFileSync(path.join(existing,'keep.txt'),'utf8'),'preserve directory');assert.equal(fs.readFileSync(file,'utf8'),'preserve file');
+ assert.equal(fs.statSync(existing).ino,before.ino);assert.equal(fs.statSync(existing).mode,before.mode);assert.equal(fs.statSync(parent).mode,parentMode);
+ const fresh=path.join(parent,"New output ' 中文");createNativeOutputDirectory(fresh);assert.equal(fs.statSync(fresh).isDirectory(),true);
+ if(process.platform!=='win32')assert.equal(fs.statSync(fresh).mode&0o777,0o700);
+});
+
+test('Windows private directory command preserves path text without PowerShell evaluation',()=>{
+ const output="D:\\Build output\\' 中文 $(not-a-command)",command=windowsNativeOutputCommand(output,'C:\\Windows');
+ assert.equal(command.executable,'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+ assert.deepEqual(command.args.slice(0,3),['-NoProfile','-NonInteractive','-EncodedCommand']);
+ const script=Buffer.from(command.args[3],'base64').toString('utf16le'),encoded=script.match(/FromBase64String\('([A-Za-z0-9+/=]+)'\)/)?.[1];
+ assert.equal(Buffer.from(encoded,'base64').toString('utf8'),output);assert.equal(script.includes('$(not-a-command)'),false);
+ assert.throws(()=>windowsNativeOutputCommand('relative-output'),/absolute_package_paths_required/);
+});
+
+test('Windows fresh native output is private at creation and children inherit only the approved principals',{skip:process.platform!=='win32'},t=>{
+ const parent=fs.mkdtempSync(path.join(os.tmpdir(),'styx-native-private-output-'));t.after(()=>fs.rmSync(parent,{recursive:true,force:true}));
+ const output=path.join(parent,'New output 中文'),b64=value=>Buffer.from(value,'utf8').toString('base64');
+ const ps=script=>execFileSync(windowsNativeOutputCommand(output).executable,['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from("$ErrorActionPreference='Stop';"+script,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true}).trim();
+ // Only this test's new temporary parent is made broadly writable. Production
+ // creation must exclude that inherited ACE without ever rewriting the parent.
+ const before=ps(`$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(parent)}'));$a=[IO.Directory]::GetAccessControl($p);$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'),[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit',[Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow));[IO.Directory]::SetAccessControl($p,$a);[IO.Directory]::GetAccessControl($p).GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)`);
+ createNativeOutputDirectory(output);const child=path.join(output,'child');fs.mkdirSync(child);fs.writeFileSync(path.join(child,'file.txt'),'private inherited child');
+ const result=JSON.parse(ps(`$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(parent)}'));$o=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(output)}'));$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;$allowed=@($sid,'S-1-5-18','S-1-5-32-544');foreach($path in @($o,(Join-Path $o 'child'),(Join-Path $o 'child\\file.txt'))){$a=Get-Acl -LiteralPath $path;if($a.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid){throw 'owner_changed'};if($path -eq $o -and !$a.AreAccessRulesProtected){throw 'root_inherits_parent'};$rules=@($a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]));if($rules.Count -ne 3){throw 'rule_count_changed'};foreach($r in $rules){if($r.IdentityReference.Value -notin $allowed -or $r.AccessControlType -ne 'Allow' -or $r.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl){throw 'unexpected_access'}}};@{parentDacl=[IO.Directory]::GetAccessControl($p).GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access);privateInheritance=$true}|ConvertTo-Json -Compress`));
+ assert.equal(result.privateInheritance,true);assert.equal(result.parentDacl,before);
+ // A competing creator wins the name; the exclusive native API refuses it.
+ assert.throws(()=>createNativeOutputDirectory(output),/native_private_output_creation_failed/);assert.equal(ps(`$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(parent)}'));[IO.Directory]::GetAccessControl($p).GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)`),before);
+});
 
 // Package compatibility only; the fixture PE is never executed or installed.
 test('native staging preserves declared migrated readers and refuses unknown versions',t=>{

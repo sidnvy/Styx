@@ -113,6 +113,11 @@
   ],
   "source_guard_limit": "lexical defense in depth; imports/aliases/macros/FFI still need review; not a Rust sandbox or a proof of no IO",
   "known_ignored": {
+    "app::startup::tests::retained_history_existing_profile_read_only": {
+      "kind": "owner_authorized_existing_mac_profile_observation",
+      "input": "STYX_TEST_RETAINED_HISTORY_PROFILE existing owner-authorized macOS profile; no setup, recovery or role launch",
+      "required_for": "physical retired-root and closed C07 history observation using existing locks; not GUI startup, pairing or recovery acceptance"
+    },
     "app::startup::tests::retired_dual_history_archives_before_new_root_cold_open": {
       "kind": "explicit_signed_runtime_history_retirement_reference",
       "input": "STYX_HISTORY_C29 and STYX_HISTORY_C30 signed payload directories; disposable private roots and loopback TLS only",

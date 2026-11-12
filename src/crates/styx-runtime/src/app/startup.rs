@@ -2,7 +2,10 @@
 //! original coordinators; a historical observation never resumes a transaction.
 use super::runtime_update::{OriginalInput, SelectionPin, root_digest, same_file};
 use super::*;
-use crate::store::{management::ManagementInventory, native_host_snapshot::NativeHostSnapshot};
+use crate::store::{
+    ExecutionLeaseGuard, RawFile, management::ManagementInventory,
+    native_host_snapshot::NativeHostSnapshot,
+};
 use std::collections::BTreeSet;
 use styx_contracts::{identity::TransactionId, management::DurableStage};
 
@@ -18,11 +21,14 @@ fn committed(inventory: &ManagementInventory, id: &TransactionId, sequence: u64)
         })
 }
 fn names(path: &Path) -> Result<BTreeSet<std::ffi::OsString>, AppError> {
+    bounded_names(path, 64)
+}
+fn bounded_names(path: &Path, limit: usize) -> Result<BTreeSet<std::ffi::OsString>, AppError> {
     let mut names = BTreeSet::new();
     for entry in
         std::fs::read_dir(path).map_err(|_| AppError("app_runtime_original_input_invalid"))?
     {
-        if names.len() >= 64 {
+        if names.len() >= limit {
             return Err(AppError("app_runtime_input_budget"));
         }
         names.insert(
@@ -33,8 +39,141 @@ fn names(path: &Path) -> Result<BTreeSet<std::ffi::OsString>, AppError> {
     }
     Ok(names)
 }
+
+/// Historical DATA for another physical root. This never resumes its updates
+/// or changes its desired state. Its existing execution lease remains held
+/// until every original input and C07 file has been revalidated.
+struct RetiredHistoryRoot {
+    path: PathBuf,
+    root: PrivateRoot,
+    lease: ExecutionLeaseGuard,
+    pins: Vec<RawFile>,
+    journal: PrivateRoot,
+    journal_names: BTreeSet<std::ffi::OsString>,
+    journal_pins: Vec<RawFile>,
+    inventory: ManagementInventory,
+}
+impl RetiredHistoryRoot {
+    fn open(path: PathBuf) -> Result<Self, AppError> {
+        const JOURNAL: &str = ".styx-management-journal-v1";
+        const MAX: usize = 1024 * 1024;
+        let changed = |_| AppError("app_runtime_original_input_changed");
+        let root = PrivateRoot::open(&path).map_err(changed)?;
+        let lease = root.try_existing_execution_lease().map_err(changed)?;
+        let pins = [
+            ".styx-native-root-v1.json",
+            "state.json",
+            "deployment.json",
+            ".styx-configuration-writer.lock",
+        ]
+        .into_iter()
+        .map(|name| root.read_raw(name, MAX).map_err(changed))
+        .collect::<Result<Vec<_>, _>>()?;
+        let journal_path = path.join(JOURNAL);
+        let journal = PrivateRoot::open(&journal_path).map_err(changed)?;
+        let budget = crate::store::enrollment::JournalBudget::default();
+        let journal_names = bounded_names(&journal_path, budget.max_files)?;
+        let mut journal_pins = Vec::new();
+        let mut total = 0usize;
+        for name in &journal_names {
+            let pin = journal.read_raw(Path::new(name), MAX).map_err(changed)?;
+            total = total
+                .checked_add(pin.bytes().len())
+                .filter(|total| *total <= budget.max_bytes)
+                .ok_or(AppError("app_runtime_input_budget"))?;
+            journal_pins.push(pin);
+        }
+        // The original native parser proves the complete canonical C07 chain;
+        // names or a retired suffix alone are never completion evidence.
+        let observed = crate::store::native_observation::read(&path)
+            .map_err(|_| AppError("app_runtime_original_input_changed"))?;
+        if !observed.inventory.orphans.is_empty()
+            || observed.inventory.transactions.iter().any(|t| {
+                t.phase_receipts
+                    .last()
+                    .is_none_or(|r| r.stage != DurableStage::Committed)
+            })
+        {
+            return Err(AppError("app_runtime_original_input_changed"));
+        }
+        let held = Self {
+            path,
+            root,
+            lease,
+            pins,
+            journal,
+            journal_names,
+            journal_pins,
+            inventory: observed.inventory,
+        };
+        held.validate()?;
+        Ok(held)
+    }
+    fn validate(&self) -> Result<(), AppError> {
+        let changed = |_| AppError("app_runtime_original_input_changed");
+        let path = self.path.join(".styx-management-journal-v1");
+        if PrivateRoot::open(&self.path).map_err(changed)?.identity() != self.root.identity()
+            || PrivateRoot::open(&path).map_err(changed)?.identity() != self.journal.identity()
+            || bounded_names(
+                &path,
+                crate::store::enrollment::JournalBudget::default().max_files,
+            )? != self.journal_names
+        {
+            return Err(AppError("app_runtime_original_input_changed"));
+        }
+        self.lease.validate().map_err(changed)?;
+        for (root, pins) in [
+            (&self.root, &self.pins),
+            (&self.journal, &self.journal_pins),
+        ] {
+            for pin in pins {
+                let after = root
+                    .read_raw(pin.relative_path(), 1024 * 1024)
+                    .map_err(changed)?;
+                if after.observation() != pin.observation() || after.bytes() != pin.bytes() {
+                    return Err(AppError("app_runtime_original_input_changed"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+struct RetiredHistoryPair {
+    host: RetiredHistoryRoot,
+    gateway: RetiredHistoryRoot,
+}
+impl RetiredHistoryPair {
+    fn matches(&self, input: &OriginalInput) -> Result<bool, AppError> {
+        Ok(input.roles.len() == 2
+            && root_digest(&self.host.root)? == input.roles[0].root_sha256
+            && root_digest(&self.gateway.root)? == input.roles[1].root_sha256)
+    }
+    fn prove(&self, input: &OriginalInput) -> Result<(), AppError> {
+        if !self.matches(input)?
+            || input
+                .roles
+                .iter()
+                .zip([&self.host, &self.gateway])
+                .any(|(role, root)| {
+                    !committed(
+                        &root.inventory,
+                        &role.select_transaction,
+                        role.select_sequence,
+                    )
+                })
+        {
+            return Err(AppError("app_runtime_original_input_changed"));
+        }
+        Ok(())
+    }
+}
+
 impl HostApp {
-    fn completed_runtime_history(&self, profile: &NativeHostSnapshot) -> Result<bool, AppError> {
+    pub(super) fn completed_runtime_history(
+        &self,
+        profile: &NativeHostSnapshot,
+    ) -> Result<bool, AppError> {
         if self
             .scope
             .container
@@ -60,6 +199,8 @@ impl HostApp {
         )?;
         let mut inputs = Vec::new();
         let mut selections = Vec::new();
+        let mut retired: Vec<RetiredHistoryPair> = Vec::new();
+        let mut retired_namespace = None;
         for name in &original_names {
             let name = name
                 .to_str()
@@ -74,13 +215,7 @@ impl HostApp {
             let input: OriginalInput = serde_json::from_slice(raw.bytes())
                 .map_err(|_| AppError("app_runtime_original_input_invalid"))?;
             input.validate_shape(&id)?;
-            // Split local Gateway updates retain the old, original recovery
-            // path. This current-state shortcut handles the single-Host App.
-            if input.roles.len() != 1 {
-                return Ok(false);
-            }
-            let role = &input.roles[0];
-            if input.container_sha256 != container || role.root_sha256 != root || role.gateway {
+            if input.container_sha256 != container {
                 return Err(AppError("app_runtime_original_input_changed"));
             }
             let selection = SelectionPin::open(
@@ -97,8 +232,81 @@ impl HostApp {
             {
                 return Err(AppError("app_runtime_original_input_changed"));
             }
-            if !committed(&inventory, &role.select_transaction, role.select_sequence) {
-                return Ok(false);
+            if input.roles.len() == 1 {
+                let role = &input.roles[0];
+                if role.root_sha256 != root || role.gateway {
+                    return Err(AppError("app_runtime_original_input_changed"));
+                }
+                if !committed(&inventory, &role.select_transaction, role.select_sequence) {
+                    return Ok(false);
+                }
+            } else {
+                // Live split composition keeps its original recovery path.
+                if self.scope.gateway_sibling()?.root.get().is_some() {
+                    return Ok(false);
+                }
+                if input.roles[0].root_sha256 == root {
+                    return Err(AppError("app_runtime_original_input_changed"));
+                }
+                if !retired
+                    .iter()
+                    .any(|pair| pair.matches(&input).unwrap_or(false))
+                {
+                    let parent = &self.scope.container.parent_path;
+                    let namespace = names(parent)?;
+                    let host_name = self
+                        .scope
+                        .state_dir
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .ok_or(AppError("app_runtime_original_input_changed"))?;
+                    let prefix = format!("{host_name}.retired-");
+                    let mut found = None;
+                    for name in &namespace {
+                        let Some(suffix) = name.to_str().and_then(|s| s.strip_prefix(&prefix))
+                        else {
+                            continue;
+                        };
+                        if suffix.is_empty()
+                            || !namespace.contains(std::ffi::OsStr::new(&format!(
+                                "gateway.retired-{suffix}"
+                            )))
+                        {
+                            continue;
+                        }
+                        let host_path = parent.join(name);
+                        let gateway_path = parent.join(format!("gateway.retired-{suffix}"));
+                        let Ok(host) = PrivateRoot::open(&host_path) else {
+                            continue;
+                        };
+                        let Ok(gateway) = PrivateRoot::open(&gateway_path) else {
+                            continue;
+                        };
+                        if root_digest(&host)? != input.roles[0].root_sha256
+                            || root_digest(&gateway)? != input.roles[1].root_sha256
+                        {
+                            continue;
+                        }
+                        found = Some(RetiredHistoryPair {
+                            host: RetiredHistoryRoot::open(host_path)?,
+                            gateway: RetiredHistoryRoot::open(gateway_path)?,
+                        });
+                        break;
+                    }
+                    retired.push(found.ok_or(AppError("app_runtime_original_input_changed"))?);
+                    if retired_namespace
+                        .as_ref()
+                        .is_some_and(|before| before != &namespace)
+                    {
+                        return Err(AppError("app_runtime_original_input_changed"));
+                    }
+                    retired_namespace = Some(namespace);
+                }
+                retired
+                    .iter()
+                    .find(|pair| pair.matches(&input).unwrap_or(false))
+                    .ok_or(AppError("app_runtime_original_input_changed"))?
+                    .prove(&input)?;
             }
             inputs.push(raw);
             selections.push(selection);
@@ -118,6 +326,15 @@ impl HostApp {
         }
         for selection in &selections {
             selection.validate()?;
+        }
+        for pair in &retired {
+            pair.host.validate()?;
+            pair.gateway.validate()?;
+        }
+        if retired_namespace.is_some_and(|before| {
+            names(&self.scope.container.parent_path).ok().as_ref() != Some(&before)
+        }) {
+            return Err(AppError("app_runtime_original_input_changed"));
         }
         profile
             .revalidate()
@@ -224,6 +441,50 @@ mod tests {
                 .expect("private test child"),
         );
         base.join(name)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires STYX_TEST_RETAINED_HISTORY_PROFILE; existing-only read-only native profile and closed retired history"]
+    fn retained_history_existing_profile_read_only() {
+        let path = PathBuf::from(std::env::var("STYX_TEST_RETAINED_HISTORY_PROFILE").unwrap());
+        assert!(path.is_absolute() && path.is_dir());
+        let scope = Arc::new(HostScope::open(&path).unwrap());
+        let profile = NativeHostSnapshot::observe_for_app(&path, scope.clone()).unwrap();
+        let (status, observed) = watch::channel(ConnectionStatus::stopped());
+        // Construct only the observer. HostApp::open_native would also inspect
+        // enrollment/fallback coordinators, which this reference must not run.
+        let app = HostApp {
+            scope,
+            status,
+            observed,
+            deployment_file: PathBuf::new(),
+            retire_failure: None,
+            runtime_update: None,
+            service: None,
+            local_gateway: None,
+            resume_local_available: false,
+            configuration: None,
+            runtime_selection_file: None,
+            inspected_join: None,
+            enrollment: None,
+            native_computer_requested: None,
+            native_runtime: None,
+            input_writer: None,
+            running: None,
+            cleanup: None,
+            retained: None,
+            join_retry: None,
+            unknown: false,
+            quit_ticket: None,
+            login: login::Login::default(),
+            maintenance: None,
+            startup_diagnostic: None,
+            startup_profile: None,
+        };
+        assert!(app.completed_runtime_history(&profile).unwrap());
+        profile.revalidate().unwrap();
+        app.scope.validate().unwrap();
     }
 
     // Real signed payload and original dual-role update/retirement. The new

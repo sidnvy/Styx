@@ -24,11 +24,19 @@ test('explicit compiled local owner cannot redirect production, output or cache'
   }
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'styx-cache-boundary-'));
   try{
-    assert.throws(()=>validateMacModuleCache({moduleCachePath:dir}),/fresh_swift_module_cache_required/);
+    if(typeof process.getuid==='function'){
+      const warm=path.join(dir,'warm-module.pcm');fs.writeFileSync(warm,'retained compiler cache');
+      validateMacModuleCache({moduleCachePath:dir});
+      assert.equal(fs.readFileSync(warm,'utf8'),'retained compiler cache');
+      assert.throws(()=>validateMacModuleCache({moduleCachePath:warm}),/private_swift_module_cache_required/);
+      fs.chmodSync(dir,0o777);
+      assert.throws(()=>validateMacModuleCache({moduleCachePath:dir}),/private_swift_module_cache_required/);
+      fs.chmodSync(dir,0o700);
+    }
     assert.throws(()=>validateMacModuleCache({...options,moduleCachePath:dir}),/fixed_local_development_cache_required/);
     if(process.platform==='darwin'&&fs.existsSync(options.moduleCachePath)){
       validateMacModuleCache(options);
-      assert.throws(()=>validateMacModuleCache({...options,localDevelopment:false}),/fresh_swift_module_cache_required/);
+      validateMacModuleCache({...options,localDevelopment:false});
     }
   }finally{fs.rmSync(dir,{recursive:true});}
 });

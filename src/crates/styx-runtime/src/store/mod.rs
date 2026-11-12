@@ -768,6 +768,14 @@ impl PrivateRoot {
             self.inner.try_lock(LockResource::Execution)?,
         ))
     }
+    /// Observe an inactive, existing native execution namespace without
+    /// creating a missing lock file. Retain the guard while using the proof.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    pub(crate) fn try_existing_execution_lease(&self) -> Result<ExecutionLeaseGuard> {
+        Ok(ExecutionLeaseGuard(
+            self.inner.try_existing_lock(LockResource::Execution)?,
+        ))
+    }
 }
 
 #[cfg(any(

@@ -9,6 +9,47 @@ const assert=(ok,code)=>{if(!ok)throw Error(code)};
 const rel=name=>typeof name==='string'&&name.length<512&&!name.includes('\\')&&!name.includes(':')&&!path.isAbsolute(name)&&name.split('/').every(x=>x&&x!=='.'&&x!=='..');
 function regular(file,directory=false){const st=fs.lstatSync(file);assert(!st.isSymbolicLink()&&(directory?st.isDirectory():st.isFile()),'redirected_package_input');const actual=fs.realpathSync(file),expected=path.resolve(file);assert(process.platform==='win32'?actual.toLowerCase()===expected.toLowerCase():actual===expected,'redirected_package_input');return st;}
 function copyExact(source,destination){const st=fs.lstatSync(source);assert(!st.isSymbolicLink(),'redirected_package_input');if(st.isDirectory()){fs.mkdirSync(destination,{recursive:true});for(const name of fs.readdirSync(source))copyExact(path.join(source,name),path.join(destination,name));}else{regular(source);fs.mkdirSync(path.dirname(destination),{recursive:true});fs.copyFileSync(source,destination,fs.constants.COPYFILE_EXCL);}}
+// Node's mode argument does not set a Windows DACL. Create the fresh staging
+// root with the same current-user/SYSTEM/Administrators policy as InstallGate;
+// its files and children then inherit only these rules. Existing paths and
+// parent ACLs are never adopted or changed, including a concurrent creator.
+export function windowsNativeOutputCommand(output,windowsDirectory=process.env.WINDIR??'C:\\Windows'){
+ assert(typeof output==='string'&&path.win32.isAbsolute(output)&&!output.includes('\0'),'absolute_package_paths_required');
+ const encodedPath=Buffer.from(output,'utf8').toString('base64');
+ const script=`$ErrorActionPreference='Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
+public static class StyxNativePackageDirectory {
+ [StructLayout(LayoutKind.Sequential)] struct Attributes { public int Length; public IntPtr Descriptor; public int InheritHandle; }
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateDirectoryW(string path,ref Attributes security);
+ public static void Create(string path) {
+  var user=WindowsIdentity.GetCurrent().User;
+  var acl=new DirectorySecurity();acl.SetOwner(user);acl.SetAccessRuleProtection(true,false);
+  foreach(var sid in new[]{user,new SecurityIdentifier("S-1-5-18"),new SecurityIdentifier("S-1-5-32-544")})
+   acl.AddAccessRule(new FileSystemAccessRule(sid,FileSystemRights.FullControl,InheritanceFlags.ContainerInherit|InheritanceFlags.ObjectInherit,PropagationFlags.None,AccessControlType.Allow));
+  byte[] descriptor=acl.GetSecurityDescriptorBinaryForm();IntPtr memory=Marshal.AllocHGlobal(descriptor.Length);
+  try {
+   Marshal.Copy(descriptor,0,memory,descriptor.Length);
+   var security=new Attributes{Length=Marshal.SizeOf(typeof(Attributes)),Descriptor=memory};
+   if(!CreateDirectoryW(path,ref security))throw new IOException("native_package_directory_create_error:"+Marshal.GetLastWin32Error());
+  } finally { Marshal.FreeHGlobal(memory); }
+ }
+}
+'@
+[StyxNativePackageDirectory]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}')))
+`;
+ return {executable:path.win32.join(windowsDirectory,'System32','WindowsPowerShell','v1.0','powershell.exe'),args:['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')]};
+}
+export function createNativeOutputDirectory(output){
+ if(process.platform!=='win32'){fs.mkdirSync(output,{mode:0o700});return;}
+ const command=windowsNativeOutputCommand(output);
+ try{execFileSync(command.executable,command.args,{stdio:'pipe',windowsHide:true});}
+ catch{throw Error('native_private_output_creation_failed');}
+}
 export function windowsExecutableArchitecture(file){regular(file);const fd=fs.openSync(file,'r');try{const header=Buffer.alloc(64);assert(fs.readSync(fd,header,0,64,0)===64&&header.toString('ascii',0,2)==='MZ','windows_pe_executable_required');const offset=header.readUInt32LE(0x3c),pe=Buffer.alloc(6);assert(offset>=64&&offset<=16*1024*1024&&fs.readSync(fd,pe,0,6,offset)===6&&pe.subarray(0,4).equals(Buffer.from([80,69,0,0])),'windows_pe_executable_required');const machine=pe.readUInt16LE(4);assert([0x8664,0xaa64].includes(machine),'supported_windows_machine_required');return machine===0x8664?'x64':'arm64';}finally{fs.closeSync(fd);}}
 function inventory(root,relative='',digest=hash,limits){return fs.readdirSync(path.join(root,relative),{withFileTypes:true}).flatMap(entry=>{const name=relative?relative+'/'+entry.name:entry.name;assert(!entry.isSymbolicLink(),'redirected_output_member');if(limits)assert(++limits.nodes<=8192&&name.split('/').length<=64,'native_tree_budget');if(entry.isDirectory())return inventory(root,name,digest,limits);assert(entry.isFile()&&rel(name),'nonregular_output_member');const file=path.join(root,...name.split('/'));return [{path:name,size:fs.statSync(file).size,sha256:digest(file)}];}).sort((a,b)=>a.path.localeCompare(b.path));}
 // Native staging verifies exact signed bytes and complete file closure. The
@@ -58,7 +99,7 @@ function buildNativeWindowsApp({sourceRoot,sourceFiles,sourceRevision,sourceArch
   assert(sourceInput.members['src/host/build-windows-app.mjs']===hash(fileURLToPath(import.meta.url)),'native_app_builder_not_in_frozen_archive');
   sourceProvenance={status:'SAME_REVISION_TRACKED_ARCHIVE_BOUND',sourceRevision,sourceArchiveSha256:expectedSourceArchiveSha256,sourceManifestSha256:createHash('sha256').update(sourceRaw).digest('hex')};
  }
- fs.mkdirSync(output,{mode:0o700});let complete=false;
+ createNativeOutputDirectory(output);let complete=false;
  try{
   fs.mkdirSync(path.join(output,'native'));for(const name of [...original.manifest.files.map(x=>x.path),'manifest.json','manifest.sig'])copyExact(path.join(nativeRuntime.payloadDir,...name.split('/')),path.join(output,'native',...name.split('/')));copyExact(nativeRuntime.publisherFile,path.join(output,'native-publisher.pem'));
   const copied=verifyNativeWindowsRuntimeInput({payloadDir:path.join(output,'native'),publisherFile:path.join(output,'native-publisher.pem'),expectedPublisher:nativeRuntime.expectedPublisher},arch);assert(copied.manifestSha256===original.manifestSha256&&copied.cliSha256===original.cliSha256,'native_copy_changed');

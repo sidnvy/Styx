@@ -8,7 +8,74 @@
 
 ## 当前开发检查点（2026-11-12）
 
-### 最新：移除多余运行期整包校验；保持原安装位置（20:03 上海时间）
+### 最新：Windows/Linux收口；仅继续Mac正式入口（21:30 上海时间）
+
+用户再次要求避免验证实现偏离主线。已停止扩展新的Linux双角色验收夹具，保留实际失败原因，
+不重跑Windows/Linux已通过矩阵；只完成Mac真实配置问题及正式App首设/恢复。
+
+- **Windows C32原地安装、首次配对、三能力和正常恢复全部通过。** 安装器SHA
+  `83ffc10b8cf6f81733c93e6a26acac6e0373ccf44f2cd453d2a65038a888b5a0`；原productId、D盘安装根及C31Host scope不变。
+  GUI origin/CA匹配，新的单次请求 `76da316b1fb04b67b649e39e9fc0e3e6` 的四字段与服务器独立匹配后批准；
+  device `styx-617c9ac5cbf57319ba54b753` 实际Connected。账号独立截图先读随机视觉标记，再核oracle；
+  Computer一次设值/一次点击、本地变化1/点击1；Browser目标GET1；Exec session85实际exit0/新文件精确匹配。
+  首次显式shell override被INVALID_ARGUMENT/uncertain=false拒绝，未派发；使用Host注册默认shell的新调用才实际执行。
+  效果后原App/Core/worker共7进程正常exit0；新App2108/Core12080同身份重连，host-ready逐字节不变；
+  恢复后账号session86实际exit0，本地33字节新文件SHA `9563a8738cc2ca590275317dad7fe6d503566054d04937b5a9e88c92f5a0b588`。
+- **Linux C32同profile更新、正常退出/恢复和独立新Exec通过。** 详见下一检查点，不再重复三能力。
+- Windows新打包目录继承Developer写权限的独立producer缺陷已修源码：Windows原子新建私有产物根；
+  已有产物通过原Gate新建私有parent后仅复制数据，2168成员SHA保持，未重编Core/App或改旧目录ACL。
+  新producer修复的Windows原生7项测试全部通过；Mac构建器同时允许复用原Swift cache。
+- **Mac C32已正常退出旧dev App并在原位置安装正式App，但尚未完成正式启动/首设。**
+  新App/Core及b9bc签名Runtime精确匹配；实际默认profile仍选旧1259 Runtime，启动返回
+  `app_runtime_input_changed`。五条旧双角色更新历史精确属于仍保留的11月9日retired roots，
+  被误送入当前profile的恢复协调器；并非配置字段不兼容，也没有证明恢复或重连。
+  两旧root的原C07 reader证明14笔链完整、10条select精确Committed；旧desired Running保留为历史快照。
+- 最小修正只把精确物理归属、完整C07闭合且无旧执行持有者的历史视为数据，不重放旧事务，
+  普通当前/未完成历史仍按原规则处理；同一证明用于正常角色retire。没有整包扫描或新增产品开关。
+  Root增量check/6项快速回归、Mac原cache/jobs10增量check通过；真实默认profile纯观察1项通过（0.69秒），
+  343个受保护输入的inode/时间/内容前后完全不变。这不是GUI首设成绩；下一步只做必要的新Mac Core/App原位更新及实际入口。
+  新Linux大夹具自身不一致及并行引用签名源的native_release_busy失败原样保留，未算PASS；新增大夹具已撤，
+  原archive reference恢复原样，未以此新增验收矩阵。
+
+Windows原始证据索引 `startup-check-removal-20261112/windows-c32-install-join-summary.json`；
+恢复效果 `windows-recovery-effect-c32-01.json`；独立截图 `windows-account-post-effect.png`。
+Mac证据在同目录 `macos-native-results/retired-existing-profile-test01.json` 等。
+**仅Mac正式默认入口、首设及恢复尚未完成；Stable NO-GO。**
+
+### 此前：原地更新与独立效果并行验收（20:37 上海时间）
+
+用户要求直接并行执行，复用已通过且未受影响的证据，不要求本人逐项手动操作。
+Root使用测试套件、原生构建/安装脚本、已授权SSH GUI自动化及独立验收账号工具推进。
+
+- 修正已集成在 `de3df9246dedb9d26debda4318f28f8df7e78b14`；三平台正式Core及签名Runtime完成。
+  workspace质量检查53项通过：45项原输入/日志SHA匹配复用，8项TLS测试因旧测试证书过期，
+  仅更换测试PKI并重跑受影响项通过；生产CA、配对和签名身份未改。
+- Linux原profile已通过正式seq2停止意图、seq3 Runtime选择、seq4运行意图更新到linux.32；
+  新Host PID2808747/birth40812449实际connected，原device/profile及identity/credential/CA/seed字节不变。
+  独立账号同environment `styx-1eb7f66a3e5c793eefe45b72` 新Exec session83实际exit0，
+  本地独立核对47字节新效果文件SHA `d82488c16863e69d1b607b7cbf86c6a8a62dbd190f549c6661d044de385fc3d3`。
+  旧C31进程stop实际exit4、远端transport drain历史汇总未确认，原失败收据完整保留。
+  随后针对新.32进程独立执行一次正常stop实际exit0，再以原profile/answers重开，
+  新Host PID2817126/birth40867823同身份connected；账号新Exec session84实际exit0，
+  本地独立核52字节新效果SHA `12fd41143cb4d8c60e90fa5a02dccde2931a8aa5794eeb94d81c57ab859831ff`。
+  **本版正常退出/恢复已通过；旧C31 exit4历史不被改写**，没有重放旧stop或增加profile。
+- Windows正式Core使用原target/cache/jobs8，producer exit0，SHA `6027aaa1564ab29022c353611087a6ab58e38148f913ea7808596a6c7fce26b6`；
+  新签名Runtime manifest `e3d06cd13db4072789ece1f5e4675e3387a806682472097da411a9dea76f83b7`。
+  正在原项目组装相同productId/root/scope的App/Inno，**尚未证明安装、配对或三能力真实效果**。
+- Mac正式Core、同原证书签封与签名Runtime完成，manifest `b9bc536e74a9668127adb46acfc4fa6c5f99d8ada91fff4ffe805e356a115d6f`。
+  正式App构建器原先强制新Swift cache；现最小修正为复用现有owner缓存、icon renderer同缓存，
+  受影响Node检查22通过/1原生平台skip。未变Swift/Core继续绑定de3，App另记实际builder SHA，不重复编译Rust。
+  当前已运行App仍使用Developer devprofile；正式默认Library中存在旧Host历史，不能冒称空首设或正式恢复通过。
+- Root在真实账号Chrome已安装详情核实验收插件、黑色圆形波纹Logo、Write21/Read14工具及三能力清单；
+  Refresh tools仅点击一次并回到可用状态，没有观察到明确成功toast，不据此编造刷新回执。
+  生产Tunnel/icon-check插件未改。账号工具已确认Linux及Mac环境库存；Windows仍未出现。
+
+收据仍在同一 `native-checks/startup-check-removal-20261112/`：
+`quality-tls-retry/receipt.json`、`linux-existing-host-update-result.json`、
+`linux-independent-fresh-exec-effect.json`、`account-plugin-detail-and-linux-exec.json`。
+**Windows原地App更新/首次配对/三能力/正常恢复，Mac正式默认入口及恢复仍待完成；Stable NO-GO。**
+
+### 此前：移除多余运行期整包校验；保持原安装位置（20:03 上海时间）
 
 用户明确否定未经要求的启动前全量校验和安装祖先ACL限制，要求Windows/Linux/macOS一起移除，
 直接使用现有项目、依赖缓存、安装位置和配置原地更新，不再通过换目录重装或新建验收scope迁就实现。
@@ -738,7 +805,9 @@ P5只在参考闭合后生产一轮必要候选；owner准备不足、邀请过�
 
 ## 7. 最终验收矩阵与报告
 
-下表“待验”是当前真实状态；即使已有历史成绩，也不填成最终候选PASS。
+下表保留C25阶段的历史待验状态，**不是2026-11-12重新派发测试的清单**。
+当前缺口以上部最新开发检查点及已绑定的原始收据为准；复用未受影响的通过证据，
+仅补当前修改影响的启动/恢复与尚未完成的正式入口，不因本表旧“待验”重跑全部矩阵。
 
 | 必需格 | PilotMac | NAB5 | Linux最新候选 |
 | --- | --- | --- | --- |
