@@ -5,6 +5,21 @@ import SwiftUI
 // Called by the signed executable's existing --self-test path. These are
 // protocol/decoding checks, not native permission or account acceptance claims.
 func productCoreSelfTest() throws {
+    // These assertions run in both production and explicitly compiled local
+    // mode. Arbitrary CLI/env values cannot select another package or profile.
+    let expectedPackage = ProductNativeLaunchScope.appPath
+    precondition(ProductNativeLaunchScope.acceptsPackagePath(expectedPackage, identifier: "app.styx.host"))
+    for invalid in [expectedPackage + "/", expectedPackage + "/../Styx.app", "/tmp/Styx.app", "relative/Styx.app"] {
+        precondition(!ProductNativeLaunchScope.acceptsPackagePath(invalid, identifier: "app.styx.host"))
+    }
+    precondition(!ProductNativeLaunchScope.acceptsPackagePath(expectedPackage, identifier: "other.app"))
+    precondition(expectedPackage == "/Applications/Styx.app")
+    precondition(!ProductNativeLaunchScope.acceptsPackagePath("/Users/it-bootstrap/Developer/Styx/artifacts/native-development/macos/Styx.app", identifier: "app.styx.host"))
+    #if STYX_LOCAL_DEVELOPMENT
+    precondition(ProductNativeLaunchScope.support.path == ProductNativeLaunchScope.developmentSupport)
+    #else
+    precondition(ProductNativeLaunchScope.support.path == NSHomeDirectory() + "/Library/Application Support/Styx")
+    #endif
     func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw NSError(domain: "Styx.ProductSelfTest", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
     }

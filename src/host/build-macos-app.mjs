@@ -11,6 +11,29 @@ import {normalizeMacPlatformUpdate,stageMacSparkle,sparkleDistributionSigningPla
 import {MAC_CORE_IDENTIFIER,MAC_CORE_RELATIVE,MAC_CORE_EXECUTABLE} from './macos/core-helper.mjs';
 
 export const MAC_BUNDLE_ID='app.styx.host';
+// One explicitly compiled local owner; never a caller-selected profile or path.
+export const MAC_LOCAL_DEVELOPMENT=Object.freeze({
+  root:'/Users/it-bootstrap/Developer/Styx/artifacts/native-development/macos',
+  app:'/Users/it-bootstrap/Developer/Styx/artifacts/native-development/macos/Styx.app',
+  runApp:'/Applications/Styx.app',
+  cache:'/Users/it-bootstrap/Developer/Artifacts/Styx/20261108-closed-rejection-check/module-cache',
+  physicalCache:'/Users/it-bootstrap/Developer/Styx/cache/swift-module-cache'
+});
+export function macLocalDevelopmentArguments({localDevelopment=false,app,moduleCachePath}={}){
+  assert(typeof localDevelopment==='boolean','explicit_local_development_boolean_required');
+  if(!localDevelopment)return [];
+  assert(app===MAC_LOCAL_DEVELOPMENT.app,'fixed_local_development_app_required');
+  assert(moduleCachePath===MAC_LOCAL_DEVELOPMENT.cache,'fixed_local_development_cache_required');
+  return ['-D','STYX_LOCAL_DEVELOPMENT'];
+}
+export function validateMacModuleCache({localDevelopment=false,app,moduleCachePath}={}){
+  macLocalDevelopmentArguments({localDevelopment,app,moduleCachePath});
+  if(localDevelopment){
+    assert(fs.realpathSync(moduleCachePath)===MAC_LOCAL_DEVELOPMENT.physicalCache&&fs.realpathSync(MAC_LOCAL_DEVELOPMENT.physicalCache)===MAC_LOCAL_DEVELOPMENT.physicalCache,'local_development_cache_alias_changed');
+    const st=fs.statSync(moduleCachePath);
+    assert(st.isDirectory()&&st.uid===process.getuid()&&!(st.mode&0o022),'private_local_development_cache_required');
+  }else if(moduleCachePath!==undefined)assert(!fs.existsSync(moduleCachePath),'fresh_swift_module_cache_required');
+}
 const SOURCE=fileURLToPath(new URL('./macos/Styx.swift',import.meta.url));
 const UPDATER=fileURLToPath(new URL('./macos/StyxUpdater.swift',import.meta.url));
 const GLYPH=fileURLToPath(new URL('./macos/BrandGlyph.swift',import.meta.url));
@@ -190,8 +213,12 @@ export function macSwiftBuildArguments({source,output,arch=process.arch,sdkPath,
     ...(frameworkSearchPath?['-F',frameworkSearchPath,'-framework','Sparkle','-Xlinker','-rpath','-Xlinker','@executable_path/../Frameworks']:[]),
     ...(additionalSources.length?['-D','STYX_PRODUCT_UI']:[]),source,...additionalSources,'-o',output,'-framework','AppKit','-framework','ApplicationServices','-framework','CoreGraphics','-framework','SwiftUI','-framework','WebKit'];
 }
-export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=false,platformUpdate,nativeRuntime=false,identity,teamID,notaryProfile,signingMode='distribution',localSigning,sdkPath,moduleCachePath}={}){
+export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=false,platformUpdate,nativeRuntime=false,identity,teamID,notaryProfile,signingMode='distribution',localSigning,sdkPath,moduleCachePath,localDevelopment=false}={}){
   assert(process.platform==='darwin','native_macos_build_required');
+  const developmentArgs=macLocalDevelopmentArguments({localDevelopment,app,moduleCachePath});
+  if(localDevelopment){
+    assert(nativeRuntime&&!updateRelease&&!platformUpdate&&!identity&&!teamID&&!notaryProfile&&localSigning===undefined,'local_development_native_prepare_only');
+  }
   const build=macAppBuildMetadata({version,buildNumber,updateRelease});
   // Developer ID output needs a distinct build even before a feed is enabled;
   // signing is not a claim that this artifact has been publicly published.
@@ -209,9 +236,9 @@ export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=fal
   const nativeSources=macNativeSwiftSources(),productSources=nativeSources.additionalSources;
   const buildRoot=fs.mkdtempSync(path.join(os.tmpdir(),'styx-native-build-'));
   const entry=path.join(buildRoot,'main.swift');fs.copyFileSync(nativeSources.source,entry);
-  const swiftArgs=macSwiftBuildArguments({source:entry,additionalSources:productSources,output:path.join(app,'Contents/MacOS/Styx'),sdkPath,moduleCachePath,...(updater?{frameworkSearchPath:path.join(app,'Contents/Frameworks')}: {})});
+  const swiftArgs=[...macSwiftBuildArguments({source:entry,additionalSources:productSources,output:path.join(app,'Contents/MacOS/Styx'),sdkPath,moduleCachePath,...(updater?{frameworkSearchPath:path.join(app,'Contents/Frameworks')}: {})}),...developmentArgs];
   if(sdkPath!==undefined)assert(fs.statSync(sdkPath).isDirectory()&&fs.statSync(path.join(sdkPath,'SDKSettings.json')).isFile(),'macos_sdk_directory_required');
-  if(moduleCachePath!==undefined)assert(!fs.existsSync(moduleCachePath),'fresh_swift_module_cache_required');
+  validateMacModuleCache({localDevelopment,app,moduleCachePath});
   const stat=fs.lstatSync(cuaBinary);
   assert(stat.isFile()&&!stat.isSymbolicLink(),'regular_cua_binary_required');
   const observed=execFileSync(cuaBinary,['--version'],{encoding:'utf8',timeout:10000}).trim();
@@ -224,7 +251,7 @@ export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=fal
   fs.mkdirSync(path.dirname(app),{recursive:true});
   fs.mkdirSync(app);
   try{
-    if(moduleCachePath!==undefined)fs.mkdirSync(moduleCachePath,{mode:0o700});
+    if(moduleCachePath!==undefined&&!localDevelopment)fs.mkdirSync(moduleCachePath,{mode:0o700});
     const notices=path.join(app,'Contents/Resources/licenses');
     fs.mkdirSync(notices,{recursive:true});
     if(localSigning!==undefined){
@@ -241,7 +268,7 @@ export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=fal
     const iconEntry=path.join(iconSource,'main.swift'),iconBinary=path.join(iconSource,'render-icons');
     fs.copyFileSync(ICON_RENDERER,iconEntry);
     execFileSync('/usr/bin/xcrun',macSwiftBuildArguments({source:iconEntry,additionalSources:[GLYPH],output:iconBinary,sdkPath,
-      ...(sdkPath?{moduleCachePath:path.join(buildRoot,'icon-module-cache')}:{})}),{stdio:'inherit',timeout:180000});
+      ...(localDevelopment?{moduleCachePath}:sdkPath?{moduleCachePath:path.join(buildRoot,'icon-module-cache')}:{})}),{stdio:'inherit',timeout:180000});
     execFileSync(iconBinary,[path.join(BRAND,'styx-icon-light-source.jpg'),brand,iconset],{stdio:'pipe',timeout:30000});
     const pluginIcon=path.join(brand,'styx-plugin-icon.png');
     fs.writeFileSync(pluginIcon,prepareMacPluginIcon(fs.readFileSync(pluginIcon)));
@@ -264,7 +291,7 @@ export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=fal
     return {schema:1,bundle_id:MAC_BUNDLE_ID,version,buildNumber:build.buildNumber,buildNumberSource:build.buildNumberSource,updateRelease:build.updateRelease,arch:process.arch,
       cua_version:observed,cua_input_sha256:inputHash,app,nativeUpdaterMode:nativeRuntime?'native_handoff_blocked_no_legacy_core':'legacy_comparison',
       platformUpdate:sparkle?{frameworkVersion:sparkle.version,archiveSha256:sparkle.archiveSha256,feedUrl:updater.feedUrl,isolatedProbe:updater.isolatedProbe}:null,
-      signing:localSigning!==undefined||identity?'PASS':'NOT RUN',
+      localDevelopment,signing:localSigning!==undefined||identity?'PASS':'NOT RUN',
       signing_detail:localSigning!==undefined?'local_certificate_preview':identity?(signingMode==='local-development'?'apple_development_local_only':'developer_id_verified'):'unsigned_development_bundle',
       signing_mode:localSigning!==undefined?'local_certificate_preview':signingMode,...(localSigning!==undefined?{local_signing:publicMacLocalSigning(localSigning)}:{}),external_distribution:'NOT RUN',
       compiler:{sdk_path:sdkPath??'xcrun_default',module_cache_path:moduleCachePath??'compiler_default',warnings_as_errors:true,target:swiftArgs[swiftArgs.indexOf('-target')+1]},

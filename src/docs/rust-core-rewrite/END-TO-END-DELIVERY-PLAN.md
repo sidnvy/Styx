@@ -6,7 +6,39 @@
 [GUI-CONVERGENCE.md](GUI-CONVERGENCE.md) 保留历史尝试与证据，不能把历史通过当作当前候选通过。
 本文中的计划项不代表已经执行。**交付未完成；Stable NO-GO。**
 
-## 最新检查点（2026-11-12，C30；以下旧检查点为历史）
+## 当前开发检查点（2026-11-12）
+
+以下补充本轮实际变化；后面的 C30 验收矩阵保留，尚未通过的格不因开发检查通过而关闭。
+
+| 出口 | 当前证据 | 下一动作 |
+| --- | --- | --- |
+| 固定项目指导 | 三端 source 同步至 `997ad83`；Mac/Windows 父项目 AGENTS 薄入口与 Skills 发现链接均有 READY 收据 | 按需使用指导，不再每次加载历史或新建项目/聊天 |
+| Windows staging 归拢 | 四祖先限定 ACL 完成；4326 文件复制/哈希一致，新树权限验证通过，正式 C30 reader 实际 exit0；新 Developer staging 指针已启用，旧树保留 | 此项收口，不再审计或复制一次 |
+| Mac 真实开发入口 | 固定运行位置/隔离持久 dev profile 改动已集成；原机 Swift/Node 及 Root Node 合同通过；App 构建/原签实际 exit0（31.172秒），独立严格验签 exit0；旧 App91645 实际退出0，新 App27564/Core27569 到首次设置，startupStatus ok/bootstrap_completed | 当前已进入同 dev profile 正常重开验证，不重建或重签 |
+| Mac 完整 Runtime | 复用已完成的 `5618911` Core 与原 workers，prepare/finalize 实际 exit0；原 publisher manifest 签名及独立验签通过；packet 已送到固定项目 | 供上述真实运行使用，不再重编 Core 或制作 DMG |
+
+Mac 新 dev Gateway 通过实际 GUI createLocal/tunnelSave 各一次，三能力/自动 LAN/系统权限
+已核对；独立验收 MCP 实际列出 `styx-7c7a313ee112506335705652` connected。
+冷账号 Exec 文件30B已独立读回；Browser nonce页面/快照和关闭完成；Computer完整AX树、
+实际PNG、输入/提交成功。无害Sheet66182的单次读取明确not_dispatched/uncertain:false，
+同上下文后续主窗读取成功；旧消费token负控同样明确未派发且原输入保持。
+fixture为29600/66165，真实5小时TTL，不因便利偏好再编译夹具。
+正常Quit后原6个产品进程（含SDK worker30288）均由原观察器记录实际exit0；
+同一App/同一dev profile重开尚待结果与Root新账号读取。独立效果计数/同worker收据随原owner归档。
+开发配置结果不能回填原 C30 同配置 P3 恢复 FAIL。旧 App/配置/keys 保留。
+为满足现有 Runtime 组装器的精确 Git HEAD 要求，使用过一次记录租约的冻结组装工作树；
+无源码修改或编译，签包完成后已清退并保存 HEAD ref，当前集成 checkout/缓存不变。
+Windows 原 App/Core 本轮新鲜核实已不存在、22022 无监听，原退出原因未知；
+当前只有Session0 SSH app-server，无Sid桌面/Explorer/原生Computer Use pipe，产品启动0次。
+Session0的新fixture不算交互GUI READY。用户仅能使用Moonlight，Sunshine已正常重启一次；
+显示捕获仍需验证。仅启用既有微软兼容签名的Virtual Desktop Monitor（Code22→0），
+未改另一未签名虚拟驱动、Intel、配对、安全策略或重启电脑；客户端复测待用户结果。
+Linux原验收前台通过原监督器正常Ctrl-C退出，实际exit4且Tunnel/主进程已消失；
+保留setup_host_cleanup_unconfirmed，不冒称exit0。只读审阅定位本机清理已settled，
+远端drain仍Unknown/Unsupported，具体子类未保留，不能归因于泛化watch_stream_ended。
+上述为开发/平台参考证据；统一最终版本与剩余矩阵仍未闭合，Stable NO-GO。
+
+## C30 验收检查点（2026-11-12；后续旧检查点为历史）
 
 冻结运行时源码为 `dce8d24d599924c88e0f177fbfb92cf07ff7fd58`，证据根为
 `/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/candidate-30`。

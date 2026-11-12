@@ -10,6 +10,47 @@ import {createHash,X509Certificate} from 'node:crypto';
 import {rootCertificates} from 'node:tls';
 import {crc32,normalizePresentation} from '../../plugin/package.mjs';
 import {appInfoPlist,macAppBuildMetadata,macSigningPlan,macDevelopmentSigningPlan,macLocalSigningPlan,normalizeMacLocalSigning,publicMacLocalSigning,verifyMacLocalSigning,buildMacApp,macSwiftBuildArguments,prepareMacPluginIcon,MAC_BUNDLE_ID} from '../build-macos-app.mjs';
+import {MAC_LOCAL_DEVELOPMENT,macLocalDevelopmentArguments,validateMacModuleCache} from '../build-macos-app.mjs';
+import {macLocalDevelopmentConfig,macLocalDevelopmentRunTarget,macLocalDevelopmentInstalledApp} from '../dev-macos.mjs';
+
+test('explicit compiled local owner cannot redirect production, output or cache',()=>{
+  const options={localDevelopment:true,app:MAC_LOCAL_DEVELOPMENT.app,moduleCachePath:MAC_LOCAL_DEVELOPMENT.cache};
+  assert.deepEqual(macLocalDevelopmentArguments(),[]);
+  assert.deepEqual(macLocalDevelopmentArguments({app:options.app,moduleCachePath:options.moduleCachePath}),[]);
+  assert.deepEqual(macLocalDevelopmentArguments(options),['-D','STYX_LOCAL_DEVELOPMENT']);
+  for(const change of [{localDevelopment:'true'},{app:'/Applications/Styx.app'},{app:options.app+'/'},{app:options.app+'/../Styx.app'},
+    {moduleCachePath:MAC_LOCAL_DEVELOPMENT.physicalCache},{moduleCachePath:options.moduleCachePath+'/'},{moduleCachePath:'/tmp/cache'}]){
+    assert.throws(()=>macLocalDevelopmentArguments({...options,...change}));
+  }
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'styx-cache-boundary-'));
+  try{
+    assert.throws(()=>validateMacModuleCache({moduleCachePath:dir}),/fresh_swift_module_cache_required/);
+    assert.throws(()=>validateMacModuleCache({...options,moduleCachePath:dir}),/fixed_local_development_cache_required/);
+    if(process.platform==='darwin'&&fs.existsSync(options.moduleCachePath)){
+      validateMacModuleCache(options);
+      assert.throws(()=>validateMacModuleCache({...options,localDevelopment:false}),/fresh_swift_module_cache_required/);
+    }
+  }finally{fs.rmSync(dir,{recursive:true});}
+});
+
+test('thin development runner admits only original sealed Runtime config, never profile or trust overrides',()=>{
+  const input={nativeRuntime:{payloadDir:'/Users/it-bootstrap/Developer/Styx/inputs/dev-runtime/payload',publisherFile:'/Users/it-bootstrap/Developer/Styx/inputs/dev-runtime/publisher.pem',expectedPublisher:'bbb49c2626c3d4ef3cf9e1679db5305b100cee4a8c41c29c958ede82fb868bed'},cuaBinary:'/Applications/Styx.app/Contents/MacOS/cua-driver'};
+  assert.deepEqual(macLocalDevelopmentConfig(input),input);
+  for(const patch of [{profile:'/tmp/profile'},{app:'/tmp/Styx.app'},{localSigning:{}},{nativeRuntime:{...input.nativeRuntime,expectedPublisher:'0'.repeat(64)}},
+    {nativeRuntime:{...input.nativeRuntime,payloadDir:'/tmp/payload'}},{nativeRuntime:{...input.nativeRuntime,payloadDir:input.nativeRuntime.payloadDir+'/../payload'}},
+    {cuaBinary:'relative'},{sdkPath:'/sdk/../other'}])assert.throws(()=>macLocalDevelopmentConfig({...input,...patch}));
+});
+
+test('local build is not a run target: only its exact installed copy retains original source admission',()=>{
+  const files=[{path:'Contents/MacOS/Styx',kind:'file',sha256:'a'.repeat(64)}];
+  const receipt={schema:1,kind:'local_production_ui_development',status:'PASS',app:MAC_LOCAL_DEVELOPMENT.app,runApp:'/Applications/Styx.app',build:{localDevelopment:true},files};
+  assert.equal(macLocalDevelopmentRunTarget(receipt,files),'/Applications/Styx.app');
+  for(const patch of [{runApp:MAC_LOCAL_DEVELOPMENT.app},{runApp:'/Applications/../Applications/Styx.app'},{app:'/tmp/Styx.app'},{build:{localDevelopment:false}},{status:'FAILED'},{files:[]}])assert.throws(()=>macLocalDevelopmentRunTarget({...receipt,...patch},files));
+  assert.throws(()=>macLocalDevelopmentRunTarget(receipt,[{...files[0],sha256:'b'.repeat(64)}]),/installed_development_copy_mismatch/);
+  // Existing admin-group-writable /Applications is a signed-code execution
+  // location, not a private profile. This observation does not launch anything.
+  if(process.platform==='darwin'&&fs.existsSync('/Applications/Styx.app'))assert.equal(macLocalDevelopmentInstalledApp(),'/Applications/Styx.app');
+});
 
 const localSigning={identitySha1:'a'.repeat(40),certificateSha256:'b'.repeat(64),keychain:'/private/build/signing.keychain-db'};
 test('persistent local signing rejects weak, ambiguous or injected configuration and publishes no keychain path',()=>{

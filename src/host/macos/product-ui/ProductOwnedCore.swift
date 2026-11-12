@@ -17,6 +17,27 @@ private let productOriginalMacPublisher = "bbb49c2626c3d4ef3cf9e1679db5305b100ce
 private let productOriginalAppRequirement = "identifier \"app.styx.host\" and certificate leaf = H\"cb50cee601419f28b43756f4fc8aefdbf60abae2\""
 private func productDigest(_ raw: Data) -> String { SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined() }
 
+// No command-line/environment switch can redirect a production build. The
+// explicitly compiled local build retains the SAME code/publisher requirements.
+enum ProductNativeLaunchScope {
+    // Development changes state isolation only. Rust/Cua retains the original
+    // installed image paths and certificate; project output is never runnable.
+    static let appPath = "/Applications/Styx.app"
+    #if STYX_LOCAL_DEVELOPMENT
+    static let developmentSupport = "/Users/it-bootstrap/Developer/Styx/artifacts/native-development/macos/state"
+    #endif
+    static func acceptsPackagePath(_ path: String, identifier: String?) -> Bool {
+        path == appPath && URL(fileURLWithPath: path).standardizedFileURL.path == path && identifier == "app.styx.host"
+    }
+    static var support: URL {
+        #if STYX_LOCAL_DEVELOPMENT
+        URL(fileURLWithPath: developmentSupport)
+        #else
+        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/Styx")
+        #endif
+    }
+}
+
 // Sole owned process and one serial JSON-line stream. Never HTTP/Node fallback.
 final class ProductOwnedCore: @unchecked Sendable {
     private let child: Process
@@ -284,6 +305,10 @@ final class ProductOwnedCore: @unchecked Sendable {
         }
     }
     private static func selectedState(_ support: URL) throws -> URL {
+        #if STYX_LOCAL_DEVELOPMENT
+        // Never inspect, adopt or offer the installed acceptance profile.
+        return support.appendingPathComponent("NativeRustHost-v1/profile")
+        #else
         let original = support.appendingPathComponent("Setup/deployment")
         let separate = support.appendingPathComponent("NativeRustHost-v1/profile")
         let originalExists = try existingPrivateDirectory(original)
@@ -298,6 +323,7 @@ final class ProductOwnedCore: @unchecked Sendable {
             return choice ? original : separate
         }
         return originalExists ? original : separate
+        #endif
     }
     private static func privateDirectory(_ url: URL) throws {
         // Only create the requested leaf. Existing ancestors must remain real
@@ -333,7 +359,9 @@ final class ProductOwnedCore: @unchecked Sendable {
         return (handle, raw)
     }
     static func open(resources: URL) throws -> ProductOwnedCore {
-        guard Bundle.main.bundleURL.standardizedFileURL.path == "/Applications/Styx.app", Bundle.main.bundleIdentifier == "app.styx.host" else { throw ProductOwnedCoreError.originalPackageRequired }
+        let bundle = Bundle.main.bundleURL
+        guard ProductNativeLaunchScope.acceptsPackagePath(bundle.path, identifier: Bundle.main.bundleIdentifier),
+              bundle.resolvingSymlinksInPath().path == bundle.path else { throw ProductOwnedCoreError.originalPackageRequired }
         var code: SecStaticCode?, requirement: SecRequirement?
         guard SecStaticCodeCreateWithPath(Bundle.main.bundleURL as CFURL, [], &code) == errSecSuccess,
               SecRequirementCreateWithString(productOriginalAppRequirement as CFString, [], &requirement) == errSecSuccess,
@@ -395,7 +423,7 @@ final class ProductOwnedCore: @unchecked Sendable {
         guard chosen["schema"].number == 1, chosen["publisher_spki_sha256"].string == productOriginalMacPublisher,
               chosen["manifest_sha256"].string == metadata["manifestSha256"].string,
               chosen["payload_path"].string == payload.path, chosen["publisher_file"].string == pub.path else { throw ProductOwnedCoreError.invalidPackage }
-        let support = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/Styx")
+        let support = ProductNativeLaunchScope.support
         // Package/selection verification above must succeed before any fresh
         // App container is created. Rust remains the sole profile/state writer.
         try privateDirectory(support)
