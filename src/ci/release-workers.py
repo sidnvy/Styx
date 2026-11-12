@@ -92,7 +92,11 @@ def copy_modules(source, destination):
     copied = 0
     for path in sorted(source.rglob('*')):
         relative = path.relative_to(source)
-        if '.bin' in relative.parts:
+        # Declarations and source maps are development inputs, not executed by
+        # the Browser worker. Keeping them duplicates thousands of long paths
+        # in Runtime file rows and worker closures, exceeding its fixed manifest
+        # budget. Preserve ordinary .ts files, JavaScript, assets and licenses.
+        if '.bin' in relative.parts or path.name.endswith(('.map', '.d.ts', '.d.mts', '.d.cts')):
             continue
         if path.is_symlink():
             resolved = path.resolve(strict=True)
