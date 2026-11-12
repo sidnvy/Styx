@@ -15,7 +15,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: styx-release-${{ github.ref }}
+  group: styx-release-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 
 env:
@@ -215,7 +215,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Remove temporary macOS keychain and codeSign trust
-        if: always() && matrix.platform == 'macos'
+        if: ${{ !cancelled() && matrix.platform == 'macos' }}
         run: python3 src/ci/release-ci.py mac-keychain-clean --directory "$RUNNER_TEMP/mac-signing"
       - name: Preserve failed Cua build diagnostics
         if: failure()
@@ -322,7 +322,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Remove temporary macOS keychain
-        if: always() && matrix.platform == 'macos'
+        if: ${{ !cancelled() && matrix.platform == 'macos' }}
         run: python3 src/ci/release-ci.py mac-keychain-clean --directory "$RUNNER_TEMP/mac-signing"
 
   seal:
@@ -461,7 +461,7 @@ jobs:
           path: ${{ runner.temp }}/package/assets/*
           if-no-files-found: error
       - name: Remove temporary macOS keychain
-        if: always() && matrix.platform == 'macos'
+        if: ${{ !cancelled() && matrix.platform == 'macos' }}
         run: python3 src/ci/release-ci.py mac-keychain-clean --directory "$RUNNER_TEMP/mac-signing"
 
   release:

@@ -16,6 +16,10 @@ ChatGPT connection. The fixed Gateway/Host topology remains a separate user setu
 5. The final job requires all four assets, generates checksums, uploads them to a draft,
    and publishes only after every upload succeeds. Failure cannot expose half a release.
 
+Different source commits use independent concurrency groups; a stuck old workflow
+cannot block a corrected commit. Duplicate runs of the same ref/commit still serialize.
+Cancellation skips cleanup steps and relies on the disposable runner teardown.
+
 ## Credentials
 
 The owner authorized GitHub Actions signing on 2026-11-13. The `sidnvy/Styx` GitHub
