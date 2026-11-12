@@ -10,7 +10,7 @@ AppName={#ProductName}
 AppVersion={#ProductVersion}
 AppPublisher=Styx
 DefaultDirName={localappdata}\Programs\{#InstallFolder}
-DisableDirPage=yes
+DisableDirPage=no
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 SetupArchitecture=x64
@@ -23,8 +23,9 @@ SolidCompression=yes
 WizardStyle=modern
 CloseApplications=no
 RestartApplications=no
-AppMutex={code:AppMutexName}
-SetupMutex={code:SetupMutexName}
+; Serialize this product's setup UI independently of its not-yet-selected path.
+; The App's root-scoped fence is acquired in PrepareToInstall, after selection.
+SetupMutex=Global\Styx.Setup.{#ProductId}
 Uninstallable=yes
 UninstallFilesDir={app}\.installer
 UninstallDisplayIcon={app}\versions\{#PackageHash}\StyxPreview.exe
@@ -51,8 +52,13 @@ Type: files; Name: "{userstartup}\Styx.lnk"; Check: OwnedStartupUnchanged
 
 [Code]
 var StartupOwned, NativeVerificationFailed: Boolean; StartupHash, StartupArgs: String;
+var HeldInstallRoot: String; HeldInstallMutex: THandle;
 function NativeAttributes(Name: String): Cardinal;
   external 'GetFileAttributesW@kernel32.dll stdcall';
+function NativeCreateMutex(Attributes: NativeUInt; InitialOwner: BOOL; Name: String): THandle;
+  external 'CreateMutexW@kernel32.dll stdcall';
+function NativeCloseHandle(Handle: THandle): BOOL;
+  external 'CloseHandle@kernel32.dll stdcall';
 function StartupPath: String;
 begin Result := ExpandConstant('{userstartup}\Styx.lnk'); end;
 function StartupArguments(Param: String): String;
@@ -64,7 +70,7 @@ begin
 end;
 function InstallRoot: String;
 begin
-  Result := ExpandConstant('{localappdata}\Programs\{#InstallFolder}');
+  Result := RemoveBackslashUnlessRoot(ExpandConstant('{app}'));
 end;
 procedure CaptureOwnedStartup(Gate: String);
 var Shell, Link: Variant; Target, Folder, VersionName, StateRoot: String; I, Code: Integer;
@@ -110,11 +116,34 @@ function SetupMutexName(Param: String): String;
 begin
   Result := 'Global\Styx.Install.' + MutexScope;
 end;
+function HoldInstallFence: Boolean;
+var Handle: THandle; Error: LongInt; Root: String;
+begin
+  Root := InstallRoot;
+  if (HeldInstallMutex <> 0) and (CompareText(HeldInstallRoot, Root) = 0) then begin
+    Result := True;
+    exit;
+  end;
+  // Atomically create the same root-scoped fence that the App checks. A
+  // pre-existing fence belongs to another installer/uninstaller, not this one.
+  Handle := NativeCreateMutex(0, False, SetupMutexName(''));
+  Error := DLLGetLastError;
+  Result := (Handle <> 0) and (Error <> 183); // ERROR_ALREADY_EXISTS
+  if not Result then begin
+    if Handle <> 0 then NativeCloseHandle(Handle);
+    exit;
+  end;
+  // Back navigation may select another root after a known admission refusal.
+  if HeldInstallMutex <> 0 then NativeCloseHandle(HeldInstallMutex);
+  HeldInstallMutex := Handle;
+  HeldInstallRoot := Root;
+  // Keep the handle until process exit, including final file/shortcut writes.
+end;
 function CheckIdle(Gate: String): String;
 var Code: Integer;
 begin
   Result := '';
-  // SetupMutex is held during setup and uninstall. The App checks that mutex
+  // The selected root's install fence is held during setup and uninstall. The App checks it
   // after creating AppMutex, so this check also fences concurrent startup.
   if CheckForMutexes(AppMutexName('')) then begin
     Result := 'Styx is still running. Finish any tasks, then choose Quit Styx and retry.';
@@ -127,8 +156,8 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var Code: Integer;
 begin
-  if CompareText(ExpandConstant('{app}'), InstallRoot) <> 0 then begin
-    Result := 'Use the standard per-user Styx installation folder.';
+  if not HoldInstallFence then begin
+    Result := 'Another Styx installer or uninstaller is using this installation folder.';
     exit;
   end;
   ExtractTemporaryFile('StyxInstallGate.exe');
@@ -139,16 +168,19 @@ begin
       exit;
     end;
   end;
-  // SetupMutex is held here. Recheck AppMutex to close the startup race.
+  // The selected root is fenced here. Recheck AppMutex to close the startup race.
   Result := CheckIdle(ExpandConstant('{tmp}\StyxInstallGate.exe'));
+  if (Result = '') and ('{#NativePackage}' = '1') then begin
+    if not Exec(ExpandConstant('{tmp}\StyxInstallGate.exe'), 'create-native-root "' + InstallRoot + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) then Code := 2;
+    if Code <> 0 then Result := 'Setup could not create the selected program folder with private permissions. Existing folder permissions have not been changed.';
+  end;
   if Result = '' then CaptureOwnedStartup(ExpandConstant('{tmp}\StyxInstallGate.exe'));
 end;
 function InitializeUninstall: Boolean;
 var Problem: String;
 begin
   Result := False;
-  if CheckForMutexes(SetupMutexName('')) then exit;
-  CreateMutex(SetupMutexName(''));
+  if not HoldInstallFence then exit;
   Problem := CheckIdle(ExpandConstant('{app}\.installer\StyxInstallGate.exe'));
   if Problem <> '' then begin
     if not UninstallSilent then MsgBox(Problem, mbInformation, MB_OK);

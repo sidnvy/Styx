@@ -85,7 +85,10 @@ The product build requires an explicit compiler path and four-part installer
 version. The existing public package is verified before and after compilation.
 
 The default installation is per-user `%LOCALAPPDATA%\Programs\Styx` with a
-stable Inno AppId. Each package goes into `versions/<package SHA256>`; the Start
+stable Inno AppId. The directory page permits another user-writable location,
+including another drive; upgrades normally reuse the registered location.
+Installation admission, runtime verification, shortcuts and uninstall use the
+selected installation root. Each package goes into `versions/<package SHA256>`; the Start
 menu shortcut points directly to that version's App. There is no new active
 pointer or launcher. Previous program versions are retained and tracked by
 Inno's uninstall log until normal uninstall. This trades disk space for exact
@@ -93,13 +96,19 @@ package closures; no background cleanup is currently performed. Historical
 `installation.json`, `releases`, and external Core state remain untouched.
 Uninstall removes only files registered by Inno, retaining legacy installation
 records and all external identities, credentials, browser profiles and state.
+Missing native program directories are created with a private inheritable DACL
+for the current user, SYSTEM and Administrators. Existing directories and ancestor
+ACLs are left unchanged. The original signed Runtime reader still qualifies the
+complete installed path and payload; selecting a directory does not waive it.
 
 App and installer coordinate through standard named mutexes scoped to the
 installation root (both `versions/<hash>` and legacy `releases/<uuid>` normalize
 to that root). App creates its mutex before checking the install mutex and
-holds it through Core shutdown until process exit. Setup holds its mutex and
-rechecks App admission immediately before copying. Uninstall explicitly holds
-the same install mutex as well; `SetupMutex` alone does not cover uninstall.
+holds it through Core shutdown until process exit. Setup serializes its UI by
+product identity, then atomically holds the selected root's install mutex and
+rechecks App admission immediately before copying. It does not check the default
+root before directory selection. Uninstall holds the same root-scoped install
+mutex as well; `SetupMutex` alone does not cover uninstall.
 A read-only Restart Manager query also checks all installed executable images
 (`.exe`, `.dll`, `.node`), including old binaries that predate the mutex protocol.
 This follows Inno's default executable/DLL filter, adding native Node addons;

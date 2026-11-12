@@ -17,6 +17,27 @@ internal static class InstallGate {
  [DllImport("rstrtmgr.dll",CharSet=CharSet.Unicode)] static extern int RmRegisterResources(uint handle,uint count,string[] files,uint applications,IntPtr processes,uint services,IntPtr names);
  [DllImport("rstrtmgr.dll")] static extern int RmGetList(uint handle,out uint needed,ref uint count,IntPtr processes,ref uint reasons);
  [DllImport("rstrtmgr.dll")] static extern int RmEndSession(uint handle);
+ [StructLayout(LayoutKind.Sequential)] struct DirectorySecurityAttributes { public int Length; public IntPtr Descriptor; public int InheritHandle; }
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateDirectoryW(string path,ref DirectorySecurityAttributes security);
+ // Create only missing program directories, atomically with a private DACL.
+ // Never retrofit ACLs onto an existing user-selected directory or its ancestors.
+ static int CreateNativeRoot(string[] args){
+  if(args.Length!=2||!Path.IsPathRooted(args[1]))return 2;
+  string root=Path.GetFullPath(args[1]);var missing=new Stack<string>();string existing=root;
+  while(!Directory.Exists(existing)){
+   if(File.Exists(existing))return 2;missing.Push(existing);existing=Path.GetDirectoryName(existing);if(String.IsNullOrEmpty(existing))return 2;
+  }
+  for(string current=existing;!String.IsNullOrEmpty(current);current=Path.GetDirectoryName(current))Regular(current);
+  var acl=new DirectorySecurity();acl.SetAccessRuleProtection(true,false);
+  foreach(string sid in new[]{WindowsIdentity.GetCurrent().User.Value,"S-1-5-18","S-1-5-32-544"})
+   acl.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(sid),FileSystemRights.FullControl,InheritanceFlags.ContainerInherit|InheritanceFlags.ObjectInherit,PropagationFlags.None,AccessControlType.Allow));
+  byte[] descriptor=acl.GetSecurityDescriptorBinaryForm();IntPtr memory=Marshal.AllocHGlobal(descriptor.Length);
+  try{
+   Marshal.Copy(descriptor,0,memory,descriptor.Length);var security=new DirectorySecurityAttributes{Length=Marshal.SizeOf(typeof(DirectorySecurityAttributes)),Descriptor=memory};
+   while(missing.Count>0){string directory=missing.Pop();if(!CreateDirectoryW(Long(directory),ref security))throw new IOException("native_directory_create_error:"+Marshal.GetLastWin32Error());Regular(directory);}
+   return 0;
+  }finally{Marshal.FreeHGlobal(memory);}
+ }
  // Package members under %LOCALAPPDATA%\Programs\Styx\versions\<sha256> exceed MAX_PATH
  // (deep Browser worker node_modules). Long paths use the extended-length prefix;
  // Main disables .NET legacy path handling before any System.IO call.
@@ -182,6 +203,7 @@ internal static class InstallGate {
    // Per-user packages require TokenOwner to be the actual user. Do not
    // extract administrator-owned files and then attempt to repair ownership.
    if(args.Length==1&&args[0]=="check-native-user"){using(var identity=WindowsIdentity.GetCurrent())return identity.User!=null&&identity.Owner!=null&&identity.User.Value==identity.Owner.Value?0:2;}
+   if(args.Length>0&&args[0]=="create-native-root")return CreateNativeRoot(args);
    if(args.Length>0&&args[0]=="verify-native")return VerifyNative(args);
    if(args.Length>0&&args[0]=="maintain-native-install")return MaintainNative(args);
    if(args.Length==2&&args[0]=="check-native-install"&&Path.IsPathRooted(args[1])){
