@@ -95,6 +95,44 @@ fn same(a: &Observed, b: &Observed) -> bool {
     a.facts == b.facts && a.executable == b.executable
 }
 impl Root {
+    pub(in crate::store) fn installed_images(
+        &self,
+        images: &[(PathBuf, u64, Sha256Digest)],
+    ) -> Result<PayloadInventory> {
+        self.validate_root()?;
+        let mut observed = BTreeMap::new();
+        let mut members = Vec::with_capacity(images.len());
+        for (path, bytes, digest) in images {
+            let opened = self.open_relative(path, false, false, false)?;
+            let mut before = observe(self, &opened, false)?;
+            if !before.executable || before.facts.observation.byte_len != *bytes {
+                return Err(StoreError::Changed);
+            }
+            before.sha256 = Some(*digest);
+            members.push(PayloadMember {
+                path: path.clone(),
+                bytes: *bytes,
+                sha256: *digest,
+                executable: true,
+                observation: before.facts.observation.clone(),
+            });
+            observed.insert(
+                path.clone(),
+                Retained {
+                    file: opened.file,
+                    observed: before,
+                    names: None,
+                },
+            );
+        }
+        let inner = PayloadSnapshot {
+            root: self.clone(),
+            observed,
+            limits: PayloadLimits::default(),
+        };
+        inner.revalidate()?;
+        Ok(PayloadInventory { members, inner })
+    }
     /// Bind this original byte observation before retaining the existing
     /// ordinary-reader HANDLE. In particular, equal bytes in a new file ID
     /// between read_raw and this open must not become the approved input.

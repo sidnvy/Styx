@@ -19,7 +19,7 @@ fn payload_version(
     selection: &styx_contracts::native_management::NativeRuntimeSelection,
 ) -> Result<Value, Failure> {
     let candidate =
-        styx_runtime::release::verify_selected(selection).map_err(|e| Failure::new(e.code()))?;
+        styx_runtime::release::load_selected(selection).map_err(|e| Failure::new(e.code()))?;
     Ok(json!({"version":candidate.report().version,"manifest_sha256":selection.manifest_sha256}))
 }
 fn current_payload(committed: &Value, role: Role) -> Value {

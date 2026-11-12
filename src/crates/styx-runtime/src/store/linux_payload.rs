@@ -85,6 +85,37 @@ fn stream_hash(file: &File, max: u64) -> Result<Sha256Digest> {
     Sha256Digest::try_from(hex::encode(hash.finalize())).map_err(|_| StoreError::Changed)
 }
 impl Root {
+    pub(in crate::store) fn installed_images(
+        &self,
+        images: &[(PathBuf, u64, Sha256Digest)],
+    ) -> Result<PayloadInventory> {
+        self.validate_root()?;
+        let mut observed = BTreeMap::new();
+        let mut members = Vec::with_capacity(images.len());
+        for (path, bytes, digest) in images {
+            let file = child(self, path, false)?;
+            let before = observe(&file, false)?;
+            if !before.executable || before.facts.byte_len != *bytes {
+                return Err(StoreError::Changed);
+            }
+            // Installed loads retain native identity/type pins below; content
+            // hashing belongs to installation/update, including these images.
+            members.push(PayloadMember {
+                path: path.clone(),
+                bytes: *bytes,
+                sha256: *digest,
+                executable: true,
+                observation: before.facts.clone(),
+            });
+            observed.insert(path.clone(), before);
+        }
+        let inner = PayloadSnapshot {
+            root: self.clone(),
+            observed,
+        };
+        inner.revalidate()?;
+        Ok(PayloadInventory { members, inner })
+    }
     pub(in crate::store) fn payload_inventory(
         &self,
         limits: PayloadLimits,

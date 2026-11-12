@@ -176,6 +176,23 @@ impl PinnedExecutable {
 }
 
 impl PrivateRoot {
+    /// Retain only the fixed native images of an installed signed manifest.
+    /// Installation/update owns payload hashing; launch does not walk the tree.
+    #[cfg(not(target_os = "windows"))]
+    pub(crate) fn installed_images(
+        &self,
+        images: &[(PathBuf, u64, Sha256Digest)],
+    ) -> Result<PayloadInventory> {
+        validate_images(images)?;
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        {
+            self.inner.installed_images(images)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        {
+            Err(StoreError::Unsupported)
+        }
+    }
     pub fn payload_inventory(&self, limits: PayloadLimits) -> Result<PayloadInventory> {
         self.payload_inventory_with_known(limits, &KnownDigests::new())
     }
@@ -195,6 +212,22 @@ impl PrivateRoot {
             Err(StoreError::Unsupported)
         }
     }
+}
+
+pub(super) fn validate_images(images: &[(PathBuf, u64, Sha256Digest)]) -> Result<()> {
+    if images.is_empty() || images.len() > 5 {
+        return Err(StoreError::TooLarge);
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    for (path, bytes, _) in images {
+        checked_relative(path)?;
+        if *bytes > PayloadLimits::default().max_file_bytes
+            || !paths.insert(path.to_string_lossy().to_lowercase())
+        {
+            return Err(StoreError::InvalidRelativePath);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

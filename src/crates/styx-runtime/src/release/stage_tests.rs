@@ -189,9 +189,34 @@ async fn signed_stage_is_exact_exclusive_and_keeps_failed_publications() {
     // Same retained release and signed selection must still reject an actual
     // member mutation; matching metadata alone never establishes freshness.
     let staged_license = root.join("version-one/payload/LICENSE");
+    let installed = load_selected(&selected).unwrap();
     let mut bytes = fs::read(&staged_license).unwrap();
     bytes[0] ^= 1;
     fs::write(&staged_license, bytes).unwrap();
     assert!(staged.revalidate_matches_selection(&selected).is_err());
+    // Runtime loading must not scan unrelated assets again. Full install/update
+    // admission still detects the changed member, and publisher/root binding stays.
+    installed.revalidate_matches_selection(&selected).unwrap();
+    load_selected(&selected).unwrap();
+    assert!(matches!(
+        verify_selected(&selected),
+        Err(ReleaseError::Integrity)
+    ));
+    fs::remove_file(&staged_license).unwrap();
+    load_selected(&selected).unwrap();
+    assert!(verify_selected(&selected).is_err());
+    assert!(matches!(
+        load_selected(&other_selection),
+        Err(ReleaseError::Changed)
+    ));
+    assert!(matches!(
+        installed_selection(
+            &root.join("version-one/payload"),
+            &root.join("version-one/publisher.pem"),
+            &"0".repeat(64)
+        )
+        .await,
+        Err(ReleaseError::Untrusted)
+    ));
     // Deliberately retain source, destination and failed partial fixtures.
 }

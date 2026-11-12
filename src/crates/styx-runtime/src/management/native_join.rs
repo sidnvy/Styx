@@ -755,15 +755,15 @@ mod platform {
         let candidate = match retained {
             Some(candidate) => {
                 // Create or the original App owner may pass its formal object.
-                // Each loader fully revalidates the exact selection; an earlier
-                // result or caller-supplied DATA never supplies admission.
+                // Revalidate the retained selection and native image identities;
+                // ordinary loading does not repeat install-time asset scanning.
                 candidate
                     .revalidate_matches_selection(selected)
                     .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?;
                 candidate
             }
             None => Arc::new(
-                release::verify_selected(selected)
+                release::load_selected(selected)
                     .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?,
             ),
         };
@@ -916,7 +916,7 @@ mod platform {
         let selection_input = Input::open(&d.runtime_selection_file, LIMIT)?;
         let selection: NativeRuntimeSelection =
             serde_json::from_slice(&selection_input.raw).map_err(|_| bad())?;
-        let candidate = release::verify_selected(&selection)
+        let candidate = release::load_selected(&selection)
             .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?;
         if !candidate
             .manifest()
@@ -1823,10 +1823,17 @@ mod platform {
             assert!(candidate_for_load(&wrong, Some(accepted)).is_err());
             let (other, _) = make("other");
             assert!(candidate_for_load(&selected, Some(other)).is_err());
-            // Cold load is still the original complete verifier.
+            // Cold load reads installed metadata, not the complete payload.
             let original = candidate_for_load(&selected, None).unwrap();
             let member = root.join("original/source-inputs.json");
             let mut file = fs::OpenOptions::new().write(true).open(member).unwrap();
+            file.write_all(b"changed").unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+            candidate_for_load(&selected, Some(original.clone())).unwrap();
+            assert!(release::verify_selected(&selected).is_err());
+            let image = root.join("original/bin/styx");
+            let mut file = fs::OpenOptions::new().write(true).open(image).unwrap();
             file.write_all(b"changed").unwrap();
             file.sync_all().unwrap();
             drop(file);

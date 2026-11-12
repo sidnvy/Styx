@@ -8,18 +8,119 @@
 
 ## 当前开发检查点（2026-11-12）
 
+### 最新：移除多余运行期整包校验；保持原安装位置（20:03 上海时间）
+
+用户明确否定未经要求的启动前全量校验和安装祖先ACL限制，要求Windows/Linux/macOS一起移除，
+直接使用现有项目、依赖缓存、安装位置和配置原地更新，不再通过换目录重装或新建验收scope迁就实现。
+此前建议的 `D:\StyxGuiAcceptanceC31` 搬迁方案已撤回。现有范围第58行原本即规定payload完整性只在安装/更新校验，
+不在每次加载时校验；不能把旧实现的额外限制当成用户需求。
+
+- 共享Rust新增安装元数据加载路径，普通启动/status/配对/恢复不再枚举整包资产。
+  首次App Runtime拷贝按签名清单边拷边校验，不再额外扫描源和目标各一轮。
+  显式安装/更新保留签名和完整包校验；系统代码签名、publisher pin、配对/TLS及私有凭据边界保留。
+- Windows移除安装父目录的额外ACL要求；GUI启动改读已安装元数据。
+  Mac同样改读已安装元数据，并移除显式重复扫描sealed resources，保留当前运行代码的原签名身份检查。
+- 本机Rust增量check、workspace clippy `-D warnings`、格式检查及workspace测试通过；runtime 336项通过、71项既有显式参考忽略。
+  初轮13项socket/loopback被执行沙箱拒绝，另1项旧测试仍要求cold load扫描普通资产；改为区分安装资产校验与运行入口身份后，
+  在允许本机socket的环境重跑workspace全部通过。Linux新CLI读取原C31 Runtime实际exit0、0.587秒；
+  新App Core隔离空容器status冒烟曾exit0，未启动Host/Gateway；用户随后要求不再新增该类隔离验收目录。
+- Windows C#原生编译exit0、零警告；Rust原生check exit0。
+  首轮命令漏带原显式target并仅用-j2，误入另一缓存子树触发依赖冷编；已精确结束本轮自有编译进程，未动产品进程。
+  更正为原 `--target x86_64-pc-windows-msvc`、原cache、`-j8` 后仅重编runtime/CLI，186秒exit0。
+  新CLI SHA `bca9195f9358bf456ecbf5178ed045d967eff78058de3628f1a1e433f177b3da`；
+  对原安装payload及原ACL实际执行installed-selection exit0、stderr空、1.334秒，manifest及root身份匹配。
+  这证明新代码的原目录读取通过，**不证明旧GUI已更新或配对通过**。原App300/Core10604及原包保持，未重放Request。
+- Mac完整Swift closure原生typecheck exit0、4.78秒；原checkout共享Rust受影响check exit0、4.43秒，复用原cache、-j10。
+  原aarch64 release缓存构建进行中；未签包、未安装或改默认Library。
+- Windows源码发送曾被自动审批两次以缺少明确载荷/目标授权拒绝，均未派发；用户随后对精确25文件传输明确授权，
+  SHA绑定同步及原生编译才实际发生。两次拒绝和已取消构建的收据保留，未改用旁路。
+- 用户要求的后续规则已写入AGENTS和native-development技能，并记录长期偏好：按CPU/可用内存利用并行，
+  保持target/profile/features/RUSTFLAGS命中原依赖缓存，不以保守jobs上限替代资源观察；不增加重复启动全包扫描。
+  技能quick_validate和diff检查通过。
+
+收据统一在 `/home/sid/Developer/Artifacts/Styx/native-checks/startup-check-removal-20261112/`；
+Windows `windows-native-check-final.json`、`windows-installed-selection-native-03.json`；
+Linux `linux-installed-selection-result.json`。Mac原机收据在原项目
+`artifacts/startup-check-removal-20261112-mac-agent/`。
+**源码及编译检查已通过的项目与已安装效果分开：匹配Runtime/App原地更新、Windows配对与真实三能力、
+正常恢复、Mac正式默认Library剩余出口及最终Logo仍未完成。Stable NO-GO。**
+
+### 先前：Root 直接 SSH 验收；旧C31 Runtime admission 阻塞（18:16 上海时间）
+
+用户已选择 Root 直接 SSH 操作 NAB5，不再依赖对端 Codex；下面的 Codex 控制链段落仅保留历史，
+不是当前交付前置条件。本轮没有修复 Codex、读取旧聊天日志或重新投递安装任务。
+
+- 现有 `develop`/HEAD `2cb70c2` 及全部原未提交修改保留；无切分支、提交、worktree、App/Core 重编或重装。
+  Root 新鲜核实 App300/Core10604 的原 birth、Session1、安装路径和 Core SHA `770e6ab9…52164b`。
+  fixture8572/supervisor13772 仍为原实例，有效至 UTC16:03:22；随机视觉 oracle 未读。
+- 原邀请在 UTC09:56:47.963 明确过期，未提交。服务器 CA DER 独立计算仍为 `0cb0c23b…334d9`，
+  权威 pending 为空。只创建一份新的 600 秒邀请（`windows-c31-direct-join-02`），保留旧文件并私密递送新文件，
+  不输出链接/token。两次参数校验拒绝发生在邀请创建前，不计作创建或配对重放。
+- 通过 Sid/InteractiveToken/RunLevel0 的临时任务操作原 GUI。新 Review 的第一次前置以为旧输入仍存在，
+  实际输入已被应用清空，故 `set_attempted=false/review_attempted=false/Request0`；新鲜观察后新 Review 实际各写入/点击一次。
+  `obs07`（UTC10:06:34）确认 GUI origin/CA 正确，新邀请 expiry `1794478466765`。
+- UTC10:07:18 对新鲜绑定的 `Approve Gateway and request to join` 仅点击一次。
+  `request01` 只证明原生消息已递送；`obs08` 返回 **operation could not be confirmed**，不证明远端请求已提交。
+  后续权威 pending 仍为空；没有可比较的四字段，故批准/Check confirmation/账号三能力效果均0。
+  原 Request 保持 UNKNOWN、不自动重放。
+- 只读诊断：同一已安装 Runtime 的 `release verify` 在 SSH 与 Sid 桌面 Session1 都返回
+  **`native_release_payload_integrity` / exit2**。独立 Node 枚举核对签名清单2154项及两个清单/签名文件，
+  实际2156文件，SHA/大小/成员全部匹配；签名 executable 标记也无差异。
+  当前 `D:\Developer\Styx` 祖先 DACL 含三个额外 SID 的修改 ACE；Rust `open_installation` 会逐祖先调用
+  `local_executable_acl`，其规则拒绝当前用户/System/Admin/TrustedInstaller 之外主体的修改权。
+  该规则在冻结源码 `5618911` 至当前 HEAD 间未变。此 ACL 冲突是现有安装路径的确定阻塞条件；
+  **没有证明这些 ACE 何时或由谁加入，也没有取得原 GUI RPC 的具体错误码**，不把独立验证诊断冒称原 RPC 收据。
+- UTC10:14:40 本地 `profile`、`runtime-versions`、`app-join-input-v1.json` 均不存在；
+  fixture 输入空/变化0/点击0/HTTP GET0，Exec目标文件不存在。原App/Core继续运行，未Quit/重开或改ACL/配置。
+  本轮所有已完成交互任务均按精确名称回收，旧任务不动。未关闭 Windows 配对、三能力或恢复出口。
+- Mac只读前置刷新：正式C31 DMG SHA仍为 `8435d4f2…c7`；默认 Library约3.0GiB，与Developer制品同卷，
+  可用约579GiB；拟归档目标 `/Users/it-bootstrap/Developer/Styx/artifacts/c31-library-preserved-20261112` 不存在。
+  已向用户请求本轮具体的正常Quit→完整保留归档→现成C31安装/默认Library首设/服务器配对/重开授权；
+  答复前没有执行这些状态变化。
+
+本轮收据/脚本：`/home/sid/Developer/Artifacts/Styx/native-checks/windows-c31-root-20261112/`，
+其中 `request01-read-receipt.json`、`obs08-read-receipt.json`、`verifySession01-read-receipt.json`、
+`runtime-inventory-receipt.json`、`runtime-acl-receipt.json`、`final-read-receipt.json`、`gateway-pending-final.json`
+可独立核对。私密输入仍只在私有文件中，不进入 Git。
+
+**下一出口**：Windows先解决当前安装路径的Runtime admission条件；本轮不改Codex ACL、不调整已有目录权限、
+不重建/重装、不重放UNKNOWN。四字段批准、独立账号效果、同身份恢复均保持未通过。
+已只读准备替代方案并请求本轮授权例外：正常GUI Quit并确认原进程退出，复用同一SHA匹配的C31安装器，
+安装到不存在的 `D:\StyxGuiAcceptanceC31`，只创建新私有目录，保留旧安装及AppData/keys/pairing，
+不改共享Developer祖先ACL。UTC10:17:51预检确认目标不存在，D盘可用137163280384字节；
+详见 `install-route-preflight.json`。用户答复前不执行该方案；不把新安装许可解释为UNKNOWN Request重放许可。
+Mac等上述本轮授权；最终账号路线和已安装Logo刷新仍未完成。**Stable NO-GO。**
+
+### 较早的控制链与安装进展（历史）
+
+当前先收口 Codex 控制链只读 RCA；用户已明确停止内部 IPC 桥适配，随后授权仅用 PilotMac 官方连接验证一次独立只读探针。
+已确认原 SSH writer 释放、手机能通过原生 NAB5 设备入口打开原聊天；原 C31 指令不重发。
+用户进一步确认 niuda 没有 Control other devices 页面；当前根客户端缺正式原生设备控制入口，
+需要先验证受支持控制端的官方路径，不再维护内部桥。源码/Git 与 Styx Gateway 位置不变。
+PilotMac 现有 SSH owner 没有官方原生聊天发现/发送工具，自动发送0次；随后本人从PilotMac官方设备入口向NAB5原聊天发送单次只读验证，Root已直接读取完成收据。nonce/chat UUID精确匹配，NAB5-WIN/cwd正确，执行进程2912→桌面app-server14116→ChatGPT11556均为Session1；官方入口真实执行PASS。本轮安装器/Styx操作均0；自动A2A目标暴露仍未通过，不用私有桥补齐。
+原聊天报告旧C31因缺失旧code-mode host在工具执行前失败、未派发安装。Root新鲜只读观察没有Styx/安装器进程，C盘可用12956364800字节，不新增清理。本人已确认在同一官方原聊天接续保存任务，不重贴安装内容；截至14:54:25上海时间，固定项目尚无新验收JSON收据、无Styx/安装器进程，不能声称安装已开始。读取该聊天助手进度的操作被自动审批以私有日志敏感性/缺少明确授权拒绝；已停止日志路径，限定读取授权问题仍待本人答复，未改用IPC或重发任务。
+14:57:08新鲜只读观察确认已有实际进展：精确C31安装器于14:56:24启动，PID16060（父11796）及Inno子进程16224均在Session1；原路径为`D:\Developer\Styx\artifacts\candidate-31\inno\StyxSetup-0.4.20261112.31.exe`。固定项目尚无新安装/READY收据，因此只记安装器已启动，不宣称安装完成。当前可继续靠产品进程与明确收据跟进，受限聊天日志读取不作为验收前置条件。
+17:08–17:09 Root读取原任务精确结果收据及`candidate-31/windows-install-ready.json`，确认16:12:41已为READY_EMPTY_JOIN。最终安装器为`inno-selectable-private-root/StyxSetup-0.4.20261112.31.exe`，SHA `5a5f4b75068ee8d74b54f249f6c8004fb9427572ffd95100d48131cfa7725764`（127693698字节），父子实际退出0；正常Explorer启动一次，原App300/Core10604/console9576及新fixture8572/window2688484身份已记录。Root独立读取当前Core SHA与冻结C31的`770e6ab9…52164b`一致；三能力/Chrome、未配置提示及空Join通过，Request/Review/邀请输入均0，尚未选择并启动Host Runtime，不冒称账号可用。fixture到UTC16:03:22有效，零基线保留，Browser URL已获授权但未调用。
+最终安装前原owner修复了可选D盘目录及缺失目录私有DACL创建：只新建目录，不修改已有父目录ACL；三项受影响原生场景通过。旧固定包取消/首次退出Unknown、第一份可选包安装后资格失败及原退出2分别保留，不重写为最终包成功。五文件源码租约已释放，Root按相同Git基线及逐文件SHA精确归入现有develop；`git diff --check`与JS语法检查通过，无App/Core重编。原有startup ownership测试的权限失败仍单列，未放宽权限。传输收据为`Developer/Artifacts/Styx/native-checks/windows-c31-final/installer-source-transfer-20261112.json`。
+当前下一出口：服务器CA DER独立再核与既定`0cb0c23b…334d9`一致、权威pending为空。原owner配对阶段文件`D:\Developer\Styx\tasks\native-owner\C31-SERVER-JOIN-20261112-ROOT-NEXT.md`已新建；等原owner生成`C31-SERVER-JOIN-receiver.json`后才创建一次10分钟新邀请，私密递送，四字段独立核对批准，再做账号三类真实效果。自动跨聊天控制的核查已分到用户的新对话，不在此修私有桥。
+用户随后明确改选由Root通过SSH分配此配对任务。Root经现有SFTP暂存传输调用公开`codex queue --thread 01a1bc09-6a26-7751-80d1-2e945120df79 --message …`一次，nonce=`NAB5-C31-SERVER-JOIN-20261112-01`，不带`--resume`、不创建server/聊天。命令实际退出1：`thread/queue/add failed: failed to read thread ... Access is denied (os error 5)`，失败发生在读取原聊天元数据阶段，未取得入队确认；原helper的`unknown_or_failed_no_auto_retry`原记录保留，不再次投递。此处是Windows拒绝访问，不是自动审批拒绝。未修改Codex ACL/锁/进程，私有IPC仍停用。原生GUI owner仍需从桌面接续已落地阶段文件；收到receiver READY前新邀请创建次数保持0。
+用户随后明确授权在NAB5新开聊天。Root正式`list_projects`未返回NAB5目标，故使用官方`codex exec --approve-for-me --cd D:\Developer\Styx --skip-git-repo-check --json`新建一个独立CLI会话，不恢复旧thread。首次启动脚本仅在本轮新目录的SID类型构造处失败；只读确认目录空/所有者Sid后修正，无Codex进程启动的旧步骤未重放。第二次真实创建会话`01a1cf18-2ec5-7d33-a068-f42233350c02`；Root独立读到thread.started事件及PID1652/Session0。SSH启动回执40秒超时保留，但新任务已继续并产出完成结果，未重复启动。
+新会话预检结果为`BLOCKED_DESKTOP_CONTEXT`（`tasks/native-owner/C31-NEW-OWNER-20261112-01-result.json`）：两次本地Exec和Node均报连接runner pipe-in 15000ms超时，正式CUA getState Node启动失败，没有取得Session1 Styx观察。Styx账号库存仍只有Linux/Mac，尚无Windows。新agent无法自行读取thread/PID/session，报告保留null，Root外部观察的UUID/PID/Session0不回填为agent自证。配对READY/Request/fixture操作均0，未读取或修改旧聊天、未安装/退出产品、未改服务/配置/沙箱；不能把新CLI会话创建成功当原生GUI接手成功。具体runner超时原因尚未证明，控制问题仍在独立对话处理。
+故障归属、官方连接模型及下一验证出口见 [控制链 RCA](CODEX-CONTROL-RCA-20261112.md)。
+RCA 尚未证明 OpenAI 产品缺陷，也不放弃任何 Styx 正式安装/真机验收门槛。
+
 以下补充本轮实际变化；后面的 C30 验收矩阵保留，尚未通过的格不因开发检查通过而关闭。
 
 | 出口 | 当前证据 | 下一动作 |
 | --- | --- | --- |
-| 固定项目指导 | 指导引入于 `997ad83`；Mac/Windows 父项目 AGENTS 薄入口与 Skills 发现链接均有 READY 收据 | 按需使用指导，不再每次加载历史或新建项目/聊天；产物后正常快进源码，旧构建收据不改写 |
+| 固定项目指导 | 指导引入于 `997ad83`；Mac/Windows 父项目 AGENTS 薄入口与 Skills 发现链接均有 READY 收据；两端持续 source 已核实干净同步至 `2cb70c2`，缓存/配置不动 | 按需使用指导，不再每次加载历史或新建项目/聊天；旧构建收据不改写 |
 | Windows staging 归拢 | 四祖先限定 ACL 完成；4326 文件复制/哈希一致，新树权限验证通过，正式 C30 reader 实际 exit0；新 Developer staging 指针已启用，旧树保留 | 此项收口，不再审计或复制一次 |
-| Mac 真实开发入口 | 固定运行位置/隔离持久 dev profile 已集成；原机及 Root 检查通过，原签 App 构建32秒；全新 Gateway 设置、三类真实效果、Sheet安全拒绝与同worker恢复、Windows Gateway→Mac三能力及双方恢复均通过 | 当前新角色确认被原端自动审批拒绝，等待本次可信本人确认；随后加入服务器，不重跑旧完整旅程 |
-| Mac 正式包 | 复用 `5618911` Core/完整 Runtime；正式 App 编译29秒，原钥匙串签封/DMG51秒均PASS，Root已独立匹配公开DMG/收据SHA | 尚未安装/验收；当前运行的隔离 dev profile 成绩单列，不冒称生产默认配置验收 |
-| 四平台冻结制品 | Core同源 `5618911`；Mac/Linux/Windows/Debian12 Runtime原签与独立验签通过；Windows App22.9秒、Inno112.2秒均PASS，尚未安装 | 完成剩余真机/最终App安装验收，不能将制品通过计为交付完成 |
-| moedeu-apps集中Gateway | C31正式安装、首次setup、严格LAN TLS、测试Tunnel及同profile正常退出恢复通过；旧服务保持 | 等Mac和Windows接入，最终刷新Custom MCP详情/Logo |
+| Mac 真实开发入口 | 固定 dev profile 已集成；全新Gateway、三能力、Sheet拒绝与同worker恢复、Windows Gateway→Mac及双方恢复通过；本轮服务器→Mac经四字段批准，三能力真实效果独立核对PASS | 保持服务器Host连接；开发结果不冒称正式App/默认Library验收，不重跑旧完整旅程 |
+| Mac 正式包 | 复用 `5618911` Core/完整 Runtime；正式 App 编译29秒、原钥匙串签封/DMG51秒PASS；Root匹配DMG/收据SHA。旧Library与备份同卷、空间约580GiB、归档目标不存在的只读前置已就绪 | 本机原聊天已发一次完整阶段确认：旧Library原样保留归档、现成正式App安装/首次设置/服务器配对/正常重开；本人答复前未Quit/归档/安装 |
+| 四平台冻结制品 | Core同源 `5618911`；Mac/Linux/Windows/Debian12 Runtime原签与独立验签通过；Windows App及最终可选私有目录Inno已完成安装，App/Core未重编 | 完成剩余真机/最终App安装验收，不能将制品通过计为交付完成 |
+| moedeu-apps集中Gateway | C31正式安装、首次setup、严格LAN TLS、测试Tunnel及同profile正常退出恢复通过；Linux及Mac均connected并有三能力独立效果；旧服务保持 | 等Windows及Mac正式App最终路线，最后刷新Custom MCP详情/Logo |
 | Linux最终路线 | 最新C31已正式独立安装；服务器→Linux三能力独立效果、同profile Host恢复、旧token无效果、Gateway恢复后新Exec均通过 | 保持连接，复用已通过场景 |
-| NAB5桌面与清理 | 临时737文件/96目录已清退；Windows→Mac方向已通过；同SID既有Session2已由标准tscon恢复console Active/UNLOCKED | Moonlight捕获仍失败；旧SSH owner7368未接桌面17108，C31安装/GUI验收挂起 |
+| NAB5桌面与清理 | 最终C31已安装，App300/Core10604仍为原实例。Root直接SSH完成新Review并单次Request；GUI结果未确认、pending空。现有Runtime只读verify报integrity/exit2；字节匹配但安装祖先存在不受信主体修改ACL，见最新检查点 | 先闭合Runtime admission阻塞；UNKNOWN不重放、不调整Codex ACL或重装。之后才能四字段批准、三类账号效果及同profile恢复 |
 
 Mac 新 dev Gateway 通过实际 GUI createLocal/tunnelSave 各一次，三能力/自动 LAN/系统权限
 已核对；独立验收 MCP 实际列出 `styx-7c7a313ee112506335705652` connected。
@@ -90,7 +191,7 @@ Mac角色退役碰到 `app_cleanup_unknown`，本机Exec/SDK已退，
 服务器Gateway也已正常恢复：原2941095 actualexit0、测试payload进程与22027监听全退；
 同profile显式重开为2954416/birth92942814，Gateway/Tunnel ready、同CA、Linux自动连回。
 Root新Exec46B/SHA `26528bff70b0cb737e2d21cd263f2b0c54e169751a5588bc25491f9cee32858f` 独立读回PASS。
-当前Mac新角色确认“继续”被自动审批明确拒绝（缺本次可信本人确认，按钮未派发），Root主聊精确问题待答；
+Mac新角色确认“继续”被自动审批明确拒绝（按钮未派发）；本人随后在Root主聊明确确认本次角色变更及服务器配对，原端审批仍拒绝跨聊天转交确认，Continue实际派发0次，待本人在当前对话框单击；
 Windows C31 App/Inno已生成且未安装/启动，Sid交互桌面/Moonlight仍未恢复。
 后续只读发现同SID已认证的Sid/Session2 Disconnected及Explorer/Codex GUI；一次标准tscon actualexit0，
 Session2现为console Active/UNLOCKED，Sunshine worker自动迁移，服务未额外重启，但捕获仍0x80070005。

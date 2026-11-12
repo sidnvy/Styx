@@ -225,7 +225,7 @@ impl Definition {
         }
         role.desired(&canonical).ok_or(ServiceError::Invalid)?;
         let selection = selection(&canonical)?;
-        let candidate = Arc::new(crate::release::verify_selected(&selection).map_err(changed)?);
+        let candidate = Arc::new(crate::release::load_selected(&selection).map_err(changed)?);
         if candidate.report().target != "x86_64-unknown-linux-gnu" {
             return Err(ServiceError::Invalid);
         }

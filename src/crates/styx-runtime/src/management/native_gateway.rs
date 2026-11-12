@@ -507,7 +507,7 @@ mod platform {
         let selection: NativeRuntimeSelection =
             serde_json::from_slice(selection_raw.bytes()).map_err(|_| bad())?;
         let candidate = Arc::new(
-            release::verify_selected(&selection)
+            release::load_selected(&selection)
                 .map_err(|_| BootstrapError::new("fresh_gateway_candidate_untrusted", 2))?,
         );
         if !candidate
@@ -993,7 +993,7 @@ mod platform {
                     candidate
                 }
                 None => Arc::new(
-                    release::verify_selected(&selected)
+                    release::load_selected(&selected)
                         .map_err(|_| BootstrapError::new("fresh_gateway_candidate_untrusted", 2))?,
                 ),
             };

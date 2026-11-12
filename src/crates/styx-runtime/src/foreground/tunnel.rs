@@ -446,7 +446,7 @@ fn selected_release(state: &Path) -> Result<crate::release::VerifiedNativeReleas
         .map_err(|_| error("tunnel_protected_read"))?;
     let selection = validated_runtime_selection(&root, &canonical, &marker)
         .map_err(|_| error("tunnel_protected_read"))?;
-    crate::release::verify_selected(&selection).map_err(|_| error("tunnel_client_unavailable"))
+    crate::release::load_selected(&selection).map_err(|_| error("tunnel_client_unavailable"))
 }
 fn available(state: &Path) -> bool {
     selected_release(state).is_ok_and(|release| {

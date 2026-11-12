@@ -51,7 +51,7 @@ impl Bootstrap {
         {
             return Err(AppError("app_runtime_bootstrap_changed"));
         }
-        let release = release::verify_selected(selection).map_err(|e| AppError(e.code()))?;
+        let release = release::load_selected(selection).map_err(|e| AppError(e.code()))?;
         if !release
             .supports_state_reader(ReaderContract::NativePairingLifecycleStateV1)
             .map_err(|e| AppError(e.code()))?
@@ -64,7 +64,7 @@ impl Bootstrap {
 
     async fn run(self) -> Result<PathBuf, Failure> {
         self.validate().map_err(Failure::Refused)?;
-        let source = release::verify_selected(&self.source.selection)
+        let source = release::load_selected(&self.source.selection)
             .map_err(|e| Failure::Refused(AppError(e.code())))?;
         if !source
             .supports_state_reader(ReaderContract::NativePairingLifecycleStateV1)
@@ -100,7 +100,7 @@ impl Bootstrap {
             .ensure_absent(&version_name)
             .map_err(|_| AppError("app_runtime_bootstrap_unknown"))?;
         self.validate()?;
-        let staged = release::stage(
+        let staged = release::stage_installed(
             Path::new(&self.source.selection.payload_path),
             Path::new(&self.source.selection.publisher_file),
             &self.source.selection.publisher_spki_sha256.to_hex(),

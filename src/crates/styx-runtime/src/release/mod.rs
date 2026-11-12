@@ -435,11 +435,30 @@ pub async fn inspect(
     }
 }
 
-/// Read-only bootstrap data from the same native verifier and observed root.
+/// Install/update admission: verify the complete signed payload once.
 pub async fn inspect_selection(
     payload: &Path,
     publisher_file: &Path,
     expected_pin: &str,
+) -> Result<NativeRuntimeSelection> {
+    selection(payload, publisher_file, expected_pin, true).await
+}
+
+/// Startup reads signed installed metadata and retains fixed native images.
+/// It does not inventory or hash the installed payload tree.
+pub async fn installed_selection(
+    payload: &Path,
+    publisher_file: &Path,
+    expected_pin: &str,
+) -> Result<NativeRuntimeSelection> {
+    selection(payload, publisher_file, expected_pin, false).await
+}
+
+async fn selection(
+    payload: &Path,
+    publisher_file: &Path,
+    expected_pin: &str,
+    verify_payload: bool,
 ) -> Result<NativeRuntimeSelection> {
     #[cfg(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -457,7 +476,7 @@ pub async fn inspect_selection(
         let publisher_file = publisher_file.to_owned();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let verified = verify(&payload, &publisher_file, &expected)?;
+            let verified = open_release(&payload, &publisher_file, &expected, verify_payload)?;
             verified.revalidate()?;
             verified.runtime_selection()
         })
@@ -483,6 +502,19 @@ pub async fn inspect_selection(
 /// Re-open a canonical DATA selection through the existing C08 verifier. This
 /// neither admits ordinary traffic nor proves the cutover was committed.
 pub fn verify_selected(selection: &NativeRuntimeSelection) -> Result<VerifiedNativeRelease> {
+    selected(selection, true)
+}
+
+/// Open an already installed selection without a full-payload verification.
+/// Canonical identity, signed manifest/publisher and native image ownership remain.
+pub fn load_selected(selection: &NativeRuntimeSelection) -> Result<VerifiedNativeRelease> {
+    selected(selection, false)
+}
+
+fn selected(
+    selection: &NativeRuntimeSelection,
+    verify_payload: bool,
+) -> Result<VerifiedNativeRelease> {
     validate_selection_locator(selection)?;
     if !cfg!(any(
         all(
@@ -504,10 +536,11 @@ pub fn verify_selected(selection: &NativeRuntimeSelection) -> Result<VerifiedNat
     }
     let expected = PublisherFingerprint::parse(&selection.publisher_spki_sha256.to_hex())
         .map_err(|_| ReleaseError::Invalid)?;
-    let verified = verify(
+    let verified = open_release(
         Path::new(&selection.payload_path),
         Path::new(&selection.publisher_file),
         &expected,
+        verify_payload,
     )?;
     if verified.selection_metadata()? != *selection {
         return Err(ReleaseError::Changed);
@@ -552,6 +585,15 @@ pub fn verify(
     publisher_file: &Path,
     expected: &PublisherFingerprint,
 ) -> Result<VerifiedNativeRelease> {
+    open_release(payload, publisher_file, expected, true)
+}
+
+fn open_release(
+    payload: &Path,
+    publisher_file: &Path,
+    expected: &PublisherFingerprint,
+    verify_payload: bool,
+) -> Result<VerifiedNativeRelease> {
     #[cfg(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
         all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
@@ -561,7 +603,7 @@ pub fn verify(
         )
     ))]
     {
-        verify_native(payload, publisher_file, expected)
+        verify_native(payload, publisher_file, expected, verify_payload)
     }
     #[cfg(not(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -588,6 +630,7 @@ fn verify_native(
     payload: &Path,
     publisher_path: &Path,
     expected: &PublisherFingerprint,
+    verify_payload: bool,
 ) -> Result<VerifiedNativeRelease> {
     if !publisher_path.is_absolute() {
         return Err(ReleaseError::Invalid);
@@ -666,28 +709,51 @@ fn verify_native(
             return Err(ReleaseError::Invalid);
         }
     }
-    // Members unchanged since the last full check of this signed manifest
-    // reuse their recorded digests; every member is still compared below.
     let manifest_sha256 = Sha256Digest::of_bytes(manifest_file.bytes());
-    let known = digest_cache::load(&manifest_sha256);
-    let inventory = root.payload_inventory_with_known(PayloadLimits::default(), &known)?;
-    if inventory.members().len() != expected_members.len() {
-        return Err(ReleaseError::Integrity);
-    }
-    let mut payload_bytes = 0u64;
-    for member in inventory.members() {
-        let Some((size, digest, executable)) = expected_members.get(&member.path) else {
-            return Err(ReleaseError::Integrity);
-        };
-        if member.bytes != *size || member.sha256 != *digest || member.executable != *executable {
+    let inventory = if verify_payload {
+        let known = digest_cache::load(&manifest_sha256);
+        let inventory = root.payload_inventory_with_known(PayloadLimits::default(), &known)?;
+        if inventory.members().len() != expected_members.len() {
             return Err(ReleaseError::Integrity);
         }
-        payload_bytes = payload_bytes
-            .checked_add(member.bytes)
-            .ok_or(ReleaseError::Capacity)?;
-    }
-    // Recorded only after every member matched the signed manifest.
-    digest_cache::store(&manifest_sha256, &known, inventory.members());
+        for member in inventory.members() {
+            let Some((size, digest, executable)) = expected_members.get(&member.path) else {
+                return Err(ReleaseError::Integrity);
+            };
+            if member.bytes != *size || member.sha256 != *digest || member.executable != *executable
+            {
+                return Err(ReleaseError::Integrity);
+            }
+        }
+        digest_cache::store(&manifest_sha256, &known, inventory.members());
+        inventory
+    } else {
+        // Only fixed native images are opened. Assets, JS dependencies and
+        // unrelated members are checked by installation/update, not on load.
+        let paths = std::iter::once(manifest.entrypoint.as_str()).chain(
+            manifest
+                .worker_closures
+                .iter()
+                .map(|worker| worker.entrypoint.as_str()),
+        );
+        let images = paths
+            .map(|path| {
+                let (bytes, digest, executable) = expected_members
+                    .get(Path::new(path))
+                    .ok_or(ReleaseError::Invalid)?;
+                if !executable {
+                    return Err(ReleaseError::Invalid);
+                }
+                Ok((PathBuf::from(path), *bytes, *digest))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        root.installed_images(&images)?
+    };
+    let payload_bytes = expected_members
+        .values()
+        .try_fold(0u64, |total, (bytes, _, _)| {
+            total.checked_add(*bytes).ok_or(ReleaseError::Capacity)
+        })?;
     #[cfg(target_os = "windows")]
     let (executable, workers) = {
         let paths: Vec<&Path> = std::iter::once(Path::new(&manifest.entrypoint))
@@ -739,7 +805,7 @@ fn verify_native(
         source_inputs_sha256: manifest.source.inputs_sha256,
         manifest_sha256: Sha256Digest::of_bytes(manifest_file.bytes()),
         publisher_spki_sha256: expected.as_hex().to_owned(),
-        member_count: inventory.members().len(),
+        member_count: expected_members.len(),
         payload_bytes,
         external_worker_count: manifest.external_workers.len(),
         installed: false,
@@ -818,5 +884,6 @@ mod windows_tests;
 mod digest_cache;
 mod stage;
 pub use stage::stage;
+pub(crate) use stage::stage_installed;
 #[cfg(test)]
 mod stage_tests;

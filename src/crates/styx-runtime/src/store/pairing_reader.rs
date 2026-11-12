@@ -87,7 +87,7 @@ pub(super) fn require(root: &PrivateRoot, writer: &ConfigurationWriterGuard) -> 
                 // history cannot be mistaken for a completed reader upgrade.
                 let selection =
                     native_host_snapshot::validated_runtime_selection(root, &canonical, &marker)?;
-                let selected = crate::release::verify_selected(&selection)
+                let selected = crate::release::load_selected(&selection)
                     .map_err(|_| JournalError::Conflict)?;
                 if !selected
                     .manifest()

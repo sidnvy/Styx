@@ -22,6 +22,45 @@ pub async fn stage(
     destination_parent: &Path,
     name: &OsStr,
 ) -> Result<NativeRuntimeSelection> {
+    stage_with_policy(
+        payload,
+        publisher_file,
+        expected_pin,
+        destination_parent,
+        name,
+        true,
+    )
+    .await
+}
+
+/// First App setup installs an already admitted bundle into its private Runtime.
+/// Check each signed member while copying, without two additional tree scans.
+pub(crate) async fn stage_installed(
+    payload: &Path,
+    publisher_file: &Path,
+    expected_pin: &str,
+    destination_parent: &Path,
+    name: &OsStr,
+) -> Result<NativeRuntimeSelection> {
+    stage_with_policy(
+        payload,
+        publisher_file,
+        expected_pin,
+        destination_parent,
+        name,
+        false,
+    )
+    .await
+}
+
+async fn stage_with_policy(
+    payload: &Path,
+    publisher_file: &Path,
+    expected_pin: &str,
+    destination_parent: &Path,
+    name: &OsStr,
+    full_admission: bool,
+) -> Result<NativeRuntimeSelection> {
     #[cfg(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
         all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
@@ -46,6 +85,7 @@ pub async fn stage(
                 &expected,
                 &destination_parent,
                 &name,
+                full_admission,
             )
         })
         .await
@@ -84,9 +124,10 @@ fn stage_blocking(
     expected: &PublisherFingerprint,
     destination_parent: &Path,
     name: &OsStr,
+    full_admission: bool,
 ) -> Result<NativeRuntimeSelection> {
     use crate::store::{ReleaseCopyMember, ReleaseStage};
-    let source = verify(payload, publisher_file, expected)?;
+    let source = open_release(payload, publisher_file, expected, full_admission)?;
     // Reject preview scope/unsupported readers before any destination creation.
     source.runtime_selection()?;
     let parent = PrivateRoot::open(destination_parent)?;
@@ -98,15 +139,39 @@ fn stage_blocking(
     let mut destination = ReleaseStage::create(&parent, destination_parent, name)
         .map_err(|_| ReleaseError::Unknown)?;
     let result = (|| {
-        for member in source.inventory.members() {
+        let mut members: Vec<_> = source
+            .manifest
+            .files
+            .iter()
+            .map(|member| {
+                (
+                    PathBuf::from(&member.path),
+                    member.size,
+                    member.sha256,
+                    member.executable,
+                )
+            })
+            .collect();
+        for (name, raw) in [
+            ("manifest.json", &source.manifest_file),
+            ("manifest.sig", &source.signature_file),
+        ] {
+            members.push((
+                PathBuf::from(name),
+                raw.bytes().len() as u64,
+                Sha256Digest::of_bytes(raw.bytes()),
+                false,
+            ));
+        }
+        for (path, bytes, digest, executable) in members {
             destination.copy_member(
                 &source.root,
                 ReleaseCopyMember {
-                    source_relative: &member.path,
-                    destination_relative: &Path::new("payload").join(&member.path),
-                    bytes: member.bytes,
-                    sha256: member.sha256,
-                    executable: member.executable,
+                    source_relative: &path,
+                    destination_relative: &Path::new("payload").join(&path),
+                    bytes,
+                    sha256: digest,
+                    executable,
                 },
             )?;
         }
@@ -121,10 +186,11 @@ fn stage_blocking(
             },
         )?;
         source.revalidate()?;
-        let staged = verify(
+        let staged = open_release(
             &destination.path().join("payload"),
             &destination.path().join("publisher.pem"),
             expected,
+            full_admission,
         )?;
         if staged.manifest_file.bytes() != source.manifest_file.bytes()
             || staged.signature_file.bytes() != source.signature_file.bytes()

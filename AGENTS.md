@@ -8,9 +8,12 @@
 ## Default development loop
 
 - Work in the existing project and native cache. WORKSPACE.md maps paths and commands; read only the relevant section. On the workstation, integrate into /home/sid/Developer/Styx on develop; origin is GitHub.
+- Reuse the known working build command, dependency cache and target directory. Preserve cache-affecting target triple, profile, features and RUSTFLAGS; the same cache root alone does not guarantee a hit. Inspect CPU/memory and the current compile/link stage, then use the available parallelism instead of defaulting to a conservative job cap. Reduce jobs for observed contention, not hypothetical load.
 - Develop and reproduce locally before release production: incremental affected-crate check, the changed scenario, and actual native execution when runtime behavior needs it. A typecheck is sufficient for a typecheck task, not for a startup/recovery fix.
 - A candidate freezes release outputs; it is not a development project, cache or prerequisite for every GUI run. Run workspace quality at integration/release checkpoints. Reuse unaffected evidence; rerun when a relevant change, failure or uncertainty justifies it.
+- Reuse existing installation paths and persisted profiles for authorized fixes and recovery. Do not accumulate new acceptance scopes or isolated projects for each step; keep ordinary disposable unit-test fixtures separate from product delivery.
 - Continue authorized implementation and verification to the requested outcome. Reuse existing authorization; do not invent per-step approval gates. Respect tool permissions and ask only for genuinely missing authorization or a required human-only action; keep independent work moving.
+- Do not add unrequested runtime security or validation layers. Signed payload verification belongs at install/update; ordinary startup, status and pairing must not repeatedly scan the whole package or impose payload ACL requirements on shared parent directories. Preserve OS signing, pairing and private credential boundaries. Fix scope deviations in the implementation rather than asking the user to change permissions or reinstall around them.
 
 ## Task-specific guidance
 

@@ -26,12 +26,32 @@ Historical failures are clues, not diagnoses of the current failure.
   DMG/Inno packaging; keep original signing, publisher/Runtime verification, source qualification
   and fixed trusted execution paths. Missing development wiring is a defect to fix, not a reason
   to add a permissive trust mode or rebuild all platforms.
-- Reuse one Cargo target. Start workstation Linux at 8 jobs; pho at 4 Cargo/2 CMake jobs.
-  NAB5 uses its owner's bounded setting. Record resource settings for necessary builds;
-  reduce on observed contention. Use --timings for those builds, not extra benchmark builds.
+- Reuse the known working command and dependency cache, not just its cache-root path.
+  Preserve the target triple (`--target`), profile, features and RUSTFLAGS that produced the
+  warm artifacts; omitting an explicit target can trigger a separate dependency build.
+  Inspect the command/cache difference before accepting unexpected dependency recompilation.
+- Size compilation to observed CPU and available memory. Use the available parallelism
+  rather than an arbitrary conservative cap: workstation Linux normally starts at 8 jobs;
+  pho retains its measured 4 Cargo/2 CMake setting. On other devices, inspect resources first.
+  Record jobs and inspect compile versus link/codegen before tuning; reduce jobs on actual
+  memory pressure or contention. Reuse --timings; do not add benchmark builds.
 - Keep source/input binding and release producers' existing cache-correctness barriers.
   Changed copied sources need refreshed mtimes and compiler evidence of rebuilding affected targets.
   Do not clean the whole workspace or install a new cache service for routine diagnosis.
+
+## Keep runtime checks within scope
+
+Full signed-payload admission belongs at installation/update. Ordinary startup, status,
+pairing and recovery read installed metadata and retain the needed native identities;
+they must not rescan every package member or impose payload ACL rules on shared ancestors.
+Keep system code signing, publisher pins, pairing/TLS and private credential protection.
+Do not turn an implementation-added restriction into a user requirement or use ACL changes,
+relocation or reinstallation to avoid fixing a scope deviation.
+
+Reuse the current installation path and persisted profile for authorized in-place fixes.
+Do not create a new product scope, checkout or acceptance directory for each step.
+Disposable unit-test fixtures remain useful for bounded regressions; their results do not
+replace actual startup and recovery with the intended installed configuration.
 
 ## Lifecycle failures
 

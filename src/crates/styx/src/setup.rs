@@ -1241,8 +1241,11 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
     let gateway = root.join("gateway");
     let host = root.join("host");
     if !session.input("runtime-selection.json").exists() {
-        session.consent("payload", "Check the installed Styx files against the publisher fingerprint you supplied and remember which version to run.")?;
-        let selection = styx_runtime::release::inspect_selection(
+        session.consent(
+            "payload",
+            "Read the installed Styx version using the publisher fingerprint you supplied.",
+        )?;
+        let selection = styx_runtime::release::installed_selection(
             &a.payload.payload_dir,
             &a.payload.publisher_file,
             &a.payload.expected_publisher,
@@ -1255,8 +1258,8 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
             .map_err(|_| Failure::new("setup_selection_unavailable"))?;
         let selection =
             serde_json::from_slice(&raw).map_err(|_| Failure::new("setup_selection_invalid"))?;
-        let verified = styx_runtime::release::verify_selected(&selection)
-            .map_err(|e| Failure::new(e.code()))?;
+        let verified =
+            styx_runtime::release::load_selected(&selection).map_err(|e| Failure::new(e.code()))?;
         let selected = verified
             .runtime_selection()
             .map_err(|e| Failure::new(e.code()))?;
@@ -1679,15 +1682,15 @@ async fn require_tunnel_client(answers: &Answers, root: &Path) -> Result<()> {
         serde_json::to_value(status).map_err(|_| Failure::new("setup_tunnel_status_failed"))?["available"]
             == true
     } else {
-        let selection = styx_runtime::release::inspect_selection(
+        let selection = styx_runtime::release::installed_selection(
             &answers.payload.payload_dir,
             &answers.payload.publisher_file,
             &answers.payload.expected_publisher,
         )
         .await
         .map_err(|e| Failure::new(e.code()))?;
-        let release = styx_runtime::release::verify_selected(&selection)
-            .map_err(|e| Failure::new(e.code()))?;
+        let release =
+            styx_runtime::release::load_selected(&selection).map_err(|e| Failure::new(e.code()))?;
         release.manifest().worker_closures.iter().any(|worker| {
             worker.kind == styx_contracts::native_release::NativeExternalWorker::TunnelClient
         })

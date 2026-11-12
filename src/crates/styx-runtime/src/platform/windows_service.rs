@@ -231,7 +231,7 @@ impl Definition {
         let selection =
             store::native_host_snapshot::validated_runtime_selection(&root, &checked, &marker)
                 .map_err(changed)?;
-        let candidate = Arc::new(release::verify_selected(&selection).map_err(changed)?);
+        let candidate = Arc::new(release::load_selected(&selection).map_err(changed)?);
         if candidate.report().target != "x86_64-pc-windows-msvc" {
             return Err(ServiceError::Invalid);
         }

@@ -974,7 +974,7 @@ impl Definition {
             )
             .map_err(changed)?
         };
-        let candidate = Arc::new(release::verify_selected(&selection).map_err(changed)?);
+        let candidate = Arc::new(release::load_selected(&selection).map_err(changed)?);
         if original.is_some()
             && !candidate
                 .supports_state_reader(state.reader_contract)

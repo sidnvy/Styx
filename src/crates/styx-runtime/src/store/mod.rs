@@ -376,6 +376,13 @@ pub(crate) struct PublicInstallationRoot {
 }
 #[cfg(target_os = "windows")]
 impl PublicInstallationRoot {
+    pub(crate) fn installed_images(
+        &self,
+        images: &[(PathBuf, u64, styx_contracts::identity::Sha256Digest)],
+    ) -> Result<PayloadInventory> {
+        payload::validate_images(images)?;
+        self.inner.installed_images(images)
+    }
     pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
             inner: platform::Root::open_installation(path.as_ref())?,

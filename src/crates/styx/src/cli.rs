@@ -711,6 +711,16 @@ enum GatewayTunnelCommand {
 
 #[derive(Subcommand)]
 enum ReleaseCommand {
+    /// Native App bootstrap metadata; payload verification belongs to install/update.
+    #[command(hide = true)]
+    InstalledSelection {
+        #[arg(long)]
+        payload_dir: PathBuf,
+        #[arg(long)]
+        publisher_file: PathBuf,
+        #[arg(long)]
+        expected_publisher: String,
+    },
     /// Commit a verified runtime selection for a stopped fresh foreground profile.
     Select {
         #[arg(long)]
@@ -1809,6 +1819,31 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                     );
                     ExitCode::from(value.exit_code())
                 }
+            }
+        }
+        Command::Release {
+            command:
+                ReleaseCommand::InstalledSelection {
+                    payload_dir,
+                    publisher_file,
+                    expected_publisher,
+                },
+        } => {
+            match styx_runtime::release::installed_selection(
+                &payload_dir,
+                &publisher_file,
+                &expected_publisher,
+            )
+            .await
+            {
+                Ok(selection) => {
+                    if write_json(&selection).is_ok() {
+                        ExitCode::SUCCESS
+                    } else {
+                        error("output_unavailable")
+                    }
+                }
+                Err(value) => error(value.code()),
             }
         }
         Command::Release {

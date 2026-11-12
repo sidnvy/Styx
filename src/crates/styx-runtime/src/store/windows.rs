@@ -182,9 +182,8 @@ impl Root {
     }
     pub(in crate::store) fn open_installation(path: &Path) -> Result<Self> {
         let (path, mut ancestors) = absolute_pins(path)?;
-        for directory in ancestors.iter().skip(1) {
-            ffi::local_executable_acl(directory)?;
-        }
+        // Installation parents may be shared development directories. Retain
+        // their identities/handles without imposing the payload's ACL on them.
         let directory = ancestors.pop().ok_or(StoreError::InvalidRoot)?;
         let facts = ffi::facts(&directory)?;
         let identity = RootIdentity::Windows {
@@ -581,11 +580,6 @@ impl Root {
             || self.read_identity(&self.directory)? != self.identity
         {
             return Err(StoreError::Changed);
-        }
-        if self.installation_read_only {
-            for file in self.ancestors.iter().skip(1) {
-                ffi::local_executable_acl(file)?;
-            }
         }
         // Keep the original chain alive across the validation call too.
         if self.ancestors.iter().any(|f| ffi::facts(f).is_err()) {

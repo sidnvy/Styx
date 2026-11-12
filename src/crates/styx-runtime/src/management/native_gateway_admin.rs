@@ -792,7 +792,7 @@ impl Material {
         {
             return Err(refused("native_gateway_admin_material"));
         }
-        let candidate = release::verify_selected(&selection)
+        let candidate = release::load_selected(&selection)
             .map_err(|_| refused("native_gateway_admin_candidate"))?;
         if !candidate
             .supports_state_reader(state.reader_contract)

@@ -114,7 +114,7 @@ impl Reference {
             outside(Path::new(&selection.payload_path), install)?;
             outside(Path::new(&selection.publisher_file), install)?;
         }
-        let release = Arc::new(release::verify_selected(&references[0]).map_err(|_| refused())?);
+        let release = Arc::new(release::load_selected(&references[0]).map_err(|_| refused())?);
         let result = Self {
             scope,
             identity: root.identity(),
@@ -166,7 +166,7 @@ impl SelectionInput {
             .map_err(|_| refused())?;
         let selection: NativeRuntimeSelection =
             serde_json::from_slice(raw.bytes()).map_err(|_| refused())?;
-        let release = release::verify_selected(&selection).map_err(|_| refused())?;
+        let release = release::load_selected(&selection).map_err(|_| refused())?;
         let result = Self {
             root,
             raw,

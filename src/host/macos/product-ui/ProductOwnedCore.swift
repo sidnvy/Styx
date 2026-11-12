@@ -362,11 +362,13 @@ final class ProductOwnedCore: @unchecked Sendable {
         let bundle = Bundle.main.bundleURL
         guard ProductNativeLaunchScope.acceptsPackagePath(bundle.path, identifier: Bundle.main.bundleIdentifier),
               bundle.resolvingSymlinksInPath().path == bundle.path else { throw ProductOwnedCoreError.originalPackageRequired }
-        var code: SecStaticCode?, requirement: SecRequirement?
-        guard SecStaticCodeCreateWithPath(Bundle.main.bundleURL as CFURL, [], &code) == errSecSuccess,
+        // The OS owns launch-time bundle validation. Bind this running App to
+        // its original identity without walking sealed resources again.
+        var code: SecCode?, requirement: SecRequirement?
+        guard SecCodeCopySelf([], &code) == errSecSuccess,
               SecRequirementCreateWithString(productOriginalAppRequirement as CFString, [], &requirement) == errSecSuccess,
               let originalCode = code, let originalRequirement = requirement,
-              SecStaticCodeCheckValidity(originalCode, SecCSFlags(rawValue: kSecCSStrictValidate), originalRequirement) == errSecSuccess else { throw ProductOwnedCoreError.originalPackageRequired }
+              SecCodeCheckValidity(originalCode, [], originalRequirement) == errSecSuccess else { throw ProductOwnedCoreError.originalPackageRequired }
         // New native package metadata is mandatory. Never infer a publisher
         // from payload key bytes or use the old Node-backed App as a fallback.
         let (_, metadataRaw) = try pinned(resources.appendingPathComponent("macos-runtime.json"), limit: 16384)
@@ -377,11 +379,11 @@ final class ProductOwnedCore: @unchecked Sendable {
         let (cliPin, cliRaw) = try pinned(cli, limit: 1024 * 1024 * 1024)
         guard productDigest(cliRaw) == cliHash else { throw ProductOwnedCoreError.invalidPackage }
         let verify = Process(), stdout = Pipe(), err = Pipe()
-        verify.executableURL = cli; verify.arguments = ["release", "verify", "--payload-dir", payload.path, "--publisher-file", pub.path, "--expected-publisher", productOriginalMacPublisher, "--json", "--runtime-selection"]
+        verify.executableURL = cli; verify.arguments = ["release", "installed-selection", "--payload-dir", payload.path, "--publisher-file", pub.path, "--expected-publisher", productOriginalMacPublisher]
         verify.environment = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin", "TMPDIR": NSTemporaryDirectory()]
         verify.standardInput = FileHandle.nullDevice; verify.standardOutput = stdout; verify.standardError = err
-        // Original verifier only; this worker runs off AppKit. It has no role,
-        // credentials or OS permission prompts. Its stdout is bounded selection.
+        // Read installed signed metadata without a full payload scan. This
+        // worker runs off AppKit and has no role or OS permission prompts.
         let errors = DispatchGroup()
         var verifierStarted = false
         do {

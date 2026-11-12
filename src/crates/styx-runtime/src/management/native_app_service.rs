@@ -173,7 +173,7 @@ pub(crate) async fn transfer_for_app(
                 .runtime_selection()
                 .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?
                 .ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?;
-            let release = crate::release::verify_selected(&selected)
+            let release = crate::release::load_selected(&selected)
                 .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
             let sequence = transactions
                 .runtime_update_high_water()
