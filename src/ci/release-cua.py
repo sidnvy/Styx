@@ -108,7 +108,12 @@ def source_cache_times(archive, source, expected):
     timestamp = epoch * 1_000_000_000
     for file in sorted(source.rglob('*'), reverse=True):
         require(not file.is_symlink(), 'cua_source_alias_refused')
-        os.utime(file, ns=(timestamp, timestamp), follow_symlinks=False)
+        if os.utime in os.supports_follow_symlinks:
+            os.utime(file, ns=(timestamp, timestamp), follow_symlinks=False)
+        else:
+            # Windows Python lacks this keyword. The complete fresh source
+            # inventory rejects links before and after this operation.
+            os.utime(file, ns=(timestamp, timestamp))
     os.utime(source, ns=(timestamp, timestamp), follow_symlinks=False)
     require(inventory(source) == expected, 'cua_source_changed_after_cache_times')
     require(all(path.stat().st_mtime_ns == timestamp for path in source.rglob('*')),

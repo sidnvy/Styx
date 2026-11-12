@@ -98,7 +98,8 @@ class CuaReleaseTests(unittest.TestCase):
         with mock.patch.dict(self.state, ARCHIVE_SHA=self.module['digest'](archive)):
             first = self.module['source_cache_times'](archive, source, expected)
             file.touch()
-            second = self.module['source_cache_times'](archive, source, expected)
+            with mock.patch.object(self.module['os'], 'supports_follow_symlinks', set()):
+                second = self.module['source_cache_times'](archive, source, expected)
             self.assertEqual(first, second)
             self.assertEqual(file.stat().st_mtime_ns, 1792135295 * 1_000_000_000)
             self.assertEqual(self.module['inventory'](source), expected)
