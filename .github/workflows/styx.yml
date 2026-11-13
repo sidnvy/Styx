@@ -105,9 +105,6 @@ jobs:
           python-version: '3.12'
       - name: Install locked JavaScript deps
         run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Install independently locked provider dependencies
-        run: |
-          npm --prefix packages/styx-browser-provider ci --ignore-scripts --no-audit --no-fund
       - name: Pinned native source inventory and bounded license evidence
         run: |
           python -m unittest discover -s ci/test -p test_native_inventory.py
@@ -148,7 +145,6 @@ jobs:
       - name: Install locked Host test dependencies
         run: |
           npm --prefix src ci --ignore-scripts --no-audit --no-fund
-          npm --prefix src/packages/styx-browser-provider ci --ignore-scripts --no-audit --no-fund
       - name: Remaining platform contracts
         run: npm --prefix src run test:all
       - name: Validate checksum and safe archive extraction regressions

@@ -67,7 +67,7 @@ impl BrowserAction {
     }
 }
 const CONTRACT: &str =
-    include_str!("../../../../packages/styx-browser-provider/playwright-contract-0.0.83.json");
+    include_str!("../../../../providers/browser-worker/playwright-contract-0.0.83.json");
 static SCHEMAS: OnceLock<Result<BTreeMap<String, jsonschema::Validator>>> = OnceLock::new();
 fn schemas() -> Result<&'static BTreeMap<String, jsonschema::Validator>> {
     SCHEMAS

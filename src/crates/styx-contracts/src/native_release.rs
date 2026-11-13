@@ -41,82 +41,30 @@ pub enum NativeReleaseReader {
     NativePairingLifecycleV1,
 }
 impl NativeReleaseReader {
+    const fn release_rank(self) -> Option<u8> {
+        match self {
+            Self::NativeReleaseV1 => None,
+            Self::NativeRuntimeV1 => Some(1),
+            Self::NativeRuntimeMigratedV1 => Some(2),
+            Self::NativeRuntimeMigratedV2 => Some(3),
+            Self::NativeRuntimeMigratedV3 => Some(4),
+            Self::NativeRuntimeSelectedV1 => Some(5),
+            Self::NativeAppRuntimeSelectedV1 => Some(6),
+            Self::NativeServiceRuntimeSelectedV1 => Some(7),
+            Self::NativeAppServiceTransferredV1 => Some(8),
+            Self::NativePairingLifecycleV1 => Some(9),
+        }
+    }
+
     /// Signed feature declaration, not evidence of successful migration.
     pub fn supports_host_admission_v2(self) -> bool {
-        matches!(
-            self,
-            Self::NativeRuntimeMigratedV3
-                | Self::NativeRuntimeSelectedV1
-                | Self::NativeAppRuntimeSelectedV1
-                | Self::NativeServiceRuntimeSelectedV1
-                | Self::NativeAppServiceTransferredV1
-                | Self::NativePairingLifecycleV1
-        )
+        self.release_rank().is_some_and(|rank| rank >= 4)
     }
 
     /// Signed reader declaration only; no runtime health or activation authority.
     pub fn supports_state_reader(self, reader: ReaderContract) -> bool {
-        if self == Self::NativePairingLifecycleV1 {
-            return matches!(
-                reader,
-                ReaderContract::NativeManagementStateV1
-                    | ReaderContract::NativeMigratedStateV1
-                    | ReaderContract::NativeMigratedStateV2
-                    | ReaderContract::NativeRuntimeSelectedStateV1
-                    | ReaderContract::NativeAppRuntimeSelectedStateV1
-                    | ReaderContract::NativeServiceRuntimeSelectedStateV1
-                    | ReaderContract::NativeAppServiceTransferredStateV1
-                    | ReaderContract::NativePairingLifecycleStateV1
-            );
-        }
-        matches!(
-            (self, reader),
-            (
-                Self::NativeRuntimeV1
-                    | Self::NativeRuntimeMigratedV1
-                    | Self::NativeRuntimeMigratedV2
-                    | Self::NativeRuntimeMigratedV3
-                    | Self::NativeRuntimeSelectedV1
-                    | Self::NativeAppRuntimeSelectedV1
-                    | Self::NativeServiceRuntimeSelectedV1
-                    | Self::NativeAppServiceTransferredV1,
-                ReaderContract::NativeManagementStateV1
-            ) | (
-                Self::NativeRuntimeMigratedV1
-                    | Self::NativeRuntimeMigratedV2
-                    | Self::NativeRuntimeMigratedV3
-                    | Self::NativeRuntimeSelectedV1
-                    | Self::NativeAppRuntimeSelectedV1
-                    | Self::NativeServiceRuntimeSelectedV1
-                    | Self::NativeAppServiceTransferredV1,
-                ReaderContract::NativeMigratedStateV1
-            ) | (
-                Self::NativeRuntimeMigratedV2
-                    | Self::NativeRuntimeMigratedV3
-                    | Self::NativeRuntimeSelectedV1
-                    | Self::NativeAppRuntimeSelectedV1
-                    | Self::NativeServiceRuntimeSelectedV1
-                    | Self::NativeAppServiceTransferredV1,
-                ReaderContract::NativeMigratedStateV2
-            ) | (
-                Self::NativeRuntimeSelectedV1
-                    | Self::NativeAppRuntimeSelectedV1
-                    | Self::NativeServiceRuntimeSelectedV1
-                    | Self::NativeAppServiceTransferredV1,
-                ReaderContract::NativeRuntimeSelectedStateV1
-            ) | (
-                Self::NativeAppRuntimeSelectedV1
-                    | Self::NativeServiceRuntimeSelectedV1
-                    | Self::NativeAppServiceTransferredV1,
-                ReaderContract::NativeAppRuntimeSelectedStateV1
-            ) | (
-                Self::NativeServiceRuntimeSelectedV1 | Self::NativeAppServiceTransferredV1,
-                ReaderContract::NativeServiceRuntimeSelectedStateV1
-            ) | (
-                Self::NativeAppServiceTransferredV1,
-                ReaderContract::NativeAppServiceTransferredStateV1
-            )
-        )
+        self.release_rank()
+            .is_some_and(|rank| rank >= reader.required_release_rank())
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

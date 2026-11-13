@@ -8,14 +8,14 @@
   },
   "scripts": {
     "test": "npm run test:all",
-    "test:all": "node --test --test-concurrency=1 host/test/*.test.mjs host/macos/test/*.test.mjs host/windows/*.test.mjs host/windows/platform-update/*.test.mjs plugin/test/*.test.mjs packages/styx-browser-provider/test/*.test.mjs providers/browser-worker/*.test.mjs",
+    "test:all": "node --test --test-concurrency=1 host/test/*.test.mjs host/macos/test/*.test.mjs host/windows/*.test.mjs host/windows/platform-update/*.test.mjs plugin/test/*.test.mjs providers/browser-worker/*.test.mjs",
     "test:js": "npm run test:all",
     "test:unit": "python3 -I -B ci/local-tests.py unit",
     "test:contracts": "python3 -I -B ci/local-tests.py contracts",
     "test:integration": "python3 -I -B ci/local-tests.py integration --",
     "test:host": "node --test --test-concurrency=1 host/test/*.test.mjs host/macos/test/*.test.mjs",
     "test:plugin": "node --test --test-concurrency=1 plugin/test/*.test.mjs",
-    "test:browser": "node --test --test-concurrency=1 packages/styx-browser-provider/test/*.test.mjs",
+    "test:browser": "node --test --test-concurrency=1 providers/browser-worker/*.test.mjs",
     "test:windows": "node --test --test-concurrency=1 host/windows/*.test.mjs host/windows/platform-update/*.test.mjs",
     "quality": "python3 -I -B ci/rust-quality.py",
     "build:checked": "python3 tools/release/build-native-runtime.py"

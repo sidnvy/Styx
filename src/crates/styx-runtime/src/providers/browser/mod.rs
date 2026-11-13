@@ -781,7 +781,7 @@ impl BrowserOpenSlot {
 }
 fn validate_tools(tools: &[rmcp::model::Tool]) -> Result<()> {
     let pinned: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../packages/styx-browser-provider/playwright-contract-0.0.83.json"
+        "../../../../../providers/browser-worker/playwright-contract-0.0.83.json"
     ))
     .map_err(|_| BrowserError::ProtocolMismatch)?;
     let expected = pinned

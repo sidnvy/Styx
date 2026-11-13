@@ -58,11 +58,11 @@ fn pairing_projection(state: &NativeState) -> Result<NativeState> {
         match manager {
             NativeManager::ForegroundCli => {
                 projected.reader_contract = ReaderContract::NativeRuntimeSelectedStateV1;
-                projected.schema = NATIVE_RUNTIME_SELECTED_STATE_SCHEMA;
+                projected.schema = projected.reader_contract.state_schema();
             }
             NativeManager::AppManaged => {
                 projected.reader_contract = ReaderContract::NativeAppRuntimeSelectedStateV1;
-                projected.schema = NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA;
+                projected.schema = projected.reader_contract.state_schema();
             }
             // No schema7 service repair/transfer history is invented. Linux's
             // existing fresh systemd roots are accepted below without history.
@@ -70,7 +70,7 @@ fn pairing_projection(state: &NativeState) -> Result<NativeState> {
         }
     } else {
         projected.reader_contract = ReaderContract::NativeManagementStateV1;
-        projected.schema = NATIVE_STATE_SCHEMA;
+        projected.schema = projected.reader_contract.state_schema();
     }
     projected
         .extensions
@@ -125,12 +125,11 @@ pub(super) fn validate_pairing_lifecycle_state(
 pub(super) fn validate_selected_state(state: &NativeState) -> Result<()> {
     let current = selection(state)?;
     let update = record(state)?;
-    let expected_schema = match state.reader_contract {
+    match state.reader_contract {
         ReaderContract::NativeRuntimeSelectedStateV1 => {
             if update.service_repair.is_some() {
                 return Err(NativeStateRuleError::InvalidState);
             }
-            NATIVE_RUNTIME_SELECTED_STATE_SCHEMA
         }
         ReaderContract::NativeAppRuntimeSelectedStateV1 => {
             // App history is a separate reader contract, never a foreground-reader extension.
@@ -148,7 +147,6 @@ pub(super) fn validate_selected_state(state: &NativeState) -> Result<()> {
             {
                 return Err(NativeStateRuleError::InvalidState);
             }
-            NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA
         }
         ReaderContract::NativeAppServiceTransferredStateV1 => {
             if update.service_repair.is_some()
@@ -162,7 +160,6 @@ pub(super) fn validate_selected_state(state: &NativeState) -> Result<()> {
             {
                 return Err(NativeStateRuleError::InvalidState);
             }
-            NATIVE_APP_SERVICE_TRANSFERRED_STATE_SCHEMA
         }
         ReaderContract::NativeServiceRuntimeSelectedStateV1 => {
             if state.mode != NativeDeploymentMode::CreateLocal
@@ -211,11 +208,10 @@ pub(super) fn validate_selected_state(state: &NativeState) -> Result<()> {
             {
                 return Err(NativeStateRuleError::InvalidState);
             }
-            NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA
         }
         _ => return Err(NativeStateRuleError::InvalidState),
-    };
-    if state.schema != expected_schema
+    }
+    if state.schema != state.reader_contract.state_schema()
         || state.migration.is_some()
         || state.extensions.contains_key(NATIVE_MIGRATION_V2_KEY)
         || state.revision == 0

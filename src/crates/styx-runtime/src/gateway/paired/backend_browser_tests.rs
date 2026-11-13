@@ -119,7 +119,7 @@ fn browser_arguments_reuse_real_policy_without_owner_or_internal_metadata() {
     // Public routing is exactly the existing 24-tool contract. Remove only the
     // routing field; all native validation comes from the pinned real schemas.
     let native: Value = serde_json::from_str(include_str!(
-        "../../../../../packages/styx-browser-provider/playwright-contract-0.0.83.json"
+        "../../../../../providers/browser-worker/playwright-contract-0.0.83.json"
     ))
     .unwrap();
     let native_tools = native["tools"].as_array().unwrap();

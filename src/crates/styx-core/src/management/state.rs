@@ -12,16 +12,7 @@ pub enum NativeStateRuleError {
     ChangedExtensions,
 }
 pub fn validate_marker(marker: &NativeRootMarker) -> Result<(), NativeStateRuleError> {
-    if marker.schema != NATIVE_MARKER_SCHEMA
-        || matches!(
-            marker.reader_floor,
-            styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1
-                | styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1
-                | styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1
-                | styx_contracts::management::ReaderContract::NativeAppServiceTransferredStateV1
-                | styx_contracts::management::ReaderContract::NativePairingLifecycleStateV1
-        )
-    {
+    if marker.schema != NATIVE_MARKER_SCHEMA || !marker.reader_floor.is_valid_marker_floor() {
         return Err(NativeStateRuleError::InvalidMarker);
     }
     Ok(())
@@ -31,40 +22,17 @@ pub fn validate_state(
     marker: &NativeRootMarker,
 ) -> Result<(), NativeStateRuleError> {
     validate_marker(marker)?;
-    let original_reader =
-        state.schema == NATIVE_STATE_SCHEMA && state.reader_contract == marker.reader_floor;
-    let selected_reader = state.schema == NATIVE_RUNTIME_SELECTED_STATE_SCHEMA
-        && state.reader_contract
-            == styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1
-        && marker.reader_floor
-            == styx_contracts::management::ReaderContract::NativeManagementStateV1;
-    let app_selected_reader = state.schema == NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA
-        && state.reader_contract
-            == styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1
-        && marker.reader_floor
-            == styx_contracts::management::ReaderContract::NativeManagementStateV1;
-    let service_selected_reader = state.schema == NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA
-        && state.reader_contract
-            == styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1
-        && marker.reader_floor
-            == styx_contracts::management::ReaderContract::NativeManagementStateV1
-        && matches!(marker.root_identity, NativeRootIdentity::Macos { .. });
-    let app_service_reader = state.schema == NATIVE_APP_SERVICE_TRANSFERRED_STATE_SCHEMA
-        && state.reader_contract
-            == styx_contracts::management::ReaderContract::NativeAppServiceTransferredStateV1
-        && marker.reader_floor
-            == styx_contracts::management::ReaderContract::NativeManagementStateV1;
-    let pairing_reader = state.schema == NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA
-        && state.reader_contract
-            == styx_contracts::management::ReaderContract::NativePairingLifecycleStateV1
-        && marker.reader_floor
-            == styx_contracts::management::ReaderContract::NativeManagementStateV1;
-    if (!original_reader
-        && !selected_reader
-        && !app_selected_reader
-        && !service_selected_reader
-        && !app_service_reader
-        && !pairing_reader)
+    let expected_floor = if state.schema == NATIVE_STATE_SCHEMA {
+        state.reader_contract
+    } else {
+        styx_contracts::management::ReaderContract::NativeManagementStateV1
+    };
+    let platform_ok = state.reader_contract
+        != styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1
+        || matches!(marker.root_identity, NativeRootIdentity::Macos { .. });
+    if state.schema != state.reader_contract.state_schema()
+        || marker.reader_floor != expected_floor
+        || !platform_ok
         || state.scope_generation != marker.scope_generation
     {
         return Err(NativeStateRuleError::InvalidState);

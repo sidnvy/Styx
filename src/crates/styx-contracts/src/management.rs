@@ -30,6 +30,40 @@ pub enum ReaderContract {
     /// Complete pending rejection lifecycle and its incompatible persistent markers.
     NativePairingLifecycleStateV1,
 }
+impl ReaderContract {
+    pub const fn state_schema(self) -> u16 {
+        use crate::native_management::*;
+        match self {
+            Self::NativeManagementStateV1
+            | Self::NativeMigratedStateV1
+            | Self::NativeMigratedStateV2 => NATIVE_STATE_SCHEMA,
+            Self::NativeRuntimeSelectedStateV1 => NATIVE_RUNTIME_SELECTED_STATE_SCHEMA,
+            Self::NativeAppRuntimeSelectedStateV1 => NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA,
+            Self::NativeServiceRuntimeSelectedStateV1 => {
+                NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA
+            }
+            Self::NativeAppServiceTransferredStateV1 => NATIVE_APP_SERVICE_TRANSFERRED_STATE_SCHEMA,
+            Self::NativePairingLifecycleStateV1 => NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA,
+        }
+    }
+
+    pub const fn is_valid_marker_floor(self) -> bool {
+        self.state_schema() == crate::native_management::NATIVE_STATE_SCHEMA
+    }
+
+    pub const fn required_release_rank(self) -> u8 {
+        match self {
+            Self::NativeManagementStateV1 => 1,
+            Self::NativeMigratedStateV1 => 2,
+            Self::NativeMigratedStateV2 => 3,
+            Self::NativeRuntimeSelectedStateV1 => 5,
+            Self::NativeAppRuntimeSelectedStateV1 => 6,
+            Self::NativeServiceRuntimeSelectedStateV1 => 7,
+            Self::NativeAppServiceTransferredStateV1 => 8,
+            Self::NativePairingLifecycleStateV1 => 9,
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesiredStateCommit {
