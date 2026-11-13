@@ -16,6 +16,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.23.3'
+          cache: npm
+          cache-dependency-path: src/providers/browser-worker/package-lock.json
+      - name: Install the locked Browser closure used by the Runtime budget test
+        run: npm --prefix src/providers/browser-worker ci --ignore-scripts --no-audit --no-fund
       - name: Release orchestration failure and archive boundaries
         run: python3 -I -B -m unittest discover -s src/ci/test -p 'test_release*.py'
       - name: Check workflow semantics with the pinned official actionlint binary
