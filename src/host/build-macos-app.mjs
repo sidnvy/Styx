@@ -11,6 +11,11 @@ import {normalizeMacPlatformUpdate,stageMacSparkle,sparkleDistributionSigningPla
 import {MAC_CORE_IDENTIFIER,MAC_CORE_RELATIVE,MAC_CORE_EXECUTABLE} from './macos/core-helper.mjs';
 
 export const MAC_BUNDLE_ID='app.styx.host';
+const PINNED_CUA_VERSION=JSON.parse(fs.readFileSync(new URL('../providers/cua-native/source.json',import.meta.url),'utf8')).upstream_version;
+export function requirePinnedMacCuaVersion(observed){
+  assert(observed===`cua-driver ${PINNED_CUA_VERSION}`,'pinned_cua_version_required');
+  return observed;
+}
 // One explicitly compiled local owner; never a caller-selected profile or path.
 export const MAC_LOCAL_DEVELOPMENT=Object.freeze({
   root:'/Users/it-bootstrap/Developer/Styx/artifacts/native-development/macos',
@@ -245,7 +250,7 @@ export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=fal
   const stat=fs.lstatSync(cuaBinary);
   assert(stat.isFile()&&!stat.isSymbolicLink(),'regular_cua_binary_required');
   const observed=execFileSync(cuaBinary,['--version'],{encoding:'utf8',timeout:10000}).trim();
-  assert(/^cua-driver 0\.36\.0(?:\s|$)/.test(observed),'pinned_cua_036_required');
+  requirePinnedMacCuaVersion(observed);
   assert(!notaryProfile||identity,'notarization_requires_signing');
   assert(!teamID||identity,'team_requires_signing');
   const steps=localSigning!==undefined?macLocalSigningPlan({app,localSigning,files:[path.posix.join(app,'Contents/MacOS/cua-driver'),path.posix.join(app,'Contents/MacOS/Styx'),path.posix.join(app,'Contents/MacOS/StyxUpdater')]}):identity?(signingMode==='local-development'

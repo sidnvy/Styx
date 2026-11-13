@@ -11,7 +11,14 @@ import {rootCertificates} from 'node:tls';
 import {crc32,normalizePresentation} from '../../plugin/package.mjs';
 import {appInfoPlist,macAppBuildMetadata,macSigningPlan,macDevelopmentSigningPlan,macLocalSigningPlan,normalizeMacLocalSigning,publicMacLocalSigning,verifyMacLocalSigning,buildMacApp,macSwiftBuildArguments,prepareMacPluginIcon,MAC_BUNDLE_ID} from '../build-macos-app.mjs';
 import {MAC_LOCAL_DEVELOPMENT,macLocalDevelopmentArguments,validateMacModuleCache} from '../build-macos-app.mjs';
+import {requirePinnedMacCuaVersion} from '../build-macos-app.mjs';
 import {macLocalDevelopmentConfig,macLocalDevelopmentRunTarget,macLocalDevelopmentInstalledApp} from '../dev-macos.mjs';
+test('Mac producer follows the shared Cua source pin and rejects the retired worker',()=>{
+  const pin=JSON.parse(fs.readFileSync(new URL('../../providers/cua-native/source.json',import.meta.url),'utf8'));
+  assert.equal(requirePinnedMacCuaVersion(`cua-driver ${pin.upstream_version}`),`cua-driver ${pin.upstream_version}`);
+  for(const version of ['cua-driver 0.36.0','cua-driver 0.47.24 extra','other-driver 0.47.24'])
+    assert.throws(()=>requirePinnedMacCuaVersion(version),/pinned_cua_version_required/);
+});
 
 test('explicit compiled local owner cannot redirect production, output or cache',()=>{
   const options={localDevelopment:true,app:MAC_LOCAL_DEVELOPMENT.app,moduleCachePath:MAC_LOCAL_DEVELOPMENT.cache};
