@@ -6,7 +6,7 @@ import path from 'node:path';
 import { readConfiguration } from './config.mjs';
 
 test('trusted startup scope accepts exact private directories and rejects aliases, extra authorities and shared profile', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'styx-browser-config-'));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'styx-browser-config-')));
   fs.chmodSync(root, 0o700);
   try {
     const config = { schema: 1 };
