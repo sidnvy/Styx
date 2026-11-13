@@ -30,7 +30,7 @@ mod upgrade;
 #[command(
     name = "styx",
     version,
-    about = "Styx Rust runtime (development build)"
+    about = "Styx native Gateway, Host and management CLI"
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]

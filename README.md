@@ -2,7 +2,7 @@
 
 Styx connects authorized native Linux, macOS and Windows devices to model-facing MCP tools through a Gateway, outbound Host connectors and one shared management Core. Exec, Browser and Computer Use are independent capabilities. Styx does not plan tasks or replay operations with unknown outcomes.
 
-**Developer Preview; Stable release is NO-GO.** The only product source is [`src/`](src/README.md). The previous root implementation was retired in the repository migration; it remains available in Git history at `6fd902e`. There is no parallel legacy runtime or root plugin entrypoint.
+**Stable 0.4.0** ([release](https://github.com/sidnvy/Styx/releases/tag/v0.4.0), 2026-11-13). Follow the [stable setup guide](src/docs/stable-setup.md) to deploy one Gateway, any number of Hosts and one Styx MCP connection. Gates that remain open are tracked in [END-TO-END-DELIVERY-PLAN.md](src/docs/rust-core-rewrite/END-TO-END-DELIVERY-PLAN.md). The only product source is [`src/`](src/README.md). The previous root implementation was retired in the repository migration; it remains available in Git history at `6fd902e`. There is no parallel legacy runtime or root plugin entrypoint.
 
 - [Installation and first use](INSTALL.md)
 - [Product boundaries](src/docs/product-boundaries.md)
@@ -25,7 +25,7 @@ npm run styx -- host run --state-dir /absolute/private/profile
 npm run gateway -- --state-dir /absolute/private/profile
 ```
 
-The runtime examples require an explicitly configured native profile and the matching manager intent. Use the Rust CLI help for supported commands, including `host`, `gateway`, `release`, `plan`, `apply`, `migrate`, `recover`, and Linux `service`. Old onboarding commands such as `create`, `advance` and `foreground` are not accepted by these aliases; fresh setup parity is still incomplete. Historical fixture and interoperability scripts remain available explicitly. Production installers and existing signed packages are unchanged by this source-checkout entrypoint switch.
+The runtime examples require an explicitly configured native profile and the matching manager intent. Use the Rust CLI help for supported commands, including `host`, `gateway`, `release`, `plan`, `apply`, `migrate`, `recover`, and Linux `service`. Old onboarding commands such as `create`, `advance` and `foreground` are not accepted by these aliases; use the [stable setup guide](src/docs/stable-setup.md) for fresh setup. Historical fixture and interoperability scripts remain available explicitly. Production installers and existing signed packages are unchanged by this source-checkout entrypoint switch.
 
 `npm run build:checked -- ...` now invokes the official native runtime packager directly: `python3 src/tools/release/build-native-runtime.py`. It consumes an already built Rust binary and its original passing build receipt, the exact clean source revision, target, version, externally trusted publisher pin, and any selected signed worker closure. It performs the existing input and signature checks; it does not compile the CLI or install a profile.
 

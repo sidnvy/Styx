@@ -1,6 +1,6 @@
 {
   "name": "styx",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Styx native Gateway, Host and shared Core; canonical source is src/",
   "type": "module",
