@@ -10,4 +10,4 @@ The gate runs dependency trees, audits, SBOM generation, all deterministic suite
 
 After a source/layout change, record a new commit and quality receipt, then build all candidates from that same SHA. Separate source checks, package checks, installation, native effects, Quit/reopen, physical boot/login and account-side acceptance. Preserve original failures and version labels; a subsequent success does not rewrite old evidence.
 
-See [release convergence](src/docs/release-convergence.md).
+See [REDUCED-SCOPE.md](src/docs/rust-core-rewrite/REDUCED-SCOPE.md).

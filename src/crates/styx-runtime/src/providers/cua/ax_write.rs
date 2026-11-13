@@ -298,10 +298,8 @@ mod tests {
     // envelope. The producer's words and follow-up hint are never authority.
     #[test]
     fn real_windows_04724_wire_is_an_unverified_ack_without_text_inference() {
-        let wire: Value = serde_json::from_str(include_str!(
-            "../../../../../docs/evidence/cua-windows-strict-0.47.24-wire.json"
-        ))
-        .unwrap();
+        let wire: Value =
+            serde_json::from_str(include_str!("cua-windows-strict-0.47.24-wire.json")).unwrap();
         let mut reply: CallToolResult = serde_json::from_value(wire["result"].clone()).unwrap();
         assert_eq!(write_evidence(&reply), CuaEvidence::Acknowledged);
         reply.content.clear();

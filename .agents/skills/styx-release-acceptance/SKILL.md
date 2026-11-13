@@ -12,9 +12,7 @@ checkpoints merely because a new step or platform starts. Tool-enforced permissi
 ## Load the requested phase
 
 For packaging, consult the existing producer and its validated inputs.
-For device/account acceptance, read only the latest relevant checkpoint and missing matrix
-cells in [the delivery plan](../../../src/docs/rust-core-rewrite/END-TO-END-DELIVERY-PLAN.md).
-Use [REDUCED-SCOPE.md](../../../src/docs/rust-core-rewrite/REDUCED-SCOPE.md) for scope questions.
+For device/account acceptance, use [REDUCED-SCOPE.md](../../../src/docs/rust-core-rewrite/REDUCED-SCOPE.md) and [stable-setup.md](../../../src/docs/stable-setup.md) for scope and setup requirements.
 Read historical evidence only to resolve a specific old receipt or failure.
 A status request alone does not authorize installation, configuration reset or topology changes.
 

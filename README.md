@@ -2,11 +2,11 @@
 
 Styx connects authorized native Linux, macOS and Windows devices to model-facing MCP tools through a Gateway, outbound Host connectors and one shared management Core. Exec, Browser and Computer Use are independent capabilities. Styx does not plan tasks or replay operations with unknown outcomes.
 
-**Stable 0.4.0** ([release](https://github.com/sidnvy/Styx/releases/tag/v0.4.0), 2026-11-13). Follow the [stable setup guide](src/docs/stable-setup.md) to deploy one Gateway, any number of Hosts and one Styx MCP connection. Gates that remain open are tracked in [END-TO-END-DELIVERY-PLAN.md](src/docs/rust-core-rewrite/END-TO-END-DELIVERY-PLAN.md). The only product source is [`src/`](src/README.md). The previous root implementation was retired in the repository migration; it remains available in Git history at `6fd902e`. There is no parallel legacy runtime or root plugin entrypoint.
+**Stable 0.4.0** ([release](https://github.com/sidnvy/Styx/releases/tag/v0.4.0), 2026-11-13). Follow the [stable setup guide](src/docs/stable-setup.md) to deploy one Gateway, any number of Hosts and one Styx MCP connection. Release scope and deferred items are tracked in [REDUCED-SCOPE.md](src/docs/rust-core-rewrite/REDUCED-SCOPE.md). The only product source is [`src/`](src/README.md). The previous root implementation was retired in the repository migration; it remains available in Git history at `6fd902e`. There is no parallel legacy runtime or root plugin entrypoint.
 
 - [Installation and first use](INSTALL.md)
-- [Product boundaries](src/docs/product-boundaries.md)
-- [Release convergence and remaining gates](src/docs/release-convergence.md)
+- [Stable 0.4.0 setup guide](src/docs/stable-setup.md)
+- [Architecture and contracts](src/docs/rust-core-rewrite/README.md)
 - [Validation](VALIDATION.md)
 
 Source-checkout runtime commands use the workspace Rust CLI and the Rust toolchain pinned in `rust-toolchain.toml`. Node.js 22 and the independent lockfiles under `src/` and its three providers remain necessary for the existing tooling, fixtures and interoperability checks.

@@ -6,9 +6,9 @@ Owner decision, 2026-10-27: Styx is installed only on the owner's own devices. R
 
 The target is a mature product with its promised capabilities. The owner's daily deployment uses `moedeu-apps` as a central Gateway and desktops as Hosts because that fits the network; this does not narrow platform support. macOS, Windows and Linux must retain their promised Gateway and Host roles and supported cross-platform connections. Choosing a Host-only acceptance journey on a platform does not establish that platform's Gateway acceptance or remove that responsibility.
 
-The one-journey `Gateway + Host or Host-only` definition below was a minimum first-usable-release evidence budget, not a statement that unexercised product roles can be dropped from mature-product delivery. The current [delivery plan](END-TO-END-DELIVERY-PLAN.md) tracks the missing platform/role and connection evidence. Keep passed evidence and close missing boundaries without replaying the full suite for every topology. Existing legacy cuts and explicitly deferred features remain separate decisions; this clarification does not silently enable them.
+The one-journey `Gateway + Host or Host-only` definition below was a minimum first-usable-release evidence budget, not a statement that unexercised product roles can be dropped from mature-product delivery. Keep passed evidence and close missing boundaries without replaying the full suite for every topology. Existing legacy cuts and explicitly deferred features remain separate decisions; this clarification does not silently enable them.
 
-This page overrides SPEC §7, EXECUTION-PLAN milestones M4/M6 migration parts, and the migration/interop scenarios in ACCEPTANCE.json and WORK-ITEMS.json wherever they conflict. The earlier handoff's "resume sequence" (HANDOFF-20261027-PAUSED.md §8) is superseded by the sequence below.
+This page overrides SPEC §7 wherever they conflict.
 
 ## What is cut
 
@@ -39,7 +39,7 @@ These are implemented partly or fully. Freeze them: no new work, no acceptance r
 Not v1 work; revisit after v1 ships.
 
 - App wording: show Gateway as "Hub" and Host as "Computer" (MCP calls the AI app the host). Code, wire and file names stay unchanged.
-- Automatic hub handover (HUB-HANDOVER.md Flow A). v1 keeps the manual role switch: retiring a hub names every computer still using it and needs explicit confirmation; those computers are re-paired by hand.
+- Automatic hub handover. v1 keeps the manual role switch: retiring a hub names every computer still using it and needs explicit confirmation; those computers are re-paired by hand.
 - Claude as a client: first Claude Code / Claude Desktop against a local or LAN Gateway (docs and CA trust only); claude.ai connectors need a public route and OAuth on the Gateway and are a separate decision.
 
 ## v1 definition

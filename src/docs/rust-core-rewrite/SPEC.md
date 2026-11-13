@@ -2,7 +2,7 @@
 
 2026-10-24 · draft-1 / owner-directed execution baseline
 
-行为参考源码：`44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3`。本轮是plan/spec，没有Rust实现/新包/部署声明。详细合同见[CONTRACTS.md](CONTRACTS.md)，任务见[EXECUTION-PLAN.md](EXECUTION-PLAN.md)。
+行为参考源码：`44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3`。详细合同见[CONTRACTS.md](CONTRACTS.md)，发布范围裁减见[REDUCED-SCOPE.md](REDUCED-SCOPE.md)。
 
 ## 1. Objective and completion boundary
 
@@ -168,7 +168,7 @@ R00盘点所有对外CLI/Control/MCP方法并分类required、intentional change
 
 测试的基本完成单位是**场景合同+独立oracle+恢复/清理证据**，不是test数量或行覆盖率。旧1149/0/57只是legacy baseline，不能兑换Rust完成比例。
 
-每个必需场景包含threat/failure、阶段、触发、预期不变量、独立观察器、negative control、恢复、cleanup、候选/会话/observer版本及证据。见[ACCEPTANCE.json](ACCEPTANCE.json)。
+每个必需场景包含threat/failure、阶段、触发、预期不变量、独立观察器、negative control、恢复、cleanup、候选/会话/observer版本及证据。见[REDUCED-SCOPE.md](REDUCED-SCOPE.md)。
 
 - 纯状态机/property tests验证政策和转换；不能证明原生权限。
 - fake transport用于精确丢包/重排/并发；不能冒充真实executor。
@@ -230,7 +230,7 @@ Preview：所有核心安全不变量、Rust正常运行链和声明支持的平
 - four-crate职责及C01–C08有实际实现；Core无平台污染，所有OS/backend通过ports，单writer与权限边界可审查。
 - required功能清单覆盖现有正常产品；缺失项不被新UI或测试数量掩盖。
 - 身份/配对/权限责任/Browser登录保留，签名格式/loader/状态迁移/回滚均通过原生场景。
-- [ACCEPTANCE.json](ACCEPTANCE.json)必需项满足所声明发布级别；每项有独立oracle和exact artifact，已知失败保留。
+- [REDUCED-SCOPE.md](REDUCED-SCOPE.md)必需项满足所声明发布级别；每项有独立oracle和exact artifact，已知失败保留。
 - 性能达到冻结预算或经过明确决策调整；不存在仅靠超时掩盖问题的改进。
 - 同SHA最终候选、签名/部署/运行版本收据可追溯，干净唯一集成分支；无长期双主线、未知worktree、无主设备/进程。
 - 最终Owner Control Report报告Product/Architecture/Integration/Release/Reliability/Decision增量；测试数仅附录诊断。

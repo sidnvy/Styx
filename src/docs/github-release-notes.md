@@ -11,4 +11,4 @@ macOS App uses the existing local certificate and is not Developer ID notarized.
 These packages do not claim OS publisher trust. Automated builds do not by themselves
 establish new device/account acceptance or formal Stable approval.
 
-Build and release setup: src/docs/github-actions-release.md in the tagged source.
+Setup and deployment guide: src/docs/stable-setup.md in the tagged source.

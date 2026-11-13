@@ -6,7 +6,7 @@ This directory is an isolated Sparkle feasibility probe, not a product updater. 
 
 On PilotMac (macOS 26.6, arm64), the official Sparkle 2.10.0 framework performed a real update from fixture App version 1 to version 2. Styx Computer Use clicked Sparkle's standard **Install Update** and **Install and Relaunch** controls. The old App's `applicationShouldTerminate` returned `terminateLater`; its asynchronous MainActor check replied successfully. Sparkle replaced the App and launched version 2 at the same path. The old PID was 66198; the new PID was 67021. Independent lifecycle JSON, installed Info.plist, strict code-signature verification, and a fresh native screenshot/AX read agreed.
 
-`acceptance-20261022.json` records the exact observations. The probe App and its loopback server were stopped afterward. Production Styx stayed on rc5, with its App/Core PIDs unchanged and all 23 preserved identity/credential hashes matching.
+The probe App and its loopback server were stopped afterward. Production Styx stayed on rc5, with its App/Core PIDs unchanged and all 23 preserved identity/credential hashes matching.
 
 The fixture uses ad-hoc App signatures and an Ed25519 archive key generated **only in a private test file**. It does not use Keychain. This tests the real Sparkle download/verification/install/relaunch mechanism, not Developer ID/notarization, public HTTPS distribution, or Styx Host migration.
 
