@@ -2504,7 +2504,7 @@ dependencies = [
 
 [[package]]
 name = "styx"
-version = "0.4.0-dev.1"
+version = "0.4.0"
 dependencies = [
  "clap",
  "console",
@@ -2521,7 +2521,7 @@ dependencies = [
 
 [[package]]
 name = "styx-contracts"
-version = "0.4.0-dev.1"
+version = "0.4.0"
 dependencies = [
  "ryu-js",
  "serde",
@@ -2533,7 +2533,7 @@ dependencies = [
 
 [[package]]
 name = "styx-core"
-version = "0.4.0-dev.1"
+version = "0.4.0"
 dependencies = [
  "serde_json",
  "styx-contracts",
@@ -2542,7 +2542,7 @@ dependencies = [
 
 [[package]]
 name = "styx-runtime"
-version = "0.4.0-dev.1"
+version = "0.4.0"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",

@@ -20,9 +20,10 @@ namespace StyxNative {
     if(mode=="active"){worker.Start();File.WriteAllText(Path.Combine(dir,"worker"),worker.Id.ToString());}
     File.WriteAllText(Path.Combine(dir,"core-ready"),"ready");
     if(mode=="failed"||mode=="startup-failed"||mode=="crashed"){return 101;}
-    string line;int calls=0;
+    string line;int calls=0,quitCalls=0;
     while((line=Console.ReadLine())!=null){
      var request=Json.Codec.DeserializeObject(line);calls++;File.WriteAllText(Path.Combine(dir,"calls"),calls.ToString());
+     if(Json.Str(request,"operation")=="quitAdmission"){quitCalls++;File.WriteAllText(Path.Combine(dir,"quit-calls"),quitCalls.ToString());}
      if(mode.StartsWith("observe",StringComparison.Ordinal)&&Json.Str(request,"operation")=="status"){
       string state=calls==1?"connected":"disconnected";System.Threading.Thread.Sleep(150);
       Console.WriteLine(Json.Codec.Serialize(Json.Obj("id",Convert.ToInt32(Json.Get(request,"id")),"ok",true,"result",Json.Obj("mode","rust_host","supportedOperations",new object[]{"status","quitAdmission","fixtureFailure"},"foreground",Json.Obj("status",state=="connected"?"connected":"started","execConnection",state)))));Console.Out.Flush();continue;
@@ -117,7 +118,7 @@ namespace StyxNative {
       Check(Json.Str(result,"code")!=null&&context.ResultCode==4,"abnormal_exit_reported_clean");
      }else Check(child.ExitCode==0&&core.CleanupConfirmed,"clean_exit_not_confirmed");
      if(mode=="active")Check(File.ReadAllText(Path.Combine(dir,"worker-exit"))=="0","owned_worker_not_joined");
-     File.WriteAllText(Path.Combine(dir,"result.json"),Json.Codec.Serialize(Json.Obj("status","PASS","mode",mode,"quitStatus",Json.Str(result,"status"),"scope","native_winforms_pipe_lifecycle_fixture_not_host_acceptance","coreExit",child.ExitCode,"cleanupConfirmed",core.CleanupConfirmed,"calls",File.Exists(Path.Combine(dir,"calls"))?File.ReadAllText(Path.Combine(dir,"calls")):"0")));code=0;
+     File.WriteAllText(Path.Combine(dir,"result.json"),Json.Codec.Serialize(Json.Obj("status","PASS","mode",mode,"quitStatus",Json.Str(result,"status"),"scope","native_winforms_pipe_lifecycle_fixture_not_host_acceptance","coreExit",child.ExitCode,"cleanupConfirmed",core.CleanupConfirmed,"calls",File.Exists(Path.Combine(dir,"calls"))?File.ReadAllText(Path.Combine(dir,"calls")):"0","quitCalls",File.Exists(Path.Combine(dir,"quit-calls"))?File.ReadAllText(Path.Combine(dir,"quit-calls")):"0")));code=0;
     }catch(Exception e){File.WriteAllText(Path.Combine(dir,"failure.txt"),e.ToString());}
     {
      if(child!=null&&!child.HasExited){try{owned.StandardInput.Close();File.WriteAllText(Path.Combine(dir,"release"),"cleanup");await Task.Run(()=>child.WaitForExit());if(core!=null)await core.SettleQuit();}catch{}}

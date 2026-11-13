@@ -48,7 +48,7 @@ test('explicit compiled local owner cannot redirect production, output or cache'
   }finally{fs.rmSync(dir,{recursive:true});}
 });
 
-test('thin development runner admits only original sealed Runtime config, never profile or trust overrides',()=>{
+test('thin development runner admits only original sealed Runtime config, never profile or trust overrides',{skip:process.platform==='win32'?'fixed macOS project paths require POSIX semantics; covered by the macOS job':false},()=>{
   const input={nativeRuntime:{payloadDir:'/Users/it-bootstrap/Developer/Styx/inputs/dev-runtime/payload',publisherFile:'/Users/it-bootstrap/Developer/Styx/inputs/dev-runtime/publisher.pem',expectedPublisher:'bbb49c2626c3d4ef3cf9e1679db5305b100cee4a8c41c29c958ede82fb868bed'},cuaBinary:'/Applications/Styx.app/Contents/MacOS/cua-driver'};
   assert.deepEqual(macLocalDevelopmentConfig(input),input);
   for(const patch of [{profile:'/tmp/profile'},{app:'/tmp/Styx.app'},{localSigning:{}},{nativeRuntime:{...input.nativeRuntime,expectedPublisher:'0'.repeat(64)}},
@@ -107,7 +107,7 @@ test('local certificate plan pins the exact leaf and stable code identifiers bef
   for(const patch of [{app:'/build/../Styx.app'},{app:'/build/Other.app'},{files:['/outside/node']},{files:[files[0],files[0]]},{files:[app+'/Contents/../escape']},{files:[app+'/Contents/file\n']},{sealApp:'true'},{localSigning:undefined}])
     assert.throws(()=>macLocalSigningPlan({app,files,localSigning,...patch}));
 });
-test('selected local keychain certificate must match both fingerprints before any signing',t=>{
+test('selected local keychain certificate must match both fingerprints before any signing',{skip:process.platform==='win32'?'macOS keychain inputs require POSIX filesystem paths; covered by the macOS job':false},t=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'styx-keychain-input-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   const keychain=path.join(dir,'local.keychain-db');fs.writeFileSync(keychain,'fixture, not a real keychain');
   const certificate=new X509Certificate(rootCertificates[0]),input={keychain,identitySha1:createHash('sha1').update(certificate.raw).digest('hex'),certificateSha256:createHash('sha256').update(certificate.raw).digest('hex')},calls=[];

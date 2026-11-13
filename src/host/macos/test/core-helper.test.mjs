@@ -26,7 +26,7 @@ test('legacy updater selection works but malformed new helper cannot fall back o
  fs.unlinkSync(helper.executable);assert.throws(()=>coreRuntimeExecutable(f.app),/ENOENT/);
 });
 test('nested helper is sealed before outer app and uses the same certificate requirement as old Node',()=>{
- const app='/build/Styx.app',exe=path.join(app,MAC_CORE_EXECUTABLE),bundle=path.join(app,MAC_CORE_RELATIVE),main=app+'/Contents/MacOS/Styx';
+ const app='/build/Styx.app',exe=path.posix.join(app,MAC_CORE_EXECUTABLE),bundle=path.posix.join(app,MAC_CORE_RELATIVE),main=app+'/Contents/MacOS/Styx';
  const localSigning={identitySha1:'a'.repeat(40),certificateSha256:'b'.repeat(64),keychain:'/private/signing.keychain-db'};
  const old=macLocalSigningPlan({app,files:[app+'/Contents/Resources/runtime/node'],localSigning});
  const plan=macLocalSigningPlan({app,files:[main,exe],localSigning});

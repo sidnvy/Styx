@@ -152,12 +152,18 @@ test('a lock cleanup failure still closes its fd and preserves recovery evidence
 });
 
 
-test('an unsuccessful installer leaves no receipt and releases its quiescent transaction',async t=>{
-  const f=fixture(t),restore=mockSpawn(t,(command,args,options)=>realSpawn(command,['-e',"process.stderr.write('private diagnostic');process.exit(7)"],options));
+test('an unsuccessful installer leaves no receipt; unverified Windows descendants preserve their journal',async t=>{
+  const f=fixture(t);let installer;
+  const restore=mockSpawn(t,(command,args,options)=>(installer=realSpawn(command,['-e',"process.stderr.write('private diagnostic');process.exit(7)"],options)));
   try{
-    await assert.rejects(prepareManagedBrowser({profileRoot:f.profileRoot,authorize:true}),error=>error.message==='browser_runtime_download_failed');
+    await assert.rejects(prepareManagedBrowser({profileRoot:f.profileRoot,authorize:true}),error=>error.message===(posix?'browser_runtime_download_failed':'browser_prepare_child_exit_unverified'));
+    assert.equal(installer.exitCode,7,'the original installer exited; this alone does not attest its Windows descendants');
     assert.equal(fs.existsSync(f.lock),!posix);assert.equal(fs.existsSync(path.join(f.runtime,'receipt.json')),false);
-    if(!posix)assert.equal(readManagedBrowser(f.profileRoot).status,'preparation_blocked');
+    if(!posix){
+      const record=JSON.parse(fs.readFileSync(f.lock,'utf8'));
+      assert.equal(record.phase,'running');assert.equal(record.child.pid,installer.pid);assert.equal(record.child.processGroup,null);
+      assert.equal(readManagedBrowser(f.profileRoot).status,'preparation_blocked');
+    }
   }finally{restore();}
 });
 

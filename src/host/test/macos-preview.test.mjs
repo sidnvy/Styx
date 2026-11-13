@@ -32,8 +32,11 @@ test('local certificate plan covers every detected Mach-O payload including nest
  for(const name of members){const file=path.join(app,name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,Buffer.from('cffaedfe00000000','hex'));}
  fs.writeFileSync(path.join(app,'Contents/Resources/public.json'),'{}');
  const files=machOFiles(app);assert.deepEqual(files,members.map(name=>path.join(app,name)).sort());
- const plan=macLocalSigningPlan({app,files,localSigning,sealApp:false}),signed=plan.filter(([,args])=>args.includes('--sign'));
- assert.deepEqual(signed.map(([,args])=>args.at(-1)).sort(),files);
+ // Detection uses this host's filesystem; codesign arguments describe a Mac
+ // destination and therefore always use POSIX paths, even in Windows CI.
+ const plannedApp='/build/Styx.app',plannedFiles=files.map(file=>path.posix.join(plannedApp,path.relative(app,file).split(path.sep).join('/')));
+ const plan=macLocalSigningPlan({app:plannedApp,files:plannedFiles,localSigning,sealApp:false}),signed=plan.filter(([,args])=>args.includes('--sign'));
+ assert.deepEqual(signed.map(([,args])=>args.at(-1)).sort(),plannedFiles);
  assert.ok(signed.every(([,args])=>args[args.indexOf('--sign')+1]===localSigning.identitySha1&&args[args.indexOf('--keychain')+1]===localSigning.keychain));
  assert.ok(signed.every(([,args])=>args[args.indexOf('--requirements')+1].includes('certificate leaf = H"'+localSigning.identitySha1+'"')));
 });
@@ -60,7 +63,10 @@ test('native archive inventory rejects changed bytes, execution modes, extra fil
  fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,'sealed app',{mode:0o700});
  const expected=preparedPreviewInventory(app);assertNativeMacAppInventory(app,expected);
  fs.writeFileSync(file,'changed app');assert.throws(()=>assertNativeMacAppInventory(app,expected),/native_archive_app_inventory_changed/);
- fs.writeFileSync(file,'sealed app');fs.chmodSync(file,0o600);assert.throws(()=>assertNativeMacAppInventory(app,expected),/native_archive_app_inventory_changed/);fs.chmodSync(file,0o700);
+ fs.writeFileSync(file,'sealed app');
+ // Windows chmod does not implement POSIX executable bits. Byte, extra-member
+ // and redirect checks below still execute there; mode checks run on macOS.
+ if(process.platform!=='win32'){fs.chmodSync(file,0o600);assert.throws(()=>assertNativeMacAppInventory(app,expected),/native_archive_app_inventory_changed/);fs.chmodSync(file,0o700);}
  const extra=path.join(app,'extra');fs.writeFileSync(extra,'unexpected');assert.throws(()=>assertNativeMacAppInventory(app,expected),/native_archive_app_inventory_changed/);fs.unlinkSync(extra);
  fs.symlinkSync(file,extra);assert.throws(()=>assertNativeMacAppInventory(app,expected),/distribution_symlink_forbidden/);
 });

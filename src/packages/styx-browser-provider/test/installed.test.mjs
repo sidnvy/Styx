@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import {installedBrowserCandidates,resolveInstalledBrowser} from '../installed.mjs';
 import {normalizeBrowserConfig} from '../config.mjs';
 
@@ -9,8 +10,9 @@ test('installed selection prefers Chrome, honors Edge and never falls back to a 
   assert.equal(resolveInstalledBrowser({channel:'msedge'},options).executablePath,'/usr/bin/microsoft-edge');
   assert.throws(()=>resolveInstalledBrowser({channel:'chrome'},{...options,isExecutable:()=>false}),/installed_browser_not_found/);
   assert.equal(resolveInstalledBrowser({},options),null);
-  for(const channel of ['auto','chrome','msedge'])assert.equal(normalizeBrowserConfig({enabled:true,profileRoot:'/private/browser',channel}).channel,channel);
-  assert.throws(()=>normalizeBrowserConfig({enabled:true,profileRoot:'/private/browser',channel:'firefox'}),/invalid_browser_channel/);
+  const profileRoot=path.resolve('/private/browser');
+  for(const channel of ['auto','chrome','msedge'])assert.equal(normalizeBrowserConfig({enabled:true,profileRoot,channel}).channel,channel);
+  assert.throws(()=>normalizeBrowserConfig({enabled:true,profileRoot,channel:'firefox'}),/invalid_browser_channel/);
 });
 
 test('Windows detects installed program files without treating arbitrary relative environment paths as executables',()=>{

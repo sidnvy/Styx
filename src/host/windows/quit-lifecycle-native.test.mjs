@@ -23,6 +23,8 @@ test('original Quit custody joins owned work, preserves uncertainty and refuses 
   if(mode==='reservation')continue;
   assert.equal(result.coreExit,['failed','startup-failed','crashed'].includes(mode)?101:0);
   assert.equal(result.quitStatus,'ready_to_exit');
-  assert.equal(result.calls,mode==='busy'?'2':['failed','startup-failed','crashed'].includes(mode)?'0':'1');
+  const quitCalls=mode==='busy'?'2':['failed','startup-failed','crashed'].includes(mode)?'0':'1';
+  assert.equal(result.quitCalls,quitCalls,`${mode}: quitAdmission is dispatched only for its explicit attempts`);
+  assert.equal(result.calls,mode==='observe'?'3':quitCalls,`${mode}: total includes the two status observations before Quit`);
  }
 });

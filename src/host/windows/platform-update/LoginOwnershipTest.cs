@@ -1,5 +1,7 @@
-using System;using System.IO;using System.Diagnostics;using System.Collections.Generic;using System.Security.AccessControl;using System.Security.Principal;using System.Security.Cryptography;using System.Web.Script.Serialization;
+using System;using System.IO;using System.Diagnostics;using System.Collections.Generic;using System.Security.AccessControl;using System.Security.Principal;using System.Security.Cryptography;using System.Web.Script.Serialization;using System.Text;using System.Runtime.InteropServices;
 class LoginOwnershipTest {
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]static extern uint GetShortPathName(string path,StringBuilder text,uint size);
+ static string Short(string path){var text=new StringBuilder(32768);uint length=GetShortPathName(path,text,(uint)text.Capacity);Check(length>0&&length<text.Capacity,"short_path_observation_failed");return text.ToString();}
  static string Hash(string f){using(var h=SHA256.Create())return BitConverter.ToString(h.ComputeHash(File.ReadAllBytes(f))).Replace("-","").ToLowerInvariant();}
  static void Private(string f){var sid=WindowsIdentity.GetCurrent().User;var a=new FileSecurity();a.SetOwner(sid);a.SetAccessRuleProtection(true,false);a.AddAccessRule(new FileSystemAccessRule(sid,FileSystemRights.FullControl,AccessControlType.Allow));File.SetAccessControl(f,a);}
  static int Gate(string exe,params string[] args){var q=Array.ConvertAll(args,s=>"\""+s+"\"");using(var p=Process.Start(new ProcessStartInfo(exe,"check-login "+String.Join(" ",q)){UseShellExecute=false,CreateNoWindow=true})){p.WaitForExit();return p.ExitCode;}}
@@ -13,7 +15,9 @@ class LoginOwnershipTest {
   string root=Path.Combine(args[0],"Install"),stateRoot=Path.Combine(args[0],"State"),state=Path.Combine(stateRoot,"deployment");Directory.CreateDirectory(root);Directory.CreateDirectory(state);string version=Package(root,"v1"),pin=Path.GetFileName(version);File.WriteAllText(link,"not a runnable shortcut; gate-only fixture");Private(link);
   string dep=Path.Combine(state,"deployment.json"),sf=Path.Combine(state,"state.json");File.WriteAllText(dep,"{}");Private(dep);File.WriteAllText(sf,"{}");Private(sf);
   Check(Gate(args[1],root,stateRoot,version,link)==2,"unregistered_entry_adopted");
-  var reg=new Dictionary<string,object>{{"schema",1},{"kind","windows-startup-shortcut"},{"ownerSid",WindowsIdentity.GetCurrent().User.Value},{"shortcutPath",link},{"installRoot",root},{"resourceRoot",version+Path.DirectorySeparatorChar},{"packageSha256",pin},{"appSha256",Hash(Path.Combine(version,"StyxPreview.exe"))},{"stateDir",state}};
+  // The Core can persist an existing 8.3 alias while the installer's modern
+  // .NET path handling expands its argv. These still name the same owned files.
+  var reg=new Dictionary<string,object>{{"schema",1},{"kind","windows-startup-shortcut"},{"ownerSid",WindowsIdentity.GetCurrent().User.Value},{"shortcutPath",link},{"installRoot",Short(root)},{"resourceRoot",Short(version)+Path.DirectorySeparatorChar},{"packageSha256",pin},{"appSha256",Hash(Path.Combine(version,"StyxPreview.exe"))},{"stateDir",Short(state)}};
   var login=new Dictionary<string,object>{{"registration",reg},{"desiredEnabled",true}};
   var preferences=new Dictionary<string,object>{{"loginAtStartup",login}};
   var value=new Dictionary<string,object>{{"configSha256",Hash(dep)},{"appPreferences",preferences}};var json=new JavaScriptSerializer();File.WriteAllText(sf,json.Serialize(value));

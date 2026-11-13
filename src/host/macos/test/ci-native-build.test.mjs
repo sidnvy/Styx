@@ -11,11 +11,11 @@ test('product packaging and CI consume the complete shared native Swift source c
  const inputs=macNativeSwiftSources(),ui=path.join(native,'product-ui');
  assert.equal(inputs.source,path.join(native,'Styx.swift'));
  assert.deepEqual(inputs.additionalSources,[path.join(native,'BrandGlyph.swift'),...fs.readdirSync(ui).filter(name=>name.endsWith('.swift')).sort().map(name=>path.join(ui,name))]);
- assert.ok(inputs.additionalSources.some(file=>file.endsWith('/ProductModel.swift')));assert.ok(inputs.additionalSources.some(file=>file.endsWith('/ProductViews.swift')));
+ assert.ok(inputs.additionalSources.some(file=>path.basename(file)==='ProductModel.swift'));assert.ok(inputs.additionalSources.some(file=>path.basename(file)==='ProductViews.swift'));
 });
 // Inject only subprocess execution and platform for this portable argv/source
-// contract. A stub compiler is never recorded as native macOS acceptance.
-test('CI copies main.swift, uses production Swift argv and provides real artwork without signing',t=>{
+// contract on POSIX filesystems. A stub compiler is never native acceptance.
+test('CI copies main.swift, uses production Swift argv and provides real artwork without signing',{skip:process.platform==='win32'?'macOS compilation requires POSIX source paths; covered by the macOS job':false},t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-mac-ci-contract-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
  const output=path.join(root,'build with spaces'),sdkPath=path.join(root,'SDK'),calls=[];fs.mkdirSync(sdkPath);
  const run=(command,args,options)=>{calls.push({command,args:[...args],options});if(args[0]==='--sdk')return sdkPath+'\n';fs.writeFileSync(args[args.indexOf('-o')+1],'contract compiler fixture');};

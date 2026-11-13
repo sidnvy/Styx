@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {requirePrivateFile} from '../../../host/private-storage.mjs';
 import {EventEmitter} from 'node:events';
 import {Server} from '@modelcontextprotocol/sdk/server/index.js';
 import {CallToolRequestSchema,ListToolsRequestSchema} from '@modelcontextprotocol/sdk/types.js';
@@ -80,7 +81,9 @@ test('login snapshots use trusted principal identity across isolated session pro
   assert.deepEqual(restored,[current]);assert.notEqual(profiles[0],profiles[1]);
   await f.supervisor.callTool('browser_snapshot',{},'e'.repeat(64),other);
   assert.equal(restored.length,1,'unrelated principal does not import another login');
-  assert.equal(fs.statSync(path.join(f.browser.profileRoot,'login-state',principal+'.json')).mode&0o777,0o600);
+  const snapshot=path.join(f.browser.profileRoot,'login-state',principal+'.json');
+  requirePrivateFile(snapshot); // Windows DACL or POSIX ownership/mode, as appropriate.
+  if(process.platform!=='win32')assert.equal(fs.statSync(snapshot).mode&0o777,0o600);
 });
 
 test('a failed login restore cannot admit later calls or overwrite the prior snapshot',{skip:!installed},async t=>{

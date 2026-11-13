@@ -70,6 +70,9 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Preserve tracked source bytes on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:

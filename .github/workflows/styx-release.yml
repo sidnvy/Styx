@@ -4,7 +4,7 @@ on:
   push:
     tags: ['v[0-9]*']
     branches: [develop]
-    paths: ['.github/workflows/styx-release.yml', 'src/ci/release-*', 'src/tools/release/**', 'src/host/build-*', 'src/host/windows/platform-update/**', 'src/host/macos/product-ui/ProductOwnedCore.swift']
+    paths: ['.github/workflows/styx-release.yml', 'Cargo.toml', 'Cargo.lock', 'src/ci/release-*', 'src/tools/release/**', 'src/host/build-*', 'src/host/windows/platform-update/**', 'src/host/macos/product-ui/ProductOwnedCore.swift']
   workflow_dispatch:
     inputs:
       publish:
