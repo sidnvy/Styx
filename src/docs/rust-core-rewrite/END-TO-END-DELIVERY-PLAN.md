@@ -4,9 +4,35 @@
 [REDUCED-SCOPE.md](REDUCED-SCOPE.md) 决定，架构由
 [README.md](README.md) 和冻结合同决定。
 [GUI-CONVERGENCE.md](GUI-CONVERGENCE.md) 保留历史尝试与证据，不能把历史通过当作当前候选通过。
-本文中的计划项不代表已经执行；当前状态以最新检查点为准。**功能验收通过；正式 Stable Release 尚未交付。**
+本文中的计划项不代表已经执行；当前状态以最新检查点为准。**正式 Stable 0.4.0 已发布。**
 
 ## 当前开发检查点（2026-11-12）
+
+### 已交付：Stable 0.4.0（2026-11-13）
+
+**Stable GO。**[正式 GitHub Release](https://github.com/sidnvy/Styx/releases/tag/v0.4.0)
+已公开且为 latest、非 prerelease；tag 精确指向 `75a1f49caa856de3d2de3f266a234eea7433bf65`。
+[唯一最终生产](https://github.com/sidnvy/Styx/actions/runs/43415867539)、
+[跨平台 contracts](https://github.com/sidnvy/Styx/actions/runs/43415401871) 和
+[Mac native compile](https://github.com/sidnvy/Styx/actions/runs/43415402101) 全部成功。
+Windows/Mac 安装包、Linux Host 与 Debian 12 Gateway 包及两份公钥/摘要文件共六件，
+GitHub 侧名称、大小与摘要已读回匹配；直接发布已验收产物，没有为 tag 再生产一版。
+
+Mac 最终 CI build1153 已原位安装并通过正常 GUI 更新到新 Runtime `8134834f…`；
+实际 Core 与持久选择一致，原设备身份和系统授权保留。独立 Gateway MCP 真实写入文本、
+点击测试按钮，独立 fixture 记录一次文本变化、点击及正常 exit0；单次会话 DELETE 返回
+HTTP202。正常 Quit 实际观察原 App/Core/Cua/Codex 四进程全部 exit0，零信号、零强杀；
+原 profile 重开自动连接，再以新 nonce 产生真实文本/点击效果并再次 DELETE202。
+最终 App 保持运行、原身份未变、没有残留 MCP proxy。原始结果为
+`/tmp/styx-macos-stable-acceptance/github-tokenfix040-RESULT.json` 与
+`/tmp/styx-stable-75a1f49-decision.json`。
+
+此前 DELETE500 及一次过期 click 观察的明确 not-dispatched 拒绝保留原样；后者使用新观察
+后才派发一次按钮点击，没有重放未知操作。已过的 Windows 17 项、Linux/Windows 设备、
+Exec/Browser、配对和安全场景均复用对应证据。本轮只将 Mac 实际升级到最终 0.4.0，
+不声称其他设备的安装也已替换。用户删除的两个 ChatGPT 连接没有重建；用户按
+[正常设置指南](../stable-setup.md) 部署一个 Gateway、多个 Host 和一个 Styx 连接。
+以下检查点为历史，不能重新作为剩余门槛。
 
 ### 当前阻塞：Mac 正常 MCP 会话清理（2026-11-13）
 

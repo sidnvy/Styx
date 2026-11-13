@@ -1,7 +1,7 @@
 # Styx 0.4.0：Gateway 与三平台 Host 设置
 
 部署方式：**moedeu-apps 只运行 Gateway；Windows、macOS、Linux 电脑作为 Host；ChatGPT 只添加一个 Styx 连接。**
-本指南不代表 Stable 已放行；正式 GitHub Release 链接在发布时补充。
+正式安装包：[Styx 0.4.0 GitHub Release](https://github.com/sidnvy/Styx/releases/tag/v0.4.0)。
 
 ## 1. 下载并核对
 
