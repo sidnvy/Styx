@@ -19,11 +19,15 @@ test('original Quit custody joins owned work, preserves uncertainty and refuses 
  for(const mode of ['idle','active','disconnected','slow','busy','failed','startup-failed','crashed','lost','reservation','observe','dispose','bootstrap','capability-draft']){
   const dir=path.join(root,mode),run=spawnSync(exe,[resources,dir,mode],{encoding:'utf8',timeout:60000,windowsHide:true});
   assert.equal(run.status,0,`${mode}: ${fs.existsSync(path.join(dir,'failure.txt'))?fs.readFileSync(path.join(dir,'failure.txt'),'utf8'):run.error||run.stderr}`);
-  const result=JSON.parse(fs.readFileSync(path.join(dir,'result.json'),'utf8'));assert.equal(result.status,'PASS');
-  if(mode==='reservation')continue;
+  const result=JSON.parse(fs.readFileSync(path.join(dir,'result.json'),'utf8'));assert.equal(result.status,'PASS');assert.equal(result.mode,mode);
+  const withoutCore={reservation:'native_profile_pipe_reservation_not_host_acceptance',bootstrap:'real_file_pin_not_signed_payload_acceptance','capability-draft':'native_controls_choice_not_setup_or_pairing_acceptance'};
+  if(Object.hasOwn(withoutCore,mode)){
+   assert.equal(result.scope,withoutCore[mode],`${mode}: the fixture validates its own boundary without starting Core`);
+   continue;
+  }
   assert.equal(result.coreExit,['failed','startup-failed','crashed'].includes(mode)?101:0);
   assert.equal(result.quitStatus,'ready_to_exit');
-  const quitCalls=mode==='busy'?'2':['failed','startup-failed','crashed'].includes(mode)?'0':'1';
+  const quitCalls=mode==='busy'?'2':['failed','startup-failed','crashed','dispose'].includes(mode)?'0':'1';
   assert.equal(result.quitCalls,quitCalls,`${mode}: quitAdmission is dispatched only for its explicit attempts`);
   assert.equal(result.calls,mode==='observe'?'3':quitCalls,`${mode}: total includes the two status observations before Quit`);
  }
