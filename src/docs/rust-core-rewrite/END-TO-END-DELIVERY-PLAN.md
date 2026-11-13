@@ -8,6 +8,23 @@
 
 ## 当前开发检查点（2026-11-12）
 
+### 最新修正：Mac 授权后的 daemon 退出清理（2026-11-13）
+
+用户已完成正常系统授权，AX/SR 的 TCC 均绑定新 `9a4` 证书。录屏授权后原 Cua daemon
+已退出，App/Core 仍在；一次正常 Quit 未完成，后续只读状态请求也等待原 Core 响应。
+原生 sample 显示 App 原控制队列等待 Core，Gateway 独立确认 Mac 已 disconnected。
+没有重放 Quit/Runtime 更新、没有强杀、没有重启或清空身份；已退出 Cua 的原 exit status
+未独立观察，不补写为正常退出。当前运行实例仍是下面的 `4d03b72` 包，不能视为验收通过。
+
+源码缺口已修：清理复用原 socket peer 绑定的完整 daemon 身份，在其确定结束时记录
+独立物理终止事实，并仍实际 join 原 proxy/transport/probe/stderr；不伪造 `end_session`
+ACK，不改变历史动作 Unknown，不接纳替代 daemon、不增加私有协议。Swift 的原 owner
+意外退出只设置显式恢复标记，仍由 Continue 先收拢原 Core，再恢复，不能自动重放。
+Linux 原缓存 5 项边界及 6 项严格写入回归、Mac 原缓存 Rust 增量检查和同 5 项原生测试、
+Swift 完整类型检查和权限恢复自测均通过。随后统一冻结修正版，复用缓存生成匹配包。
+旧实例卡在旧代码，不能热加载修正；精确处置须在修复/验证与新包就绪后另行明确授权。
+**Stable 仍 NO-GO：修正版实际 Runtime 选择、真实效果、正常退出恢复及正式发布尚待完成。**
+
 ### 当前：0.4.0 Stable 收尾（2026-11-13）
 
 用户授权并行关闭 Windows 17 项失败和新版 Mac GUI，复用已经通过的证据。

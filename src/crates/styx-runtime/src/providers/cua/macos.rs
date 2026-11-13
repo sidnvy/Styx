@@ -630,6 +630,7 @@ pub(super) struct ProxyWorker {
     suspended: Option<SuspendedChild>,
     session_started: bool,
     session_ended: bool,
+    daemon_ended: bool,
     attempted: bool,
     resumed: bool,
     // Original source and budget survive cancellation/failed starts and cleanup.
@@ -648,6 +649,7 @@ impl ProxyWorker {
             suspended: None,
             session_started: false,
             session_ended: false,
+            daemon_ended: false,
             attempted: false,
             resumed: false,
             _source: source,
@@ -661,20 +663,36 @@ impl ProxyWorker {
     pub(super) fn mark_session_ended(&mut self) {
         self.session_ended = true;
     }
+    pub(super) fn observe_original_daemon_exit(&mut self) -> Result<bool> {
+        if !self.daemon_ended {
+            self.daemon_ended = self
+                ._control
+                .original_daemon_ended()
+                .map_err(|_| CuaError::CleanupUnconfirmed)?;
+        }
+        Ok(self.daemon_ended)
+    }
     pub(super) fn was_started(&self) -> bool {
         self.attempted
     }
     pub(super) fn native_not_started(&self) -> bool {
         !self.attempted || (!self.resumed && self.suspended.is_some())
     }
-    pub(super) async fn settle(&mut self, until: Instant) -> (bool, Option<bool>, bool) {
+    pub(super) async fn settle(
+        &mut self,
+        until: Instant,
+    ) -> (bool, Option<bool>, super::CuaNativeSettlement) {
         if let Some(child) = self.running.as_mut() {
             child.take_stdin();
             child.take_stdout();
             child.take_stderr();
         }
         if self.attempted && self.running.is_none() && self.suspended.is_none() {
-            return (false, None, false);
+            return (
+                false,
+                None,
+                super::CuaNativeSettlement::MacAppTransport { drained: false },
+            );
         }
         if let Some(child) = self.suspended.as_mut() {
             // Verification never resumed this owned child. Only this proxy may be
@@ -684,7 +702,7 @@ impl ProxyWorker {
             return (
                 receipt.actual_wait && receipt.supervisor_joined,
                 receipt.exit_success,
-                false,
+                super::CuaNativeSettlement::MacAppTransport { drained: false },
             );
         }
         let mut exited = self.running.is_none();
@@ -700,7 +718,13 @@ impl ProxyWorker {
         (
             exited,
             success,
-            (!self.session_started || self.session_ended) && exited && success == Some(true),
+            super::macos_cleanup::proxy_native_settlement(
+                self.session_started,
+                self.session_ended,
+                self.daemon_ended,
+                exited,
+                success,
+            ),
         )
     }
 }

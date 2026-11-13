@@ -903,12 +903,7 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         child.terminationHandler = { [weak self] terminated in
             guard let owner = self else { return }
             DispatchQueue.main.async {
-                guard owner.daemon === terminated else { return }
-                try? owner.lifetimeWriter?.close(); owner.lifetimeWriter = nil
-                owner.daemon = nil; owner.timer?.invalidate(); owner.runtime?.clear()
-                owner.phase = "daemon_exited"
-                owner.statusLine?.title = "Cua exited; reconnect after restart"
-                // Never replay an interrupted GUI action or silently restart a generation.
+                owner.ownedDaemonDidExit(terminated)
             }
         }
         do { try child.run() }
@@ -921,6 +916,18 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
             guard let owner = self else { return }
             Task { @MainActor in owner.poll() }
         }
+    }
+    func ownedDaemonDidExit(_ terminated: Process) {
+        guard daemon === terminated else { return }
+        try? lifetimeWriter?.close(); lifetimeWriter = nil
+        daemon = nil; timer?.invalidate(); runtime?.clear()
+        #if STYX_PRODUCT_UI
+        if nativeCoreAttempted { computerPermissionRecoveryRequired = true }
+        #endif
+        phase = "daemon_exited"
+        statusLine?.title = "Cua exited; reconnect after restart"
+        // Explicit Continue must drain the original Core before replacing this
+        // generation. Never replay an action or silently restart the daemon.
     }
     func poll() {
         guard let runtime = runtime, let daemon = daemon, daemon.isRunning, daemonStopTask == nil else { return }

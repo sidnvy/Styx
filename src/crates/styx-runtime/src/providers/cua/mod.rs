@@ -28,6 +28,8 @@ use styx_contracts::{
 use styx_core::operations::{DispatchPermit, OperationPurpose, OwnerLease, ResourceDomain};
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(any(target_os = "macos", test))]
+mod macos_cleanup;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_source;
 #[cfg(target_os = "macos")]
@@ -416,6 +418,9 @@ pub enum CuaNativeSettlement {
     MacAppTransport {
         drained: bool,
     },
+    /// The originally authenticated daemon birth is definitively gone. This
+    /// proves physical termination, not end_session ACK or any action outcome.
+    MacOriginalDaemonExited,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct CuaCleanup {
@@ -433,6 +438,7 @@ impl CuaCleanup {
                 | CuaNativeSettlement::LinuxScope { confirmed: true }
                 | CuaNativeSettlement::WindowsJob { confirmed: true }
                 | CuaNativeSettlement::MacAppTransport { drained: true }
+                | CuaNativeSettlement::MacOriginalDaemonExited
         )
     }
     pub fn complete(&self) -> bool {
@@ -1369,7 +1375,19 @@ mod tests;
 #[cfg(target_os = "macos")]
 async fn cleanup(live: &mut Live, budget: Duration) -> CuaCleanup {
     let until = Instant::now() + budget;
-    if !live.mac_session_end_finished && live.mac_session_end.is_none() {
+    let daemon_exited = live
+        .mac_proxy
+        .as_mut()
+        .is_some_and(|proxy| proxy.observe_original_daemon_exit().unwrap_or(false));
+    if daemon_exited
+        && live.close_job.is_none()
+        && let Some(mut client) = live.client.take()
+    {
+        // Stop and JOIN the original local MCP transport. This also releases
+        // any already queued end_session waiter; never abort/detach that job.
+        live.close_job = Some(tokio::spawn(async move { client.close().await.is_ok() }));
+    }
+    if !daemon_exited && !live.mac_session_end_finished && live.mac_session_end.is_none() {
         if let (Some(session), Some(client)) = (live.mac_session.clone(), live.client.as_ref()) {
             let peer = client.peer().clone();
             live.mac_session_end = Some(tokio::spawn(async move {
@@ -1422,8 +1440,8 @@ async fn cleanup(live: &mut Live, budget: Duration) -> CuaCleanup {
     {
         live.close_job = Some(tokio::spawn(async move { client.close().await.is_ok() }));
     }
-    // The standard named-session result above establishes native cleanup;
-    // EOF then closes only this resource's original proxy and retained IO.
+    // Normal end_session ACK and confirmed original-daemon exit are separate
+    // physical facts. Neither replaces joining the original proxy and all IO.
     let mut joined = !live.io_failed;
     if let Some(job) = live.close_job.as_mut() {
         match timeout_at(until, job).await {
@@ -1454,11 +1472,11 @@ async fn cleanup(live: &mut Live, budget: Duration) -> CuaCleanup {
     let (exited, success, native_settlement) = match live.mac_proxy.as_mut() {
         None => (true, None, CuaNativeSettlement::NotStarted),
         Some(proxy) => {
-            let (exited, success, drained) = proxy.settle(until).await;
+            let (exited, success, settlement) = proxy.settle(until).await;
             let native = if proxy.native_not_started() {
                 CuaNativeSettlement::NotStarted
             } else {
-                CuaNativeSettlement::MacAppTransport { drained }
+                settlement
             };
             (exited, success, native)
         }

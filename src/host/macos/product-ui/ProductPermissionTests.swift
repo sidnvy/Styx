@@ -8,6 +8,15 @@ import SwiftUI
     func require(_ value: Bool, _ message: String) throws {
         if !value { throw NSError(domain: "Styx.PermissionTest", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
     }
+    let owner = StyxDelegate()
+    let originalDaemon = Process()
+    owner.nativeCoreAttempted = true
+    owner.daemon = originalDaemon
+    owner.phase = "socket_accepting"
+    owner.ownedDaemonDidExit(Process())
+    try require(owner.daemon === originalDaemon && !owner.computerPermissionRecoveryRequired && owner.phase == "socket_accepting", "An unrelated child exit changed original daemon custody or recovery admission")
+    owner.ownedDaemonDidExit(originalDaemon)
+    try require(owner.daemon == nil && owner.computerPermissionRecoveryRequired && owner.phase == "daemon_exited", "Original daemon exit did not require explicit Continue recovery")
     var observation = (accessibility: false, screenRecording: false)
     var checks = 0, recoveries = 0
     var requests: [Bool] = [], settings: [Bool] = []

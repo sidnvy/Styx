@@ -314,6 +314,7 @@ impl ConnectedCandidate {
             native_console: None,
             probe_session: None,
             probe_drained: false,
+            probe_daemon_exited: false,
             probe_failure: None,
             initial_provisional: false,
         };
@@ -332,6 +333,8 @@ pub(crate) struct BoundMacSource {
     native_console: Option<ObservedConsoleIdentity>,
     probe_session: Option<String>,
     probe_drained: bool,
+    // Physical original-daemon exit is never recorded as a session ACK.
+    probe_daemon_exited: bool,
     // First closed fault facts only; never consulted for source authority.
     probe_failure: Option<ProbeDiagnostic>,
     // A protocol-complete qualification sample exists on this original FD.
@@ -367,6 +370,7 @@ impl BoundMacSource {
             native_console: self.native_console.clone(),
             probe_session: None,
             probe_drained: false,
+            probe_daemon_exited: false,
             probe_failure: None,
             initial_provisional: false,
         };
@@ -432,6 +436,12 @@ impl BoundMacSource {
     // the original authenticated FD. Process, socket and image pins still apply.
     fn check_cleanup_binding(&self) -> Result<()> {
         self.check_original_peer(false)
+    }
+    pub(crate) fn original_daemon_ended(&self) -> Result<bool> {
+        // This birth came from discovery and was bound to the original kernel
+        // socket peer by finish_binding; never inspect/adopt a new publication.
+        super::macos_cleanup::original_daemon_ended(&self.candidate.daemon)
+            .map_err(|_| BindingError::Peer)
     }
     fn check_original_peer(&self, require_publication: bool) -> Result<()> {
         let candidate = &self.candidate;

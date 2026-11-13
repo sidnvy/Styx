@@ -419,11 +419,18 @@ impl BoundMacSource {
         result
     }
     pub(crate) fn drain_probe(&mut self, deadline: Instant) -> Result<bool> {
-        if self.probe_drained {
+        if self.probe_drained || self.probe_daemon_exited {
             return Ok(true);
         }
         if self.probe_session.is_none() {
             self.probe_drained = true;
+            self.fence_initial_native();
+            return Ok(true);
+        }
+        if self.original_daemon_ended()? {
+            // The original observation task is joined by DesktopSource::stop.
+            // A departed daemon cannot run its session, but did not ACK its end.
+            self.probe_daemon_exited = true;
             self.fence_initial_native();
             return Ok(true);
         }
