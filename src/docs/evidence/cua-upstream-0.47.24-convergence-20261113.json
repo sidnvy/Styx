@@ -1,0 +1,191 @@
+{
+  "schema": 1,
+  "scope": "Development source convergence; no installation or Stable release claim",
+  "upstream_version": "0.47.24",
+  "upstream_commit": "b168ff39fef15d993ab66facce9b0027ea556dce",
+  "patch_sha256": "4608100b00a98c0f0eda5e51c64213aef01787e69cac652f75988dfed8c1bce1",
+  "patch_files": 8,
+  "upstream_lock_unchanged": true,
+  "actual_linux_strict_fixture": {
+    "driver_version": "0.47.24",
+    "binary_is_official": false,
+    "installed_product_untouched": true,
+    "strict_text_patch": true,
+    "fixture_pid": 3417928,
+    "read_is_error": false,
+    "read_fields": [
+      "_note",
+      "app_name",
+      "bounds_complete",
+      "coordinate_frame",
+      "element_count",
+      "elements",
+      "elements_complete",
+      "frame_note",
+      "nodes_pending",
+      "nodes_visited",
+      "pid",
+      "returned_element_count",
+      "snapshot_id",
+      "timeout_ms",
+      "total_element_count",
+      "tree_markdown",
+      "truncated",
+      "walk_elapsed_ms",
+      "window_bounds",
+      "window_id",
+      "window_title"
+    ],
+    "editable_candidates": 1,
+    "write_is_error": false,
+    "write_result": {
+      "delivery": {
+        "mode": "unknown"
+      },
+      "effect": "unverifiable",
+      "hint": "The value was written but not read back. Read the element again to confirm it before relying on it.",
+      "next_call": {
+        "arguments": {
+          "pid": 3417928,
+          "session": "styx-strict-audit",
+          "since": "latest",
+          "window_id": 6291459
+        },
+        "tool": "get_window_state"
+      },
+      "route": "accessibility",
+      "summary": "strict_text_acknowledged"
+    },
+    "independent_text_matches": true,
+    "fixture_events": {
+      "changed": 1,
+      "activate": 0
+    },
+    "fresh_read_is_error": false,
+    "fresh_read_text_matches": true,
+    "end_session_is_error": false,
+    "eof_exit_code": 0,
+    "fixture_exit_code": 0
+  },
+  "actual_linux_stale_refusal_fixture": {
+    "driver_version": "0.47.24",
+    "binary_is_official": false,
+    "installed_product_untouched": true,
+    "strict_text_patch": true,
+    "fixture_pid": 3424044,
+    "read_is_error": false,
+    "read_fields": [
+      "_note",
+      "app_name",
+      "bounds_complete",
+      "coordinate_frame",
+      "element_count",
+      "elements",
+      "elements_complete",
+      "frame_note",
+      "nodes_pending",
+      "nodes_visited",
+      "pid",
+      "returned_element_count",
+      "snapshot_id",
+      "timeout_ms",
+      "total_element_count",
+      "tree_markdown",
+      "truncated",
+      "walk_elapsed_ms",
+      "window_bounds",
+      "window_id",
+      "window_title"
+    ],
+    "editable_candidates": 1,
+    "write_is_error": false,
+    "write_result": {
+      "delivery": {
+        "mode": "unknown"
+      },
+      "effect": "unverifiable",
+      "hint": "The value was written but not read back. Read the element again to confirm it before relying on it.",
+      "next_call": {
+        "arguments": {
+          "pid": 3424044,
+          "session": "styx-strict-audit",
+          "since": "latest",
+          "window_id": 6291459
+        },
+        "tool": "get_window_state"
+      },
+      "route": "accessibility",
+      "summary": "strict_text_acknowledged"
+    },
+    "independent_text_matches": true,
+    "fixture_events": {
+      "changed": 1,
+      "activate": 0
+    },
+    "fresh_read_is_error": false,
+    "fresh_read_text_matches": true,
+    "stale_reply_is_error": true,
+    "stale_reply": {
+      "code": "stale_observation",
+      "effect": "unverified",
+      "hint": "The window changed since your last read, so nothing was sent. Read it again and aim from the fresh state.",
+      "next_call": {
+        "arguments": {
+          "pid": 3424044,
+          "session": "styx-strict-audit",
+          "window_id": 6291459
+        },
+        "tool": "get_window_state"
+      },
+      "outcome": "refused",
+      "schema": 1
+    },
+    "events_after_stale": {
+      "text": "after-strict-cua-04724",
+      "changed": 1,
+      "activate": 0
+    },
+    "end_session_is_error": false,
+    "eof_exit_code": 0,
+    "fixture_exit_code": 0
+  },
+  "native_fault_test": "Real private AT-SPI D-Bus: success/false/error/stall; setter count one; InsertText/activate/Value count zero; errors remain Unknown",
+  "installed_product_changed": false,
+  "validation": {
+    "rust_format": "PASS",
+    "rust_workspace_clippy_all_targets": "PASS",
+    "rust_workspace_tests_with_local_sockets": "PASS",
+    "rust_workspace_passed_tests": 483,
+    "release_helper_tests": 33,
+    "workflow_actionlint": "PASS",
+    "macos_styx_runtime_native_check": "PASS",
+    "macos_22_swift_sources_typecheck": "PASS",
+    "upstream_cua_macos_native_check": "PASS",
+    "windows_native_validation": "PASS: native compilation, 3 unit tests, debug build, interactive single setter effect, normal exits, current Host real-wire decoder; old harness assertion retained as historical failed check",
+    "initial_workspace_test_attempt": "Local socket/interface restrictions caused 13 EPERM failures; the unchanged suite passed with required local socket access.",
+    "upstream_cua_macos_strict_outcome_test": "PASS: 1 native test, no GUI/TCC/installation changes",
+    "upstream_cua_windows_native_check": "PASS: cua-driver and platform-windows with tests, x86_64-pc-windows-msvc",
+    "upstream_cua_windows_strict_and_click_tests": "PASS: 2 strict outcome tests and 1 typed completed-click test",
+    "upstream_cua_windows_native_debug_build": "PASS: 0.47.24, SHA256 ee8b3190e33427903d386dcc41588cc60fdf47e94ba4b78183376c666f384872",
+    "macos_styx_runtime_final_shared_check": "PASS: final shared catalog/session/outcome changes",
+    "macos_real_gui_effect": "NOT RUN: preserved current installed App/TCC identity, no new permission grants",
+    "upstream_cua_windows_session0_attempt": "NotDispatched: official worker refused Session 0 before MCP initialize; setter_attempts=0, fixture text changes=0. Interactive-token attempt is separate.",
+    "actual_windows_wire_host_decoder": "PASS: real captured wire accepted as native ACK/unverified; changing success to error or route to keyboard stays Unknown, diagnostic text ignored"
+  },
+  "macos_transport_boundary": "Official private UDS path and server-side UID boundary; source App/process/observation-FD checks retained, but not an atomic OS-peer binding for every new proxy call connection. Removed extra same-UID socket replacement hardening; no new relay.",
+  "actual_windows_strict_fixture": {
+    "native_setter_effect": "PASS",
+    "strict_calls": 1,
+    "independent_value_changes": 1,
+    "independent_value": "styx-strict-native-04724-once",
+    "clicks": 0,
+    "fixture_normal_quit_exit": 0,
+    "worker_eof_exit": 0,
+    "harness_status": "FAIL",
+    "note": "Preserved obsolete exact-envelope assertion failure; actual normalized Windows wire exported for current Host decoder test. No setter replay.",
+    "binary_sha256": "ee8b3190e33427903d386dcc41588cc60fdf47e94ba4b78183376c666f384872",
+    "patch_sha256": "4608100b00a98c0f0eda5e51c64213aef01787e69cac652f75988dfed8c1bce1",
+    "fresh_ax_after_write": "NOT_RUN_AFTER_OBSOLETE_ASSERTION",
+    "installed": false
+  }
+}

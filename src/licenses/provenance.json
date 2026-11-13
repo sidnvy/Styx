@@ -4,9 +4,9 @@
     {
       "file": "cua-LICENSE",
       "repository": "trycua/cua",
-      "ref": "cua-driver-rs-v0.36.0",
+      "ref": "cua-driver-rs-v0.47.24",
       "source_path": "LICENSE.md",
-      "source_url": "https://raw.githubusercontent.com/trycua/cua/cua-driver-rs-v0.36.0/LICENSE.md",
+      "source_url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/LICENSE.md",
       "sha256": "c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9"
     },
     {

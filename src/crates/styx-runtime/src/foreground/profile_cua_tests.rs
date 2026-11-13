@@ -67,7 +67,7 @@ for(const name of ['codex','cua-driver'])put(path.join(release,'bin',name),fs.re
             output.status.success(),
             "owned signed profile fixture failed"
         );
-        fixture.sign_release("cua-driver 0.36.0", Some(true));
+        fixture.sign_release("cua-driver 0.47.24", Some(true));
         fixture
     }
     fn release(&self) -> PathBuf {
@@ -197,19 +197,19 @@ fn original_signed_cua_pin_requires_both_selections_and_exact_member_provenance(
         wrong_version.pin_cua_driver(),
         Err(ProfileError::UntrustedRelease)
     ));
-    fixture.sign_release("cua-driver 0.36.0", Some(false));
+    fixture.sign_release("cua-driver 0.47.24", Some(false));
     assert!(matches!(
         load_paired(&fixture.state).unwrap().pin_cua_driver(),
         Err(ProfileError::UntrustedRelease)
     ));
     fs::remove_file(fixture.release().join("bin/cua-driver")).unwrap();
-    fixture.sign_release("cua-driver 0.36.0", None);
+    fixture.sign_release("cua-driver 0.47.24", None);
     assert!(matches!(
         load_paired(&fixture.state).unwrap().pin_cua_driver(),
         Err(ProfileError::UntrustedRelease)
     ));
     fs::copy("/usr/bin/true", fixture.release().join("bin/cua-driver")).unwrap();
-    fixture.sign_release("cua-driver 0.36.0", Some(true));
+    fixture.sign_release("cua-driver 0.47.24", Some(true));
     let original = load_paired(&fixture.state).unwrap();
     let original_pin = original.pin_cua_driver().unwrap().unwrap();
     fs::write(

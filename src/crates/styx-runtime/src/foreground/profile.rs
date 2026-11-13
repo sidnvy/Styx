@@ -382,7 +382,7 @@ impl LoadedLegacyProfile {
         )? {
             return Ok(None);
         }
-        if self.cua_version.as_deref() != Some("cua-driver 0.36.0")
+        if self.cua_version.as_deref() != Some("cua-driver 0.47.24")
             || !self.inventory.has_worker(NativeExternalWorker::CuaNative)
         {
             return Err(ProfileError::UntrustedRelease);

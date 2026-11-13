@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision an immutable, checksum-pinned Cua v0.36.0 binary in a scratch folder.
+"""Provision an immutable, checksum-pinned Cua v0.47.24 binary in a scratch folder.
 
 Does not install system packages, request OS permissions, or run a daemon.
 Use the returned binary path from CI or an explicit local test runner.
@@ -19,20 +19,20 @@ import time
 from urllib.request import urlopen
 import zipfile
 
-RELEASE = "cua-driver-rs-v0.36.0"
+RELEASE = "cua-driver-rs-v0.47.24"
 BASE = f"https://github.com/trycua/cua/releases/download/{RELEASE}"
 ARTIFACTS = {
     "darwin": (
-        "cua-driver-rs-0.36.0-darwin-universal-binary.tar.gz",
-        "584e44435a26f5aa90c2f0097242307efbd63e843fc3f61072147c1963b0e592",
+        "cua-driver-rs-0.47.24-darwin-universal-binary.tar.gz",
+        "032039c3701727a76458b61a6649f950a9d52ba453da00be741ef00c185a2edd",
     ),
     "linux": (
-        "cua-driver-rs-0.36.0-linux-x86_64-binary.tar.gz",
-        "05dae2160c86bdf4855c279d30898213d7a150edb1992b7470afdd69f0df4064",
+        "cua-driver-rs-0.47.24-linux-x86_64-binary.tar.gz",
+        "e5333da45b233e8ec93550ec8061fdc9513b23621145def3a3ea22a01c328738",
     ),
     "win32": (
-        "cua-driver-rs-0.36.0-windows-x86_64-binary.zip",
-        "f8c47024b626f4e0e70f8428d2998df39e4879110c5722a29d5fd03e367353ad",
+        "cua-driver-rs-0.47.24-windows-x86_64-binary.zip",
+        "db7079d8f420ced9f4925b5b8f4b7b34c5573c3592859be7d3029a7259ad7d32",
     ),
 }
 
@@ -124,7 +124,7 @@ def main() -> None:
     extract_single(archive, executable)
     archive.unlink(missing_ok=True)
     print(f"binary={executable}")
-    print(f"version=0.36.0")
+    print(f"version=0.47.24")
     print(f"artifact_sha256={actual}")
 
 

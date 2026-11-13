@@ -128,18 +128,44 @@ pub struct SuspendedChild {
 }
 
 #[allow(unsafe_code)]
-mod darwin_file_actions {
+mod darwin_ffi {
     use nix::spawn::PosixSpawnFileActions;
     use std::ffi::CStr;
 
-    pub(super) fn duplicate_inherited(
-        fd: &std::os::fd::OwnedFd,
-    ) -> Result<std::os::fd::OwnedFd, super::SpawnFailure> {
-        let raw = nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_DUPFD_CLOEXEC(5))
-            .map_err(|_| super::refused("proxy_descriptor_unavailable"))?;
-        // SAFETY: successful F_DUPFD_CLOEXEC returns a NEW descriptor owned by
-        // this call; it cannot alias caller ownership. It is adopted exactly once.
-        Ok(unsafe { std::os::fd::FromRawFd::from_raw_fd(raw) })
+    pub(super) fn parent_matches(child: &super::ProcessIdentity, expected_parent: u32) -> bool {
+        let super::ProcessIdentity::Macos {
+            pid,
+            uid,
+            start_seconds,
+            start_microseconds,
+            ..
+        } = child
+        else {
+            return false;
+        };
+        let mut value = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>();
+        // SAFETY: Darwin libc's repr(C) record, exact output size, and a live
+        // positive original child PID. Only read-only process information.
+        let returned = unsafe {
+            libc::proc_pidinfo(
+                *pid as i32,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                value.as_mut_ptr().cast(),
+                size as i32,
+            )
+        };
+        if returned != size as i32 {
+            return false;
+        }
+        // SAFETY: proc_pidinfo reported the entire initialized native record.
+        let value = unsafe { value.assume_init() };
+        value.pbi_pid == *pid
+            && value.pbi_uid == *uid
+            && value.pbi_ppid == expected_parent
+            && value.pbi_start_tvsec == *start_seconds
+            && value.pbi_start_tvusec == *start_microseconds
     }
     // nix 0.31.3 spawn.rs:229 declares this wrapper repr(transparent), with
     // its sole libc::posix_spawn_file_actions_t field. Darwin's official
@@ -161,6 +187,10 @@ mod darwin_file_actions {
         if result == 0 { Ok(()) } else { Err(result) }
     }
 }
+pub(crate) fn original_parent_matches(child: &ProcessIdentity, expected_parent: u32) -> bool {
+    darwin_ffi::parent_matches(child, expected_parent)
+}
+
 fn cstring(value: &std::ffi::OsStr) -> Result<CString, SpawnFailure> {
     CString::new(value.as_bytes()).map_err(|_| refused("invalid_spawn_argument"))
 }
@@ -182,8 +212,6 @@ pub fn spawn_suspended(
 /// no serialized request can provide an executable, FD, environment or socket.
 pub(crate) fn spawn_installed_proxy_suspended(
     member: Arc<SignedAppMember>,
-    control: OwnedFd,
-    lifecycle: OwnedFd,
     socket: PathBuf,
     workspace: PathBuf,
     home: PathBuf,
@@ -192,12 +220,6 @@ pub(crate) fn spawn_installed_proxy_suspended(
     if !socket.is_absolute() || !home.is_absolute() || !workspace.is_absolute() {
         return Err(refused("invalid_proxy_source"));
     }
-    // Duplicate above the fixed child slots before posix_spawn file actions;
-    // source descriptors3/4 cannot be clobbered by another dup2 action.
-    let inherited = vec![
-        (darwin_file_actions::duplicate_inherited(&control)?, 3),
-        (darwin_file_actions::duplicate_inherited(&lifecycle)?, 4),
-    ];
     let env = BTreeMap::from([
         (
             OsString::from("CUA_DRIVER_RS_TELEMETRY_ENABLED"),
@@ -207,10 +229,7 @@ pub(crate) fn spawn_installed_proxy_suspended(
         (OsString::from("TMPDIR"), workspace.clone().into_os_string()),
         (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
         (OsString::from("LANG"), OsString::from("C.UTF-8")),
-        (
-            OsString::from("STYX_PRIVATE_OWNED_PROXY_V1"),
-            OsString::from("1"),
-        ),
+        (OsString::from("CUA_DRIVER_EMBEDDED"), OsString::from("1")),
         (
             OsString::from("CUA_DRIVER_MCP_ENVELOPES"),
             OsString::from("0"),
@@ -223,12 +242,13 @@ pub(crate) fn spawn_installed_proxy_suspended(
         },
         vec![
             OsString::from("mcp"),
+            OsString::from("--embedded"),
             OsString::from("--socket"),
             socket.into_os_string(),
         ],
         workspace,
         env,
-        inherited,
+        Vec::new(),
     )
 }
 fn spawn_image(
@@ -305,7 +325,7 @@ fn spawn_image(
             .add_dup2(fd.as_raw_fd(), *target)
             .map_err(|_| refused("proxy_descriptor_unavailable"))?;
     }
-    darwin_file_actions::chdir(&mut actions, directory.as_c_str())
+    darwin_ffi::chdir(&mut actions, directory.as_c_str())
         .map_err(|_| refused("spawn_directory_unavailable"))?;
     let mut attributes = PosixSpawnAttr::init().map_err(|_| refused("spawn_unavailable"))?;
     attributes

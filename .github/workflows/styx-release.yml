@@ -161,14 +161,14 @@ jobs:
         id: cua_cache
         with:
           path: ~/.cache/styx-cua-target
-          key: cua-${{ matrix.target }}-rust1971-${{ hashFiles('src/providers/cua-native/**', 'src/host/windows/cua-window-dpi-capture.rs', 'src/tools/release/*cua*.py', 'src/ci/release-cua.py') }}-${{ github.sha }}
+          key: cua-${{ matrix.target }}-rust1971-${{ hashFiles('src/providers/cua-native/**', 'src/ci/release-cua.py') }}-${{ github.sha }}
           restore-keys: |
-            cua-${{ matrix.target }}-rust1971-${{ hashFiles('src/providers/cua-native/**', 'src/host/windows/cua-window-dpi-capture.rs', 'src/tools/release/*cua*.py', 'src/ci/release-cua.py') }}-
+            cua-${{ matrix.target }}-rust1971-${{ hashFiles('src/providers/cua-native/**', 'src/ci/release-cua.py') }}-
             cua-${{ matrix.target }}-rust1971-
       - name: Source version
         id: meta
         run: python3 src/ci/release-ci.py metadata --build-number "$((1142 + GITHUB_RUN_NUMBER))"
-      - name: Build the existing pinned Cua source and patch
+      - name: Build pinned upstream Cua with the retained behavioral fixes
         run: python3 src/ci/release-cua.py --platform '${{ matrix.platform }}' --source-revision '${{ steps.meta.outputs.revision }}' --cache "$HOME/.cache/styx-public-dependencies" --target-dir "$HOME/.cache/styx-cua-target" --output "$RUNNER_TEMP/cua"
       - name: Save completed Cua compilation before signing
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830

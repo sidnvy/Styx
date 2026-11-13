@@ -66,14 +66,14 @@ and [isolated lab connection](docs/cas-lab-connection.md).
 ## Native runtimes
 
 - **Execution:** OpenAI Codex Exec Server, with exec_command and write_stdin.
-- **Computer Use:** TryCua Cua Driver 0.36.0, using original MCP tool names and
+- **Computer Use:** TryCua Cua Driver 0.47.24, using original MCP tool names and
   input schemas. Styx adds only the optional environment_id routing parameter.
 - **Portable tools:** list_apps, list_windows, get_window_state,
   get_desktop_state, click, set_value, type_text, press_key, scroll,
   verify_state.
 - **Browser:** independent Playwright MCP provider with isolated profiles and explicit login persistence. No iOS.
 
-The portable schema is generated from official live Cua v0.36.0 tool
+The public portable schema retains its original v0.36.0 compatibility contract; the current native worker is 0.47.24. It was generated from official live tool
 declarations captured on macOS, Linux and Windows. Fields that differ between
 platforms are excluded. Native Cua always performs final action validation.
 Native screenshot/session handles are not Codex Exec process session IDs.
@@ -196,7 +196,7 @@ For macOS the Host computer configuration MUST include an absolute socket
 path for a running Styx.app-managed embedded Cua daemon. The generic Host
 Connector will not silently launch an unprivileged macOS GUI worker.
 
-Cua tool schemas remain pinned to portable v0.36.0. The model-facing
+The portable v0.36.0 public compatibility schema remains unchanged while native workers use 0.47.24. The model-facing
 session field is hidden: Host and Gateway bind implicit native sessions to
 distinct authenticated MCP connections. Mutating GUI calls interrupted
 by transport loss are marked uncertain and never automatically retried.
@@ -210,7 +210,7 @@ See docs/outbound-computer.md and gateway/test/computer-outbound.test.mjs.
 
 ## Documented native Cua behavior and unattended Wayland acceptance
 
-Cua v0.36.0 is the source of truth for macOS, Linux and Windows native tools.
+Cua v0.47.24 is the pinned native worker for macOS, Linux and Windows; the portable public tool contract remains unchanged.
 Before changing a Cua-related execution path, consult the tag-pinned
 docs/cua-0.36-source-contract.md and the linked official source files.
 
@@ -316,7 +316,7 @@ A local Linux signed Host build, user-owned systemd service lifecycle, and
 installed native Cua/Exec end-to-end acceptance have been implemented.
 No production Charon/Coder or MCP endpoint changed.
 
-The Linux builder includes pinned Codex 0.163.0 and Cua 0.36.0 binaries,
+The Linux builder includes pinned Codex 0.163.0 and Cua 0.47.24 binaries,
 the minimal ws runtime package, and a signed manifest. The installer
 verifies, stages and activates versioned releases, while a tiny bootstrap
 verifies the active publisher signature and starts the actual signed Host.

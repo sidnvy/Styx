@@ -10,7 +10,7 @@ fn initialized() -> TxJsonRpcMessage<RoleClient> {
     serde_json::from_value(json!({"jsonrpc":"2.0","method":"notifications/initialized"})).unwrap()
 }
 fn response() -> Vec<u8> {
-    let mut bytes=serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"cua-driver","version":"0.36.0"}}})).unwrap();
+    let mut bytes=serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"cua-driver","version":"0.47.24"}}})).unwrap();
     bytes.push(b'\n');
     bytes
 }

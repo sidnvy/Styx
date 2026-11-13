@@ -3,7 +3,7 @@
 
 Only public source archives are downloaded. Baseline patch contents and every
 changed source file are checked against the retained source contract. Windows
-also reuses the reviewed WGC/DPI preparation and native build producers.
+uses the same source preparation, build and cache recipe as the other platforms.
 """
 import argparse
 import hashlib
@@ -12,7 +12,6 @@ import os
 from pathlib import Path, PurePosixPath
 import platform
 import re
-import runpy
 import shutil
 import subprocess
 import sys
@@ -22,13 +21,14 @@ import time
 from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[2]
-PREPARER = ROOT / 'src/tools/release/prepare-cua-windows-wgc.py'
-CONTRACT = runpy.run_path(str(PREPARER), run_name='cua_preparation_contract')
-COMMIT = CONTRACT['COMMIT']
-ARCHIVE_SHA = CONTRACT['ARCHIVE_SHA']
-BASELINE = CONTRACT['BASELINE']
-BASELINE_SHA = CONTRACT['BASELINE_SHA']
-PATCH_SHA = CONTRACT['BASELINE_PATCH_SHA']
+BASELINE = ROOT / 'src/providers/cua-native/source.json'
+BASELINE_RAW = BASELINE.read_bytes()
+CONTRACT = json.loads(BASELINE_RAW)
+COMMIT = CONTRACT['upstream_commit']
+ARCHIVE_SHA = CONTRACT['official_archive_sha256']
+BASELINE_SHA = hashlib.sha256(BASELINE_RAW).hexdigest()
+PATCH_SHA = CONTRACT['patch_sha256']
+VERSION = CONTRACT['upstream_version']
 TARGETS = {'linux': 'x86_64-unknown-linux-gnu', 'windows': 'x86_64-pc-windows-msvc',
            'macos': 'aarch64-apple-darwin'}
 
@@ -132,6 +132,7 @@ def source_cache_times(archive, source, expected):
 
 
 def prepare_baseline(archive, output, revision):
+    require(digest(archive) == ARCHIVE_SHA, 'fixed_cua_archive_required')
     require(digest(BASELINE) == BASELINE_SHA, 'fixed_cua_baseline_manifest_required')
     baseline = json.loads(BASELINE.read_bytes())
     patch = BASELINE.parent / baseline['patch']
@@ -194,16 +195,10 @@ def workspace_cache(args, source, env):
     """Keep dependency caches; invalidate only Cua workspace packages on drift."""
     target = TARGETS[args.platform]
     args.target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    workspace = source / 'libs/cua-driver/rust'
+    workspace = source / CONTRACT['workspace']
     inputs = inventory(source)
-    # Windows's preparation receipt records the current product revision, not
-    # compiler input. Its content is verified by the original Windows producer.
-    inputs.pop('prepared-inputs.json', None)
-    helpers = ['src/ci/release-cua.py', 'src/tools/release/prepare-cua-windows-wgc.py',
-               'src/tools/release/build-cua-windows-wgc.py',
-               'src/providers/cua-native/source.json',
-               'src/providers/cua-native/cua-0.36.0-styx-once.patch',
-               'src/host/windows/cua-window-dpi-capture.rs']
+    helpers = ['src/ci/release-cua.py', 'src/providers/cua-native/source.json',
+               'src/providers/cua-native/' + CONTRACT['patch']]
     variable_names = {'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'RUSTC_WRAPPER',
                       'RUSTC_WORKSPACE_WRAPPER', 'RUSTUP_TOOLCHAIN',
                       'MACOSX_DEPLOYMENT_TARGET', 'CFLAGS', 'CXXFLAGS',
@@ -211,7 +206,7 @@ def workspace_cache(args, source, env):
     variable_names.update(name for name in env if name.startswith('CARGO_PROFILE_RELEASE_'))
     recipe = {'schema': 1, 'target': target, 'profile': 'release',
               'features': ['cua-driver/portal-input'] if args.platform == 'linux' else [],
-              'toolchain': '1.97.1', 'source': inputs,
+              'toolchain': CONTRACT['rust_toolchain'], 'source': inputs,
               'helpers': {name: digest(ROOT / name) for name in helpers},
               'compiler_environment': {name: env.get(name, '') for name in sorted(variable_names)}}
     recipe_sha = hashlib.sha256(json.dumps(recipe, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
@@ -274,7 +269,7 @@ def mark_workspace_success(args, observation):
 
 def native_build(args, source, prepared):
     target = TARGETS[args.platform]
-    workspace = source / 'libs/cua-driver/rust'
+    workspace = source / CONTRACT['workspace']
     args.target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     env = build_environment(args)
     run('cargo', 'fetch', '--locked', '--target', target, cwd=workspace, env=env)
@@ -298,13 +293,13 @@ def native_build(args, source, prepared):
     require(len(selected) == 1, 'one_native_cua_executable_required')
     original = Path(selected[0]['executable']).resolve(strict=True)
     require(original.is_file() and original.is_relative_to(args.target_dir), 'owned_cua_output_required')
-    binary = args.output / 'bin/cua-driver'
+    binary = args.output / 'bin' / ('cua-driver.exe' if args.platform == 'windows' else 'cua-driver')
     binary.parent.mkdir(mode=0o700)
     shutil.copyfile(original, binary)
     binary.chmod(0o700)
     require(digest(binary) == digest(original), 'cua_binary_copy_changed')
     version = subprocess.check_output([str(binary), '--version'], text=True).strip()
-    require(version == 'cua-driver 0.36.0', 'pinned_cua_worker_version_required')
+    require(version == f'cua-driver {VERSION}', 'pinned_cua_worker_version_required')
     mark_workspace_success(args, target_cache)
     return {'status': 'PASS', 'schema': 1, 'scope': 'NATIVE_WORKER_BUILD_NOT_PLATFORM_ACCEPTANCE',
             'source_revision': args.source_revision, 'upstream_commit': COMMIT,
@@ -341,33 +336,11 @@ def main():
     archive = download(args.cache)
     args.output.mkdir(mode=0o700, parents=True)
     source = args.output / 'source'
-    if args.platform == 'windows':
-        run(sys.executable, '-I', '-B', PREPARER, '--archive', archive, '--output', source,
-            '--source-revision', args.source_revision)
-        cache_contract = source_cache_times(archive, source, inventory(source))
-        write(args.output / 'source-cache-contract.json', cache_contract)
-        env = build_environment(args)
-        run('cargo', 'fetch', '--locked', '--target', TARGETS[args.platform],
-            cwd=source / 'libs/cua-driver/rust', env=env)
-        target_cache = workspace_cache(args, source, env)
-        built = args.output / 'native-build'
-        run(sys.executable, '-I', '-B', ROOT / 'src/tools/release/build-cua-windows-wgc.py',
-            '--prepared-source', source, '--source-revision', args.source_revision,
-            '--target-dir', args.target_dir, '--output', built, '--jobs', args.jobs,
-            env=dict(env, CARGO_NET_OFFLINE='true'))
-        receipt = json.loads((built / 'receipt.json').read_text())
-        require(receipt.get('status') == 'PASS', 'windows_cua_build_required')
-        (args.output / 'bin').mkdir(mode=0o700)
-        shutil.copyfile(built / 'bin/cua-driver.exe', args.output / 'bin/cua-driver.exe')
-        require(digest(args.output / 'bin/cua-driver.exe') == receipt['binary_sha256'], 'windows_cua_copy_changed')
-        mark_workspace_success(args, target_cache)
-        receipt['target_cache'] = target_cache
-    else:
-        prepared = prepare_baseline(archive, source, args.source_revision)
-        cache_contract = source_cache_times(archive, source, prepared['files'])
-        prepared['source_cache'] = cache_contract
-        write(args.output / 'prepared-source.json', prepared)
-        receipt = native_build(args, source, prepared)
+    prepared = prepare_baseline(archive, source, args.source_revision)
+    cache_contract = source_cache_times(archive, source, prepared['files'])
+    prepared['source_cache'] = cache_contract
+    write(args.output / 'prepared-source.json', prepared)
+    receipt = native_build(args, source, prepared)
     receipt['source_cache'] = cache_contract
     write(args.output / 'receipt.json', receipt)
     print(json.dumps({key: receipt[key] for key in ('status', 'binary_sha256', 'jobs')}))

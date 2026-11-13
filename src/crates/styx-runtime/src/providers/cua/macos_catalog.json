@@ -55,6 +55,14 @@
         "description": "Target process ID. Optional with element_token (it carries the pid).",
         "type": "integer"
       },
+      "post_action_wait": {
+        "description": "Whether the result waits for the post-action window-change report (default \"default\": up to 300 ms for a new window, menu, dialog or foreground change). \"none\" returns as soon as the input is delivered and says window changes were not observed; the watch keeps running in the background and a change it sees is reported on the next action's result. Only paths that already observe window changes are affected; for example a right_click that does not watch is unchanged.",
+        "enum": [
+          "default",
+          "none"
+        ],
+        "type": "string"
+      },
       "scope": {
         "description": "Default \"window\". \"desktop\": x,y with no pid/window_id are true screen pixels from get_desktop_state.",
         "enum": [
@@ -138,7 +146,7 @@
     "additionalProperties": false,
     "properties": {
       "capture_mode": {
-        "description": "DEPRECATED and ignored. get_window_state always returns BOTH the element tree and a screenshot — ground on both. The modality is chosen at action time by how you address the target: an element ax action (element_token) or an element px action (x,y). Any value (including the old \"som\"/\"screenshot\" aliases) is accepted but has no effect.",
+        "description": "DEPRECATED and ignored. get_window_state always returns BOTH the element tree and a screenshot \u2014 ground on both. The modality is chosen at action time by how you address the target: an element ax action (element_token) or an element px action (x,y). Any value (including the old \"som\"/\"screenshot\" aliases) is accepted but has no effect.",
         "enum": [
           "ax",
           "vision"
@@ -167,7 +175,7 @@
         "type": "integer"
       },
       "max_dimension": {
-        "description": "Optional cap on the returned screenshot's long edge, in pixels (aspect ratio preserved) — the cheap path for a small preview / thumbnail. Applied on top of the session/global max_image_dimension ceiling; the tighter of the two wins. Omit for the configured default.",
+        "description": "Optional cap on the returned screenshot's long edge, in pixels (aspect ratio preserved) \u2014 the cheap path for a small preview / thumbnail. Applied on top of the session/global max_image_dimension ceiling; the tighter of the two wins. Omit for the configured default.",
         "minimum": 1,
         "type": "integer"
       },
@@ -189,9 +197,23 @@
         "description": "Case-insensitive substring filter: returns matching rows plus ancestors; element_index values are not renumbered. Try this before a full read.",
         "type": "string"
       },
-      "screenshot_out_file": {
-        "description": "When set, write the PNG to this file path (~ expanded) instead of embedding base64 in the response. The structured output will contain screenshot_file_path instead.",
+      "screenshot_format": {
+        "description": "Encoding of the returned screenshot. Default \"png\". \"jpeg\" is smaller, drops alpha, and mints no capture_id (capture_id-bound tools need a PNG read); pixel coordinates are unchanged.",
+        "enum": [
+          "png",
+          "jpeg"
+        ],
         "type": "string"
+      },
+      "screenshot_out_file": {
+        "description": "When set, write the screenshot (PNG, or JPEG with screenshot_format:\"jpeg\") to this file path (~ expanded) instead of embedding base64 in the response. The structured output will contain screenshot_file_path instead.",
+        "type": "string"
+      },
+      "screenshot_quality": {
+        "description": "JPEG quality, 1-95, with screenshot_format:\"jpeg\" only. Default 85.",
+        "maximum": 95,
+        "minimum": 1,
+        "type": "integer"
       },
       "session": {
         "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it.",
@@ -294,6 +316,14 @@
       "pid": {
         "description": "Target process ID.",
         "type": "integer"
+      },
+      "post_action_wait": {
+        "description": "Whether the result waits for the post-action window-change report (default \"default\": up to 300 ms for a new window, menu, dialog or foreground change). \"none\" returns as soon as the input is delivered and says window changes were not observed; the watch keeps running in the background and a change it sees is reported on the next action's result. Only paths that already observe window changes are affected; for example a right_click that does not watch is unchanged.",
+        "enum": [
+          "default",
+          "none"
+        ],
+        "type": "string"
       },
       "scope": {
         "default": "window",
@@ -402,6 +432,14 @@
         "description": "Target process ID. Required unless scope is \"desktop\" or element_token is supplied.",
         "type": "integer"
       },
+      "post_action_wait": {
+        "description": "Whether the result waits for the post-action window-change report (default \"default\": up to 300 ms for a new window, menu, dialog or foreground change). \"none\" returns as soon as the input is delivered and says window changes were not observed; the watch keeps running in the background and a change it sees is reported on the next action's result. Only paths that already observe window changes are affected; for example a right_click that does not watch is unchanged.",
+        "enum": [
+          "default",
+          "none"
+        ],
+        "type": "string"
+      },
       "scope": {
         "default": "window",
         "description": "\"desktop\" with x,y and no pid/window_id uses get_desktop_state coordinates.",
@@ -477,6 +515,14 @@
         "description": "Target process ID. Optional with element_token (the token carries the pid).",
         "type": "integer"
       },
+      "post_action_wait": {
+        "description": "Whether the result waits for the post-action window-change report (default \"default\": up to 300 ms for a new window, menu, dialog or foreground change). \"none\" returns as soon as the input is delivered and says window changes were not observed; the watch keeps running in the background and a change it sees is reported on the next action's result. Only paths that already observe window changes are affected; for example a right_click that does not watch is unchanged.",
+        "enum": [
+          "default",
+          "none"
+        ],
+        "type": "string"
+      },
       "session": {
         "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it.",
         "type": "string"
@@ -499,7 +545,7 @@
     "additionalProperties": false,
     "properties": {
       "delay_ms": {
-        "description": "Ms between characters in the CGEvent fallback. Default 30.",
+        "description": "Ms between characters in the CGEvent fallback. Default 0: characters go in batched key events, fast. Set a positive value for one paced key per character (debounced search boxes).",
         "maximum": 200,
         "minimum": 0,
         "type": "integer"
@@ -520,6 +566,14 @@
       "pid": {
         "description": "Target process ID.",
         "type": "integer"
+      },
+      "post_action_wait": {
+        "description": "Whether the result waits for the post-action window-change report (default \"default\": up to 300 ms for a new window, menu, dialog or foreground change). \"none\" returns as soon as the input is delivered and says window changes were not observed; the watch keeps running in the background and a change it sees is reported on the next action's result. Only paths that already observe window changes are affected; for example a right_click that does not watch is unchanged.",
+        "enum": [
+          "default",
+          "none"
+        ],
+        "type": "string"
       },
       "scope": {
         "default": "window",

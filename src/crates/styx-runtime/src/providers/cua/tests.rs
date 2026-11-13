@@ -64,9 +64,9 @@ fn authority() -> (
 #[test]
 fn fixed_public_tools_and_native_inventory_cannot_become_arbitrary_rpc() {
     let native: Value = serde_json::from_str(NATIVE_CATALOG).unwrap();
-    assert_eq!(native.as_object().unwrap().len(), 64);
-    assert!(native.get("run_script").is_some());
-    assert!(native.get("run_steps").is_some());
+    assert_eq!(native.as_object().unwrap().len(), 10);
+    assert!(native.get("run_script").is_none());
+    assert!(native.get("run_steps").is_none());
     let schemas = public_schemas().unwrap();
     assert_eq!(schemas.len(), 10);
     for name in schemas.keys() {
@@ -105,35 +105,33 @@ fn fixed_public_tools_and_native_inventory_cannot_become_arbitrary_rpc() {
     }
     assert!(bounded_bytes(&"x".repeat(FRAME_BYTES), FRAME_BYTES).is_err());
 }
-// Source-derived catalogs are compatibility evidence, never device acceptance.
-// A portable projection must still reject altered schemas, duplicate names and
-// half-present private write protocols; unrelated upstream tools grant no access.
+// Source-derived projections are compatibility evidence, not device acceptance.
 #[test]
-fn portable_catalogs_preserve_exact_schemas_and_private_protocol_pairing() {
+fn portable_catalogs_require_ten_tools_and_only_optional_strict_boolean() {
     for schemas_json in [
+        include_str!("linux-catalog.json"),
         include_str!("macos_catalog.json"),
         include_str!("windows-catalog.json"),
     ] {
-        let contract = FixedNativeCatalog {
-            native_count: None,
-            schemas_json,
-            full_catalog: false,
-        };
+        let contract = FixedNativeCatalog { schemas_json };
         let expected: BTreeMap<String, Value> = serde_json::from_str(schemas_json).unwrap();
         let tools: Vec<rmcp::model::Tool> = expected
             .into_iter()
             .map(|(name, schema)| {
-                serde_json::from_value(serde_json::json!({"name": name, "inputSchema": schema}))
+                serde_json::from_value(serde_json::json!({"name":name,"inputSchema":schema}))
                     .unwrap()
             })
             .collect();
+        assert_eq!(tools.len(), 10);
         assert!(!validate_native_catalog(&tools, contract).unwrap());
         let mut duplicate = tools.clone();
         duplicate.push(tools[0].clone());
         assert!(validate_native_catalog(&duplicate, contract).is_err());
-        let mut missing = tools.clone();
-        missing.remove(0);
-        assert!(validate_native_catalog(&missing, contract).is_err());
+        for index in 0..tools.len() {
+            let mut missing = tools.clone();
+            missing.remove(index);
+            assert!(validate_native_catalog(&missing, contract).is_err());
+        }
         let mut altered = tools.clone();
         altered[0].input_schema = Arc::new(
             serde_json::json!({"type":"object"})
@@ -142,28 +140,76 @@ fn portable_catalogs_preserve_exact_schemas_and_private_protocol_pairing() {
                 .clone(),
         );
         assert!(validate_native_catalog(&altered, contract).is_err());
-        let mut extended = tools;
-        for (name, schema) in ax_write::private_schemas() {
-            extended.push(
-                serde_json::from_value(serde_json::json!({"name": name, "inputSchema": schema}))
-                    .unwrap(),
+        let mut documented = tools.clone();
+        for tool in &mut documented {
+            let mut schema = (*tool.input_schema).clone();
+            schema.insert(
+                "description".into(),
+                Value::String("updated upstream documentation".into()),
             );
-            if extended.len() == 11 {
-                assert!(validate_native_catalog(&extended, contract).is_err());
+            if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+                for value in properties.values_mut() {
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert(
+                            "description".into(),
+                            Value::String("updated field wording".into()),
+                        );
+                    }
+                }
             }
+            tool.input_schema = Arc::new(schema);
         }
-        assert!(validate_native_catalog(&extended, contract).unwrap());
-        extended.push(
+        assert!(!validate_native_catalog(&documented, contract).unwrap());
+        let mut strict = tools.clone();
+        let write = strict
+            .iter_mut()
+            .find(|tool| tool.name == "set_value")
+            .unwrap();
+        let mut schema = (*write.input_schema).clone();
+        schema
+            .get_mut("properties")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "styx_strict_text".into(),
+                serde_json::json!({"type":"boolean"}),
+            );
+        write.input_schema = Arc::new(schema);
+        assert!(validate_native_catalog(&strict, contract).unwrap());
+        for flag_schema in [
+            serde_json::json!({"type":"string"}),
+            serde_json::json!({"type":"boolean","const":false}),
+            serde_json::json!({"type":"boolean","enum":[false]}),
+        ] {
+            let mut bad = strict.clone();
+            let write = bad
+                .iter_mut()
+                .find(|tool| tool.name == "set_value")
+                .unwrap();
+            let mut schema = (*write.input_schema).clone();
+            schema
+                .get_mut("properties")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("styx_strict_text".into(), flag_schema);
+            write.input_schema = Arc::new(schema);
+            assert!(validate_native_catalog(&bad, contract).is_err());
+        }
+        strict.push(
             serde_json::from_value(
                 serde_json::json!({"name":"run_script","inputSchema":{"type":"object"}}),
             )
             .unwrap(),
         );
-        assert!(validate_native_catalog(&extended, contract).unwrap());
+        assert!(validate_native_catalog(&strict, contract).unwrap());
         assert!(matches!(
             CuaAction::new("run_script".into(), Map::new()),
             Err(CuaError::Unsupported)
         ));
+        let public = serde_json::json!({"pid":42,"window_id":7,"element_token":"s00000001:2","value":"test","styx_strict_text":true});
+        assert!(CuaAction::new("set_value".into(), public.as_object().unwrap().clone()).is_err());
     }
 }
 

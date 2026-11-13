@@ -19,7 +19,7 @@ use serde::Deserialize;
 use std::{
     fs,
     os::{
-        fd::{AsRawFd, OwnedFd},
+        fd::AsRawFd,
         unix::{
             fs::{FileTypeExt, MetadataExt},
             net::UnixStream,
@@ -134,8 +134,10 @@ struct Hint {
     owner_pid: u32,
     daemon_pid: u32,
     bundle_id: String,
-    // socket, TCC booleans and acceptance strings are deliberately not parsed.
-    // None of those fields is an authenticated platform observation.
+    // Console availability is published by this same signed App owner. TCC
+    // still comes from the original daemon's standard check_permissions.
+    host_on_console: bool,
+    host_session_locked: bool,
 }
 fn missing_publication(error: StoreError) -> BindingError {
     match error {
@@ -170,6 +172,16 @@ fn birth(pid: u32, uid: u32) -> Result<ProcessIdentity> {
         return Err(BindingError::Peer);
     }
     Ok(value)
+}
+
+fn original_daemon_parent(candidate: &MacSourceCandidate) -> Result<()> {
+    if !crate::platform::macos_spawn::original_parent_matches(
+        &candidate.daemon,
+        candidate.hint.owner_pid,
+    ) {
+        return Err(BindingError::Peer);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -299,7 +311,6 @@ impl ConnectedCandidate {
             peer_token,
             fenced: false,
             protocol_clean: true,
-            native_instance: None,
             native_console: None,
             probe_session: None,
             probe_drained: false,
@@ -318,7 +329,6 @@ pub(crate) struct BoundMacSource {
     fenced: bool,
     // Frame integrity is independent of authorization/session fencing.
     protocol_clean: bool,
-    native_instance: Option<String>,
     native_console: Option<ObservedConsoleIdentity>,
     probe_session: Option<String>,
     probe_drained: bool,
@@ -354,7 +364,6 @@ impl BoundMacSource {
             peer_token: self.peer_token,
             fenced: false,
             protocol_clean: true,
-            native_instance: self.native_instance.clone(),
             native_console: self.native_console.clone(),
             probe_session: None,
             probe_drained: false,
@@ -364,9 +373,9 @@ impl BoundMacSource {
         self.fresh_binding()?;
         Ok(next)
     }
-    /// A second fact connection is authenticated independently against the SAME
-    /// retained source, not rediscovered/adopted. The original controlFD remains
-    /// exclusively owned by proxy control I/O once handed off.
+    /// A second observation connection is authenticated against the retained
+    /// source. The official proxy independently uses its private-path service
+    /// connections; this observation is not an attestation of those call FDs.
     pub(crate) async fn connect_same_peer(&mut self, until: tokio::time::Instant) -> Result<Self> {
         self.fresh_binding()?;
         let stream = tokio::time::timeout_at(
@@ -384,22 +393,16 @@ impl BoundMacSource {
         if next.peer_token != self.peer_token {
             return Err(BindingError::Peer);
         }
-        next.native_instance = self.native_instance.clone();
         next.native_console = self.native_console.clone();
         self.fresh_binding()?;
         Ok(next)
     }
-    pub(crate) fn proxy_parts(&mut self) -> Result<(Arc<SignedAppMember>, PathBuf, OwnedFd)> {
+    pub(crate) fn proxy_parts(&mut self) -> Result<(Arc<SignedAppMember>, PathBuf)> {
         self.fresh_binding()?;
-        let duplicate = self
-            .stream
-            .try_clone()
-            .map_err(|_| BindingError::Unavailable)?;
         self.fresh_binding()?;
         Ok((
             self.candidate.images.members.daemon.clone(),
             self.candidate.socket_path.clone(),
-            duplicate.into(),
         ))
     }
     pub(crate) fn binding_digest(&self) -> Result<styx_contracts::identity::Sha256Digest> {
@@ -461,6 +464,7 @@ impl BoundMacSource {
             return Err(BindingError::Peer);
         }
         candidate.images.revalidate()?;
+        original_daemon_parent(candidate)?;
         verify_guest(
             candidate.hint.owner_pid,
             None,
@@ -483,18 +487,8 @@ impl BoundMacSource {
         {
             return Err(BindingError::Fenced);
         }
+        original_daemon_parent(candidate)?;
         Ok(())
-    }
-
-    /// The only transport accessor returns this original connected FD. It does
-    /// not grant actions or certify live session/TCC facts. Caller must not open
-    /// a second connection and substitute this binding's identity for that peer.
-    pub(crate) fn transport_for_native_handshake(&self) -> Result<&UnixStream> {
-        if self.fenced {
-            Err(BindingError::Fenced)
-        } else {
-            Ok(&self.stream)
-        }
     }
 }
 
@@ -551,262 +545,4 @@ fn verify_guest(
         return Err(BindingError::Signature);
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod installed_source_tests {
-    use super::*;
-
-    #[tokio::test]
-    #[ignore = "requires the owner-authorized installed Mac App and live original Cua"]
-    async fn installed_source_withdrawn_discovery_still_drains() {
-        assert_eq!(
-            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
-            Ok("read-only")
-        );
-        let images = MacAppImages::open_fixed().expect("fixed_signed_App_images");
-        let candidate = MacSourceCandidate::discover(images).expect("original_candidate");
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
-        let mut bound = candidate
-            .connect(deadline)
-            .await
-            .expect("original_socket_connect")
-            .finish_binding()
-            .expect("original_binding");
-        bound
-            .observe_native(deadline.into_std())
-            .expect("native_facts");
-        let read = bound.probe_windows(deadline.into_std());
-        assert!(bound.probe_session.is_some(), "actual_native_read_session");
-        // Withdraw only this test's discovery view. Never alter the running
-        // App's descriptor, permissions, socket, peer or signed image pins.
-        use std::os::unix::fs::DirBuilderExt;
-        let absent = std::env::temp_dir().join(format!("styx-withdrawal-{}", Uuid::new_v4()));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&absent)
-            .expect("private_discovery_fixture");
-        Arc::get_mut(&mut bound.candidate)
-            .expect("exclusive_test_candidate")
-            .root =
-            PrivateRoot::open(absent.canonicalize().unwrap()).expect("private_discovery_root");
-        assert_eq!(bound.fresh_binding(), Err(BindingError::NotPublished));
-        assert_eq!(
-            bound.drain_probe(std::time::Instant::now() + std::time::Duration::from_secs(10)),
-            Ok(true),
-            "original_native_transport_drain_after_withdrawal"
-        );
-        assert!(bound.fenced, "cleanup_does_not_restore_admission");
-        std::fs::remove_dir(&absent).expect("remove_empty_discovery_fixture");
-        read.expect("native_window_read");
-        eprintln!(
-            "MAC_SOURCE_WITHDRAWAL admission=REFUSED original_transport_drain=PASS replay=NONE"
-        );
-    }
-
-    // Opt-in native diagnostic only: authenticate the installed original source,
-    // read native facts, then close these original FDs. No session or input.
-    #[test]
-    #[ignore = "requires the owner-authorized installed Mac App and live original Cua"]
-    fn installed_source_publication_continuity_read_only() {
-        assert_eq!(
-            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
-            Ok("read-only")
-        );
-        let images = MacAppImages::open_fixed().expect("fixed_signed_App_images");
-        let candidate = MacSourceCandidate::discover(images).expect("original_candidate");
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut reads = 0;
-        let mut failures = 0;
-        while std::time::Instant::now() < until {
-            match hint(&candidate.root) {
-                Ok(value) => assert!(value == candidate.hint, "original_generation_changed"),
-                Err(error) => {
-                    failures += 1;
-                    eprintln!("MAC_SOURCE_PUBLICATION read_error={error:?}");
-                }
-            }
-            reads += 1;
-        }
-        candidate
-            .images
-            .revalidate()
-            .expect("original_images_retained");
-        assert!(hint(&candidate.root).expect("final_publication") == candidate.hint);
-        eprintln!("MAC_SOURCE_PUBLICATION reads={reads} failures={failures}");
-        assert_eq!(failures, 0, "unchanged_publication_must_remain_readable");
-    }
-
-    #[tokio::test]
-    #[ignore = "requires the owner-authorized installed Mac App and live original Cua"]
-    async fn installed_source_binding_read_only() {
-        assert_eq!(
-            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
-            Ok("read-only")
-        );
-        MacSourceCandidate::check_discovery_presence().expect("discovery_presence");
-        eprintln!("MAC_SOURCE_READ_ONLY discovery_presence=PASS");
-        let images = MacAppImages::open_fixed().expect("fixed_signed_App_images");
-        eprintln!("MAC_SOURCE_READ_ONLY fixed_signed_App_images=PASS");
-        let candidate = MacSourceCandidate::discover(images).expect("original_candidate");
-        eprintln!("MAC_SOURCE_READ_ONLY original_candidate=PASS");
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        let connected = candidate
-            .connect(deadline)
-            .await
-            .expect("original_socket_connect");
-        let mut bound = connected
-            .finish_binding()
-            .expect("kernel_peer_and_original_images");
-        eprintln!("MAC_SOURCE_READ_ONLY kernel_peer_and_original_images=PASS");
-        let facts = bound
-            .observe_native(deadline.into_std())
-            .expect("original_FD_native_protocol");
-        assert!(
-            facts.observed_unlocked(),
-            "original_native_console_unlocked"
-        );
-        eprintln!("MAC_SOURCE_READ_ONLY original_FD_native_console=PASS");
-    }
-    #[tokio::test]
-    #[ignore = "requires the owner-authorized installed Mac App and live original Cua"]
-    async fn installed_source_windows_read_only() {
-        assert_eq!(
-            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
-            Ok("read-only")
-        );
-        let source = super::super::macos::MacProxySource::discover(
-            tokio::time::Instant::now() + std::time::Duration::from_secs(10),
-        )
-        .await
-        .expect("original_source_discovery");
-        let preparation_source = source.clone();
-        tokio::task::spawn_blocking(move || {
-            preparation_source
-                .observe_preparation(std::time::Instant::now() + std::time::Duration::from_secs(10))
-        })
-        .await
-        .expect("preparation_task_joined")
-        .expect("unqualified_preparation");
-        let original = source.clone();
-        let observation = tokio::task::spawn_blocking(move || {
-            original.observe_initial_with_windows(
-                std::time::Instant::now() + std::time::Duration::from_secs(15),
-            )
-        })
-        .await
-        .expect("original_read_task_joined");
-        let strict = if observation.is_ok() {
-            let original = source.clone();
-            Some(
-                tokio::task::spawn_blocking(move || {
-                    original.observe_with_windows(
-                        std::time::Instant::now() + std::time::Duration::from_secs(15),
-                    )
-                })
-                .await
-                .expect("original_strict_read_task_joined"),
-            )
-        } else {
-            None
-        };
-        let advanced = source.initial_epoch_advanced();
-        eprintln!(
-            "MAC_SOURCE_PROBE_DIAGNOSTIC {}",
-            serde_json::to_string(&source.probe_diagnostic()).expect("closed_probe_diagnostic")
-        );
-        // Settle the same original read control even if its observation failed.
-        let drain = tokio::task::spawn_blocking(move || {
-            source
-                .drain_source_probe(std::time::Instant::now() + std::time::Duration::from_secs(10))
-        })
-        .await
-        .expect("original_drain_task_joined");
-        assert_eq!(drain, Ok(true), "original_read_probe_drain");
-        let (facts, windows) = observation.expect("original_FD_window_read");
-        assert!(facts.observed_unlocked());
-        let (strict_facts, strict_windows) = strict
-            .expect("strict_read_after_initial_success")
-            .expect("strict_original_FD_window_read");
-        assert!(strict_facts.observed_unlocked());
-        eprintln!(
-            "MAC_SOURCE_READ_ONLY window_read_count={} strict_window_read_count={} initial_epoch_advanced={} original_probe_drain=PASS",
-            windows.count, strict_windows.count, advanced
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires owner-authorized installed Mac App; controlled retained-baseline fault only"]
-    async fn installed_qualification_strict_baseline_counterexample() {
-        assert_eq!(
-            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
-            Ok("read-only")
-        );
-        let images = MacAppImages::open_fixed().expect("fixed_signed_App_images");
-        let candidate = MacSourceCandidate::discover(images).expect("original_candidate");
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut bound = candidate
-            .connect(deadline)
-            .await
-            .expect("original_connect")
-            .finish_binding()
-            .expect("original_binding");
-        let result = tokio::task::spawn_blocking(move || {
-            let before = bound.observe_native(deadline.into_std());
-            before
-                .as_ref()
-                .map_err(|_| ())
-                .expect("original_native_facts");
-            bound.lag_retained_console_seed();
-            let result = bound.observe_native(deadline.into_std());
-            let diagnostic = bound.probe_diagnostic();
-            let no_sdk_probe = bound.probe_session.is_none();
-            (result.is_err(), diagnostic, no_sdk_probe)
-        })
-        .await
-        .expect("original_fact_task_joined");
-        assert!(result.0 && result.2, "strict_refusal_before_any_SDK_probe");
-        assert_eq!(
-            result.1.map(|v| v.cause),
-            Some(ProbeCause::ConsoleEpochChanged)
-        );
-        eprintln!(
-            "MAC_QUALIFICATION_COUNTEREXAMPLE retained_baseline_lag=CONTROLLED strict_before_probe=REFUSED sdk_dispatches=0 native_seed_mutation=NONE"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires owner-authorized installed Mac App; controlled drain-before-probe boundary, no input"]
-    async fn installed_qualification_empty_drain_prevents_late_probe() {
-        assert_eq!(
-            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
-            Ok("read-only")
-        );
-        let images = MacAppImages::open_fixed().expect("fixed_signed_App_images");
-        let candidate = MacSourceCandidate::discover(images).expect("original_candidate");
-        let until = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut bound = candidate
-            .connect(until)
-            .await
-            .expect("original_connect")
-            .finish_binding()
-            .expect("original_binding");
-        tokio::task::spawn_blocking(move || {
-            bound
-                .observe_native(until.into_std())
-                .expect("original_facts");
-            assert!(bound.probe_session.is_none());
-            assert_eq!(bound.drain_probe(until.into_std()), Ok(true));
-            // A delayed initial step obtains the same FD after empty drain.
-            // No session_begin may be sent after that acknowledged cleanup.
-            assert!(bound.probe_windows(until.into_std()).is_err());
-            assert!(bound.probe_session.is_none() && bound.probe_drained && bound.fenced);
-            assert!(bound.observe_initial_native(until.into_std()).is_err());
-        })
-        .await
-        .expect("original_fact_and_drain_task_joined");
-        eprintln!(
-            "MAC_QUALIFICATION_EMPTY_DRAIN original_empty_drain=PASS late_probe=REFUSED sdk_dispatches=0 admission=FENCED"
-        );
-    }
 }

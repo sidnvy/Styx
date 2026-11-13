@@ -62,7 +62,7 @@ CI obtains dependencies directly from their public upstreams:
 | Node 22.23.3 | `src/host/prepare-node.py` |
 | Browser worker packages | `src/providers/browser-worker/package-lock.json` |
 | Secure MCP tunnel-client 0.0.17 | `src/ci/release-tunnel.json` |
-| Cua 0.36.0 fixed source commit/patch | `src/providers/cua-native/source.json`, existing baseline patch and Windows DPI fragment |
+| Cua 0.47.24 pinned upstream with small behavioral fixes | `src/providers/cua-native/source.json`, single reviewed fixes patch |
 | Portable Inno Setup | `src/host/windows/platform-update/toolchain.json` |
 
 Public archives use content-addressed/checksum-verified caches. npm uses its normal

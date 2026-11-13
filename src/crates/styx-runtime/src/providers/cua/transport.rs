@@ -30,6 +30,18 @@ fn permission_query(name: &str, args: Option<&serde_json::Map<String, serde_json
     }
 }
 
+fn lifecycle_query(name: &str, args: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
+    cfg!(target_os = "macos")
+        && matches!(name, "start_session" | "end_session")
+        && args.is_some_and(|args| {
+            args.len() == 1
+                && args
+                    .get("session")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|session| session.starts_with("styx-") && session.len() <= 80)
+        })
+}
+
 const NOTIFICATIONS_PER_REQUEST: u16 = 64;
 const TOTAL_DROPPED_NOTIFICATIONS: u32 = 4096;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -117,8 +129,9 @@ impl Admission {
                                         value.params.name.as_ref(),
                                         value.params.arguments.as_ref(),
                                     )
-                                    || super::ax_write::private_name(
+                                    || lifecycle_query(
                                         value.params.name.as_ref(),
+                                        value.params.arguments.as_ref(),
                                     )) =>
                         {
                             Kind::Tool
@@ -371,7 +384,7 @@ mod tests {
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"owned-fixture","version":"1"}}}),
         );
         let init_response = server(
-            json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"cua-driver","version":"0.36.0"}}}),
+            json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"cua-driver","version":"0.47.24"}}}),
         );
         let gate = new_gate().await;
         gate.admit_send(&init).unwrap();
@@ -389,7 +402,7 @@ mod tests {
         let wrong = new_gate().await;
         wrong.admit_send(&init).unwrap();
         let response = server(
-            json!({"jsonrpc":"2.0","id":99,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"cua-driver","version":"0.36.0"}}}),
+            json!({"jsonrpc":"2.0","id":99,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"cua-driver","version":"0.47.24"}}}),
         );
         assert!(wrong.admit_receive(&response).is_err());
         let peer = new_gate().await;

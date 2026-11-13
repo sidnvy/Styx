@@ -41,8 +41,8 @@ def main():
     args = parser.parse_args()
     owner, driver = str(Path(args.owner).resolve()), str(Path(args.driver).resolve())
     version = subprocess.check_output([driver, "--version"], text=True, timeout=10).strip()
-    if version.split()[:2] != ["cua-driver", "0.36.0"]:
-        raise RuntimeError("pinned Cua 0.36.0 required")
+    if version.split()[:2] != ["cua-driver", "0.47.24"]:
+        raise RuntimeError("pinned Cua 0.47.24 required")
     directory = Path(tempfile.mkdtemp(prefix="styx-life-", dir="/tmp"))
     endpoint = directory / "cua.sock"
     process = None

@@ -48,6 +48,12 @@ class CuaReleaseTests(unittest.TestCase):
                          f'https://codeload.github.com/trycua/cua/tar.gz/{self.module["COMMIT"]}')
 
     def test_native_build_accepts_a_locked_cache_hit_without_cleaning(self):
+        self.native_build_cache_hit('linux')
+
+    def test_windows_native_build_uses_common_producer_and_executable_suffix(self):
+        self.native_build_cache_hit('windows')
+
+    def native_build_cache_hit(self, native_platform):
         source = self.root / 'source'
         workspace = source / 'libs/cua-driver/rust'
         workspace.mkdir(parents=True)
@@ -56,10 +62,12 @@ class CuaReleaseTests(unittest.TestCase):
         output = self.root / 'output'
         output.mkdir()
         target = self.root / 'cua-target'
-        original = target / 'x86_64-unknown-linux-gnu/release/cua-driver'
+        target_triple = self.module['TARGETS'][native_platform]
+        binary_name = 'cua-driver.exe' if native_platform == 'windows' else 'cua-driver'
+        original = target / target_triple / 'release' / binary_name
         original.parent.mkdir(parents=True)
         original.write_bytes(b'cached native worker fixture')
-        args = types.SimpleNamespace(platform='linux', target_dir=target, jobs=8,
+        args = types.SimpleNamespace(platform=native_platform, target_dir=target, jobs=8,
                                      output=output, source_revision='a' * 40)
         calls = []
 
@@ -72,18 +80,20 @@ class CuaReleaseTests(unittest.TestCase):
             return types.SimpleNamespace(returncode=0)
 
         with mock.patch.object(self.module['subprocess'], 'run', side_effect=cargo), \
-                mock.patch.object(self.module['subprocess'], 'check_output', return_value='cua-driver 0.36.0\n'), \
+                mock.patch.object(self.module['subprocess'], 'check_output', return_value=f'cua-driver {self.module["VERSION"]}\n'), \
                 mock.patch.dict(self.state, workspace_cache=mock.Mock(return_value={
-                    'target': 'x86_64-unknown-linux-gnu', 'recipe_sha256': 'f' * 64,
+                    'target': target_triple, 'recipe_sha256': 'f' * 64,
                     'previous_recipe_matches': True, 'workspace_clean': None})):
             receipt = self.module['native_build'](args, source, prepared)
         self.assertEqual(receipt['status'], 'PASS')
         self.assertTrue(receipt['compiler_artifact_fresh'])
-        self.assertEqual((output / 'bin/cua-driver').read_bytes(), original.read_bytes())
+        self.assertEqual((output / 'bin' / binary_name).read_bytes(), original.read_bytes())
         self.assertEqual([command[1] for command, _ in calls], ['fetch', 'build'])
         self.assertIn('--locked', calls[1][0])
         self.assertIn('--offline', calls[1][0])
-        self.assertIn('cua-driver/portal-input', calls[1][0])
+        self.assertEqual('cua-driver/portal-input' in calls[1][0], native_platform == 'linux')
+        self.assertEqual(receipt['version'], f'cua-driver {self.module["VERSION"]}')
+        self.assertEqual(receipt['target'], target_triple)
         self.assertEqual(calls[1][1]['env']['CMAKE_BUILD_PARALLEL_LEVEL'], '8')
 
     def test_verified_source_mtimes_are_stable_without_changing_bytes(self):
@@ -91,7 +101,7 @@ class CuaReleaseTests(unittest.TestCase):
         with tarfile.open(archive, 'w') as stream:
             root = tarfile.TarInfo(f'cua-{self.module["COMMIT"]}')
             root.type = tarfile.DIRTYPE
-            root.mtime = 1792135295
+            root.mtime = 1794515309
             stream.addfile(root)
         source = self.root / 'third-party'
         (source / 'rust').mkdir(parents=True)
@@ -111,7 +121,7 @@ class CuaReleaseTests(unittest.TestCase):
                     mock.patch.object(self.module['os'], 'utime', side_effect=portable_utime):
                 second = self.module['source_cache_times'](archive, source, expected)
             self.assertEqual(first, second)
-            self.assertEqual(file.stat().st_mtime_ns, 1792135295 * 1_000_000_000)
+            self.assertEqual(file.stat().st_mtime_ns, 1794515309 * 1_000_000_000)
             self.assertEqual(self.module['inventory'](source), expected)
             file.write_bytes(b'changed source cannot inherit a cached timestamp')
             with self.assertRaisesRegex(ValueError, 'changed_before_cache_times'):
@@ -124,8 +134,8 @@ class CuaReleaseTests(unittest.TestCase):
         for name in ('cua-driver', 'platform-linux'):
             manifest = workspace / f'crates/{name}/Cargo.toml'
             manifest.parent.mkdir(parents=True)
-            manifest.write_text(f'[package]\nname="{name}"\nversion="0.36.0"\n')
-            packages.append(dict(id=f'path+{manifest.parent}#{name}@0.36.0',
+            manifest.write_text(f'[package]\nname="{name}"\nversion="{self.module["VERSION"]}"\n')
+            packages.append(dict(id=f'path+{manifest.parent}#{name}@{self.module["VERSION"]}',
                                  name=name, manifest_path=str(manifest)))
         metadata = dict(workspace_members=[package['id'] for package in packages],
                         packages=packages + [dict(id='registry+crates.io#serde@1.0.0',

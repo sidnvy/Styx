@@ -41,7 +41,7 @@ def download(url):
     require(url.startswith(('https://raw.githubusercontent.com/', 'https://crates.io/api/v1/crates/',
                             'https://static.crates.io/crates/',
                             'https://github.com/openai/codex/releases/download/rust-v0.163.0/',
-                            'https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.36.0/')),
+                            'https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.47.24/')),
             'unsupported_source_url')
     last_error = None
     for attempt in range(3):

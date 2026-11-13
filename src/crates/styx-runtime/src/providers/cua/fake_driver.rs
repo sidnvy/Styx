@@ -23,7 +23,7 @@ impl FakeDriver {
                 };
                 let result = match request["method"].as_str().unwrap() {
                     "initialize" => {
-                        serde_json::json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"cua-driver","version":"0.36.0"}})
+                        serde_json::json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"cua-driver","version":"0.47.24"}})
                     }
                     "tools/list" => serde_json::json!({"tools":[]}),
                     "tools/call" => {

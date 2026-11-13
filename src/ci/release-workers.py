@@ -224,7 +224,7 @@ def manifest(args):
                     browserMcp=browser['@playwright/mcp'], playwright=browser['playwright'])
     if args.platform != 'macos':
         require((root / ('bin/cua-driver' + suffix)).is_file(), 'built native Cua required')
-        upstream['cua'] = '0.36.0'
+        upstream['cua'] = '0.47.24'
     write(root / 'manifest.json', dict(schema=1, platform=platform, arch=arch, version=args.version,
                                      upstream=upstream, files=rows))
     if refresh:

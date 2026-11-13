@@ -1,7 +1,8 @@
-//! App-owned macOS daemon + owned stdio proxy. No daemon spawn/stop/adoption.
-//! The original authenticated controlFD and independent factFD are both bound
-//! to the same original App/daemon. Only that control's real drain ACK settles
-//! native work. Proxy wait and all IO joins remain separate requirements.
+//! App-owned macOS daemon with the official embedded socket MCP proxy.
+//! Standard session lifecycle and actual owned-process/IO completion replace
+//! the former private control/drain/report protocol.
+//! Source observations pin the original App/daemon; the official proxy opens
+//! its own private-path connections. This is not per-call FD/PID attestation.
 use super::macos_source::{BoundMacSource, MacAppImages, MacSourceCandidate, NativeObservation};
 use super::probe_diagnostic::{ProbeCause, ProbeDiagnostic, ProbeStage};
 use super::{CuaError, OwnedCuaConfig, Result};
@@ -10,7 +11,6 @@ use crate::{
     store::PrivateRoot,
 };
 use std::{
-    os::fd::OwnedFd,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -19,9 +19,7 @@ use std::{
 };
 use styx_contracts::{identity::Sha256Digest, session::SessionBinding};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
     process::{ChildStderr, ChildStdin, ChildStdout},
-    task::JoinHandle,
     time::{Instant, timeout_at},
 };
 
@@ -157,8 +155,8 @@ impl MacProxySource {
             .map(|_| ())
             .map_err(|_| CuaError::PermissionDenied)
     }
-    /// One read-only preparation before Host registration. No SDK probe or
-    /// target is published here, and the discovery baseline is not committed.
+    /// Read-only permission preparation before Host registration. Standard SDK
+    /// source sessions remain owned until stop; no action target is published.
     pub(crate) fn observe_preparation(
         &self,
         until: std::time::Instant,
@@ -214,8 +212,8 @@ impl MacProxySource {
     ) {
         self.remember_probe_diagnostic(ProbeDiagnostic::observed(stage, cause, started, until));
     }
-    /// Caller owns the existing bounded blocking job and joins it; facts never
-    /// derive from caller env/descriptor booleans or the proxy's exit status.
+    /// Caller owns and joins the blocking job. Console availability belongs to
+    /// the authenticated App bridge; live TCC comes from the daemon tool result.
     pub(crate) fn observe_current(&self, until: std::time::Instant) -> Result<NativeObservation> {
         if !self.ready() {
             return Err(CuaError::PermissionDenied);
@@ -515,6 +513,15 @@ impl MacProxySource {
             .map_err(|_| CuaError::Unknown)?
             .drain_probe(until)
             .map_err(|_| CuaError::CleanupUnconfirmed);
+        let result = result.and_then(|observations| {
+            let control = self
+                .control
+                .lock()
+                .map_err(|_| CuaError::Unknown)?
+                .drain_probe(until)
+                .map_err(|_| CuaError::CleanupUnconfirmed)?;
+            Ok(observations && control)
+        });
         if result == Ok(true) {
             self.phase
                 .store(SourcePhase::Ended as u8, Ordering::Release);
@@ -618,50 +625,11 @@ pub(super) async fn preflight(
     live.mac_probe.take();
     result.map_err(|_| CuaError::Unknown)?
 }
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DrainReport {
-    schema: u32,
-    source: String,
-    drained: bool,
-}
-async fn read_report(reader: std::io::PipeReader) -> Result<()> {
-    let file = std::fs::File::from(OwnedFd::from(reader));
-    let file = tokio::fs::File::from_std(file);
-    let mut reader = BufReader::new(file.take(4097));
-    let mut bytes = Vec::new();
-    if reader
-        .read_until(b'\n', &mut bytes)
-        .await
-        .map_err(|_| CuaError::Unknown)?
-        == 0
-        || bytes.len() > 4096
-        || bytes.last() != Some(&b'\n')
-    {
-        return Err(CuaError::Unknown);
-    }
-    let report: DrainReport =
-        serde_json::from_slice(&bytes).map_err(|_| CuaError::ProtocolMismatch)?;
-    if report.schema != 1 || report.source != "original_control_transport" || !report.drained {
-        return Err(CuaError::CleanupUnconfirmed);
-    }
-    let mut extra = [0u8; 1];
-    if reader
-        .read(&mut extra)
-        .await
-        .map_err(|_| CuaError::Unknown)?
-        != 0
-    {
-        return Err(CuaError::ProtocolMismatch);
-    }
-    Ok(())
-}
 pub(super) struct ProxyWorker {
     running: Option<RunningChild>,
     suspended: Option<SuspendedChild>,
-    report: Option<JoinHandle<Result<()>>>,
-    report_failed: bool,
-    drained: bool,
+    session_started: bool,
+    session_ended: bool,
     attempted: bool,
     resumed: bool,
     // Original source and budget survive cancellation/failed starts and cleanup.
@@ -678,15 +646,20 @@ impl ProxyWorker {
         Self {
             running: None,
             suspended: None,
-            report: None,
-            report_failed: false,
-            drained: false,
+            session_started: false,
+            session_ended: false,
             attempted: false,
             resumed: false,
             _source: source,
             _control: control,
             _budget: budget,
         }
+    }
+    pub(super) fn mark_session_started(&mut self) {
+        self.session_started = true;
+    }
+    pub(super) fn mark_session_ended(&mut self) {
+        self.session_ended = true;
     }
     pub(super) fn was_started(&self) -> bool {
         self.attempted
@@ -724,20 +697,11 @@ impl ProxyWorker {
             exited = receipt.actual_wait && receipt.supervisor_joined;
             success = receipt.exit_success;
         }
-        if let Some(job) = self.report.as_mut() {
-            match timeout_at(until, job).await {
-                Ok(Ok(Ok(()))) => {
-                    self.report.take();
-                    self.drained = true;
-                }
-                Ok(_) => {
-                    self.report.take();
-                    self.report_failed = true;
-                }
-                Err(_) => {}
-            }
-        }
-        (exited, success, self.drained && !self.report_failed)
+        (
+            exited,
+            success,
+            (!self.session_started || self.session_ended) && exited && success == Some(true),
+        )
     }
 }
 pub(super) async fn start_proxy(
@@ -759,36 +723,27 @@ pub(super) async fn start_proxy(
     })
     .await
     .map_err(|_| CuaError::Unknown)??;
-    // A fresh resource authenticates its original control BEFORE FD handoff.
-    // This path is never called by settlement/recovery of an existing resource.
+    // Retain source identity before launching the official proxy. Its later
+    // connections use the standard private socket path, not this observed FD.
     let mut control_binding = original
         .connect_same_peer(until)
         .await
         .map_err(|_| CuaError::PermissionDenied)?;
-    let (control_binding, image, socket, control) = tokio::task::spawn_blocking(move || {
-        let (image, socket, control) = control_binding
+    let (control_binding, image, socket) = tokio::task::spawn_blocking(move || {
+        let (image, socket) = control_binding
             .proxy_parts()
             .map_err(|_| CuaError::PermissionDenied)?;
-        Ok::<_, CuaError>((control_binding, image, socket, control))
+        Ok::<_, CuaError>((control_binding, image, socket))
     })
     .await
     .map_err(|_| CuaError::Unknown)??;
-    let (report_read, report_write) = std::io::pipe().map_err(|_| CuaError::Unknown)?;
     let mut worker = ProxyWorker::new(source, control_binding, budget.clone());
     worker.attempted = true;
     live.mac_proxy = Some(worker);
     let workspace = config.workspace.clone();
     let home = config.home.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        macos_spawn::spawn_installed_proxy_suspended(
-            image,
-            control,
-            OwnedFd::from(report_write),
-            socket,
-            workspace,
-            home,
-            budget,
-        )
+        macos_spawn::spawn_installed_proxy_suspended(image, socket, workspace, home, budget)
     })
     .await
     .map_err(|_| CuaError::Unknown)?;
@@ -816,7 +771,6 @@ pub(super) async fn start_proxy(
             return Err(CuaError::PermissionDenied);
         }
     }
-    worker.report = Some(tokio::spawn(read_report(report_read)));
     let child = worker.running.as_mut().ok_or(CuaError::Unknown)?;
     live.identity = child.receipt().birth;
     Ok((
@@ -890,122 +844,5 @@ mod qualification_reference {
             *receiver.borrow(),
             Some((ProbeStage::NativeBeforeBinding, ProbeCause::Fenced))
         );
-    }
-
-    fn lag_test_baselines(source: &MacProxySource) {
-        source.control.lock().unwrap().lag_retained_console_seed();
-        source
-            .observations
-            .lock()
-            .unwrap()
-            .lag_retained_console_seed();
-    }
-
-    async fn lagged_epoch_reference(before_preparation: bool) {
-        assert_eq!(
-            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
-            Ok("read-only")
-        );
-        let source = MacProxySource::discover(Instant::now() + std::time::Duration::from_secs(10))
-            .await
-            .expect("original_source_discovery");
-        let (runtime_fault, fault_observation) = tokio::sync::watch::channel(None);
-        source.attach_runtime_fault(runtime_fault);
-        let original = source.clone();
-        let observation = tokio::task::spawn_blocking(move || -> Result<_> {
-            assert!(!original.ready(), "discovery_is_not_executor_readiness");
-            if before_preparation {
-                lag_test_baselines(&original);
-            }
-            original.observe_preparation(
-                std::time::Instant::now() + std::time::Duration::from_secs(10),
-            )?;
-            assert!(!original.ready(), "preparation_cannot_authorize_a_worker");
-            if !before_preparation {
-                lag_test_baselines(&original);
-            }
-            let (facts, windows) = original.observe_initial_with_windows(
-                std::time::Instant::now() + std::time::Duration::from_secs(15),
-            )?;
-            assert!(facts.observed_unlocked() && original.ready());
-            assert!(
-                original.initial_epoch_advanced(),
-                "controlled_lag_was_qualified"
-            );
-            // A second initial call is refused before IO and cannot reopen the
-            // one initial claim or disable this already qualified source.
-            assert!(
-                original
-                    .observe_initial_with_windows(
-                        std::time::Instant::now() + std::time::Duration::from_secs(1)
-                    )
-                    .is_err()
-            );
-            assert!(original.ready());
-            let (_, strict_windows) = original.observe_with_windows(
-                std::time::Instant::now() + std::time::Duration::from_secs(15),
-            )?;
-            lag_test_baselines(&original);
-            assert!(
-                original
-                    .observe_current(std::time::Instant::now() + std::time::Duration::from_secs(10))
-                    .is_err(),
-                "Ready_still_requires_exact_epoch"
-            );
-            assert!(original.fenced() && !original.ready());
-            Ok((windows.count, strict_windows.count))
-        })
-        .await
-        .expect("original_qualification_task_joined");
-        let diagnostic = source.probe_diagnostic();
-        let runtime_fault = *fault_observation.borrow();
-        assert_eq!(
-            runtime_fault.map(|(_, cause)| cause),
-            Some(ProbeCause::ConsoleEpochChanged)
-        );
-        assert_eq!(
-            *fault_observation.borrow(),
-            runtime_fault,
-            "reading status cannot change the latch"
-        );
-        let original = source.clone();
-        let drained = tokio::task::spawn_blocking(move || {
-            original
-                .drain_source_probe(std::time::Instant::now() + std::time::Duration::from_secs(10))
-        })
-        .await
-        .expect("original_probe_drain_task_joined");
-        assert_eq!(
-            drained,
-            Ok(true),
-            "original_read_probe_must_settle_even_on_failure"
-        );
-        let (windows, strict_windows) = observation.expect("qualified_and_strict_original_reads");
-        assert_eq!(
-            diagnostic.map(|v| v.cause),
-            Some(ProbeCause::ConsoleEpochChanged)
-        );
-        eprintln!(
-            "MAC_QUALIFICATION_REFERENCE lag_point={} retained_baseline_lag=CONTROLLED qualify=PASS strict_read=PASS strict_later_epoch=REFUSED windows={} strict_windows={} original_drain=PASS input_dispatches=0 native_seed_mutation=NONE",
-            if before_preparation {
-                "before_preparation"
-            } else {
-                "before_probe"
-            },
-            windows,
-            strict_windows
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires owner-authorized installed Mac App; original source read-only reference"]
-    async fn installed_qualification_lag_before_preparation() {
-        lagged_epoch_reference(true).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires owner-authorized installed Mac App; original source read-only reference"]
-    async fn installed_qualification_lag_before_probe() {
-        lagged_epoch_reference(false).await;
     }
 }

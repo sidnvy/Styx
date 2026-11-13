@@ -10,7 +10,7 @@ commit URLs, exact byte lengths and SHA-256 digests for the fixed releases:
 | Source | Release | Immutable commit |
 |---|---|---|
 | Codex | rust-v0.163.0 | 83086188ae0614bd882818ff1aa23f3194962012 |
-| Cua driver | cua-driver-rs-v0.36.0 | 6d6c734c127025fb39ad5d585a10382808b39dc1 |
+| Cua driver | cua-driver-rs-v0.47.24 | b168ff39fef15d993ab66facce9b0027ea556dce |
 | Node | v22.23.3 | 80dc632040e6bada37aac1220dde9c79581c9c22 |
 
 The evidence includes the exact Cargo lockfiles and workspace manifests,

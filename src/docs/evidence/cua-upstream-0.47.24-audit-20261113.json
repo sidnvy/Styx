@@ -1,0 +1,121 @@
+{
+  "schema": 1,
+  "audit_date": "2026-11-13",
+  "scope": "Upstream reuse assessment; no product dependency/install/signing/policy changes",
+  "product_revision": "0f33bec2f3670b2a69554a6e306981b78bd27de7",
+  "current_cua": {
+    "version": "0.36.0",
+    "commit": "6d6c734c127025fb39ad5d585a10382808b39dc1",
+    "patch_files": 33,
+    "patch_added_lines": 6384,
+    "patch_removed_lines": 314
+  },
+  "upstream": {
+    "version": "0.47.24",
+    "commit": "b168ff39fef15d993ab66facce9b0027ea556dce",
+    "release_url": "https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.47.24",
+    "linux_binary_archive_sha256": "e5333da45b233e8ec93550ec8061fdc9513b23621145def3a3ea22a01c328738",
+    "linux_executable_sha256": "b3e5c69f3e910fe33f90b1d3f8146583c484972b0274917015280bcbb53d0b27"
+  },
+  "actual_linux_probe": {
+    "driver_version": "0.47.24",
+    "binary_is_official": true,
+    "installed_product_untouched": true,
+    "fixture_pid": 3397139,
+    "read_is_error": false,
+    "read_fields": [
+      "_note",
+      "app_name",
+      "bounds_complete",
+      "coordinate_frame",
+      "element_count",
+      "elements",
+      "elements_complete",
+      "frame_note",
+      "nodes_pending",
+      "nodes_visited",
+      "pid",
+      "returned_element_count",
+      "snapshot_id",
+      "timeout_ms",
+      "total_element_count",
+      "tree_markdown",
+      "truncated",
+      "walk_elapsed_ms",
+      "window_bounds",
+      "window_id",
+      "window_title"
+    ],
+    "editable_candidates": 1,
+    "write_is_error": false,
+    "write_result": {
+      "delivery": {
+        "mode": "background"
+      },
+      "effect": "confirmed",
+      "evidence": [
+        {
+          "kind": "value_readback"
+        }
+      ],
+      "route": "accessibility",
+      "summary": "Set value of element [0] to 'after-official-cua-04724' (path=ax); read back 'after-official-cua-04724'."
+    },
+    "independent_text_matches": true,
+    "fixture_events": {
+      "changed": 1,
+      "activate": 1
+    },
+    "fresh_read_is_error": false,
+    "fresh_read_text_matches": true,
+    "end_session_is_error": false,
+    "eof_exit_code": 0,
+    "fixture_exit_code": 0
+  },
+  "catalog": {
+    "current_standard_tools": 64,
+    "upstream_standard_tools": 66,
+    "upstream_styx_private_tools": [],
+    "added_upstream_tools": [
+      "browser_select",
+      "get_guide"
+    ],
+    "direct_swap_supported": false,
+    "reason": "Existing full-catalog matcher treats count 66 as old 64 plus the two exact Styx private tools; official 66 contains different tools and changed schemas."
+  },
+  "proven_gap": "Official Linux normal set_value invokes activate after a successful text replacement; fixture observed one changed and one activate. Source also falls from error/false SetTextContents into InsertText. Fault branch was inspected, not fault-injected.",
+  "not_executed": [
+    "Linux lost-reply fault injection",
+    "Windows DPI-unaware native capture regression",
+    "macOS signed-App/TCC/session/overlay lifecycle equivalence",
+    "Styx integration with upstream 0.47.24"
+  ],
+  "source_sha256": {
+    "crates/cua-driver/src/cli.rs": "f5472f5e4a311f45b7df54f0d6cb7dd2735cec30c8cfe5fc24952873d8649cbb",
+    "crates/cua-driver/src/proxy.rs": "22a15ca3e252143846e31e84fdc1228df48b739f731d11c1a39a20b167a8ff5a",
+    "crates/cua-driver/src/sdk_adapter.rs": "7b87c1d3fadeaf7d6be44fa7d0f936d726e185dea0cb3d680d32310be83e7cc8",
+    "crates/cua-driver/src/serve.rs": "b3377636765812bc7155ca019d875f072d92865f860f75d552437d83a460b479",
+    "crates/cua-driver-core/src/element_token.rs": "4e0998d8f064e833ec39591529ef0d8c8bbfb2b241bc61e225e4ae80de3b7a47",
+    "crates/cua-driver-core/src/session.rs": "8e447acced5c81b9c9c36d98681bfdcb891ee257a76f8868b028111562836d9b",
+    "crates/cua-driver-core/src/session_authorization.rs": "564e1b86a181c5a9a78ad2ec955ecd1fce6d50245a8f3ce5692619718b71cdf2",
+    "crates/cua-driver-core/src/session_tools.rs": "d7b4bc06b3268e4b0b72c029d2b8e8f1e22186ca49f9e2b6fd93997d2e0419c7",
+    "crates/cua-driver-core/src/snapshot_store.rs": "29d05804ff13a1824289e856f4af044e114bc961794cf1cf9247f415c09ee860",
+    "crates/cua-driver-sdk/src/authorization_host.rs": "3d2eed046ea300dc337cf8c56677160237551dbca6d2ab48a0a1fa57b54838c0",
+    "crates/cua-driver-sdk/src/runtime.rs": "4980b4b15dccc030bfde0579432a49c67c0f1711237e38d06c03b2e5bd6776cf",
+    "crates/cua-driver-sdk/src/service_session.rs": "a54b61e3476652de329aec9280e1f854cc8cd776b1e7f16d40513eace38b91ad",
+    "crates/platform-linux/src/atspi/native.rs": "5df205dd3655ffb37980a3bef9e85328efd02be510621fca2297564c7cbef776",
+    "crates/platform-linux/src/tools/set_value.rs": "5974a5db61b1502e884afc62412ca24ce7570c65df792d99ab6c4d865b8ae16a",
+    "crates/platform-linux/src/tools/type_text.rs": "bc69507bf3e3fa3e68b24f8da25c0640a22e6fa1f465c48f33b3bb80299d1676",
+    "crates/platform-linux/src/wayland/hyprland.rs": "bb2038bfe9313e46b12a4bb317934b1f379f881ff4766989095a6ce0903a42c1",
+    "crates/platform-macos/src/cursor/overlay.rs": "a78bcde6c5116f28a02e0cd6dabaf4836ec97ce13aeed115c65e2cc73bb66f78",
+    "crates/platform-macos/src/session.rs": "185926ce55527ea44921b7fb3990373ad5663b983b3efc7686d2e0670a2db533",
+    "crates/platform-macos/src/tools/set_value.rs": "1050199854fdc5a4ae5b553795f7e366d4ea1e7a47f10a93b3a74fa759dc41da",
+    "crates/platform-macos/src/tools/type_text.rs": "8ebc31cd13eaeebdb86740c177d498e5ec6dd3ecd021eb7fc1f859f412804abd",
+    "crates/platform-windows/src/capture.rs": "7c91cd28bc3be14ffca815c1f9f78de94f2996d498732b9c59d7821b4b8bf8c9",
+    "crates/platform-windows/src/input/mouse.rs": "efcca068e1ab571ce2ee668e37038bc9b8e97027559fa8d33fb1c7dceb6307ef",
+    "crates/platform-windows/src/tools/set_value.rs": "26ab7b7d4a305dbc8a4e0b85f083e482d805b958c175d96591a86b73a95d2d5f",
+    "crates/platform-windows/src/tools/type_text.rs": "0f82dbe9af63207f3b3a390bf7f99a676ac618084f1fd11df7e5ecd76a986379",
+    "crates/platform-windows/src/uia/snapshot.rs": "07c173a2bf9bba33b195523b28b160afdfb66daea94b7ba7194c487e92576c12",
+    "crates/platform-windows/src/wgc.rs": "34811cfb4e092fe58a96261c9ead8d2613bcc543139d561107fc047250171c34"
+  }
+}

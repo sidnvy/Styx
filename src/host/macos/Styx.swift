@@ -71,7 +71,7 @@ func socketAccepts(_ path: String) -> Bool {
     }
 }
 
-// Pinned Cua 0.36.0 cli.rs exports this internal host contract; serve.rs
+// Pinned official Cua cli.rs exposes the embedded host contract; serve.rs
 // waits for embedded stdin EOF and shuts down its runtime. The sole writer
 // stays in Styx: process death closes it without a PID watchdog or guessed API.
 func makeEmbeddedDaemon(driver: URL, socketPath: String, pidFile: String) -> (Process, Pipe) {
@@ -959,9 +959,12 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         lastGrants = grants
         if socketAccepts(runtime.socket) {
             phase = "socket_accepting"
+            let consoleSession = CGSessionCopyCurrentDictionary() as? [String: Any]
             let descriptor: [String: Any] = ["schema": 1, "generation": generation,
                 "owner_pid": getpid(), "daemon_pid": daemon.processIdentifier,
                 "bundle_id": bundleID, "socket": runtime.socket,
+                "host_on_console": consoleSession?[kCGSessionOnConsoleKey as String] as? Bool == true,
+                "host_session_locked": consoleSession?["CGSSessionScreenIsLocked"] as? Bool ?? false,
                 "transport": "socket_accepting", "host_accessibility": ax,
                 "host_screen_recording": screen, "native_gui_acceptance": "NOT RUN",
                 "mcp_attribution": "NOT RUN"]

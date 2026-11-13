@@ -1,545 +1,189 @@
-//! Private read-only facts over the exact FD retained by BoundMacSource.
-//! Runs on the existing blocking boundary. The owner must retain/join its work
-//! handle if the outer waiter is cancelled; dropping a waiter is not cleanup.
-
+//! Standard Cua service observations on the authenticated App-owned socket.
+//! The App's existing native bridge owns console availability; Cua's native
+//! check_permissions owns live TCC facts. No private daemon method or IOKit seed.
 use super::*;
 use std::{
     io::{Read, Write},
     time::Instant,
 };
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Response {
-    ok: bool,
-    result: Option<NativeObservation>,
-    error: Option<String>,
-    exit_code: Option<i32>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct NativeObservation {
-    schema: u32,
-    platform: String,
-    daemon_instance: String,
-    uid: u32,
-    daemon: ProcessBirth,
-    parent: ProcessBirth,
-    pub(crate) session: SessionObservation,
-    pub(crate) permissions: Permissions,
-    pub(crate) registry_before: RegistryObservation,
-    pub(crate) registry_after: RegistryObservation,
-    lifetime: Lifetime,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProcessBirth {
-    pid: u32,
-    start_seconds: u64,
-    start_microseconds: u64,
-}
-impl ProcessBirth {
-    fn matches(&self, original: &ProcessIdentity, uid: u32) -> bool {
-        matches!(original, ProcessIdentity::Macos {
-            pid, start_seconds, start_microseconds, uid: actual, ..
-        } if *pid == self.pid && *start_seconds == self.start_seconds
-            && *start_microseconds == self.start_microseconds && *actual == uid
-            && self.start_seconds > 0 && self.start_microseconds < 1_000_000)
-    }
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SessionStatus {
-    #[serde(rename = "unlocked")]
     Unlocked,
-    #[serde(rename = "desktop_session_unknown")]
-    Unknown,
-    #[serde(rename = "desktop_session_locked")]
     Locked,
-    #[serde(rename = "no_graphical_session")]
-    NoGraphicalSession,
-    #[serde(rename = "desktop_session_disconnected")]
-    Disconnected,
-    #[serde(rename = "desktop_session_ambiguous")]
-    Ambiguous,
-    #[serde(rename = "desktop_session_changed")]
-    Changed,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct SessionObservation {
     pub(crate) uid: Option<u32>,
     pub(crate) audit_id: Option<u32>,
     pub(crate) status: SessionStatus,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct Permissions {
     pub(crate) accessibility: bool,
     pub(crate) screen_recording: bool,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Lifetime {
-    embedded_configured: bool,
-    stdin_monitor_enabled: bool,
-    stdin_monitor_started: bool,
-    original_stdin_pipe: bool,
-    ended: bool,
+pub(crate) struct NativeObservation {
+    pub(crate) session: SessionObservation,
+    pub(crate) permissions: Permissions,
+    console_uuid: String,
 }
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(
-    tag = "state",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub(crate) enum BoolObservation {
-    Known(bool),
-    Missing,
-    Invalid,
-}
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(
-    tag = "state",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub(crate) enum ConsoleUuidObservation {
-    Known(String),
-    Missing,
-    Invalid,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
-#[serde(
-    tag = "state",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub(crate) enum LockTimeObservation {
-    Known(u32),
-    Missing,
-    Invalid,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ConsoleLockEvidence {
-    PerRowUnlocked,
-    KernelConsoleSecurityOpen,
-}
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SelectedRow {
-    pub(crate) uid: u32,
-    pub(crate) audit_id: u32,
-    pub(crate) console_uuid: ConsoleUuidObservation,
-    pub(crate) session_id: Option<u32>,
-    pub(crate) on_console: BoolObservation,
-    pub(crate) login_done: BoolObservation,
-    pub(crate) screen_locked: BoolObservation,
-    pub(crate) screen_locked_time: LockTimeObservation,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ConsoleEpoch {
-    root_entry_id: u64,
-    resources_entry_id: u64,
-    seed: u32,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
-#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum ConsoleEpochObservation {
-    Cfdata4NativeEndian {
-        root_before: u64,
-        root_after: u64,
-        resources_before: u64,
-        resources_after: u64,
-        before: u32,
-        after: u32,
-    },
-    Unavailable,
-}
-impl ConsoleEpochObservation {
-    fn stable_stamp(&self) -> Option<ConsoleEpoch> {
-        match *self {
-            Self::Cfdata4NativeEndian {
-                root_before,
-                root_after,
-                resources_before,
-                resources_after,
-                before,
-                after,
-            } if root_before != 0
-                && resources_before != 0
-                && root_before == root_after
-                && resources_before == resources_after
-                && before == after =>
-            {
-                Some(ConsoleEpoch {
-                    root_entry_id: root_before,
-                    resources_entry_id: resources_before,
-                    seed: before,
-                })
-            }
-            _ => None,
-        }
-    }
-}
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RegistryObservation {
-    read_status: String,
-    pub(crate) global_io_console_locked: BoolObservation,
-    pub(crate) selected_unique_row: Option<SelectedRow>,
-    selection_status: String,
-    user_count: Option<u32>,
-    lock_evidence: Option<ConsoleLockEvidence>,
-    epoch: ConsoleEpochObservation,
-}
-
-impl RegistryObservation {
-    fn validated_lock_evidence(&self) -> Option<ConsoleLockEvidence> {
-        self.epoch.stable_stamp()?;
-        if self.read_status != "copied"
-            || self.selection_status != "unique"
-            || self.global_io_console_locked != BoolObservation::Known(false)
-        {
-            return None;
-        }
-        let row = self.selected_unique_row.as_ref()?;
-        if row.on_console != BoolObservation::Known(true)
-            || row.login_done != BoolObservation::Known(true)
-            || !matches!(
-                row.screen_locked_time,
-                LockTimeObservation::Missing | LockTimeObservation::Known(0)
-            )
-        {
-            return None;
-        }
-        let ConsoleUuidObservation::Known(uuid) = &row.console_uuid else {
-            return None;
-        };
-        if Uuid::parse_str(uuid)
-            .ok()
-            .is_none_or(|value| value.is_nil() || value.to_string() != *uuid)
-        {
-            return None;
-        }
-        let expected = match row.screen_locked {
-            BoolObservation::Known(false) => ConsoleLockEvidence::PerRowUnlocked,
-            BoolObservation::Missing if self.user_count == Some(1) => {
-                ConsoleLockEvidence::KernelConsoleSecurityOpen
-            }
-            _ => return None,
-        };
-        (self.lock_evidence == Some(expected)).then_some(expected)
-    }
-}
-
-/// An authenticated native identity candidate, not a Core registration/grant.
-/// The console instance comes ONLY from the matching IOConsoleUsers row UUID.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ObservedConsoleIdentity {
     pub(crate) uid: u32,
     pub(crate) audit_id: u32,
     pub(crate) console_uuid: String,
-    pub(crate) epoch: ConsoleEpoch,
-}
-fn console_mismatch_cause(
-    original: &ObservedConsoleIdentity,
-    current: Option<&ObservedConsoleIdentity>,
-    current_unlocked: bool,
-) -> ProbeCause {
-    if current_unlocked
-        && current.is_some_and(|current| {
-            same_console_source(original, current) && current.epoch.seed != original.epoch.seed
-        })
-    {
-        ProbeCause::ConsoleEpochChanged
-    } else {
-        ProbeCause::ConsoleChanged
-    }
-}
-fn same_console_source(
-    original: &ObservedConsoleIdentity,
-    current: &ObservedConsoleIdentity,
-) -> bool {
-    current.uid == original.uid
-        && current.audit_id == original.audit_id
-        && current.console_uuid == original.console_uuid
-        && current.epoch.root_entry_id == original.epoch.root_entry_id
-        && current.epoch.resources_entry_id == original.epoch.resources_entry_id
-}
-fn initial_console_compatible(
-    original: Option<&ObservedConsoleIdentity>,
-    current: Option<&ObservedConsoleIdentity>,
-    current_unlocked: bool,
-) -> bool {
-    current_unlocked
-        && original
-            .zip(current)
-            .is_some_and(|(original, current)| same_console_source(original, current))
-}
-fn strict_console_matches(
-    original: Option<&ObservedConsoleIdentity>,
-    current: Option<&ObservedConsoleIdentity>,
-) -> bool {
-    original.is_none_or(|original| current == Some(original))
 }
 impl NativeObservation {
     pub(crate) fn console_identity(&self) -> Option<ObservedConsoleIdentity> {
-        let before = self.registry_before.selected_unique_row.as_ref()?;
-        let after = self.registry_after.selected_unique_row.as_ref()?;
-        if self.registry_before.read_status != "copied"
-            || self.registry_after.read_status != "copied"
-            || self.registry_before.selection_status != "unique"
-            || self.registry_after.selection_status != "unique"
-            || before != after
-            || Some(before.uid) != self.session.uid
-            || Some(before.audit_id) != self.session.audit_id
-            || before.uid != self.uid
-            || matches!(before.audit_id, 0 | u32::MAX)
-            || before.audit_id == u32::MAX - 1
-            || before.on_console != BoolObservation::Known(true)
-            || before.login_done != BoolObservation::Known(true)
-        {
-            return None;
-        }
-        let ConsoleUuidObservation::Known(value) = &before.console_uuid else {
-            return None;
-        };
-        let uuid = Uuid::parse_str(value).ok()?;
-        if uuid.is_nil() || value.len() != 36 || uuid.to_string() != *value {
-            return None;
-        }
         Some(ObservedConsoleIdentity {
-            uid: before.uid,
-            audit_id: before.audit_id,
-            console_uuid: value.clone(),
-            epoch: self
-                .registry_before
-                .epoch
-                .stable_stamp()
-                .filter(|value| Some(*value) == self.registry_after.epoch.stable_stamp())?,
+            uid: self.session.uid?,
+            audit_id: self.session.audit_id?,
+            console_uuid: self.console_uuid.clone(),
         })
     }
-    /// Separate labelled kernel-console-security evidence is not a fabricated
-    /// row lock bit, TCC grant, or atomic native input fence.
     pub(crate) fn observed_unlocked(&self) -> bool {
-        self.schema == 2
-            && self.session.status == SessionStatus::Unlocked
-            && self.console_identity().is_some()
-            && self.registry_before == self.registry_after
-            && self.registry_before.validated_lock_evidence().is_some()
+        self.session.status == SessionStatus::Unlocked && self.console_identity().is_some()
     }
 }
-
+fn tool_result(value: &serde_json::Value) -> Result<&serde_json::Value> {
+    if value
+        .get("isError")
+        .is_some_and(|v| v != &serde_json::Value::Bool(false))
+    {
+        return Err(BindingError::NativeProtocol);
+    }
+    value
+        .get("structuredContent")
+        .ok_or(BindingError::NativeProtocol)
+}
+fn permissions_from_result(value: &serde_json::Value) -> Result<Permissions> {
+    let value = tool_result(value)?;
+    Ok(Permissions {
+        accessibility: value
+            .get("accessibility")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or(BindingError::NativeProtocol)?,
+        screen_recording: value
+            .get("screen_recording")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or(BindingError::NativeProtocol)?,
+    })
+}
 impl BoundMacSource {
-    /// Controlled reference fault in this test's retained baseline only.
-    /// Native replies, OS state and the real App are unchanged.
-    #[cfg(test)]
-    pub(in crate::providers::cua) fn lag_retained_console_seed(&mut self) {
-        let original = self
-            .native_console
-            .as_mut()
-            .expect("observed_console_baseline");
-        original.epoch.seed = original.epoch.seed.wrapping_sub(1);
-    }
-    /// Entire exchange stays serialized by &mut self on the original FD. No
-    /// reconnect, side channel, action, hidden retry, or descriptor boolean.
-    pub(crate) fn observe_native(&mut self, deadline: Instant) -> Result<NativeObservation> {
-        self.observe_native_mode(deadline, false)
-    }
-    /// Read-only qualification only. A complete sample retains the discovery
-    /// baseline and permits the next qualification step on this same FD. The
-    /// source lifecycle prevents executor use until both FD samples commit.
-    pub(in crate::providers::cua) fn observe_initial_native(
+    fn service_tool(
         &mut self,
-        deadline: Instant,
-    ) -> Result<NativeObservation> {
-        self.observe_native_mode(deadline, true)
+        name: &str,
+        mut args: serde_json::Value,
+        until: Instant,
+    ) -> Result<serde_json::Value> {
+        if let Some(session) = &self.probe_session {
+            args["session"] = serde_json::json!(session);
+        }
+        let mut request = serde_json::to_vec(&serde_json::json!({
+            "method":"call", "name":name, "args":args, "session_id":self.probe_session,
+        }))
+        .map_err(|_| BindingError::NativeProtocol)?;
+        request.push(b'\n');
+        self.exchange_value(&request, until)
     }
-    fn observe_native_mode(
-        &mut self,
-        deadline: Instant,
-        initial: bool,
-    ) -> Result<NativeObservation> {
-        let started = Instant::now();
-        self.fresh_binding()?;
-        // Any partial protocol exchange or panic permanently fences this source.
-        // A later waiter cannot consume a delayed reply as a different request.
-        self.fenced = true;
-        let value = self.exchange_native_observation(deadline)?;
-        self.check_binding()?;
-        if Instant::now() >= deadline {
-            return Err(BindingError::NativeProtocol);
-        }
-        if value.schema != 2
-            || value.platform != "macos"
-            || value.uid != self.candidate.uid
-            || !value
-                .daemon
-                .matches(&self.candidate.daemon, self.candidate.uid)
-            || !value
-                .parent
-                .matches(&self.candidate.owner, self.candidate.uid)
-            || value
-                .session
-                .uid
-                .is_some_and(|uid| uid != self.candidate.uid)
-            || !value.lifetime.embedded_configured
-            || !value.lifetime.stdin_monitor_enabled
-            || !value.lifetime.stdin_monitor_started
-            || !value.lifetime.original_stdin_pipe
-            || value.lifetime.ended
-        {
-            return Err(BindingError::NativeProtocol);
-        }
-        let instance =
-            Uuid::parse_str(&value.daemon_instance).map_err(|_| BindingError::NativeProtocol)?;
-        if instance.is_nil()
-            || value.daemon_instance.len() != 36
-            || instance.to_string() != value.daemon_instance
-            || self
-                .native_instance
-                .as_ref()
-                .is_some_and(|original| original != &value.daemon_instance)
-        {
-            return Err(BindingError::NativeProtocol);
-        }
-        let identity = value.console_identity();
-        let matches = if initial {
-            initial_console_compatible(
-                self.native_console.as_ref(),
-                identity.as_ref(),
-                value.observed_unlocked(),
-            )
-        } else {
-            strict_console_matches(self.native_console.as_ref(), identity.as_ref())
-        };
-        if !matches {
-            let cause =
-                self.native_console
-                    .as_ref()
-                    .map_or(ProbeCause::ConsoleChanged, |original| {
-                        console_mismatch_cause(
-                            original,
-                            identity.as_ref(),
-                            value.observed_unlocked(),
-                        )
-                    });
-            self.remember_probe_failure(ProbeDiagnostic::observed(
-                ProbeStage::ConsoleMatch,
-                cause,
-                started,
-                deadline,
-            ));
+    fn ensure_probe_session(&mut self, until: Instant) -> Result<()> {
+        if self.probe_drained {
             return Err(BindingError::Fenced);
         }
-        if value.session.status == SessionStatus::Unlocked && !value.observed_unlocked() {
+        if self.probe_session.is_some() {
+            return Ok(());
+        }
+        let session = format!("styx-source-{}", Uuid::new_v4().simple());
+        // Retain the identity before dispatch; a lost acknowledgement is not a
+        // license to mint a different session or replay an action.
+        self.probe_session = Some(session.clone());
+        let mut request =
+            serde_json::to_vec(&serde_json::json!({"method":"session_begin","session_id":session}))
+                .map_err(|_| BindingError::NativeProtocol)?;
+        request.push(b'\n');
+        if self.exchange_value(&request, until)? != serde_json::json!({"session_begin":true}) {
             return Err(BindingError::NativeProtocol);
         }
-        if initial {
-            self.initial_provisional = true;
-            self.fenced = false;
-            return Ok(value);
+        let begun = self.service_tool("start_session", serde_json::json!({}), until)?;
+        if tool_result(&begun)?.get("active") != Some(&serde_json::Value::Bool(true)) {
+            return Err(BindingError::NativeProtocol);
         }
-        self.native_instance = Some(value.daemon_instance.clone());
+        Ok(())
+    }
+    pub(crate) fn observe_native(&mut self, until: Instant) -> Result<NativeObservation> {
+        self.observe_native_mode(until)
+    }
+    pub(in crate::providers::cua) fn observe_initial_native(
+        &mut self,
+        until: Instant,
+    ) -> Result<NativeObservation> {
+        self.observe_native_mode(until)
+    }
+    fn observe_native_mode(&mut self, until: Instant) -> Result<NativeObservation> {
+        self.fresh_binding()?;
+        self.fenced = true;
+        self.ensure_probe_session(until)?;
+        let response = self.service_tool(
+            "check_permissions",
+            serde_json::json!({"prompt":false}),
+            until,
+        )?;
+        let permissions = permissions_from_result(&response)?;
+        self.check_binding()?;
+        if Instant::now() >= until {
+            return Err(BindingError::NativeProtocol);
+        }
+        // Current hint bytes come from the same signed App generation checked
+        // by check_binding; the daemon's kernel audit token supplies its ASID.
+        let value = NativeObservation {
+            session: SessionObservation {
+                uid: Some(self.candidate.uid),
+                audit_id: Some(self.peer_token.val[6]),
+                status: if self.candidate.hint.host_on_console
+                    && !self.candidate.hint.host_session_locked
+                {
+                    SessionStatus::Unlocked
+                } else {
+                    SessionStatus::Locked
+                },
+            },
+            permissions,
+            console_uuid: self.candidate.hint.generation.clone(),
+        };
+        let identity = value.console_identity();
+        if self
+            .native_console
+            .as_ref()
+            .is_some_and(|old| Some(old) != identity.as_ref())
+        {
+            return Err(BindingError::Fenced);
+        }
         self.native_console = identity;
+        self.initial_provisional = true;
         self.fenced = false;
-        // Locked/Unknown are actual typed results, never Ready. Core owns grant,
-        // generation and operation admission separately from these observations.
         Ok(value)
     }
-    /// All fallible checks precede either baseline assignment. The caller owns
-    /// both original FD guards and the sole initial-probe claim throughout.
     pub(in crate::providers::cua) fn commit_initial_native_pair(
         &mut self,
         control: &mut Self,
         before: &NativeObservation,
         after: &NativeObservation,
         control_after: &NativeObservation,
-        deadline: Instant,
+        until: Instant,
     ) -> Result<bool> {
-        let started = Instant::now();
-        let result: Result<bool> = (|| {
-            let before_identity = before.console_identity().ok_or(BindingError::Fenced)?;
-            let after_identity = after.console_identity().ok_or(BindingError::Fenced)?;
-            let control_identity = control_after
-                .console_identity()
-                .ok_or(BindingError::Fenced)?;
-            if !self.initial_provisional
-                || !control.initial_provisional
-                || self.fenced
-                || control.fenced
-                || !Arc::ptr_eq(&self.candidate, &control.candidate)
-                || self.peer_token != control.peer_token
-                || self.native_instance.as_deref() != Some(after.daemon_instance.as_str())
-                || control.native_instance.as_deref()
-                    != Some(control_after.daemon_instance.as_str())
-                || !initial_console_compatible(
-                    self.native_console.as_ref(),
-                    Some(&before_identity),
-                    before.observed_unlocked(),
-                )
-                || !initial_console_compatible(
-                    self.native_console.as_ref(),
-                    Some(&after_identity),
-                    after.observed_unlocked(),
-                )
-                || !initial_console_compatible(
-                    control.native_console.as_ref(),
-                    Some(&control_identity),
-                    control_after.observed_unlocked(),
-                )
-                || after_identity != control_identity
-            {
-                return Err(BindingError::Fenced);
-            }
-            self.check_binding()?;
-            control.check_binding()?;
-            if Instant::now() >= deadline {
-                return Err(BindingError::NativeProtocol);
-            }
-            let advanced = self
-                .native_console
-                .as_ref()
-                .is_some_and(|original| after_identity.epoch.seed != original.epoch.seed);
-            self.native_console = Some(after_identity);
-            control.native_console = Some(control_identity);
-            self.initial_provisional = false;
-            control.initial_provisional = false;
-            self.fenced = false;
-            control.fenced = false;
-            Ok(advanced)
-        })();
-        if let Err(error) = result {
-            self.fence_initial_native();
-            control.fence_initial_native();
-            self.remember_probe_failure(ProbeDiagnostic::observed(
-                ProbeStage::ConsoleMatch,
-                error.probe_cause(),
-                started,
-                deadline,
-            ));
+        if Instant::now() >= until
+            || !before.observed_unlocked()
+            || !after.observed_unlocked()
+            || !control_after.observed_unlocked()
+            || before.console_identity() != after.console_identity()
+            || after.console_identity() != control_after.console_identity()
+        {
+            return Err(BindingError::Fenced);
         }
-        result
-    }
-    fn exchange_native_observation(&mut self, deadline: Instant) -> Result<NativeObservation> {
-        self.protocol_clean = false;
-        let bytes = self.exchange_frame(
-            b"{\"method\":\"styx_private_desktop_observation_v1\"}\n",
-            deadline,
-            16 * 1024,
-        )?;
-        self.protocol_clean = true;
-        let reply: Response =
-            serde_json::from_slice(&bytes).map_err(|_| BindingError::NativeProtocol)?;
-        if !reply.ok || reply.error.is_some() || reply.exit_code.is_some() {
-            return Err(BindingError::NativeProtocol);
-        }
-        reply.result.ok_or(BindingError::NativeProtocol)
+        self.check_binding()?;
+        control.check_binding()?;
+        self.initial_provisional = false;
+        control.initial_provisional = false;
+        Ok(false) // No independent IOKit epoch/seed qualification remains.
     }
     fn exchange_frame(&self, request: &[u8], deadline: Instant, maximum: usize) -> Result<Vec<u8>> {
         let mut probe = [0u8; 1];
@@ -690,29 +334,9 @@ impl BoundMacSource {
                 return Err(BindingError::Fenced);
             }
             self.fenced = true;
-            if self.probe_session.is_none() {
-                stage = ProbeStage::SessionBeginExchange;
-                let sid = format!("styx-source-{}", Uuid::new_v4().simple());
-                let mut request = serde_json::to_vec(
-                    &serde_json::json!({"method":"session_begin","session_id":sid}),
-                )
-                .map_err(|_| BindingError::NativeProtocol)?;
-                request.push(b'\n');
-                // Store original identity BEFORE sending: lost ACK is never a new begin.
-                self.probe_session = Some(sid);
-                let reply =
-                    self.exchange_value_diagnostic(&request, deadline, Some((stage, started)))?;
-                stage = ProbeStage::SessionBeginReply;
-                if reply != serde_json::json!({"session_begin":true}) {
-                    return Err(self.probe_protocol_failure(
-                        Some((stage, started)),
-                        ProbeCause::BeginReplyShape,
-                        deadline,
-                    ));
-                }
-            }
+            self.ensure_probe_session(deadline)?;
             stage = ProbeStage::ListWindowsExchange;
-            let mut request=serde_json::to_vec(&serde_json::json!({"method":"call","name":"list_windows","args":{},"session_id":self.probe_session})).map_err(|_|BindingError::NativeProtocol)?;
+            let mut request=serde_json::to_vec(&serde_json::json!({"method":"call","name":"list_windows","args":{"session":self.probe_session},"session_id":self.probe_session})).map_err(|_|BindingError::NativeProtocol)?;
             request.push(b'\n');
             let value =
                 self.exchange_value_diagnostic(&request, deadline, Some((stage, started)))?;
@@ -799,25 +423,19 @@ impl BoundMacSource {
             return Ok(true);
         }
         if self.probe_session.is_none() {
-            // Even an empty drain ends this original source. A delayed initial
-            // step must not begin an SDK session after successful cleanup.
             self.probe_drained = true;
             self.fence_initial_native();
             return Ok(true);
         }
-        // Authorization can be fenced while the original transport remains
-        // frame-aligned. Only cleanup may use that FD; never revive admission.
-        // An interrupted frame cannot consume a delayed reply as a drain ACK.
         if !self.protocol_clean {
             return Err(BindingError::NativeProtocol);
         }
         self.check_cleanup_binding()?;
         self.fenced = true;
-        let value = self.exchange_value(
-            b"{\"method\":\"styx_private_transport_drain_v1\"}\n",
-            deadline,
-        )?;
-        if value != serde_json::json!({"schema":1,"drained":true}) {
+        // Standard end_session is an actual tool result. The legacy service
+        // method session_end always ACKs and cannot prove successful cleanup.
+        let ended = self.service_tool("end_session", serde_json::json!({}), deadline)?;
+        if tool_result(&ended)?.get("active") != Some(&serde_json::Value::Bool(false)) {
             return Err(BindingError::NativeProtocol);
         }
         self.check_cleanup_binding()?;
@@ -825,199 +443,20 @@ impl BoundMacSource {
         Ok(true)
     }
 }
-
 #[cfg(test)]
-mod console_contract_tests {
+mod standard_observation_tests {
     use super::*;
     #[test]
-    fn seed_only_diagnostic_requires_same_unlocked_console_and_registry_sources() {
-        let original = ObservedConsoleIdentity {
-            uid: 501,
-            audit_id: 1001,
-            console_uuid: "7463ea88-7056-4b41-94d4-9b4311d2a970".into(),
-            epoch: ConsoleEpoch {
-                root_entry_id: 1,
-                resources_entry_id: 2,
-                seed: 3,
-            },
-        };
-        let mut changed = original.clone();
-        changed.epoch.seed += 1;
-        assert_eq!(
-            console_mismatch_cause(&original, Some(&changed), true),
-            ProbeCause::ConsoleEpochChanged
-        );
-        assert!(initial_console_compatible(
-            Some(&original),
-            Some(&changed),
-            true
-        ));
-        assert!(!strict_console_matches(Some(&original), Some(&changed)));
-        let committed = changed.clone();
-        assert!(strict_console_matches(Some(&committed), Some(&changed)));
-        let mut later = committed.clone();
-        later.epoch.seed += 1;
-        assert!(!strict_console_matches(Some(&committed), Some(&later)));
-        for field in 0..5 {
-            let mut other = changed.clone();
-            match field {
-                0 => other.uid += 1,
-                1 => other.audit_id += 1,
-                2 => other.console_uuid = "7b7a1188-4af2-4e4f-8d69-9bf23f28c578".into(),
-                3 => other.epoch.root_entry_id += 1,
-                _ => other.epoch.resources_entry_id += 1,
-            }
-            assert_eq!(
-                console_mismatch_cause(&original, Some(&other), true),
-                ProbeCause::ConsoleChanged
-            );
-            assert!(!initial_console_compatible(
-                Some(&original),
-                Some(&other),
-                true
-            ));
-            assert!(!strict_console_matches(Some(&committed), Some(&other)));
-        }
-        assert!(!initial_console_compatible(None, Some(&changed), true));
-        assert!(!initial_console_compatible(Some(&original), None, true));
-        assert!(!initial_console_compatible(
-            Some(&original),
-            Some(&changed),
-            false
-        ));
-        assert!(initial_console_compatible(
-            Some(&original),
-            Some(&original),
-            true
-        ));
-        for (current, unlocked) in [
-            (None, true),
-            (Some(&changed), false),
-            (Some(&original), true),
+    fn tcc_facts_require_native_booleans_and_successful_tool_result() {
+        let good = serde_json::json!({"isError":false,"structuredContent":{"accessibility":true,"screen_recording":false}});
+        let result = permissions_from_result(&good).unwrap();
+        assert!(result.accessibility && !result.screen_recording);
+        for bad in [
+            serde_json::json!({"isError":true,"structuredContent":{"accessibility":true,"screen_recording":true}}),
+            serde_json::json!({"structuredContent":{"accessibility":"true","screen_recording":true}}),
+            serde_json::json!({"structuredContent":{"accessibility":true}}),
         ] {
-            assert_eq!(
-                console_mismatch_cause(&original, current, unlocked),
-                ProbeCause::ConsoleChanged
-            );
+            assert!(permissions_from_result(&bad).is_err());
         }
-    }
-    fn candidate() -> RegistryObservation {
-        RegistryObservation {
-            epoch: ConsoleEpochObservation::Cfdata4NativeEndian {
-                root_before: 1,
-                root_after: 1,
-                resources_before: 2,
-                resources_after: 2,
-                before: 3,
-                after: 3,
-            },
-            read_status: "copied".into(),
-            selection_status: "unique".into(),
-            user_count: Some(1),
-            global_io_console_locked: BoolObservation::Known(false),
-            lock_evidence: Some(ConsoleLockEvidence::KernelConsoleSecurityOpen),
-            selected_unique_row: Some(SelectedRow {
-                uid: 501,
-                audit_id: 1001,
-                console_uuid: ConsoleUuidObservation::Known(
-                    "7463ea88-7056-4b41-94d4-9b4311d2a970".into(),
-                ),
-                session_id: Some(100),
-                on_console: BoolObservation::Known(true),
-                login_done: BoolObservation::Known(true),
-                screen_locked: BoolObservation::Missing,
-                screen_locked_time: LockTimeObservation::Missing,
-            }),
-        }
-    }
-    #[test]
-    fn original_unconsumed_epoch_is_not_reused_after_lock_unlock_or_source_change() {
-        let original = candidate();
-        let unconsumed = original.epoch.stable_stamp().unwrap();
-        let mut after_unlock = candidate();
-        after_unlock.epoch = ConsoleEpochObservation::Cfdata4NativeEndian {
-            root_before: 1,
-            root_after: 1,
-            resources_before: 2,
-            resources_after: 2,
-            before: 5,
-            after: 5,
-        };
-        assert!(after_unlock.validated_lock_evidence().is_some());
-        assert_ne!(after_unlock.epoch.stable_stamp(), Some(unconsumed));
-        let mut replaced = candidate();
-        replaced.epoch = ConsoleEpochObservation::Cfdata4NativeEndian {
-            root_before: 1,
-            root_after: 1,
-            resources_before: 7,
-            resources_after: 7,
-            before: 3,
-            after: 3,
-        };
-        assert_ne!(replaced.epoch.stable_stamp(), Some(unconsumed));
-        let mut transitioning = candidate();
-        transitioning.epoch = ConsoleEpochObservation::Cfdata4NativeEndian {
-            root_before: 1,
-            root_after: 1,
-            resources_before: 2,
-            resources_after: 2,
-            before: 3,
-            after: 4,
-        };
-        assert!(transitioning.validated_lock_evidence().is_none());
-        transitioning.epoch = ConsoleEpochObservation::Unavailable;
-        assert!(transitioning.validated_lock_evidence().is_none());
-        assert!(
-            serde_json::from_str::<ConsoleEpochObservation>(
-                r#"{"source":"unconditional","before":3,"after":3}"#
-            )
-            .is_err()
-        );
-    }
-    #[test]
-    fn labelled_kernel_evidence_never_turns_missing_or_transition_into_row_false() {
-        let candidate = candidate();
-        assert_eq!(
-            candidate.validated_lock_evidence(),
-            Some(ConsoleLockEvidence::KernelConsoleSecurityOpen)
-        );
-        assert_eq!(
-            candidate
-                .selected_unique_row
-                .as_ref()
-                .unwrap()
-                .screen_locked,
-            BoolObservation::Missing
-        );
-        for change in 0..10 {
-            let mut bad = candidate.clone();
-            let row = bad.selected_unique_row.as_mut().unwrap();
-            match change {
-                0 => bad.global_io_console_locked = BoolObservation::Known(true),
-                1 => row.screen_locked = BoolObservation::Known(true),
-                2 => row.screen_locked_time = LockTimeObservation::Known(u32::MAX),
-                3 => row.screen_locked_time = LockTimeObservation::Known(1),
-                4 => row.screen_locked_time = LockTimeObservation::Invalid,
-                5 => bad.user_count = Some(2),
-                6 => row.on_console = BoolObservation::Known(false),
-                7 => row.console_uuid = ConsoleUuidObservation::Missing,
-                8 => bad.lock_evidence = Some(ConsoleLockEvidence::PerRowUnlocked),
-                _ => bad.global_io_console_locked = BoolObservation::Invalid,
-            }
-            assert_eq!(bad.validated_lock_evidence(), None, "case {change}");
-            assert_ne!(bad, candidate); // before/after transition cannot be stable
-        }
-        let mut explicit = candidate;
-        explicit.selected_unique_row.as_mut().unwrap().screen_locked =
-            BoolObservation::Known(false);
-        explicit.lock_evidence = Some(ConsoleLockEvidence::PerRowUnlocked);
-        explicit.user_count = Some(2); // exact matching row remains strict per-row evidence
-        assert_eq!(
-            explicit.validated_lock_evidence(),
-            Some(ConsoleLockEvidence::PerRowUnlocked)
-        );
-        let unknown_source =
-            serde_json::from_str::<ConsoleLockEvidence>("\"unconditional_unlocked\"");
-        assert!(unknown_source.is_err());
     }
 }

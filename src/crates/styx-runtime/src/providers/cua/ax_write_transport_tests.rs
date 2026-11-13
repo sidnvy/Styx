@@ -1,5 +1,5 @@
 //! Real in-memory MCP adapter contracts, not native OS/GUI acceptance.
-use super::{ACQUIRE, AxWriteGate, AxWriteRequest, WRITE, invoke};
+use super::{AxWriteGate, AxWriteRequest, invoke};
 use crate::providers::cua::{CuaError, CuaEvidence};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
@@ -16,14 +16,21 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
 struct Trace {
-    // Recorded only when the official server actually receives tools/call.
     calls: Vec<(String, Map<String, Value>)>,
     gates: usize,
     effects: usize,
     write_observed_gate: Option<usize>,
 }
+#[derive(Clone, Copy)]
+enum Reply {
+    Ack,
+    Refused,
+    PostEffectError,
+    Late,
+}
 struct RpcFixture {
     trace: Arc<Mutex<Trace>>,
+    reply: Reply,
 }
 impl ServerHandler for RpcFixture {
     fn get_info(&self) -> ServerConfig {
@@ -35,38 +42,54 @@ impl ServerHandler for RpcFixture {
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let name = request.name.to_string();
-        let mut trace = self.trace.lock().expect("fixture trace");
-        trace
-            .calls
-            .push((name.clone(), request.arguments.unwrap_or_default()));
-        match name.as_str() {
-            ACQUIRE => Ok(CallToolResponse::Complete(CallToolResult::structured(
-                json!({
-                    "schema":1,"pid":42,"window_id":7,"snapshot_id":"s00000001",
-                    "element_index":2,"target":"ab".repeat(32)
-                }),
-            ))),
-            WRITE => {
-                // The side effect really happens in the receiving RPC fixture,
-                // before the error is serialized. isError cannot prove no effect.
-                trace.write_observed_gate = Some(trace.gates);
-                trace.effects += 1;
-                Ok(CallToolResponse::Complete(CallToolResult::error(vec![
-                    ContentBlock::text("owned_fixture_post_effect_failure"),
-                ])))
+        {
+            let mut trace = self.trace.lock().expect("fixture trace");
+            trace
+                .calls
+                .push((name.clone(), request.arguments.unwrap_or_default()));
+            if name != "set_value" {
+                return Err(ErrorData::invalid_request("unexpected_fixture_tool", None));
             }
-            _ => Err(ErrorData::invalid_request("unexpected_fixture_tool", None)),
+            trace.write_observed_gate = Some(trace.gates);
+            if !matches!(self.reply, Reply::Refused) {
+                trace.effects += 1;
+            }
         }
+        if matches!(self.reply, Reply::Late) {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        let result = match self.reply {
+            Reply::Ack | Reply::Late => CallToolResult::structured(
+                json!({"route":"accessibility","effect":"unverifiable","delivery":{"mode":"unknown"},"summary":"official action result fixture"}),
+            ),
+            Reply::Refused => {
+                let mut value = CallToolResult::structured(
+                    json!({"schema":1,"outcome":"refused","effect":"unverified","code":"stale_observation","hint":"official read-again hint","next_call":{"tool":"get_window_state","arguments":{"pid":42,"window_id":7}}}),
+                );
+                value.is_error = Some(true);
+                value
+            }
+            Reply::PostEffectError => CallToolResult::error(vec![ContentBlock::text(
+                "owned_fixture_post_effect_failure",
+            )]),
+        };
+        Ok(CallToolResponse::Complete(result))
     }
 }
 
 #[tokio::test]
-async fn private_acquire_gate_refusal_and_post_effect_error_never_replay_write() {
-    // Each branch has a fresh real SDK connection and independent RPC trace.
-    for deny_gate in [true, false] {
+async fn standard_set_value_runs_gate_before_one_strict_call_and_never_replays() {
+    for (deny_gate, reply) in [
+        (true, Reply::Ack),
+        (false, Reply::Ack),
+        (false, Reply::Refused),
+        (false, Reply::PostEffectError),
+        (false, Reply::Late),
+    ] {
         let trace = Arc::new(Mutex::new(Trace::default()));
         let fixture = RpcFixture {
             trace: trace.clone(),
+            reply,
         };
         let (server_io, client_io) = tokio::io::duplex(65536);
         let (server, client) = timeout(Duration::from_secs(5), async {
@@ -95,17 +118,21 @@ async fn private_acquire_gate_refusal_and_post_effect_error_never_replay_write()
         };
         let stop = CancellationToken::new();
         let mut uncertain = false;
+        let budget = if matches!(reply, Reply::Late) {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_secs(5)
+        };
         let result = invoke(
             &stop,
             &mut uncertain,
             client.peer(),
             request,
-            Instant::now() + Duration::from_secs(5),
+            Instant::now() + budget,
             gate,
+            None,
         )
         .await;
-        // Actual SDK tasks are closed/joined before assertions, including the
-        // branch whose reply is an error after a real counted effect.
         let (client_closed, server_closed) = timeout(Duration::from_secs(5), async {
             tokio::join!(client.close(), server.close())
         })
@@ -115,52 +142,85 @@ async fn private_acquire_gate_refusal_and_post_effect_error_never_replay_write()
         assert!(server_closed.is_ok());
         let trace = trace.lock().unwrap();
         assert_eq!(trace.gates, 1);
-        assert_eq!(
-            trace.calls[0],
-            (
-                ACQUIRE.into(),
-                json!({
-                    "pid":42,"window_id":7,"element_token":"s00000001:2"
-                })
-                .as_object()
-                .unwrap()
-                .clone()
-            )
-        );
-        assert!(
-            result.1.is_none(),
-            "neither refusal nor failed write is an ACK"
-        );
         if deny_gate {
             assert_eq!(result.0, CuaEvidence::NotDispatched);
             assert_eq!(result.2, Some(CuaError::PermissionDenied));
-            assert_eq!(trace.calls.len(), 1);
+            assert!(trace.calls.is_empty());
             assert_eq!(trace.effects, 0);
             assert_eq!(trace.write_observed_gate, None);
-        } else {
-            assert_eq!(result.0, CuaEvidence::Unknown);
-            assert_eq!(result.2, Some(CuaError::Unknown));
-            assert_eq!(
-                trace.calls,
-                vec![
-                    (
-                        ACQUIRE.into(),
-                        json!({"pid":42,"window_id":7,"element_token":"s00000001:2"})
-                            .as_object()
-                            .unwrap()
-                            .clone()
-                    ),
-                    (
-                        WRITE.into(),
-                        json!({"editable_target":"ab".repeat(32),"value":"owned-fixture-replacement"})
-                            .as_object()
-                            .unwrap()
-                            .clone()
-                    ),
-                ]
-            );
-            assert_eq!(trace.effects, 1);
-            assert_eq!(trace.write_observed_gate, Some(1));
+            assert!(!uncertain);
+            continue;
         }
+        assert_eq!(trace.calls,vec![("set_value".into(),json!({"pid":42,"window_id":7,"element_token":"s00000001:2","value":"owned-fixture-replacement","styx_strict_text":true}).as_object().unwrap().clone())]);
+        assert_eq!(trace.write_observed_gate, Some(1));
+        match reply {
+            Reply::Ack => {
+                assert_eq!(result.0, CuaEvidence::Acknowledged);
+                assert!(result.1.is_some());
+                assert!(!uncertain);
+                assert_eq!(trace.effects, 1);
+            }
+            Reply::Refused => {
+                assert_eq!(result.0, CuaEvidence::NotDispatched);
+                assert!(result.1.is_none());
+                assert!(!uncertain);
+                assert_eq!(trace.effects, 0);
+            }
+            Reply::PostEffectError | Reply::Late => {
+                assert_eq!(result.0, CuaEvidence::Unknown);
+                assert!(result.1.is_none());
+                assert!(uncertain);
+                assert!(stop.is_cancelled());
+                assert_eq!(trace.effects, 1);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn strict_write_expired_or_cancelled_before_gate_sends_no_request() {
+    for cancelled in [false, true] {
+        let trace = Arc::new(Mutex::new(Trace::default()));
+        let fixture = RpcFixture {
+            trace: trace.clone(),
+            reply: Reply::Ack,
+        };
+        let (server_io, client_io) = tokio::io::duplex(65536);
+        let (server, client) = tokio::join!(fixture.serve(server_io), ().serve(client_io));
+        let mut server = server.unwrap();
+        let mut client = client.unwrap();
+        let stop = CancellationToken::new();
+        if cancelled {
+            stop.cancel();
+        }
+        let gate: AxWriteGate =
+            Box::new(|| Box::pin(async { panic!("pre-expired gate must not run") }));
+        let request = AxWriteRequest {
+            pid: 42,
+            window_id: 7,
+            element_token: "s00000001:2".into(),
+            value: "never sent".into(),
+        };
+        let until = if cancelled {
+            Instant::now() + Duration::from_secs(5)
+        } else {
+            Instant::now()
+        };
+        let mut uncertain = false;
+        let result = invoke(
+            &stop,
+            &mut uncertain,
+            client.peer(),
+            request,
+            until,
+            gate,
+            None,
+        )
+        .await;
+        let (a, b) = tokio::join!(client.close(), server.close());
+        assert!(a.is_ok() && b.is_ok());
+        assert_eq!(result.0, CuaEvidence::NotDispatched);
+        assert!(!uncertain);
+        assert!(trace.lock().unwrap().calls.is_empty());
     }
 }

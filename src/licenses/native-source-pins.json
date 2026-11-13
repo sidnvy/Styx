@@ -1975,48 +1975,48 @@
     {
       "component": "cua",
       "repository": "trycua/cua",
-      "release": "cua-driver-rs-v0.36.0",
-      "commit": "6d6c734c127025fb39ad5d585a10382808b39dc1",
+      "release": "cua-driver-rs-v0.47.24",
+      "commit": "b168ff39fef15d993ab66facce9b0027ea556dce",
       "files": [
         {
           "path": ".github/workflows/cd-rust-cua-driver.yml",
           "kind": "build-evidence",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/.github/workflows/cd-rust-cua-driver.yml",
-          "sha256": "21ca874e4d4a9c40559dee131f51eb3b1b60564f081b96ed1fabf9690366656f",
-          "size": 82107
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/.github/workflows/cd-rust-cua-driver.yml",
+          "sha256": "7a865af14352eb1118fe11951dbc9de887b10add04c23d965b411d387060c965",
+          "size": 94422
         },
         {
           "path": "LICENSE.md",
           "kind": "license",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/LICENSE.md",
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/LICENSE.md",
           "sha256": "c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9",
           "size": 1069
         },
         {
-          "path": "cua-driver-rs-0.36.0-linux-x86_64-binary.tar.gz.sigstore.json",
+          "path": "cua-driver-rs-0.47.24-linux-x86_64-binary.tar.gz.sigstore.json",
           "kind": "unverified-release-signature",
-          "url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.36.0/cua-driver-rs-0.36.0-linux-x86_64-binary.tar.gz.sigstore.json",
-          "sha256": "76ff51c9b126fde79a4a4ea3c7ec0d41f0d314f28f0ca877d3c0ce7e1b7705bb",
-          "size": 8741
+          "url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.47.24/cua-driver-rs-0.47.24-linux-x86_64-binary.tar.gz.sigstore.json",
+          "sha256": "2a63a7273d1e0801e72b65fe796e1492e313c7466166940e05f0685a78a22885",
+          "size": 8781
         },
         {
           "path": "libs/cua-driver/rust/Cargo.lock",
           "kind": "cargo-lock",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/Cargo.lock",
-          "sha256": "f9d49ce2dccdc43b2f7f027185301138fdd45eab4f9a556aace4cb0f4a98d46c",
-          "size": 160713
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/Cargo.lock",
+          "sha256": "c454ac5d2bb8356d95a80edf15dcf9570ec8c5a9de917615839139b656a76f7f",
+          "size": 159973
         },
         {
           "path": "libs/cua-driver/rust/Cargo.toml",
           "kind": "cargo-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/Cargo.toml",
-          "sha256": "26c985c8195f7a5703ca2cce4fb45552c000fa542fdd08a25c31eaee7675b895",
-          "size": 1822
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/Cargo.toml",
+          "sha256": "b607f902b6677acd83e5e5e75eba2a918d9937fb18177b72b4085f5e053eb25e",
+          "size": 2482
         },
         {
           "path": "libs/cua-driver/rust/crates/cua-cursor-motion/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-cursor-motion/Cargo.toml",
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/crates/cua-cursor-motion/Cargo.toml",
           "sha256": "6e72d6bfc8cd56a38b202c06d29191328e32203ade501f5a013c70f6f0b2afaa",
           "size": 817,
           "git_blob_sha1": "2b43c7604f1dbe707738f71b3df99510564b0739"
@@ -2024,7 +2024,7 @@
         {
           "path": "libs/cua-driver/rust/crates/cua-driver-bindgen/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-driver-bindgen/Cargo.toml",
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/crates/cua-driver-bindgen/Cargo.toml",
           "sha256": "ee45147d4985c8ad155ac2c08d8045b67bcc0d5caa18ae2457ae43ac23524b72",
           "size": 394,
           "git_blob_sha1": "10257e7b15098f5943eeb13ef269050c967a5b4f"
@@ -2032,7 +2032,7 @@
         {
           "path": "libs/cua-driver/rust/crates/cua-driver-contract/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-driver-contract/Cargo.toml",
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/crates/cua-driver-contract/Cargo.toml",
           "sha256": "a0bfc462c279b13e3021325ffdfcb9240848f54273a5a4b8fc0d9a92a99528ac",
           "size": 324,
           "git_blob_sha1": "a41ae2a7769314bd97548493ed9262dd7a43be89"
@@ -2040,15 +2040,15 @@
         {
           "path": "libs/cua-driver/rust/crates/cua-driver-core/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-driver-core/Cargo.toml",
-          "sha256": "76a3632fb2ea88ac4b7649252111ee0ce75bb7bfb76538ccc8dde91d2c439433",
-          "size": 2909,
-          "git_blob_sha1": "de9e618d6b514fa4508b8a247a3cd66213574b8a"
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/crates/cua-driver-core/Cargo.toml",
+          "sha256": "dff77b34c82495cac71b7201cc1abec260d6650480bc2dee58570589f90d87f6",
+          "size": 3695,
+          "git_blob_sha1": "d8e2a5d9eeb1620f96208dacbbaa3c2b8a1d5137"
         },
         {
           "path": "libs/cua-driver/rust/crates/cua-driver-e2e/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-driver-e2e/Cargo.toml",
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/crates/cua-driver-e2e/Cargo.toml",
           "sha256": "997988a94104d50d8f6ecba4813fd2af15ee277157395b9850ea30f5d5d03043",
           "size": 2196,
           "git_blob_sha1": "d413d182aa997517fe6021ffbb4b049eef51dab1"
@@ -2056,15 +2056,15 @@
         {
           "path": "libs/cua-driver/rust/crates/cua-driver-sdk/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-driver-sdk/Cargo.toml",
-          "sha256": "f04ba5347c3ab010bb571cbb19c27150718f38156d4f2ab7131c8671f60b5ae0",
-          "size": 1535,
-          "git_blob_sha1": "cdadd053eb4e28b80b47419854518b80129f92af"
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/crates/cua-driver-sdk/Cargo.toml",
+          "sha256": "392c1caa9f34c2f3a872e1c8f7a1bc7f28e635cd6d9f9905b1e0a7fe389be7c7",
+          "size": 1717,
+          "git_blob_sha1": "1004f1346afe5b2395229038bdb38242fabaa17d"
         },
         {
           "path": "libs/cua-driver/rust/crates/cua-driver-testkit/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-driver-testkit/Cargo.toml",
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/crates/cua-driver-testkit/Cargo.toml",
           "sha256": "36ff9a0d7a30d72a9b5b3bb68dd58e71510acc9d946b711f79c4770c0b54d87a",
           "size": 1958,
           "git_blob_sha1": "617bf5df8715e5014baff54b3a4021469ea2ac1b"
@@ -2072,7 +2072,7 @@
         {
           "path": "libs/cua-driver/rust/crates/cua-driver-uia/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-driver-uia/Cargo.toml",
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/crates/cua-driver-uia/Cargo.toml",
           "sha256": "df8c6a635f068ead7c8fa38af2ac618191079c556542ae3abba71f5517797eb3",
           "size": 1359,
           "git_blob_sha1": "52abca90d16966ef4abf0113471f70c01008729f"
@@ -2080,22 +2080,22 @@
         {
           "path": "libs/cua-driver/rust/crates/cua-driver/Cargo.toml",
           "kind": "cargo-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-driver/Cargo.toml",
-          "sha256": "3733ec872f09da41d2e7571582fedb4c0f8d788e8316b5be7d9a6cb5b2e6fabb",
-          "size": 5260
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/crates/cua-driver/Cargo.toml",
+          "sha256": "47a7f34fcbaf08149e458da525b58464e73d7463d6cac3e6945d435b5097c399",
+          "size": 5593
         },
         {
           "path": "libs/cua-driver/rust/crates/cua-perception/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-perception/Cargo.toml",
-          "sha256": "bc43d4f9a3435beb9a14d010d1d65b894a00003175aa237711ad64f12160dcf2",
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/crates/cua-perception/Cargo.toml",
+          "sha256": "8382cc58fb6cb93d33073d947eb632bc15f34e6b25379693db5e9690648f63b5",
           "size": 560,
-          "git_blob_sha1": "d41c008a5a57e28cd43319a146fee7666ef48b14"
+          "git_blob_sha1": "f096afe4dbc2ae61e722f47a094bc92fd9fd8f38"
         },
         {
           "path": "libs/cua-driver/rust/crates/cursor-overlay/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cursor-overlay/Cargo.toml",
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/crates/cursor-overlay/Cargo.toml",
           "sha256": "de44389abe226ebe55a31578467a0732e90e82274e4c52a7f03502c3bb40237d",
           "size": 960,
           "git_blob_sha1": "0b55e9e2b1b999ca4f9e450585611b0643c0a669"
@@ -2103,7 +2103,7 @@
         {
           "path": "libs/cua-driver/rust/crates/cursor-theme-cli/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cursor-theme-cli/Cargo.toml",
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/crates/cursor-theme-cli/Cargo.toml",
           "sha256": "67da4b7a9a536262bb0faf78b0448889971babca384f59e12000a3fc75d30f45",
           "size": 617,
           "git_blob_sha1": "348e0ceffc32d1829866785a89b66f97a0aa099c"
@@ -2111,7 +2111,7 @@
         {
           "path": "libs/cua-driver/rust/crates/pip-preview/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/pip-preview/Cargo.toml",
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/crates/pip-preview/Cargo.toml",
           "sha256": "7277a1ae52015d4e6352bb47e4f64f8bfdf4764928e85454c701eb8bf2c42c62",
           "size": 156,
           "git_blob_sha1": "efa5f7b49d6e480a7fd703de9fa0a4f858a0d5b1"
@@ -2119,45 +2119,45 @@
         {
           "path": "libs/cua-driver/rust/crates/platform-linux/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/platform-linux/Cargo.toml",
-          "sha256": "18f8925950b55903a973eec91ff94c914b5e21332e7d84758c789b74a6339224",
-          "size": 8851,
-          "git_blob_sha1": "dfb5ec0fdc3f971970dfd9e05a244ac8099fa87b"
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/crates/platform-linux/Cargo.toml",
+          "sha256": "d12407e68b2b51ef32f1e87a60eccb804a40e4ed8600839f0b646d742cc7ac74",
+          "size": 8982,
+          "git_blob_sha1": "d4524062d519868c9c2fe86cbb51d7edcc141163"
         },
         {
           "path": "libs/cua-driver/rust/crates/platform-macos/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/platform-macos/Cargo.toml",
-          "sha256": "fc1aad47cb395cb7705ac10811dba8eeed129fe48bcc31a44b6a823c6c68c093",
-          "size": 3111,
-          "git_blob_sha1": "8d429484aa477f95a1cc6af5dde832cfc019db0e"
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/crates/platform-macos/Cargo.toml",
+          "sha256": "1c59e5a292af693d1689b6e94327b0c2f7e33eb2a7c8a7e739810a7dc1c0b223",
+          "size": 3165,
+          "git_blob_sha1": "670a896056b2f30f56569e528bb25d911aeddf54"
         },
         {
           "path": "libs/cua-driver/rust/crates/platform-windows/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/platform-windows/Cargo.toml",
-          "sha256": "1a1cbc82841bc738694c114995d9d2c4003441e6e7b0bb2e745c5df676d5cd33",
-          "size": 3879,
-          "git_blob_sha1": "1d2a2ae148db9ffe7d9ee599babd4fd89ba416df"
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua-driver/rust/crates/platform-windows/Cargo.toml",
+          "sha256": "aca51da18736bd9f66b5f410351f5399a8aa9fd92faa23d831d17852541fedfd",
+          "size": 3941,
+          "git_blob_sha1": "a1dbf7ca914ad753c7944933be0e8b96248314ed"
         },
         {
           "path": "libs/cua/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua/Cargo.toml",
-          "sha256": "39bdb036d5cff37fd2eb056d25c90b282782b76ba1d64a625d5176f3fdf2fc6a",
-          "size": 8294,
-          "git_blob_sha1": "c470eb0bdfb1b5e7c455dbfd4fb09bda1085f538"
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua/Cargo.toml",
+          "sha256": "014d6e089ac47987ff7cad8528dbd45c6f8174fa34e01b467b58cba74729b750",
+          "size": 14873,
+          "git_blob_sha1": "e9e73f0d2967a0fee9f8d4cd2bc0efa5ee440048"
         },
         {
           "path": "libs/cua/crates/cua-telemetry/Cargo.toml",
           "kind": "package-manifest",
-          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua/crates/cua-telemetry/Cargo.toml",
-          "sha256": "0bbfb01118980044cef350e82317d3c251526dc21b960bb74a929c6a881b0bb0",
-          "size": 1023,
-          "git_blob_sha1": "732437749deacf5ccf946ca61750f64115848630"
+          "url": "https://raw.githubusercontent.com/trycua/cua/b168ff39fef15d993ab66facce9b0027ea556dce/libs/cua/crates/cua-telemetry/Cargo.toml",
+          "sha256": "31c00dc6f0108a162eb7212c6831007c0dd119eed9f2a897687b14fe43effe37",
+          "size": 1110,
+          "git_blob_sha1": "7f90d1d1051e81ed1504a06b81b53751355d9ac6"
         }
       ],
-      "version": "0.36.0"
+      "version": "0.47.24"
     },
     {
       "component": "node",

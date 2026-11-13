@@ -1,0 +1,821 @@
+--- a/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs
+@@ -5911,6 +5911,52 @@
+     )
+ }
+ 
++/// Result of the strict text-only route. Refused is reserved for validation
++/// that completed before the one native setter was polled.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum StrictTextOutcome {
++    Refused(&'static str),
++    Acknowledged,
++    Unknown,
++}
++
++/// One SetTextContents on the cached snapshot object. Never re-resolve an
++/// ordinal, insert text, set a numeric Value, activate, or retry after failure.
++pub fn set_text_ref_strict(object_ref: &ObjectRef, value: &str) -> StrictTextOutcome {
++    bounded_for(
++        REF_ACTION_BUDGET,
++        async {
++            let conn = match shared_connection().await {
++                Ok(conn) => conn,
++                Err(_) => return Ok(StrictTextOutcome::Refused("strict_text_unavailable")),
++            };
++            let (acc, _) = match live_accessible(conn, object_ref).await {
++                Ok(accessible) => accessible,
++                Err(_) => return Ok(StrictTextOutcome::Refused("stale_observation")),
++            };
++            let proxies = match acc.proxies().await {
++                Ok(proxies) => proxies,
++                Err(_) => return Ok(StrictTextOutcome::Refused("editable_unavailable")),
++            };
++            let editable = match proxies.editable_text().await {
++                Ok(editable) => editable,
++                Err(_) => return Ok(StrictTextOutcome::Refused("editable_unavailable")),
++            };
++            if deadline_passed() {
++                return Ok(StrictTextOutcome::Refused("stale_observation"));
++            }
++            // From the first setter poll onward, false/error/timeout is
++            // Unknown: an application may have changed before its reply failed.
++            Ok(match call(editable.set_text_contents(value)).await {
++                Some(Ok(true)) => StrictTextOutcome::Acknowledged,
++                _ => StrictTextOutcome::Unknown,
++            })
++        },
++        || Ok(StrictTextOutcome::Unknown),
++    )
++    .unwrap_or(StrictTextOutcome::Unknown)
++}
++
+ /// Error prefix: a selection container (combo box, list) has no option
+ /// with the requested text.
+ pub const NO_SUCH_OPTION: &str = "no_such_option";
+--- a/libs/cua-driver/rust/crates/platform-linux/src/tools/set_value.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/tools/set_value.rs
+@@ -39,6 +39,7 @@
+                     "window_id":{"type":"integer","description":"Omit when element_token is supplied (the token carries it)."},
+                     "element_token": cua_driver_core::tool_schema::element_token_schema(),
+                     "value":{"type":"string","description":"New value. Written through AT-SPI EditableText/Value when the element exposes them; otherwise (GTK2 spin scales, VCL spin buttons) the field is clicked with the session's real pointer, its text selected and replaced through the virtual keyboard and committed with Tab, then read back."},
++                    "styx_strict_text":{"type":"boolean"},
+                     "delivery_mode": crate::input::delivery::delivery_mode_schema()
+                 },"additionalProperties":false
+             }),
+@@ -47,6 +48,9 @@
+     }
+ 
+     async fn invoke(&self, args: Value) -> ToolResult {
++        if args.get("styx_strict_text").and_then(Value::as_bool) == Some(true) {
++            return self.strict_text(args).await;
++        }
+         use cua_driver_core::tool_args::ArgsExt;
+         let pid = match args.require_u32("pid") {
+             Ok(v) => v,
+@@ -259,6 +263,68 @@
+     }
+ }
+ 
++// Styx's Host-only strict mode keeps the standard snapshot/session resolver.
++// No second acquire tool, retained private target cache or fallback route exists.
++impl SetValueTool {
++    async fn strict_text(&self, args: Value) -> ToolResult {
++        use crate::atspi::native::StrictTextOutcome;
++        use cua_driver_core::tool_args::ArgsExt;
++        let pid = match args.require_u32("pid") {
++            Ok(pid) if pid > 0 && pid <= i32::MAX as u32 => pid,
++            _ => return strict_text_result(StrictTextOutcome::Refused("invalid_request")),
++        };
++        let value = match args.get("value").and_then(Value::as_str) {
++            Some(value) if value.len() <= 16 * 1024 => value.to_owned(),
++            _ => return strict_text_result(StrictTextOutcome::Refused("invalid_request")),
++        };
++        let resolved = match self.state.snapshots.resolve(pid as i32, &args) {
++            Ok(resolved) => resolved,
++            Err(_) => return strict_text_result(StrictTextOutcome::Refused("stale_observation")),
++        };
++        let token = match prove_token_element(pid, &resolved, "set_value").await {
++            Ok(Some(token)) => token,
++            _ => return strict_text_result(StrictTextOutcome::Refused("stale_observation")),
++        };
++        if refuse_if_disabled(pid, &resolved, "set_value")
++            .await
++            .is_some()
++        {
++            return strict_text_result(StrictTextOutcome::Refused("permission_denied"));
++        }
++        let object = match token.object() {
++            Ok(object) => object.clone(),
++            Err(_) => {
++                return strict_text_result(StrictTextOutcome::Refused("editable_unavailable"))
++            }
++        };
++        // TokenElement::act can retry an ordinal after an error. Strict mode
++        // deliberately uses only the exact cached ObjectRef and one setter.
++        let outcome = tokio::task::spawn_blocking(move || {
++            crate::atspi::native::set_text_ref_strict(&object, &value)
++        })
++        .await
++        .unwrap_or(StrictTextOutcome::Unknown);
++        strict_text_result(outcome)
++    }
++}
++
++fn strict_text_result(outcome: crate::atspi::native::StrictTextOutcome) -> ToolResult {
++    use crate::atspi::native::StrictTextOutcome;
++    let (outcome, code) = match outcome {
++        StrictTextOutcome::Acknowledged => ("acknowledged", None),
++        StrictTextOutcome::Refused(code) => ("refused", Some(code)),
++        StrictTextOutcome::Unknown => ("unknown", Some("native_write_unknown")),
++    };
++    let mut data = json!({"schema":1,"outcome":outcome,"effect":"unverified"});
++    let result = if let Some(code) = code {
++        data["code"] = json!(code);
++        ToolResult::error(code)
++    } else {
++        ToolResult::text("strict_text_acknowledged")
++    };
++    result.with_structured(data)
++}
++
+ /// `set_value` named an option the combo box or list does not have.
+ fn no_such_option_result(idx: usize, error: &anyhow::Error) -> ToolResult {
+     let detail = error.to_string();
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-linux/tests/styx_strict_text.rs
+@@ -0,0 +1,185 @@
++//! Actual strict setter against fault-controlled AT-SPI on a private D-Bus bus.
++#![cfg(target_os = "linux")]
++use platform_linux::atspi::native::{set_text_ref_strict, ObjectRef, StrictTextOutcome};
++use std::io::BufRead;
++use std::process::{Child, Command, Stdio};
++use std::sync::{Arc, Mutex};
++
++const SERVICE: &str = "org.cua.StrictTextFixture";
++const OBJECT: &str = "/org/a11y/atspi/accessible/entry";
++#[derive(Default)]
++struct Counts {
++    setters: usize,
++    effects: usize,
++    inserts: usize,
++    activates: usize,
++    values: usize,
++}
++struct Bus {
++    child: Child,
++    _directory: tempfile::TempDir,
++}
++impl Drop for Bus {
++    fn drop(&mut self) {
++        let _ = self.child.kill();
++        let _ = self.child.wait();
++    }
++}
++struct A11yBus(String);
++#[zbus::interface(name = "org.a11y.Bus")]
++impl A11yBus {
++    fn get_address(&self) -> String {
++        self.0.clone()
++    }
++}
++struct Accessible;
++#[zbus::interface(name = "org.a11y.atspi.Accessible")]
++impl Accessible {
++    fn get_role_name(&self) -> String {
++        "text".into()
++    }
++    fn get_interfaces(&self) -> Vec<String> {
++        ["Accessible", "EditableText", "Text", "Action", "Value"]
++            .into_iter()
++            .map(|name| format!("org.a11y.atspi.{name}"))
++            .collect()
++    }
++}
++struct Editable(Arc<Mutex<Counts>>);
++#[zbus::interface(name = "org.a11y.atspi.EditableText")]
++impl Editable {
++    async fn set_text_contents(&self, text: &str) -> zbus::fdo::Result<bool> {
++        {
++            let mut count = self.0.lock().unwrap();
++            count.setters += 1;
++            count.effects += 1;
++        }
++        match text {
++            "false-after-effect" => Ok(false),
++            "error-after-effect" => Err(zbus::fdo::Error::Failed(
++                "fixture applied before its error".into(),
++            )),
++            "timeout-after-effect" => {
++                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
++                Ok(true)
++            }
++            _ => Ok(true),
++        }
++    }
++    fn insert_text(&self, _position: i32, _text: &str, _length: i32) -> bool {
++        self.0.lock().unwrap().inserts += 1;
++        true
++    }
++}
++struct Action(Arc<Mutex<Counts>>);
++#[zbus::interface(name = "org.a11y.atspi.Action")]
++impl Action {
++    #[zbus(property, name = "NActions")]
++    fn n_actions(&self) -> i32 {
++        1
++    }
++    fn get_name(&self, _index: i32) -> String {
++        "activate".into()
++    }
++    fn do_action(&self, _index: i32) -> bool {
++        self.0.lock().unwrap().activates += 1;
++        true
++    }
++}
++struct NumericValue(Arc<Mutex<Counts>>);
++#[zbus::interface(name = "org.a11y.atspi.Value")]
++impl NumericValue {
++    #[zbus(property)]
++    fn current_value(&self) -> f64 {
++        0.0
++    }
++    #[zbus(property)]
++    fn set_current_value(&self, _value: f64) {
++        self.0.lock().unwrap().values += 1;
++    }
++}
++
++#[test]
++fn one_native_setter_has_no_insert_activate_or_value_fallback_after_effect() {
++    let directory = tempfile::tempdir().unwrap();
++    let config = directory.path().join("bus.conf");
++    std::fs::write(&config,format!("<busconfig><type>session</type><listen>unix:dir={}</listen><auth>EXTERNAL</auth><policy context=\"default\"><allow send_destination=\"*\" eavesdrop=\"true\"/><allow eavesdrop=\"true\"/><allow own=\"*\"/></policy></busconfig>",directory.path().display())).unwrap();
++    let child = Command::new("dbus-daemon")
++        .arg(format!("--config-file={}", config.display()))
++        .args(["--nofork", "--print-address=1"])
++        .stdout(Stdio::piped())
++        .spawn()
++        .expect("private dbus-daemon required");
++    let mut bus = Bus {
++        child,
++        _directory: directory,
++    };
++    let mut address = String::new();
++    std::io::BufReader::new(bus.child.stdout.take().unwrap())
++        .read_line(&mut address)
++        .unwrap();
++    let address = address.trim().to_owned();
++    assert!(!address.is_empty());
++    std::env::set_var("DBUS_SESSION_BUS_ADDRESS", &address);
++    let runtime = tokio::runtime::Builder::new_multi_thread()
++        .worker_threads(2)
++        .enable_all()
++        .build()
++        .unwrap();
++    let counts = Arc::new(Mutex::new(Counts::default()));
++    let _service = runtime.block_on(async {
++        zbus::connection::Builder::address(address.as_str())
++            .unwrap()
++            .name(SERVICE)
++            .unwrap()
++            .name("org.a11y.Bus")
++            .unwrap()
++            .serve_at("/org/a11y/bus", A11yBus(address.clone()))
++            .unwrap()
++            .serve_at(OBJECT, Accessible)
++            .unwrap()
++            .serve_at(OBJECT, Editable(counts.clone()))
++            .unwrap()
++            .serve_at(OBJECT, Action(counts.clone()))
++            .unwrap()
++            .serve_at(OBJECT, NumericValue(counts.clone()))
++            .unwrap()
++            .build()
++            .await
++            .unwrap()
++    });
++    let object = ObjectRef {
++        bus: SERVICE.into(),
++        path: OBJECT.into(),
++    };
++    for text in [
++        "acknowledged",
++        "false-after-effect",
++        "error-after-effect",
++        "timeout-after-effect",
++    ] {
++        let before = counts.lock().unwrap().setters;
++        let result = set_text_ref_strict(&object, text);
++        assert_eq!(
++            result,
++            if text == "acknowledged" {
++                StrictTextOutcome::Acknowledged
++            } else {
++                StrictTextOutcome::Unknown
++            },
++            "{text}"
++        );
++        let observed = counts.lock().unwrap();
++        assert_eq!(
++            observed.setters,
++            before + 1,
++            "exactly one setter for {text}"
++        );
++        assert_eq!(observed.effects, observed.setters);
++        assert_eq!(
++            (observed.inserts, observed.activates, observed.values),
++            (0, 0, 0),
++            "no second mutation for {text}"
++        );
++    }
++}
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/set_value.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/set_value.rs
+@@ -25,8 +25,8 @@
+ 
+ use crate::apps;
+ use crate::ax::bindings::{
+-    copy_bool_attr, copy_children, copy_number_attr, copy_string_attr, copy_url_attr,
+-    kAXErrorSuccess, perform_action, set_number_attr, set_string_attr, AXUIElementRef,
++    AXUIElementRef, copy_bool_attr, copy_children, copy_number_attr, copy_string_attr,
++    copy_url_attr, kAXErrorSuccess, perform_action, set_number_attr, set_string_attr,
+ };
+ use crate::focus_guard;
+ use crate::window_change_detector::WindowChangeDetector;
+@@ -63,6 +63,7 @@
+                     "description": "Window ID. Omit with element_token."
+                 },
+                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
++                "styx_strict_text": { "type": "boolean", "description": "Internal Styx bounded single AXValue text setter; no fallback." },
+                 "value": {
+                     "type": "string",
+                     "description": "New value, coerced to the element's type."
+@@ -84,6 +85,9 @@
+     }
+ 
+     async fn invoke(&self, args: Value) -> ToolResult {
++        if args.get("styx_strict_text").is_some() {
++            return strict_text_once(&self.state, &args).await;
++        }
+         use cua_driver_core::tool_args::ArgsExt;
+         let pid = match super::target_pid(&self.state, &args) {
+             Ok(v) => v,
+@@ -99,7 +103,7 @@
+                 Ok(cua_driver_core::element_token::ResolvedElement::None) => {
+                     return ToolResult::error(
+                         "set_value requires element_token to address the target element.",
+-                    )
++                    );
+                 }
+                 Ok(cua_driver_core::element_token::ResolvedElement::Element {
+                     window_id,
+@@ -165,7 +169,7 @@
+         .flatten();
+         match name_target {
+             Some(NameTarget::Refuse(reason)) => {
+-                return file_name_needs_rename(pid, window_id, reason)
++                return file_name_needs_rename(pid, window_id, reason);
+             }
+             Some(NameTarget::FinderItem(path)) => {
+                 let new_name = value.clone();
+@@ -279,6 +283,89 @@
+             Err(e) => ToolResult::error(format!("Task error: {e}")),
+         }
+     }
++}
++
++// Styx's bounded semantic text route reuses the upstream snapshot resolver.
++// It has no acquisition cache, numeric coercion, focus/click/activation or retry.
++fn strict_text_result(outcome: &str, code: Option<&str>) -> ToolResult {
++    let mut structured = serde_json::json!({"schema":1,"outcome":outcome,"effect":"unverified"});
++    if let Some(code) = code {
++        structured["code"] = serde_json::json!(code);
++    }
++    let result = if outcome == "acknowledged" {
++        ToolResult::text("AXValue setter acknowledged; application effect is unverified.")
++    } else {
++        ToolResult::error("Strict AXValue text write was not acknowledged.")
++    };
++    result.with_structured(structured)
++}
++async fn strict_text_once(state: &Arc<ToolState>, args: &Value) -> ToolResult {
++    if args.get("styx_strict_text") != Some(&Value::Bool(true)) {
++        return strict_text_result("refused", Some("invalid_request"));
++    }
++    let Some(value) = args
++        .get("value")
++        .and_then(Value::as_str)
++        .filter(|v| v.len() <= 65536)
++    else {
++        return strict_text_result("refused", Some("invalid_request"));
++    };
++    let pid = match super::target_pid(state, args) {
++        Ok(pid) if pid > 0 => pid,
++        _ => return strict_text_result("refused", Some("process_unavailable")),
++    };
++    let (window, element) = match state.snapshots.resolve(pid, args) {
++        Ok(cua_driver_core::element_token::ResolvedElement::Element {
++            window_id, element, ..
++        }) => match u32::try_from(window_id) {
++            Ok(window) if window > 0 => (window, element),
++            _ => return strict_text_result("refused", Some("window_unavailable")),
++        },
++        Ok(_) => return strict_text_result("refused", Some("invalid_request")),
++        Err(_) => return strict_text_result("refused", Some("stale_observation")),
++    };
++    let _lease = match super::gate_background_window_action(
++        pid,
++        window,
++        Some(element.as_ptr()),
++        cua_driver_core::background_input::BackgroundAction::AxSemantic,
++    )
++    .await
++    {
++        Ok(lease) => lease,
++        Err(_) => return strict_text_result("refused", Some("window_unavailable")),
++    };
++    let value = value.to_owned();
++    let result = tokio::task::spawn_blocking(move || unsafe {
++        use crate::ax::bindings::{AXIsProcessTrusted, is_attribute_settable, set_string_attr};
++        if !AXIsProcessTrusted() {
++            return strict_text_result("refused", Some("permission_denied"));
++        }
++        let target = element.as_ptr() as AXUIElementRef;
++        if !matches!(
++            copy_string_attr(target, "AXRole").as_deref(),
++            Some("AXTextField" | "AXTextArea")
++        ) || copy_string_attr(target, "AXSubrole").as_deref() == Some("AXSecureTextField")
++            || copy_bool_attr(target, "AXEnabled") != Some(true)
++            || copy_string_attr(target, "AXValue").is_none()
++            || !is_attribute_settable(target, "AXValue")
++        {
++            return strict_text_result("refused", Some("editable_unavailable"));
++        }
++        // Exactly one setter dispatch. All errors after entry, including an AX
++        // messaging timeout, are unknown; no fallback or inferred non-dispatch.
++        let code = set_string_attr(target, "AXValue", &value);
++        strict_text_result(
++            if code == kAXErrorSuccess {
++                "acknowledged"
++            } else {
++                "unknown"
++            },
++            None,
++        )
++    })
++    .await;
++    result.unwrap_or_else(|_| strict_text_result("unknown", None))
+ }
+ 
+ // ── File name cells ──────────────────────────────────────────────────────────
+@@ -1308,10 +1395,29 @@
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn styx_strict_text_outcomes_never_claim_application_effect() {
++        let acknowledged = super::strict_text_result("acknowledged", None);
++        assert_eq!(
++            acknowledged.structured_content.unwrap(),
++            serde_json::json!({"schema":1,"outcome":"acknowledged","effect":"unverified"})
++        );
++        let unknown = super::strict_text_result("unknown", None);
++        assert_eq!(
++            unknown.structured_content.unwrap(),
++            serde_json::json!({"schema":1,"outcome":"unknown","effect":"unverified"})
++        );
++        let refused = super::strict_text_result("refused", Some("editable_unavailable"));
++        assert_eq!(
++            refused.structured_content.unwrap(),
++            serde_json::json!({"schema":1,"outcome":"refused","effect":"unverified","code":"editable_unavailable"})
++        );
++    }
++
+     use super::{
+-        apply_surface_trust, apply_verification_label, classify_write, file_name_needs_rename,
+-        is_file_name_cell, is_get_info_name_field, not_applied_result, write_not_applied,
+-        SetValueOutcome, GET_INFO_RENAME_ROUTE, LIST_RENAME_ROUTE,
++        GET_INFO_RENAME_ROUTE, LIST_RENAME_ROUTE, SetValueOutcome, apply_surface_trust,
++        apply_verification_label, classify_write, file_name_needs_rename, is_file_name_cell,
++        is_get_info_name_field, not_applied_result, write_not_applied,
+     };
+ 
+     #[test]
+--- a/libs/cua-driver/rust/crates/platform-windows/src/capture.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/capture.rs
+@@ -362,7 +362,38 @@
+     Some((png, x, y))
+ }
+ 
++fn capture_dpi_unaware_window(hwnd: u64) -> Result<Option<(Vec<u8>, bool, Option<FrameGeometry>)>> {
++    use windows::Win32::UI::HiDpi::{
++        GetAwarenessFromDpiAwarenessContext, GetWindowDpiAwarenessContext, DPI_AWARENESS_INVALID,
++        DPI_AWARENESS_UNAWARE,
++    };
++    let context = unsafe { GetWindowDpiAwarenessContext(HWND(hwnd as *mut _)) };
++    if context == Default::default() {
++        bail!("window DPI context unavailable; capture geometry is unproven");
++    }
++    let awareness = unsafe { GetAwarenessFromDpiAwarenessContext(context) };
++    if awareness == DPI_AWARENESS_INVALID {
++        bail!("window DPI awareness unavailable; capture geometry is unproven");
++    }
++    if awareness != DPI_AWARENESS_UNAWARE {
++        return Ok(None);
++    }
++    let (pixels, width, height) = crate::wgc::screenshot_window_via_wgc(hwnd).map_err(|error| {
++        anyhow::anyhow!(
++            "DPI-unaware window needs compositor capture; no partial GDI or screen-region fallback: {error}"
++        )
++    })?;
++    Ok(Some((
++        cua_driver_core::image_utils::encode_bgra_to_png(&pixels, width, height)?,
++        false,
++        // WGC gives no proven screen origin. Preserve the existing restriction
++        // against using this frame as mapped pixel-action evidence.
++        None,
++    )))
++}
++
+ fn screenshot_window_mapped(hwnd: u64) -> Result<(Vec<u8>, bool, Option<FrameGeometry>)> {
++    if let Some(capture) = capture_dpi_unaware_window(hwnd)? { return Ok(capture); }
+     match unsafe { screenshot_window_bytes_with_occlusion_unsafe(hwnd) } {
+         Ok(capture) => Ok(capture),
+         Err(primary_error) => {
+--- a/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs
+@@ -550,6 +550,23 @@
+     send_click_synthesized_mods_impl(target, sx, sy, count, button, modifiers, ClickMode::Desktop)
+ }
+ 
++/// All requested mouse/modifier events were inserted, then focus moved outside
++/// the exact target/owned-window set. This records dispatch, never visible effect
++/// or authority over the newly foreground window.
++#[derive(Debug)]
++pub(crate) struct CompletedClickFocusChanged {
++    pub(crate) target: u64,
++    pub(crate) actual: u64,
++}
++
++impl std::fmt::Display for CompletedClickFocusChanged {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "foreground_unavailable: exact target HWND 0x{:x} or a verified same-process post-action window was not foreground after the click (actual foreground HWND 0x{:x})", self.target, self.actual)
++    }
++}
++
++impl std::error::Error for CompletedClickFocusChanged {}
++
+ #[derive(Clone, Copy, PartialEq)]
+ enum ClickMode {
+     NonActivating,
+@@ -802,13 +819,13 @@
+                 foreground_target.expect("foreground target captured before input"),
+                 actual.0 as usize as u64,
+             ) {
+-                bail!(
+-                    "foreground_unavailable: exact target HWND {:?} or a verified same-process \
+-                     post-action window was not foreground after the click \
+-                     (actual foreground HWND {:?})",
+-                    target.0,
+-                    actual.0
+-                );
++                // This point is reachable only after complete SendInput. Keep
++                // pre-dispatch and partial-send errors distinct from this fact.
++                return Err(CompletedClickFocusChanged {
++                    target: target.0 as usize as u64,
++                    actual: actual.0 as usize as u64,
++                }
++                .into());
+             }
+         }
+     }
+--- a/libs/cua-driver/rust/crates/platform-windows/src/tools/click.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/click.rs
+@@ -37,6 +37,12 @@
+         "effect": "refused",
+         "detail": error.to_string(),
+     }))
++}
++
++fn completed_click_focus_change(error: &anyhow::Error) -> bool {
++    error
++        .downcast_ref::<crate::input::mouse::CompletedClickFocusChanged>()
++        .is_some()
+ }
+ 
+ // ── click ─────────────────────────────────────────────────────────────────────
+@@ -763,6 +769,12 @@
+                         "✅ Performed SendInput click on [{idx}] at screen ({cx},{cy}) (delivery_mode:foreground)."
+                     ))
+                     .with_structured(json!({ "path": "pixel", "verified": false, "effect": "unverifiable" })),
++                    Ok(Err(error)) if completed_click_focus_change(&error) => {
++                        ToolResult::text(format!(
++                            "Sent the complete foreground click on [{idx}] at ({cx},{cy}); post-action foreground changed. Verify the effect with a fresh observation."
++                        ))
++                        .with_structured(json!({ "path": "pixel", "verified": false, "effect": "unverifiable" }))
++                    }
+                     Ok(Err(e)) => ToolResult::error(e.to_string()),
+                     Err(e) => ToolResult::error(format!("Task error: {e}")),
+                 };
+@@ -1533,3 +1545,26 @@
+         assert_eq!(capture_id["minLength"], 1);
+     }
+ }
++
++#[cfg(test)]
++mod completed_click_receipt_tests {
++    use super::completed_click_focus_change;
++
++    #[test]
++    fn completed_dispatch_requires_native_typed_receipt_not_error_text() {
++        let receipt: anyhow::Error = crate::input::mouse::CompletedClickFocusChanged {
++            target: 1,
++            actual: 2,
++        }
++        .into();
++        assert!(completed_click_focus_change(&receipt));
++        let copied_text = anyhow::anyhow!(receipt.to_string());
++        assert!(!completed_click_focus_change(&copied_text));
++        assert!(!completed_click_focus_change(&anyhow::anyhow!(
++            "foreground_unavailable: Windows did not activate exact target HWND; no mouse input was sent"
++        )));
++        assert!(!completed_click_focus_change(&anyhow::anyhow!(
++            "SendInput inserted fewer modifier or mouse events than expected for the foreground click."
++        )));
++    }
++}
+--- a/libs/cua-driver/rust/crates/platform-windows/src/tools/set_value.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/set_value.rs
+@@ -51,6 +51,7 @@
+                     "window_id":{"type":"integer","description":"HWND of the window. Omit when element_token is supplied (the token carries it)."},
+                     "element_token": cua_driver_core::tool_schema::element_token_schema(),
+                     "value":{"type":"string","description":"New value. UIA will coerce to the element's native type."},
++                    "styx_strict_text":{"type":"boolean","description":"Internal Host adapter: one retained Edit ValuePattern write without fallback or activation."},
+                     "delivery_mode": crate::input::delivery::delivery_mode_schema()
+                 },"additionalProperties":false
+             }),
+@@ -60,6 +61,9 @@
+     }
+ 
+     async fn invoke(&self, args: Value) -> ToolResult {
++        if args.get("styx_strict_text").and_then(Value::as_bool) == Some(true) {
++            return self.invoke_strict_text(args).await;
++        }
+         let cursor_key = resolve_cursor_key(&args);
+         let raw_pid = args.get("pid").and_then(|v| v.as_i64());
+         if raw_pid.is_none() {
+@@ -222,6 +226,153 @@
+     }
+ }
+ 
++// Styx owns admission, operation identity and no replay. This route only narrows
++// the existing retained-object setter; it has no second tree, target cache,
++// cursor, focus, alternate native setter or independent authorization policy.
++impl SetValueTool {
++    async fn invoke_strict_text(&self, args: Value) -> ToolResult {
++        let Some(pid) = args
++            .get("pid")
++            .and_then(Value::as_u64)
++            .filter(|pid| *pid > 0 && *pid <= i32::MAX as u64)
++        else {
++            return strict_text_result("refused", Some("invalid_request"));
++        };
++        let Some(window_id) = args
++            .get("window_id")
++            .and_then(Value::as_u64)
++            .filter(|id| *id > 0)
++        else {
++            return strict_text_result("refused", Some("invalid_request"));
++        };
++        let Some(value) = args
++            .get("value")
++            .and_then(Value::as_str)
++            .filter(|value| value.len() <= 16 * 1024)
++        else {
++            return strict_text_result("refused", Some("invalid_request"));
++        };
++        if args
++            .get("element_token")
++            .and_then(Value::as_str)
++            .and_then(cua_driver_core::element_token::parse_token)
++            .is_none()
++        {
++            return strict_text_result("refused", Some("invalid_request"));
++        }
++        let resolved = match self.state.snapshots.resolve(pid as i32, &args) {
++            Ok(resolved) => resolved,
++            Err(_) => return strict_text_result("refused", Some("stale_observation")),
++        };
++        let (_, Some(retained_window), Some(admitted)) = resolved.into_parts(None) else {
++            return strict_text_result("refused", Some("stale_observation"));
++        };
++        if retained_window != window_id || !admitted.is_uia() {
++            return strict_text_result("refused", Some("editable_unavailable"));
++        }
++        let value = value.to_owned();
++        let result = tokio::task::spawn_blocking(move || {
++            use windows::core::{BSTR, Interface};
++            use windows::Win32::UI::Accessibility::{
++                IUIAutomationElement, IUIAutomationValuePattern, UIA_EditControlTypeId,
++                UIA_ValuePatternId,
++            };
++            // The original retained element owns this COM reference throughout
++            // the call; no lookup by label/index or reconstructed UIA object.
++            let element = std::mem::ManuallyDrop::new(unsafe {
++                IUIAutomationElement::from_raw(admitted.as_ptr() as *mut _)
++            });
++            let eligible = unsafe {
++                (|| -> windows::core::Result<bool> {
++                    Ok(element.CurrentProcessId()? == pid as i32
++                        && element.CurrentControlType()? == UIA_EditControlTypeId
++                        && element.CurrentIsEnabled()?.as_bool()
++                        && !element.CurrentIsPassword()?.as_bool())
++                })()
++            };
++            if !matches!(eligible, Ok(true)) {
++                return strict_text_result("refused", Some("editable_unavailable"));
++            }
++            let pattern = match unsafe { element.GetCurrentPattern(UIA_ValuePatternId) }
++                .and_then(|pattern| pattern.cast::<IUIAutomationValuePattern>())
++            {
++                Ok(pattern) => pattern,
++                Err(_) => return strict_text_result("refused", Some("editable_unavailable")),
++            };
++            if !matches!(unsafe { pattern.CurrentIsReadOnly() }, Ok(read_only) if !read_only.as_bool()) {
++                return strict_text_result("refused", Some("editable_unavailable"));
++            }
++            // From this point an HRESULT failure (including timeout) is unknown:
++            // the target may already have handled the write. No fallback/retry.
++            match unsafe { pattern.SetValue(&BSTR::from(value.as_str())) } {
++                Ok(()) => strict_text_result("acknowledged", None),
++                Err(_) => strict_text_result("unknown", None),
++            }
++        }).await;
++        match result {
++            Ok(result) => result,
++            // Losing the worker reply cannot prove that SetValue was not sent.
++            Err(_) => strict_text_result("unknown", None),
++        }
++    }
++}
++
++fn strict_text_result(outcome: &'static str, code: Option<&'static str>) -> ToolResult {
++    let mut content = json!({"schema":1,"outcome":outcome,"effect":"unverified"});
++    if let Some(code) = code {
++        content["code"] = json!(code);
++    }
++    let mut result = if outcome == "acknowledged" {
++        ToolResult::text("strict_text_write_acknowledged")
++    } else {
++        ToolResult::error(if outcome == "refused" {
++            "strict_text_write_refused"
++        } else {
++            "strict_text_write_unknown"
++        })
++    };
++    result.is_error = Some(outcome != "acknowledged");
++    result.with_structured(content)
++}
++
++#[cfg(test)]
++mod styx_strict_text_tests {
++    use super::strict_text_result;
++    use serde_json::json;
++
++    #[test]
++    fn acknowledged_only_confirms_native_reply_not_visible_effect() {
++        let result = strict_text_result("acknowledged", None);
++        assert_eq!(result.is_error, Some(false));
++        assert_eq!(
++            result.structured_content,
++            Some(json!({
++                "schema":1,"outcome":"acknowledged","effect":"unverified"
++            }))
++        );
++    }
++
++    #[test]
++    fn refused_and_unknown_have_distinct_closed_envelopes() {
++        let refused = strict_text_result("refused", Some("editable_unavailable"));
++        assert_eq!(refused.is_error, Some(true));
++        assert_eq!(
++            refused.structured_content,
++            Some(json!({
++                "schema":1,"outcome":"refused","effect":"unverified","code":"editable_unavailable"
++            }))
++        );
++        let unknown = strict_text_result("unknown", None);
++        assert_eq!(unknown.is_error, Some(true));
++        assert_eq!(
++            unknown.structured_content,
++            Some(json!({
++                "schema":1,"outcome":"unknown","effect":"unverified"
++            }))
++        );
++    }
++}
++
+ /// How `set_value` wrote the value.
+ enum SetValueRoute {
+     /// A UIA pattern on a non-combo element (`ValuePattern`, `RangeValuePattern`).
