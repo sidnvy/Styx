@@ -4,7 +4,7 @@ Owner decision, 2026-10-27: Styx is installed only on the owner's own devices. R
 
 ## Deployment roles (owner decision, 2026-11-14)
 
-Each deployment has one Gateway. Its OpenAI Private MCP Tunnel is configured once on that Gateway. Hosts connect to their paired Gateway. Desktop installations on macOS, Windows and Linux offer Host only or Gateway + Host. Headless Linux runs Gateway only. This matrix governs the product configurations in this refactor and takes precedence over broader platform/role combinations in older plans. Existing installations and identities are handled explicitly during implementation. See the [architecture proposal](REFACTOR-PLAN.md).
+Each deployment has one Gateway. Its OpenAI Private MCP Tunnel is configured once on that Gateway. Hosts connect to their paired Gateway. Desktop installations on macOS, Windows and Linux offer Host only or Gateway + Host. Headless Linux runs Gateway only. This matrix governs the product configurations in this refactor and takes precedence over broader platform/role combinations in older plans. Existing installations and identities are handled explicitly during implementation. The [owner-confirmed architecture](REFACTOR-PLAN.md) governs onboarding, capabilities, conversation and task lifetimes, and device removal for this refactor. Its product decisions supersede conflicting older flows, including a second enrollment approval and a separate desktop Pause action.
 
 ## Product capability clarification (owner, 2026-11-10)
 

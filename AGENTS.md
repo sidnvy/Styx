@@ -24,7 +24,7 @@ Read a skill only when its trigger applies; do not load all references or histor
 | --- | --- |
 | Native GUI/Core behavior, lifecycle bugs, or desktop build/run wiring | .agents/skills/styx-native-development/SKILL.md |
 | Release freeze, signing/packaging, installation or cross-device/account acceptance | .agents/skills/styx-release-acceptance/SKILL.md |
-| Architecture or interface changes | src/docs/rust-core-rewrite/README.md routes to current contracts and decisions |
+| Architecture or interface changes | [Confirmed product behavior and role ownership](src/docs/rust-core-rewrite/REFACTOR-PLAN.md); the [architecture index](src/docs/rust-core-rewrite/README.md) routes to implementation contracts |
 | Delivery status or next acceptance exit | Latest checkpoint in src/docs/rust-core-rewrite/END-TO-END-DELIVERY-PLAN.md |
 
 ## Ownership and safety
