@@ -1,5 +1,12 @@
 use super::*;
 use crate::providers::cua::CuaCleanup;
+use rmcp::{
+    ErrorData, RoleServer, ServerHandler, ServiceExt,
+    model::{CallToolRequestParams, CallToolResponse, CallToolResult},
+    service::RequestContext,
+};
+use serde_json::json;
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn observation_error_and_live_original_never_prove_daemon_exit() {
@@ -139,4 +146,105 @@ async fn actual_dead_daemon_still_waits_original_proxy_and_retained_io() {
         complete.native_settlement,
         CuaNativeSettlement::MacOriginalDaemonExited
     ));
+}
+
+struct EndFixture {
+    replies: Arc<Mutex<std::collections::VecDeque<CallToolResult>>>,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+impl ServerHandler for EndFixture {
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        assert_eq!(request.name, "end_session");
+        let session = request.arguments.unwrap()["session"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        self.calls.lock().unwrap().push(session);
+        Ok(CallToolResponse::Complete(
+            self.replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("no extra RPC permitted"),
+        ))
+    }
+}
+
+fn pending_reply(code: &str, session: &str, in_progress: bool) -> CallToolResult {
+    let mut reply = CallToolResult::structured(json!({
+        "code":code,"session":session,"cleanup_complete":false,
+        "cleanup_in_progress":in_progress,"failed_hooks":[],
+    }));
+    reply.is_error = Some(true);
+    reply
+}
+
+#[tokio::test]
+async fn actual_original_mcp_peer_continues_only_known_same_session_cleanup() {
+    for known in [true, false] {
+        let session = "styx-original-cleanup-fixture";
+        let first = if known {
+            pending_reply("session_cleanup_pending", session, true)
+        } else {
+            pending_reply("generic_failure", session, false)
+        };
+        let replies = if known {
+            vec![
+                first,
+                pending_reply("session_cleanup_partial", session, false),
+                CallToolResult::structured(json!({"session":session,"active":false})),
+            ]
+        } else {
+            vec![first]
+        };
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fixture = EndFixture {
+            replies: Arc::new(Mutex::new(replies.into())),
+            calls: calls.clone(),
+        };
+        let (server_io, client_io) = tokio::io::duplex(65536);
+        let (server, client) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(fixture.serve(server_io), ().serve(client_io))
+        })
+        .await
+        .unwrap();
+        let mut server = server.unwrap();
+        let mut client = client.unwrap();
+        // Invoke the exact RPC/decoder function used by production cleanup.
+        let mut result = end_session(client.peer().clone(), session.into()).await;
+        if known {
+            assert_eq!(result, EndSessionOutcome::RetryKnown);
+            result = end_session(client.peer().clone(), session.into()).await;
+            assert_eq!(result, EndSessionOutcome::RetryKnown);
+            result = end_session(client.peer().clone(), session.into()).await;
+            assert_eq!(result, EndSessionOutcome::Ended);
+            assert_eq!(*calls.lock().unwrap(), vec![session; 3]);
+        } else {
+            assert_eq!(result, EndSessionOutcome::Unknown);
+            tokio::task::yield_now().await;
+            assert_eq!(*calls.lock().unwrap(), vec![session]);
+        }
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+}
+
+#[test]
+fn malformed_or_foreign_cleanup_errors_are_never_retry_admission() {
+    let session = "styx-original-cleanup-fixture";
+    for reply in [
+        pending_reply("session_cleanup_pending", "styx-other-owner", true),
+        pending_reply("session_cleanup_pending", session, false),
+        pending_reply("session_cleanup_partial", session, true),
+        CallToolResult::structured(json!({"session":session,"code":"session_cleanup_pending"})),
+    ] {
+        assert_eq!(
+            end_session_outcome(session, &reply),
+            EndSessionOutcome::Unknown
+        );
+    }
 }

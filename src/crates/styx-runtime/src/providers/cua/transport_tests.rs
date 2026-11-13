@@ -1,6 +1,7 @@
 //! Owned duplex IO and the real official AsyncRw codec; no native/GUI process.
 use super::*;
 use serde_json::json;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::io::{AsyncWriteExt, duplex, split};
 
 fn initialize() -> TxJsonRpcMessage<RoleClient> {
@@ -118,4 +119,125 @@ async fn normal_response_and_unpolled_send_cancel_preserve_original_credit_seman
     );
     drop(transport);
     drop(peer);
+}
+
+#[tokio::test]
+async fn actual_codec_cleanup_survives_business_stop_only_with_production_split_tokens() {
+    for legacy_shared_token in [true, false] {
+        let (business, io_stop) = super::super::macos_cleanup::resource_stop_tokens();
+        let transport_stop = if legacy_shared_token {
+            business.clone()
+        } else {
+            io_stop
+        };
+        let (peer, local) = duplex(4096);
+        let mut peer = BufReader::new(peer);
+        let (read, write) = split(local);
+        let mut transport =
+            AdmittedTransport::from_io(read, write, transport_stop.clone(), budget().await);
+        let mut line = String::new();
+        transport.send(initialize()).await.unwrap();
+        peer.read_line(&mut line).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()["method"],
+            "initialize"
+        );
+        peer.get_mut().write_all(&response()).await.unwrap();
+        assert!(transport.receive().await.is_some());
+        transport.send(initialized()).await.unwrap();
+        line.clear();
+        peer.read_line(&mut line).await.unwrap();
+        let list =
+            serde_json::from_value(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).unwrap();
+        transport.send(list).await.unwrap();
+        line.clear();
+        peer.read_line(&mut line).await.unwrap();
+        peer.get_mut()
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}\n")
+            .await
+            .unwrap();
+        assert!(transport.receive().await.is_some());
+
+        // This is the SAME factory and supervisor cancellation function used
+        // by Mac Resource, not a pair of unrelated ad hoc fixture tokens.
+        let host = CancellationToken::new();
+        let business_owner = business.clone();
+        let io_owner = transport_stop.clone();
+        let supervisor = tokio::spawn(async move {
+            super::super::macos_cleanup::wait_cleanup_request(&host, &business_owner, &io_owner)
+                .await;
+        });
+        business.cancel();
+        supervisor.await.unwrap();
+        let name = if cfg!(target_os = "macos") {
+            "end_session"
+        } else {
+            "list_apps"
+        };
+        let arguments = if cfg!(target_os = "macos") {
+            json!({"session":"styx-cleanup-fixture"})
+        } else {
+            json!({})
+        };
+        let call = serde_json::from_value(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":name,"arguments":arguments}})).unwrap();
+        let sent = transport.send(call).await;
+        if legacy_shared_token {
+            assert!(
+                sent.is_err(),
+                "old resource.stop wiring prevents cleanup before any bytes are sent"
+            );
+            assert!(transport.receive().await.is_none());
+            line.clear();
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(20),
+                    peer.read_line(&mut line)
+                )
+                .await
+                .is_err()
+            );
+        } else {
+            sent.unwrap();
+            line.clear();
+            peer.read_line(&mut line).await.unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&line).unwrap()["params"]["name"],
+                name
+            );
+            peer.get_mut().write_all(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"isError\":false,\"content\":[],\"structuredContent\":{\"session\":\"styx-cleanup-fixture\",\"active\":false}}}\n").await.unwrap();
+            assert!(transport.receive().await.is_some());
+            assert!(!transport_stop.is_cancelled());
+        }
+        assert!(
+            business.is_cancelled(),
+            "cleanup never restores business admission"
+        );
+        transport.close().await.unwrap();
+        assert!(transport_stop.is_cancelled());
+        assert!(transport.send(initialize()).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn actual_codec_eof_still_requests_resource_cleanup_with_split_tokens() {
+    let (business, io_stop) = super::super::macos_cleanup::resource_stop_tokens();
+    let host = CancellationToken::new();
+    let business_owner = business.clone();
+    let io_owner = io_stop.clone();
+    let supervisor = tokio::spawn(async move {
+        super::super::macos_cleanup::wait_cleanup_request(&host, &business_owner, &io_owner).await;
+    });
+    let (peer, local) = duplex(4096);
+    let (read, write) = split(local);
+    let mut transport = AdmittedTransport::from_io(read, write, io_stop.clone(), budget().await);
+    transport.send(initialize()).await.unwrap();
+    assert!(!business.is_cancelled());
+    drop(peer);
+    assert!(transport.receive().await.is_none());
+    tokio::time::timeout(std::time::Duration::from_secs(5), supervisor)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(io_stop.is_cancelled() && business.is_cancelled());
+    transport.close().await.unwrap();
 }

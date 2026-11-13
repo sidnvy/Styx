@@ -8,6 +8,31 @@
 
 ## 当前开发检查点（2026-11-12）
 
+### 当前阻塞：Mac 正常 MCP 会话清理（2026-11-13）
+
+`47427bb` 的三平台构建、contracts 和 20 项质量门已通过；Mac build1152 已原位安装，
+GUI 的 Runtime 更新已 Committed，实际 Core 与新选择一致，AX/SR 均已生效。
+独立 Gateway→Host/Core→Cua 的真实截图通过。两个测试窗口均自行正常结束且独立记录为
+零写入；真实文本写入、按钮点击及正常退出重开尚未通过，不将截图当作这些场景的结果。
+
+原 MCP 会话的一次 DELETE 返回 HTTP 500，随后新 owner 的一次读取明确返回
+`computer_not_dispatched`、`uncertain:false`，没有重放写入或旧 DELETE。新空会话已单次
+关闭且没有 DELETE 错误；这不能证明原资源已经完成清理。App/Core 仍响应，保留原实例。
+
+两位 owner 并行只读确认直接代码缺陷：资源清理先取消 `resource.stop`，而原 MCP
+transport 使用同一 token，因此后续标准 `end_session` 在准入处被本地拒绝。
+已分离业务停止与原 transport 的关闭时机；仍保留原 client、预算、协议拒绝和实际
+IO join。官方明确的 cleanup pending/partial 已与普通未知失败区分，只继续同一会话
+明确未完的清理，不重发用户操作。本机受影响 Cua 回归 50 PASS、0 FAIL，保留原有一项
+需原生 capture receipt 的 ignored；真实 transport 测试同时复现旧接线的零字节拒绝并
+验证新接线完成 request/reply/close。Mac 独立官方 proxy 的只读 start/read/end 和真实
+exit0 已通过，证实上游正常清理可用；这些结果尚不替代修正版的产品内验收。
+原 `47427bb` 的 daemon-first 故障退出场景已实际通过：预先观察原 App/Core/Cua/Codex，
+一次标准 PID-bound stop 后 Cua 真实 exit0，随后一次正常 App Quit，其余三进程均真实
+exit0，全程零信号、零强制处置。旧 DELETE 500 仍原样保留，不据此改成会话清理成功。
+仅补受影响的 native 效果、会话结束和同身份恢复；Windows 17 项及其他已通过场景不重跑。
+**Stable 仍 NO-GO；先完成开发原生验证，再冻结匹配的新发布输出，不发布旧包。**
+
 ### 最新修正：Mac 授权后的 daemon 退出清理（2026-11-13）
 
 用户已完成正常系统授权，AX/SR 的 TCC 均绑定新 `9a4` 证书。录屏授权后原 Cua daemon

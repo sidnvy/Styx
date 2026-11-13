@@ -494,6 +494,10 @@ struct Resource {
     session: SessionBinding,
     budget: Arc<CuaIoBudget>,
     stop: CancellationToken,
+    // Stop business admission before draining the original Mac session. This
+    // independent token fences only its IO; it must not be a child of stop.
+    #[cfg(target_os = "macos")]
+    transport_stop: CancellationToken,
     live: Arc<tokio::sync::Mutex<Live>>,
     cleanup_job: Mutex<Option<tokio::sync::watch::Receiver<Option<CuaCleanup>>>>,
 }
@@ -511,7 +515,7 @@ struct Live {
     #[cfg(target_os = "macos")]
     mac_session: Option<String>,
     #[cfg(target_os = "macos")]
-    mac_session_end: Option<JoinHandle<bool>>,
+    mac_session_end: Option<JoinHandle<macos_cleanup::EndSessionOutcome>>,
     #[cfg(target_os = "macos")]
     mac_session_end_finished: bool,
     identity: Option<ProcessIdentity>,
@@ -769,12 +773,16 @@ impl CuaOpenSlot {
         };
         let config = Arc::new(config);
         let (cleanup_tx, cleanup_rx) = tokio::sync::watch::channel(None);
+        #[cfg(target_os = "macos")]
+        let (stop, transport_stop) = macos_cleanup::resource_stop_tokens();
+        #[cfg(not(target_os = "macos"))]
+        let stop = CancellationToken::new();
         let resource = Arc::new(Resource {
             owner: permit.owner().clone(),
             target,
             session: config.launch.session.clone(),
             budget: self.worker.inner.budget.clone(),
-            stop: CancellationToken::new(),
+            stop,
             live: Arc::new(tokio::sync::Mutex::new(Live {
                 #[cfg(target_os = "linux")]
                 scope: None,
@@ -811,6 +819,8 @@ impl CuaOpenSlot {
                 actions: BTreeMap::new(),
             })),
             cleanup_job: Mutex::new(Some(cleanup_rx)),
+            #[cfg(target_os = "macos")]
+            transport_stop,
         });
         self.worker
             .inner
@@ -830,8 +840,11 @@ impl CuaOpenSlot {
         #[cfg(target_os = "windows")]
         let source = config.launch.source.clone();
         tokio::spawn(async move {
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(target_os = "linux")]
             tokio::select! {_=host_stop.cancelled()=>{},_=owned.stop.cancelled()=>{}}
+            #[cfg(target_os = "macos")]
+            macos_cleanup::wait_cleanup_request(&host_stop, &owned.stop, &owned.transport_stop)
+                .await;
             #[cfg(target_os = "windows")]
             tokio::select! {_=host_stop.cancelled()=>{},_=owned.stop.cancelled()=>{},_=source.invalidated()=>{}}
             owned.stop.cancel();
@@ -878,7 +891,11 @@ impl CuaOpenSlot {
      (child.take_stdin().ok_or(CuaError::Unknown)?,child.take_stdout().ok_or(CuaError::Unknown)?,child.take_stderr().ok_or(CuaError::Unknown)?)
    };
    let budget=resource.budget.clone();live.stderr=Some(tokio::spawn(async move{let _budget=budget;tokio::io::copy(&mut stderr,&mut tokio::io::sink()).await}));
-   let transport=transport::AdmittedTransport::from_io(stdout,stdin,resource.stop.clone(),resource.budget.clone());
+   #[cfg(target_os = "macos")]
+   let transport_stop=resource.transport_stop.clone();
+   #[cfg(not(target_os = "macos"))]
+   let transport_stop=resource.stop.clone();
+   let transport=transport::AdmittedTransport::from_io(stdout,stdin,transport_stop,resource.budget.clone());
    let handler=CuaClient{_budget:resource.budget.clone()};let client=tokio::select!{_=resource.stop.cancelled()=>return Err(CuaError::Unknown),value=timeout_at(until,handler.serve(transport))=>value.map_err(|_|CuaError::Unknown)?.map_err(|_|CuaError::ProtocolMismatch)?};live.client=Some(client);
    let peer=live.client.as_ref().ok_or(CuaError::Unknown)?.peer().clone();let info=peer.peer_info().ok_or(CuaError::ProtocolMismatch)?;
    if !info.server_info.as_ref().is_some_and(|v|v.name=="cua-driver"&&v.version=="0.47.24"){return Err(CuaError::ProtocolMismatch)}
@@ -1390,24 +1407,7 @@ async fn cleanup(live: &mut Live, budget: Duration) -> CuaCleanup {
     if !daemon_exited && !live.mac_session_end_finished && live.mac_session_end.is_none() {
         if let (Some(session), Some(client)) = (live.mac_session.clone(), live.client.as_ref()) {
             let peer = client.peer().clone();
-            live.mac_session_end = Some(tokio::spawn(async move {
-                let arguments = serde_json::json!({"session":session})
-                    .as_object()
-                    .expect("literal object")
-                    .clone();
-                let request = CallToolRequestParams::new("end_session").with_arguments(arguments);
-                match peer.call_tool(request).await {
-                    Ok(reply) => {
-                        reply.is_error != Some(true)
-                            && reply.structured_content.as_ref().is_some_and(|value| {
-                                value.get("active").and_then(Value::as_bool) == Some(false)
-                                    && value.get("session").and_then(Value::as_str)
-                                        == Some(session.as_str())
-                            })
-                    }
-                    Err(_) => false,
-                }
-            }));
+            live.mac_session_end = Some(tokio::spawn(macos_cleanup::end_session(peer, session)));
         } else {
             live.mac_session_end_finished = true;
         }
@@ -1416,11 +1416,28 @@ async fn cleanup(live: &mut Live, budget: Duration) -> CuaCleanup {
         match timeout_at(until, job).await {
             Ok(result) => {
                 live.mac_session_end.take();
-                live.mac_session_end_finished = true;
-                if matches!(result, Ok(true)) {
-                    if let Some(proxy) = live.mac_proxy.as_mut() {
-                        proxy.mark_session_ended();
+                match result {
+                    Ok(macos_cleanup::EndSessionOutcome::Ended) => {
+                        live.mac_session_end_finished = true;
+                        if let Some(proxy) = live.mac_proxy.as_mut() {
+                            proxy.mark_session_ended();
+                        }
                     }
+                    Ok(macos_cleanup::EndSessionOutcome::RetryKnown) if !daemon_exited => {
+                        // The official same-session cleanup explicitly remains
+                        // unfinished. Keep its original client for the next
+                        // bounded supervisor turn; never replay a native action.
+                        return CuaCleanup {
+                            worker_exited: false,
+                            worker_exit_success: live.exit_success,
+                            io_joined: false,
+                            descendants_confirmed: false,
+                            native_settlement: CuaNativeSettlement::MacAppTransport {
+                                drained: false,
+                            },
+                        };
+                    }
+                    _ => live.mac_session_end_finished = true,
                 }
             }
             Err(_) => {
