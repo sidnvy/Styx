@@ -40,6 +40,9 @@ enum ProductNativeLaunchScope {
 
 // Sole owned process and one serial JSON-line stream. Never HTTP/Node fallback.
 final class ProductOwnedCore: @unchecked Sendable {
+    // UI navigation only, scoped to the profile selected by the normal bootstrap.
+    // No credential, grant or Core authority is stored in this preference key.
+    let uiPreferenceScope: String
     private let child: Process
     private let input: FileHandle
     private let output: FileHandle
@@ -61,6 +64,7 @@ final class ProductOwnedCore: @unchecked Sendable {
 
     // Only the fixed package bootstrap below can construct this owner.
     private init(cli: URL, selection: URL, state: URL, cliPin: FileHandle, selectionPin: FileHandle) throws {
+        uiPreferenceScope = productDigest(Data(state.standardizedFileURL.path.utf8))
         self.cliPin = cliPin; self.selectionPin = selectionPin
         child = Process(); let stdin = Pipe(), stdout = Pipe(), err = Pipe()
         input = stdin.fileHandleForWriting; output = stdout.fileHandleForReading; stderr = err.fileHandleForReading

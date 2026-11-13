@@ -13,6 +13,8 @@ namespace StyxNative {
   static object Get(object value,string name){return value.GetType().GetField(name,Fields).GetValue(value);}
   static void Set(object value,string name,object data){value.GetType().GetField(name,Fields).SetValue(value,data);}
   static void Check(bool value,string code){if(!value)throw new Exception(code);}
+  static Button FindButton(Settings settings,string title){foreach(Control c in ((FlowLayoutPanel)Get(settings,"content")).Controls)if(c is Button&&c.Text==title)return (Button)c;return null;}
+  static bool HasText(Settings settings,string text){foreach(Control c in ((FlowLayoutPanel)Get(settings,"content")).Controls)if(c.Text.Contains(text))return true;return false;}
   static async Task Until(Func<bool> ready,int seconds){var until=DateTime.UtcNow.AddSeconds(seconds);while(!ready()){if(DateTime.UtcNow>until)throw new Exception("fixture_deadline");await Task.Delay(20);}}
   static int Child(string mode,string dir){
    if(mode=="worker"){Console.In.ReadLine();return 0;}
@@ -67,7 +69,46 @@ namespace StyxNative {
    }
    var context=new StyxContext(resources,dir,true);var settings=(Settings)Get(context,"settings");settings.CreateControl();var handle=settings.Handle;
    if(mode=="capability-draft"){
-    Set(context,"snapshot",Json.Obj("mode","rust_host","supportedOperations",new object[]{"status","quitAdmission","createLocal","inspectJoin","join"}));
+    var operations=new object[]{"status","quitAdmission","createLocal","inspectJoin","join","retireRole"};
+    var fresh=Json.Obj("mode","rust_host","supportedOperations",operations);
+    Set(context,"snapshot",fresh);settings.ShowPage("general");
+    var freshJoin=FindButton(settings,"Join an existing Gateway");Check(freshJoin!=null&&freshJoin.Enabled,"fresh_general_join_missing");
+    ((Task)typeof(Settings).GetMethod("JoinGateway",Fields).Invoke(settings,null)).GetAwaiter().GetResult();
+    Check(Equals(Get(settings,"page"),"join"),"fresh_join_entry_did_not_open_join");
+    var setupFailure=typeof(Settings).GetMethod("ApplySetupFailure",Fields);
+    foreach(string inputCode in new[]{"app_input_invalid","app_lan_address_invalid","app_network_interface_changed","app_network_interface_required","app_network_interfaces_unavailable"}){
+     Set(settings,"localCreationSubmitted",true);setupFailure.Invoke(settings,new object[]{new NativeOperationException(inputCode),fresh});
+     Check(Equals(Get(settings,"localCreationSubmitted"),false),"known_pre_input_refusal_kept_submit_guard");
+     settings.ShowPage("general");Check(FindButton(settings,"Join an existing Gateway")!=null,"known_pre_input_refusal_hid_join");
+    }
+    foreach(Exception failure in new Exception[]{new IOException("unconfirmed transport"),new NativeOperationException("app_runtime_bootstrap_unknown")}){
+     Set(settings,"localCreationSubmitted",true);setupFailure.Invoke(settings,new object[]{failure,fresh});
+     Check(Equals(Get(settings,"localCreationSubmitted"),true),"unknown_setup_cleared_submit_guard");
+     settings.ShowPage("general");var blocked=FindButton(settings,"Join another Gateway…");
+     Check(blocked!=null&&!blocked.Enabled&&HasText(settings,"unconfirmed"),"unknown_setup_offered_new_join");
+    }
+    foreach(object observed in new object[]{null,Json.Obj("admission_fenced",true),Json.Obj("enrollment",Json.Obj("status","incomplete"))}){
+     Set(settings,"localCreationSubmitted",true);setupFailure.Invoke(settings,new object[]{new NativeOperationException("app_input_invalid"),observed});
+     Check(Equals(Get(settings,"localCreationSubmitted"),true),"input_error_without_fresh_empty_status_cleared_guard");
+    }
+    Set(settings,"localCreationSubmitted",false);
+    foreach(string field in new[]{"gateway","configuration","enrollment","admission_fenced"}){
+     Set(context,"snapshot",fresh);settings.ShowPage("welcome");
+     var retained=Json.Obj("mode","rust_host","supportedOperations",operations);
+     retained[field]=field=="admission_fenced"?(object)true:Json.Obj("status","incomplete");
+     Set(context,"snapshot",retained);settings.ShowStatus(retained);
+     Check(Equals(Get(settings,"page"),"overview"),"retained_setup_status_left_welcome_join");
+     settings.ShowPage("general");var another=FindButton(settings,"Join another Gateway…");
+     Check(another!=null&&another.Enabled==(field!="admission_fenced"),"retained_gateway_entry_ignored_review_boundary");
+     if(field=="admission_fenced")Check(HasText(settings,"unconfirmed"),"fenced_setup_warning_hidden");
+    }
+    Set(context,"snapshot",Json.Obj("mode","rust_host","enrollment",Json.Obj("status","awaiting_approval"),"supportedOperations",operations));
+    settings.ShowPage("general");Check(FindButton(settings,"Join another Gateway…")!=null&&FindButton(settings,"Join an existing Gateway")==null,"pending_join_offered_direct_fresh_setup");
+    settings.ShowPage("overview");Check(HasText(settings,"Join request sent — waiting for Gateway approval")&&FindButton(settings,"Check Gateway approval")!=null,"pending_join_did_not_explain_gateway_approval");
+    Set(context,"snapshot",Json.Obj("mode","rust_host","gateway",Json.Obj(),"supportedOperations",new object[]{"tunnelSave","tunnelStatus"}));settings.ShowPage("chat");
+    foreach(string step in new[]{"1. Connect the Gateway to Tunnel","2. Open ChatGPT Plugins","3. Set the name and icon","4. Fill in the connection fields","5. Connect and try Styx"})Check(HasText(settings,step),"chatgpt_setup_step_missing");
+    Check(HasText(settings,"single Styx plugin")&&HasText(settings,"Authentication: No authentication")&&HasText(settings,"runtime API key in Styx only"),"chatgpt_gateway_fields_or_key_boundary_missing");
+    Set(context,"snapshot",fresh);settings.ShowPage("chat");Check(!HasText(settings,"4. Fill in the connection fields"),"host_offered_gateway_tunnel_configuration");
     foreach(string page in new[]{"create","join"}){
      settings.ShowPage(page);var computer=(CheckBox)Get(settings,"computer");Check(computer.Enabled&&!computer.Checked,"fresh_desktop_not_explicit_opt_in");computer.Checked=true;
      var choice=(System.Collections.Generic.Dictionary<string,object>)typeof(Settings).GetMethod("Choice",Fields).Invoke(settings,null);Check(Equals(choice["computer"],true),"desktop_choice_not_sent_to_core");
@@ -88,6 +129,24 @@ namespace StyxNative {
      if(mode.StartsWith("observe",StringComparison.Ordinal)){
       Set(context,"snapshot",Json.Obj("mode","rust_host","supportedOperations",new object[]{"status","quitAdmission","fixtureFailure"},"foreground",Json.Obj("status","started","execConnection","connecting")));
       Set(context,"snapshot",Json.Obj("mode","rust_host","supportedOperations",new object[]{"status","quitAdmission","fixtureFailure"},"configuration",Json.Obj(),"foreground",Json.Obj("status","started","execConnection","connecting")));settings.ShowStatus(Get(context,"snapshot"));
+      if(mode=="observe"){
+       // Exercise the real message loop while a once-only write is deferred.
+       // No network or join response is fabricated by this callback fixture.
+       settings.Show();var releaseWrite=new TaskCompletionSource<bool>();int dispatches=0;
+       var waiting=context.Run(async()=>{dispatches++;await releaseWrite.Task;},Settings.JoinRequestProgress);
+       try{
+        var progress=(ProgressBar)Get(settings,"startupProgress");var area=(TableLayoutPanel)Get(settings,"startupPanel");
+        Check(settings.Enabled&&area.Visible&&progress.Visible&&progress.Style==ProgressBarStyle.Marquee,"pending_write_disabled_window_or_hid_progress");
+        Check(((Label)Get(settings,"startupText")).Text==Settings.JoinRequestProgress,"pending_join_progress_not_explicit");
+        Check(!((FlowLayoutPanel)Get(settings,"navigation")).Enabled&&!((FlowLayoutPanel)Get(settings,"content")).Enabled,"pending_write_inputs_not_locked");
+        bool pumped=false;settings.BeginInvoke(new Action(()=>{pumped=true;}));await Until(()=>pumped,5);
+        await context.Run(()=>{dispatches++;return Task.FromResult(0);},Settings.JoinRequestProgress);
+        Check(dispatches==1&&!waiting.IsCompleted,"pending_write_was_replayed_or_not_deferred");
+       }finally{releaseWrite.TrySetResult(true);}
+       await waiting;
+       Check(settings.Enabled&&!context.MutationBusy&&!((TableLayoutPanel)Get(settings,"startupPanel")).Visible&&((FlowLayoutPanel)Get(settings,"content")).Enabled&&((FlowLayoutPanel)Get(settings,"navigation")).Enabled,"completed_write_did_not_release_busy_ui");
+       settings.Hide();
+      }
       var content=(FlowLayoutPanel)Get(settings,"content");var draft=new TextBox {Text="keep this draft"};content.Controls.Add(draft);
       if(mode=="observe-mutation"){
        var reading=(Task)typeof(StyxContext).GetMethod("ObserveStatus",Fields).Invoke(context,null);

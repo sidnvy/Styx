@@ -441,12 +441,15 @@ impl HostCoordinator {
             .try_read_owned()
             .map_err(|_| CoordinatorError::Busy)?;
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
+        #[cfg(not(target_os = "macos"))]
         let slot = self
             .inner
             .slots
             .clone()
             .try_acquire_owned()
             .map_err(|_| CoordinatorError::Busy)?;
+        #[cfg(target_os = "macos")]
+        let slot: Option<tokio::sync::OwnedSemaphorePermit> = None;
         let mut state = self.inner.state.lock().expect("Host state mutex");
         if state.shutting_down {
             return Err(CoordinatorError::Busy);
@@ -570,12 +573,15 @@ impl HostCoordinator {
             .try_read_owned()
             .map_err(|_| CoordinatorError::Busy)?;
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
+        #[cfg(not(target_os = "macos"))]
         let slot = self
             .inner
             .slots
             .clone()
             .try_acquire_owned()
             .map_err(|_| CoordinatorError::Busy)?;
+        #[cfg(target_os = "macos")]
+        let slot: Option<tokio::sync::OwnedSemaphorePermit> = None;
         let mut state = self.inner.state.lock().expect("Host state mutex");
         if state.shutting_down {
             return Err(CoordinatorError::Busy);
@@ -754,6 +760,7 @@ impl HostCoordinator {
                 return Err(ErrorCategory::StateConflict.into());
             }
         }
+        #[cfg(not(target_os = "macos"))]
         let _slot = self
             .inner
             .slots

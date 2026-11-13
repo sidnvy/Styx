@@ -1037,7 +1037,7 @@ impl<'a> HostProtocol<'a> {
                     else if stop_requested && !matches!(&request.call, Call::OwnerCleanup { .. }) {
                         rejection(ErrorCategory::Unauthorized)
                     }
-                    else if pending.len() >= if matches!(&request.call, Call::OwnerCleanup { .. }) { 3 } else { 2 } { rejection(ErrorCategory::Busy) }
+                    else if !cfg!(target_os = "macos") && pending.len() >= if matches!(&request.call, Call::OwnerCleanup { .. }) { 3 } else { 2 } { rejection(ErrorCategory::Busy) }
                     else {
                         let owner = call_owner(&request.call).cloned();
                         // Poll once at admission: dispatch/cleanup synchronously

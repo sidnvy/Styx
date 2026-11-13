@@ -1,4 +1,4 @@
-//! One external Browser executor lane. Core permits, owner/profile/reference
+//! External Browser executors. Core permits, owner/profile/reference
 //! policy and operation outcomes stay in Rust; this module creates no ledger.
 use futures_util::FutureExt;
 use rmcp::{
@@ -17,8 +17,10 @@ use std::{
 };
 use styx_contracts::{capability::CapabilityId, identity::Sha256Digest, operation::OperationId};
 use styx_core::operations::{DispatchPermit, OwnerLease};
+#[cfg(not(target_os = "macos"))]
+use tokio::sync::Semaphore;
 use tokio::{
-    sync::{OwnedMutexGuard, OwnedSemaphorePermit, Semaphore},
+    sync::{OwnedMutexGuard, OwnedSemaphorePermit},
     task::JoinHandle,
     time::{Instant, timeout_at},
 };
@@ -57,9 +59,18 @@ fn canonical_path(path: &Path) -> Result<PathBuf> {
 
 const IO_BYTES: usize = 16 * 1024 * 1024;
 const FRAME_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(not(target_os = "macos"))]
 // One MiB logical retained metadata, conservatively 8KiB per record.
 // This is not an I/O pool or a second Host byte allocator. No live eviction.
 const MAX_RECORDS: usize = 128;
+#[cfg(not(target_os = "macos"))]
+type WorkerSlot = OwnedSemaphorePermit;
+#[cfg(target_os = "macos")]
+type WorkerSlot = ();
+#[cfg(not(target_os = "macos"))]
+type MetadataRecord = OwnedSemaphorePermit;
+#[cfg(target_os = "macos")]
+type MetadataRecord = ();
 pub use crate::providers::browser_contract::{BrowserAction, BrowserError};
 type Result<T> = std::result::Result<T, BrowserError>;
 /// Trusted bootstrap input only, never a network DTO. Caller verifies release
@@ -131,17 +142,32 @@ pub struct BrowserCleanup {
     pub context_closed: bool,
     pub descendants: BrowserDescendants,
 }
-/// Exclusive lane reservation from the SAME Host allocator. Metadata retention
-/// does not own the physical single-worker slot; only actual cleanup releases it.
+/// Non-macOS retains its original Host byte partition and single-worker gate.
+/// macOS allocates each executor's codec buffers on demand, without an aggregate
+/// worker-count or retained-metadata quota. Individual resources remain locked.
 pub struct BrowserIoBudget {
+    #[cfg(not(target_os = "macos"))]
     _partition: Arc<OwnedSemaphorePermit>,
+    #[cfg(not(target_os = "macos"))]
     active: Arc<Semaphore>,
 }
 impl BrowserIoBudget {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn platform_managed() -> Arc<Self> {
+        Arc::new(Self {})
+    }
     pub fn from_reserved(partition: OwnedSemaphorePermit) -> Result<Arc<Self>> {
         if partition.num_permits() != IO_BYTES {
             return Err(BrowserError::InvalidRequest);
         }
+        #[cfg(target_os = "macos")]
+        {
+            // Compatibility callers must not retain a one-worker reservation
+            // and misrepresent it as covering multiple live executors.
+            drop(partition);
+            Ok(Self::platform_managed())
+        }
+        #[cfg(not(target_os = "macos"))]
         Ok(Arc::new(Self {
             _partition: Arc::new(partition),
             active: Arc::new(Semaphore::new(1)),
@@ -177,11 +203,13 @@ struct Inner {
     reference_link: Arc<Mutex<ReferenceLink>>,
     budget: Arc<BrowserIoBudget>,
     resources: Mutex<BTreeMap<OperationId, Arc<Resource>>>,
+    #[cfg(not(target_os = "macos"))]
     metadata: Arc<Semaphore>,
 }
 struct Resource {
     reference_link: Arc<Mutex<ReferenceLink>>,
-    metadata_record: Mutex<Option<OwnedSemaphorePermit>>,
+    metadata_record: Mutex<Option<MetadataRecord>>,
+    #[cfg(not(target_os = "macos"))]
     metadata: Arc<Semaphore>,
     stop: CancellationToken,
     cleanup_job: Mutex<Option<tokio::sync::watch::Receiver<Option<BrowserCleanup>>>>,
@@ -210,7 +238,7 @@ struct Live {
     reference_revision: u64,
     workspace: PathBuf,
     output: PathBuf,
-    slot: Option<OwnedSemaphorePermit>,
+    slot: Option<WorkerSlot>,
     pins: Vec<File>,
     uncertain: bool,
     context_closed: bool,
@@ -221,7 +249,7 @@ struct Live {
             Sha256Digest,
             BrowserActionEvidence,
             Option<BrowserError>,
-            OwnedSemaphorePermit,
+            MetadataRecord,
         ),
     >,
     config_file: PathBuf,
@@ -259,8 +287,8 @@ pub struct BrowserOpenReceipt {
 }
 pub struct BrowserOpenSlot {
     worker: BrowserWorker,
-    slot: OwnedSemaphorePermit,
-    metadata: OwnedSemaphorePermit,
+    slot: WorkerSlot,
+    metadata: MetadataRecord,
 }
 pub struct BrowserActionSlot {
     captured_reference_revision: u64,
@@ -274,6 +302,7 @@ impl BrowserWorker {
                 reference_link: Arc::new(Mutex::new(ReferenceLink { revision: 1 })),
                 budget,
                 resources: Mutex::new(BTreeMap::new()),
+                #[cfg(not(target_os = "macos"))]
                 metadata: Arc::new(Semaphore::new(MAX_RECORDS)),
             }),
         }
@@ -287,6 +316,7 @@ impl BrowserWorker {
         // Poisoned mutex already makes every resolution/mint fail closed.
     }
     pub fn try_reserve_open(&self) -> Result<BrowserOpenSlot> {
+        #[cfg(not(target_os = "macos"))]
         if self
             .inner
             .resources
@@ -297,6 +327,7 @@ impl BrowserWorker {
         {
             return Err(BrowserError::Busy);
         }
+        #[cfg(not(target_os = "macos"))]
         let slot = self
             .inner
             .budget
@@ -304,12 +335,15 @@ impl BrowserWorker {
             .clone()
             .try_acquire_owned()
             .map_err(|_| BrowserError::Busy)?;
+        #[cfg(not(target_os = "macos"))]
         let metadata = self
             .inner
             .metadata
             .clone()
             .try_acquire_owned()
             .map_err(|_| BrowserError::Busy)?;
+        #[cfg(target_os = "macos")]
+        let (slot, metadata) = ((), ());
         Ok(BrowserOpenSlot {
             metadata,
             worker: self.clone(),
@@ -460,11 +494,11 @@ impl OwnedBrowserConfig {
         bytes
     }
     pub(crate) fn validate_metadata_bound(&self) -> Result<()> {
+        #[cfg(not(target_os = "macos"))]
         if self.retained_profile_bytes() > 128 * 1024 {
-            Err(BrowserError::InvalidRequest)
-        } else {
-            Ok(())
+            return Err(BrowserError::InvalidRequest);
         }
+        Ok(())
     }
 
     fn validate(&self) -> Result<()> {
@@ -652,6 +686,7 @@ impl BrowserOpenSlot {
         let resource = Arc::new(Resource {
             reference_link: self.worker.inner.reference_link.clone(),
             metadata_record: Mutex::new(Some(self.metadata)),
+            #[cfg(not(target_os = "macos"))]
             metadata: self.worker.inner.metadata.clone(),
             stop: CancellationToken::new(),
             cleanup_job: Mutex::new(None),
@@ -975,6 +1010,7 @@ impl BrowserActionSlot {
         if let Err(error) = action.validate() {
             return refuse(error);
         }
+        #[cfg(not(target_os = "macos"))]
         if self.state.actions.len() >= MAX_RECORDS {
             return refuse(BrowserError::Busy);
         }
@@ -1130,10 +1166,13 @@ impl BrowserActionSlot {
                     .into(),
                 );
             }
+            #[cfg(not(target_os = "macos"))]
             let metadata = match self.resource.metadata.clone().try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(_) => return refuse(BrowserError::Busy),
             };
+            #[cfg(target_os = "macos")]
+            let metadata = ();
             self.state.actions.insert(
                 operation.clone(),
                 (

@@ -434,10 +434,10 @@ namespace StyxNative {
    }
   }
   internal async Task Run(Func<Task> action,string pending="Working…",string failure="The operation could not be confirmed. Refresh to review current state. Completed steps are retained; an interrupted operation is not automatically repeated."){
-   if(busy||starting||core==null)return;string previousMessage=message.Text;busy=true;mutationDone=new TaskCompletionSource<bool>();mutationRevision++;settings.Enabled=false;message.Text=pending;settings.Feedback(pending);
+   if(busy||starting||core==null)return;string previousMessage=message.Text;busy=true;mutationDone=new TaskCompletionSource<bool>();mutationRevision++;settings.Startup(pending,true,false);message.Text=pending;settings.Feedback(pending);
    try{var reading=observation;if(reading!=null){try{await reading;}catch{}if(observation==reading)observation=null;}await action();if(settings.HasFeedback(pending))settings.Feedback("Operation completed. Review the current connection and test evidence below.");}
    catch(Exception error){string text=failure;var native=error as NativeOperationException;if(native!=null&&native.JoinNotSent)text="The pairing request was not sent. Check network access and allow styx incoming connections in the hub computer’s system prompt. Then paste a new invitation, review it and submit again. Styx will not retry automatically.";else if(native!=null&&native.Code=="pairing_link_expired_or_invalid")text="This invitation is invalid or has expired. Get a new invitation from your Gateway and review it before submitting again. Styx will not retry automatically.";else if(native!=null&&native.Code=="app_system_trust_not_supported")text="This native join currently requires an explicit Gateway CA in the invitation. System-trust-only joining is not supported; no CA or approval was fabricated.";else if(native!=null&&Array.IndexOf(new[]{"app_lan_address_invalid","app_network_interface_changed","app_network_interface_required","app_network_interfaces_unavailable"},native.Code)>=0)text="Select an available LAN or VPN network. If the network changed, detect networks again. Setup was not submitted.";else if(native!=null&&native.Code=="app_operation_not_supported")text="This operation is unavailable in the native Host slice. Existing settings were retained.";else if(native!=null&&native.Code=="host_payload_insufficient_space")text=SpaceFeedback(native.Budget,native.Preflight);else if(native!=null&&native.Code=="windows_native_app_binding_required")text="The desktop test could not start. This package could not verify the current native Styx app. Your settings are retained.";else if(native!=null&&native.Code=="desktop_acceptance_native_app_changed")text="The native Styx app changed during this desktop test. Create a new test in this app before continuing.";else if(native!=null&&native.Code=="app_login_result_unknown_no_replay")text="The login startup change is unconfirmed and will not be repeated. Check Windows startup settings. Quit and reopen Styx to read the system state.";else if(native!=null&&native.Code=="app_login_observation_changed")text="The Startup entry changed before the operation could finish. Styx preserved the current entry. Check its current state before making another explicit change.";else if(native!=null&&native.Code=="work_in_progress")text="A task is still running. Wait for it to finish before quitting or updating Styx.";else if(native!=null&&native.Code=="work_state_unknown")text="Styx could not confirm whether tasks are running. Keep it open and try again after checking the connection.";if(native!=null){string diagnostic=NativeFailureCode(native.Code);if(diagnostic.Length>0)text+="\nNative result: "+diagnostic;}message.Text="Connection needs attention. Open Settings to review the last result.";settings.Feedback(text);}
-   finally{if(message.Text==pending)message.Text=previousMessage;settings.Enabled=true;busy=false;mutationDone.TrySetResult(true);}
+   finally{if(message.Text==pending)message.Text=previousMessage;settings.Startup("",false,false);busy=false;mutationDone.TrySetResult(true);}
    // A mutation invalidates an in-flight startup observation. Resume only that
    // read after settling; never replay the mutation or block the ready controls.
    if(!closing&&core!=null&&ManagementOnly)LoadInitialDetails();else await CompleteStartupUpdate();
@@ -595,9 +595,10 @@ namespace StyxNative {
   internal void Startup(string text,bool checking,bool canRetry){
    startupPanel.Visible=checking||canRetry;startupText.Text=text;startupProgress.Visible=checking;retryStartup.Visible=canRetry;navigation.Enabled=!checking&&!canRetry;content.Enabled=!checking&&!canRetry;
   }
-  void Action(string title,Func<Task> action,bool mutation=true){StyxContext.Button(content,title,()=>mutation?owner.Run(action):owner.Read(action));}
+  void Action(string title,Func<Task> action,bool mutation=true,string pending="Working…"){StyxContext.Button(content,title,()=>mutation?owner.Run(action,pending):owner.Read(action));}
   void RefreshAction(){Action("Refresh status",owner.Refresh,false);}
   const string PreparationMessage="Preparing this computer…";
+  internal const string JoinRequestProgress="Preparing this computer and sending join request…";
   internal void ClearPreparationFeedback(){if(HasFeedback(PreparationMessage)||HasFeedback("Preparing signed components…"))Feedback("");}
   static bool PendingJoin(object data){
    if(Json.Str(data,"status","deployment","mode")!="join-existing")return false;
@@ -645,9 +646,8 @@ namespace StyxNative {
   static bool InvitationPage(string name){return name=="add-computer"||name=="pending-computers";}
   async Task ReadLogin(){ApplyLogin(await owner.Call("appLifecycle"));}
   void ApplyLogin(object response){string state=Json.Str(response,"lifecycle","status"),operation=Json.Str(response,"login","status");Feedback(!owner.LoginChangeAllowed||operation=="unknown"?"The last login startup change is unconfirmed and will not be repeated. Check Windows startup settings. Quit and reopen Styx to read the system state.":operation=="pending"?"A login startup change is awaiting its result. Styx will not repeat it.":state=="not_registered"?"Login startup is off.":state=="registered_unverified"?"Login startup is registered. Windows can disable it independently; check Windows startup settings.":state=="foreign"?"The existing Startup entry belongs to another app or installation. Styx preserved it.":"Login startup could not be observed. Check Windows startup settings; no startup entry was changed.");}
-  bool NeedsNativeSetup(object data){
-   return !localCreationSubmitted&&!Json.Yes(data,"admission_fenced")&&Json.Get(data,"gateway")==null&&Json.Get(data,"configuration")==null&&Json.Get(data,"enrollment")==null;
-  }
+  bool NativeSetupEmpty(object data){return Json.Str(data,"mode")=="rust_host"&&!Json.Yes(data,"admission_fenced")&&Json.Get(data,"gateway")==null&&Json.Get(data,"configuration")==null&&Json.Get(data,"enrollment")==null;}
+  bool NeedsNativeSetup(object data){return !localCreationSubmitted&&NativeSetupEmpty(data);}
   internal void ShowPage(string name){if(owner.RustHost&&name=="overview"&&NeedsNativeSetup(owner.CurrentStatus))name="welcome";if(Json.Yes(owner.CurrentStatus,"status","joinRecovery","rollbackRequired"))name="join-interrupted";if(owner.ManagementOnly&&name!="update-recovery"){if(name!="component-start")requestedPage=name;name="component-start";}if(InvitationPage(page)&&!InvitationPage(name))owner.FinishInviting();page=name;updateRuntime=null;desktopInput=null;desktopInputLabel=null;challengePrompt=null;confirmChat=null;var previous=new Control[content.Controls.Count];content.Controls.CopyTo(previous,0);foreach(var item in previous)if(item!=feedback&&item!=statusReadout&&item!=observationError){var picture=item as PictureBox;if(picture!=null&&picture.Image!=null)picture.Image.Dispose();item.Dispose();}content.Controls.Clear();Status("");if(!owner.RustHost||name=="welcome"||name=="create"||name=="join")owner.Logo(content,48);StyxContext.Heading(content,name=="general"?"General":name=="runtime-settings"?"Runtime components":name=="login-startup"?"Startup":name=="chat"?"ChatGPT":(name=="overview"||name=="component-start"||name=="update-recovery")?"Computers":"Get started with Styx");
    renderedRustMode=owner.RustHost;if(renderedRustMode){ShowRustPage(name);return;}
    if(name=="welcome"){
@@ -688,7 +688,7 @@ namespace StyxNative {
     StyxContext.Heading(content,"1. Connect this computer");Explain("Sign in to the OpenAI Platform with the organization you will use in ChatGPT. Create a Secure MCP Tunnel. Copy its Tunnel ID and runtime key into the fields below.",100);Action("Open tunnel settings",()=>{Process.Start("https://platform.openai.com/settings/organization/tunnels");return Task.FromResult(0);},false);
     tunnel=Input("Tunnel ID");tunnel.Text=tunnelDraft;tunnel.TextChanged+=(s,e)=>tunnelDraft=((TextBox)s).Text;key=Input("Tunnel runtime key",true);key.Text=keyDraft;key.TextChanged+=(s,e)=>keyDraft=((TextBox)s).Text;
     Action("Save and connect tunnel",async()=>{var input=Json.Obj("tunnelId",tunnel.Text.Trim(),"runtimeKey",key.Text);await owner.Call("tunnelSave",input);await owner.Call("tunnelStart");await owner.RefreshAfterMutation();key.Clear();Feedback("Tunnel settings saved and start requested. Check the transport status below; tool execution and account confirmation remain separate.");});
-    RefreshAction();CustomMcpGuide();StyxContext.Heading(content,"3. Test in a new chat");Explain("Start a new chat with your Styx plugin selected. Create a test below, then copy its prompt into that chat.",75);Action("Create ChatGPT test",async()=>{ApplyAcceptance(Json.Get(await owner.Call("acceptanceBegin"),"acceptance"));Feedback("The test is ready. Run the current prompt through this Styx connection in your target ChatGPT chat.");});
+    RefreshAction();CustomMcpGuide();StyxContext.Heading(content,"Test in a new chat");Explain("Start a new chat with your Styx plugin selected. Create a test below, then copy its prompt into that chat.",75);Action("Create ChatGPT test",async()=>{ApplyAcceptance(Json.Get(await owner.Call("acceptanceBegin"),"acceptance"));Feedback("The test is ready. Run the current prompt through this Styx connection in your target ChatGPT chat.");});
     desktopInputLabel=StyxContext.Text(content,"桌面验收输入框",22);desktopInput=new TextBox {Width=490,Name="styx_desktop_acceptance_input",AccessibleName="桌面验收输入框",AccessibleDescription="Current Styx desktop acceptance challenge input",MaxLength=256};desktopInput.TextChanged+=(s,e)=>readbackSubmitted=null;content.Controls.Add(desktopInput);challengePrompt=new TextBox {Width=490,Height=180,Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Vertical,AccessibleName="Current ChatGPT test prompt"};content.Controls.Add(challengePrompt);
     confirmChat=StyxContext.Button(content,"I saw the successful test in ChatGPT",()=>owner.Run(async()=>{if(!TargetProofReady(acceptance)||String.IsNullOrEmpty(challengeId))throw new InvalidOperationException();await owner.Call("acceptanceConfirm",Json.Obj("challengeId",challengeId));await owner.RefreshAfterMutation();Feedback("Your target-chat confirmation has been recorded with the tool evidence. Provider account identity is not independently verified.");}));
     Explain("A running tunnel does not verify tool execution or your ChatGPT account.",55);RenderAcceptance();
@@ -696,7 +696,28 @@ namespace StyxNative {
    if((page=="overview"||page=="chat")&&owner.CurrentStatus!=null)Status(EvidenceStatus(owner.CurrentStatus));content.Controls.Add(statusReadout);content.Controls.Add(observationError);content.Controls.Add(feedback);
   }
   void Unavailable(string title){var button=StyxContext.Button(content,title+" — unavailable in this native slice",()=>Task.FromResult(0));button.Enabled=false;}
-  async Task ChangeRole(){
+  Task ChangeRole(){return ChangeRoleAndShow("welcome");}
+  bool JoinNeedsReview(object data){return Json.Yes(data,"admission_fenced")||(localCreationSubmitted&&Json.Get(data,"gateway")==null&&Json.Get(data,"configuration")==null&&Json.Get(data,"enrollment")==null);}
+  async Task JoinGateway(){
+   if(JoinNeedsReview(owner.CurrentStatus)){Feedback("The previous setup result is unconfirmed. Refresh status and review it before changing Gateway. Your existing settings are retained.");return;}
+   if(NeedsNativeSetup(owner.CurrentStatus)){Feedback("");ShowPage("join");return;}
+   await ChangeRoleAndShow("join");
+  }
+  void JoinGatewayAction(){
+   bool fresh=NeedsNativeSetup(owner.CurrentStatus);string title=fresh?"Join an existing Gateway":"Join another Gateway…";
+   if(!owner.Supports(fresh?"inspectJoin":"retireRole")){Unavailable(title);return;}
+   var button=StyxContext.Button(content,title,()=>owner.Run(JoinGateway));button.Enabled=!JoinNeedsReview(owner.CurrentStatus);
+   if(!button.Enabled)Explain("Your previous setup result is unconfirmed. Review the status below before changing Gateway. Existing settings and pairing are retained.",85);
+   else if(!fresh)Explain("You will review a change of role before disconnecting this computer and pairing with another Gateway.",65);
+  }
+  void ApplySetupFailure(Exception failure,object observed){
+   var native=failure as NativeOperationException;
+   // A closed input refusal AND a successful post-failure Rust observation
+   // must show no retained/published setup. Never infer this from a stale
+   // snapshot, an error string alone or a lost transport response.
+   if(native!=null&&NativeSetupEmpty(observed)&&Array.IndexOf(new[]{"app_input_invalid","app_lan_address_invalid","app_network_interface_changed","app_network_interface_required","app_network_interfaces_unavailable"},native.Code)>=0)localCreationSubmitted=false;
+  }
+  async Task ChangeRoleAndShow(string destination){
    if(MessageBox.Show(this,"This computer will disconnect, back up its current settings, and be paired again.","Change this computer's role…",MessageBoxButtons.OKCancel,MessageBoxIcon.Question)!=DialogResult.OK)return;
    var stopped=await owner.Call("quitAdmission");if(Json.Str(stopped,"quit","status")!="ready_to_quit")throw new IOException();
    // The C# 5 compiler does not allow await inside catch blocks.
@@ -709,13 +730,20 @@ namespace StyxNative {
     result=await owner.Call("retireRole",Json.Obj("allowOtherDevices",true));
    }
    if(Json.Yes(result,"retirement","restartRequired"))throw new IOException();
-   localCreationSubmitted=false;joinOrigin="";joinCa="";await owner.RefreshAfterMutation();ShowPage("welcome");
+   localCreationSubmitted=false;joinOrigin="";joinCa="";await owner.RefreshAfterMutation();
+   // Retirement and its fresh status must both prove a clean setup boundary.
+   // Never enter Join with pending, fenced or retained role state.
+   ShowPage(destination=="join"&&NeedsNativeSetup(owner.CurrentStatus)?"join":"welcome");
   }
-  void NativeAction(string title,string operation,Func<Task> action){if(owner.Supports(operation))Action(title,action);else Unavailable(title);}
+  void NativeAction(string title,string operation,Func<Task> action,string pending="Working…"){if(owner.Supports(operation))Action(title,action,true,pending);else Unavailable(title);}
   void CustomMcpGuide(){
-   StyxContext.Heading(content,"Add Styx in ChatGPT");
-   Explain("Wait for the hub's tunnel to be ready. In the intended ChatGPT account and workspace, open Plugins > Add > Add custom MCP server. Reuse a working Custom MCP connection for this hub; do not delete an existing plugin.",115);
-   Explain("Name it Styx (add the computer name for multiple hubs). Save the icon below, then upload it with Choose icon. Select Connection: Tunnel, paste the hub's Tunnel ID, and select Authentication: No authentication. Keep the runtime key only in Styx.",130);
+   StyxContext.Heading(content,"1. Connect the Gateway to Tunnel");
+   Explain("Configure Tunnel on the computer running your Gateway, then check that Tunnel is ready. Joined computers share this Gateway's single Styx plugin; they do not need another Tunnel or plugin.",100);
+   StyxContext.Heading(content,"2. Open ChatGPT Plugins");
+   Explain("In your intended ChatGPT account and workspace, choose Add > Add custom MCP server. If this Gateway already has a working Styx connection, keep using it.",85);
+   Action("Open ChatGPT Plugins",()=>{Process.Start("https://chatgpt.com/plugins");return Task.FromResult(0);},false);
+   StyxContext.Heading(content,"3. Set the name and icon");
+   Explain("Name: Styx. Save the icon below, then upload it using Choose icon.",55);
    Action("Save Styx icon (under 10 KB)…",()=>{
     var bytes=File.ReadAllBytes(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"styx-custom-mcp-icon.png"));
     if(bytes.Length>10000)throw new IOException("The upload icon exceeds the ChatGPT size limit.");
@@ -724,9 +752,11 @@ namespace StyxNative {
     }
     return Task.FromResult(0);
    },false);
-   Explain("Review the notice, choose Create as a plugin, then Connect. Refresh the installed detail page and check that the Styx logo remains. Choose Try in chat and send: List my Styx computers.",100);
-   Explain("If Add custom MCP server is missing, check Developer mode and workspace permissions. Custom MCP connects tools without installing the ZIP's skills. ZIP installation may replace the logo, so use this Custom MCP path.",105);
-   Action("Open ChatGPT Plugins",()=>{Process.Start("https://chatgpt.com/plugins");return Task.FromResult(0);},false);
+   StyxContext.Heading(content,"4. Fill in the connection fields");
+   Explain("Connection: Tunnel\nTunnel ID: the same Tunnel ID saved on your Gateway\nAuthentication: No authentication\nKeep the runtime API key in Styx only; do not paste it into ChatGPT.",120);
+   StyxContext.Heading(content,"5. Connect and try Styx");
+   Explain("Review the notice, choose Create as a plugin, then Connect. Choose Try in chat and send: List my Styx computers. Check that your Gateway and joined computers appear.",100);
+   Explain("If Add custom MCP server is missing, check Developer mode and workspace permissions.",65);
   }
   async Task ShowNativeComputers(){
    var response=await owner.Call("computers");ShowPage("overview");
@@ -810,7 +840,17 @@ namespace StyxNative {
     try{dialog.ShowDialog(this);}finally{if(large.Image!=null)large.Image.Dispose();if(small.Image!=null)small.Image.Dispose();}
    }
   }
-  string NativeStatus(object data){var enrollment=Json.Get(data,"enrollment");string text="Exec transport: "+Json.Str(data,"foreground","execConnection")+"\nHost: "+Json.Str(data,"foreground","status");if(Json.Get(data,"gateway")!=null)text+="\nLocal gateway address: "+Json.Str(data,"gateway","origin")+"\nLocal gateway: "+(Json.Yes(data,"gateway","running")&&Json.Yes(data,"gateway","listening")?"running":"status not confirmed");if(Json.Yes(data,"gateway","lan","enabled")&&!String.IsNullOrEmpty(Json.Str(data,"gateway","lan","origin")))text+="\nOther computers on your network can join at "+Json.Str(data,"gateway","lan","origin")+". Choose Add computer to create an invitation.";if(Json.Yes(data,"admission_fenced"))text+="\nThe last setup result is unconfirmed. Refresh status to review it; your existing settings have been retained.";string status=Json.Str(enrollment,"status");if(status.Length>0)text+="\nEnrollment: "+status+"\nDevice: "+Json.Str(enrollment,"device_id");if(status=="awaiting_approval")text+="\nCompare on your Gateway: "+Json.Str(enrollment,"comparison_code")+"\nFingerprint: "+Json.Str(enrollment,"fingerprint")+"\nApproval must be performed on the Gateway. Then check confirmation here.";return text+"\nTool execution, desktop control and target ChatGPT account acceptance are not inferred from connection status.";}
+  string NativeStatus(object data){
+   var enrollment=Json.Get(data,"enrollment");string status=Json.Str(enrollment,"status"),text="";
+   if(Json.Yes(data,"admission_fenced"))text="The last setup result is unconfirmed. Refresh status to review it; your existing settings have been retained.\n\n";
+   if(status=="awaiting_approval")text+="Join request sent — waiting for Gateway approval\nThe Gateway owner must approve this computer on the Gateway.\n\n";
+   text+="Exec transport: "+Json.Str(data,"foreground","execConnection")+"\nHost: "+Json.Str(data,"foreground","status");
+   if(Json.Get(data,"gateway")!=null)text+="\nLocal gateway address: "+Json.Str(data,"gateway","origin")+"\nLocal gateway: "+(Json.Yes(data,"gateway","running")&&Json.Yes(data,"gateway","listening")?"running":"status not confirmed");
+   if(Json.Yes(data,"gateway","lan","enabled")&&!String.IsNullOrEmpty(Json.Str(data,"gateway","lan","origin")))text+="\nOther computers on your network can join at "+Json.Str(data,"gateway","lan","origin")+". Choose Add computer to create an invitation.";
+   if(status.Length>0)text+="\nEnrollment: "+status+"\nDevice: "+Json.Str(enrollment,"device_id");
+   if(status=="awaiting_approval")text+="\nCompare on your Gateway: "+Json.Str(enrollment,"comparison_code")+"\nFingerprint: "+Json.Str(enrollment,"fingerprint")+"\nThen choose Check Gateway approval here.";
+   return text+"\nTool execution, desktop control and target ChatGPT account acceptance are not inferred from connection status.";
+  }
   string NativeSettingsStatus(object data){
    if(data!=null&&NeedsNativeSetup(data)&&(page=="welcome"||page=="create"||page=="join"))return "This computer is not configured. Complete setup or join a Gateway to connect.";
    if(Json.Str(data,"enrollment","status")=="rejected")return "The Gateway rejected this request. No access was granted. Change this computer's setup to apply again with a new invitation.";
@@ -829,6 +869,7 @@ namespace StyxNative {
   }
   void ShowRustPage(string name){
    if(name=="general"){
+    StyxContext.Heading(content,"Gateway");JoinGatewayAction();
     StyxContext.Heading(content,"Startup");
     Explain("Closing the window keeps Styx running in the system tray. Choose Quit Styx to stop this session.");
     StyxContext.Button(content,"Quit Styx",owner.RequestQuit);
@@ -838,7 +879,7 @@ namespace StyxNative {
     var advanced=StyxContext.Button(content,"Advanced: runtime components",()=>{ShowPage("runtime-settings");return Task.FromResult(0);});advanced.MinimumSize=new Size(260,36);
    }else if(name=="runtime-settings"){
     Explain("Runtime updates preserve your identity, pairing and settings. Both App roles are stopped first and stay stopped until you reconnect. The two configuration updates are separate transactions.",95);
-    NativeAction("Stage runtime candidate","stageRuntime",async()=>{await owner.Call("stageRuntime",new Dictionary<string,object>{{"authorize",true}});await owner.RefreshAfterMutation();ShowPage("runtime-settings");});
+    NativeAction("Prepare runtime update","stageRuntime",async()=>{await owner.Call("stageRuntime",new Dictionary<string,object>{{"authorize",true}});await owner.RefreshAfterMutation();ShowPage("runtime-settings");});
     NativeAction("Check runtime update","runtimeUpdateStatus",async()=>{await owner.Call("runtimeUpdateStatus");await owner.RefreshAfterMutation();ShowPage("runtime-settings");});
     string updateState=Json.Str(owner.CurrentStatus,"runtimeUpdate","status"),updateTransaction=Json.Str(owner.CurrentStatus,"runtimeUpdate","transaction_id");
     if(updateState=="staged")NativeAction("Update runtime…","updateRuntime",async()=>{if(MessageBox.Show(this,"Update this App’s runtime components? Your identity, pairing and settings will be kept. Connections will pause; reconnect when the update completes. If it does not complete, use Recover update.","Update runtime",MessageBoxButtons.OKCancel,MessageBoxIcon.Question)!=DialogResult.OK)return;await owner.Call("updateRuntime",new Dictionary<string,object>{{"authorize",true},{"transactionId","app-runtime-"+Guid.NewGuid().ToString("N")}});await owner.RefreshAfterMutation();ShowPage("runtime-settings");});
@@ -848,7 +889,7 @@ namespace StyxNative {
    }else if(name=="welcome"){
 
     if(!NeedsNativeSetup(owner.CurrentStatus)){Explain("Your existing settings and setup progress have been retained. Open this computer to review the current status.",65);Action("Open this computer",ContinueJoiningView,false);}
-    else{Explain("Set up a local gateway and connect this computer, or join a gateway you already own.",65);NativeAction("Set up this computer","createLocal",()=>{Feedback("");ShowPage("create");return Task.FromResult(0);});NativeAction("Join an existing Gateway","inspectJoin",()=>{Feedback("");ShowPage("join");return Task.FromResult(0);});}
+    else{Explain("Set up a local gateway and connect this computer, or join a gateway you already own.",65);NativeAction("Set up this computer","createLocal",()=>{Feedback("");ShowPage("create");return Task.FromResult(0);});JoinGatewayAction();}
     NativeAction("Change this computer's role…","retireRole",ChangeRole);
     NativeAction("Login startup","appLifecycle",async()=>{ShowPage("login-startup");await ReadLogin();});
    }else if(name=="login-startup"){
@@ -903,8 +944,8 @@ namespace StyxNative {
      Exception setupFailure=null;
      try{await owner.Call("createLocal",choice);}catch(Exception failure){setupFailure=failure;}
      var nativeFailure=setupFailure as NativeOperationException;bool invalidLan=nativeFailure!=null&&Array.IndexOf(new[]{"app_lan_address_invalid","app_network_interface_changed","app_network_interface_required","app_network_interfaces_unavailable"},nativeFailure.Code)>=0;
-     if(invalidLan)localCreationSubmitted=false; // Core refused before publishing setup inputs.
-     try{await owner.RefreshAfterMutation();}catch{}ShowPage(invalidLan?"create":"overview");
+     object observed=null;try{await owner.RefreshAfterMutation();observed=owner.CurrentStatus;}catch{}
+     ApplySetupFailure(setupFailure,observed);ShowPage(invalidLan&&!localCreationSubmitted?"create":"overview");
      if(setupFailure!=null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(setupFailure).Throw();
     });
     Action("Return",()=>{ShowPage("welcome");return Task.FromResult(0);},false);
@@ -913,13 +954,17 @@ namespace StyxNative {
     channel.Items[0]="Choose Microsoft Edge or Google Chrome";channel.Enabled=browser.Checked;browser.CheckedChanged+=(s,e)=>channel.Enabled=browser.Checked;
     Explain("Choose the features to request from your Gateway. Computer Use is optional; it requires Gateway approval and an available signed-in desktop. Browser Automation uses a separate, temporary profile.",85);
     joinOrigin="";joinCa="";link=Input("Private pairing link",true);
-    NativeAction("Review pairing link","inspectJoin",async()=>{joinOrigin="";joinCa="";string invitation=link.Text;link.Clear();var result=await owner.Call("inspectJoin",Json.Obj("link",invitation));if(String.IsNullOrEmpty(Json.Str(result,"inspectionId")))throw new IOException();joinOrigin=Json.Str(result,"preview","origin");joinCa=Json.Str(result,"preview","caSha256");Feedback("Gateway: "+joinOrigin+"\nCertificate SHA-256: "+(joinCa.Length>0?joinCa:"System trust is not supported in this slice")+"\nExpires: "+Convert.ToString(Json.Get(result,"preview","expiresAt"))+"\nApprove only after independently checking this Gateway and certificate.");});
-    NativeAction("Approve Gateway and request to join","join",async()=>{if(String.IsNullOrEmpty(joinOrigin))throw new InvalidOperationException();if(String.IsNullOrEmpty(joinCa))throw new NativeOperationException("app_system_trust_not_supported");if(browser.Checked&&channel.SelectedIndex==0){Feedback("Choose Microsoft Edge or Google Chrome before requesting Browser Automation.");return;}var choice=Choice();if(!browser.Checked)choice["browserChannel"]=null;choice["approvedGatewayOrigin"]=joinOrigin;choice["approvedCaSha256"]=joinCa;joinOrigin="";joinCa="";var result=await owner.Call("join",choice);if(Json.Str(result,"status")!="awaiting_approval")throw new IOException();await owner.RefreshAfterMutation();ShowPage("overview");Feedback("Request submitted. Compare the original code on your Gateway and explicitly approve this device there.");});
+    NativeAction("Review pairing link","inspectJoin",async()=>{joinOrigin="";joinCa="";string invitation=link.Text;link.Clear();var result=await owner.Call("inspectJoin",Json.Obj("link",invitation));if(String.IsNullOrEmpty(Json.Str(result,"inspectionId")))throw new IOException();joinOrigin=Json.Str(result,"preview","origin");joinCa=Json.Str(result,"preview","caSha256");Feedback("Gateway: "+joinOrigin+"\nCertificate SHA-256: "+(joinCa.Length>0?joinCa:"System trust is not supported in this slice")+"\nExpires: "+Convert.ToString(Json.Get(result,"preview","expiresAt"))+"\nCheck this Gateway identity and certificate. Sending a request does not grant this computer access.");});
+    NativeAction("Trust this Gateway and send request","join",async()=>{if(String.IsNullOrEmpty(joinOrigin))throw new InvalidOperationException();if(String.IsNullOrEmpty(joinCa))throw new NativeOperationException("app_system_trust_not_supported");if(browser.Checked&&channel.SelectedIndex==0){Feedback("Choose Microsoft Edge or Google Chrome before requesting Browser Automation.");return;}var choice=Choice();if(!browser.Checked)choice["browserChannel"]=null;choice["approvedGatewayOrigin"]=joinOrigin;choice["approvedCaSha256"]=joinCa;joinOrigin="";joinCa="";var result=await owner.Call("join",choice);if(Json.Str(result,"status")!="awaiting_approval")throw new IOException();await owner.RefreshAfterMutation();ShowPage("overview");Feedback("Join request sent. The Gateway owner must compare the code and approve this computer on the Gateway. Then choose Check Gateway approval here.");},JoinRequestProgress);
     Action("Return",()=>{ShowPage("welcome");return Task.FromResult(0);},false);
    }else if(name=="overview"||name=="join-waiting"){
-    Explain("Styx keeps your local connection and gateway running while the App is open. If you joined another computer, its gateway is still used.",85);RefreshAction();string enrollment=Json.Str(owner.CurrentStatus,"enrollment","status");
-    if(enrollment=="awaiting_approval")NativeAction("Check confirmation","claimJoin",async()=>{var result=await owner.Call("claimJoin");string actual=Json.Str(result,"status");if(actual!="awaiting_approval"&&actual!="ready_to_connect"&&actual!="rejected")throw new IOException();await owner.RefreshAfterMutation();ShowPage("overview");Feedback(actual=="rejected"?"The Gateway rejected this request. No access was granted.":actual=="awaiting_approval"?"The Gateway has not approved this request. No connection was started.":"The Gateway confirmed this identity. Check the current connection status above.");});
+    string enrollment=Json.Str(owner.CurrentStatus,"enrollment","status");
+    if(enrollment=="awaiting_approval"){StyxContext.Heading(content,"Join request sent — waiting for Gateway approval");Explain("The Gateway owner must compare the code below and approve this computer on the Gateway. Then choose Check Gateway approval here. No need to send the request again.",100);}
+    else Explain("Styx keeps your local connection and gateway running while the App is open. If you joined another computer, its gateway is still used.",85);
+    RefreshAction();
+    if(enrollment=="awaiting_approval")NativeAction("Check Gateway approval","claimJoin",async()=>{var result=await owner.Call("claimJoin");string actual=Json.Str(result,"status");if(actual!="awaiting_approval"&&actual!="ready_to_connect"&&actual!="rejected")throw new IOException();await owner.RefreshAfterMutation();ShowPage("overview");Feedback(actual=="rejected"?"The Gateway rejected this request. No access was granted.":actual=="awaiting_approval"?"The Gateway has not approved this request. No connection was started.":"The Gateway confirmed this identity. Check the current connection status above.");});
     if(Json.Str(owner.CurrentStatus,"foreground","error")!="gateway_wss_admission_refused")NativeAction("Reconnect","connect",async()=>{await owner.Call("connect");await owner.RefreshAfterMutation();Feedback(StyxContext.ReconnectResult(owner.CurrentStatus));});NativeAction("Pause","disconnect",async()=>{await owner.Call("disconnect");await owner.RefreshAfterMutation();});
+    JoinGatewayAction();
     NativeAction("Change this computer's role…","retireRole",ChangeRole);
     if(owner.Supports("computers")){
      NativeAction("Computers…","computers",ShowNativeComputers);
@@ -1020,7 +1065,7 @@ namespace StyxNative {
    catch(NativeOperationException error){readbackSubmitted=id+":"+window;Feedback(error.Code=="desktop_acceptance_native_app_changed"?"The native Styx app changed. Create a new desktop test before continuing.":"The desktop readback could not be confirmed. Refresh status and create a new test before retrying.");}catch{readbackSubmitted=id+":"+window;Feedback("The desktop readback could not be confirmed. Refresh status and create a new test before retrying.");}finally{readbackInFlight=false;}
   }
   internal void ShowStatus(object data){
-   if(owner.RustHost){SetText(observationError,"",0);if(!renderedRustMode){ShowPage(page=="welcome"&&(Json.Get(data,"configuration")!=null||Json.Get(data,"enrollment")!=null)?"overview":page);return;}if(page=="welcome"&&(Json.Get(data,"configuration")!=null||Json.Get(data,"enrollment")!=null)){ShowPage("overview");return;}if((page=="overview"||page=="join-waiting")&&renderedRustOverviewKey!=NativeOverviewKey(data)){ShowPage("overview");return;}Status(NativeSettingsStatus(data));return;}
+   if(owner.RustHost){SetText(observationError,"",0);if(!renderedRustMode){ShowPage(page=="welcome"&&!NeedsNativeSetup(data)?"overview":page);return;}if(page=="welcome"&&!NeedsNativeSetup(data)){ShowPage("overview");return;}if((page=="overview"||page=="join-waiting")&&renderedRustOverviewKey!=NativeOverviewKey(data)){ShowPage("overview");return;}Status(NativeSettingsStatus(data));return;}
    if(page=="join-interrupted"&&!Json.Yes(data,"status","joinRecovery","rollbackRequired"))ShowPage("overview");
    if(page=="component-start"&&!owner.ManagementOnly)ShowPage(requestedPage);
    if(updateRuntime!=null)updateRuntime.Visible=CanUpdateRuntime(data);

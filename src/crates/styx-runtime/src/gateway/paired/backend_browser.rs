@@ -8,6 +8,7 @@ use crate::{
     providers::browser_contract::BrowserAction,
 };
 use styx_contracts::error::{ErrorCategory, ExecutionCertainty};
+#[cfg(not(target_os = "macos"))]
 const MAX_BROWSER_CONTEXTS: usize = 64;
 const MAX_BROWSER_RESULT_BYTES: usize = 128 * 1024;
 
@@ -210,6 +211,7 @@ impl PairedGatewayBackend {
         if !create {
             return Ok(None);
         }
+        #[cfg(not(target_os = "macos"))]
         if state.browsers.entries.len() >= MAX_BROWSER_CONTEXTS
             || (!state.owners.contains_key(owner.owner_id()) && state.owners.len() >= MAX_OWNERS)
         {

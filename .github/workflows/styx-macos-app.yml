@@ -6,13 +6,20 @@ on:
   pull_request:
     paths: ['src/**', '.github/workflows/styx-macos-app.yml']
   workflow_dispatch:
+    inputs:
+      quick_build:
+        description: Compile and sign macOS Core only; skip tests and quality
+        type: boolean
+        default: false
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 permissions:
   contents: read
+  actions: read
 jobs:
   compile:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.quick_build) }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -41,3 +48,155 @@ jobs:
         run: python src/host/macos/liveness-acceptance.py "$STYX_NATIVE_TEST_BINARY" "$RUNNER_TEMP/styx-liveness-cua/cua-driver"
       - name: Record boundaries
         run: echo 'Synthetic native window/Core fixtures and the Cua owner lifetime are checked. Developer ID signing, notarization, LaunchServices responsibility, TCC, real desktop automation, full app crash recovery, and upgrade permission persistence NOT RUN.' >> "$GITHUB_STEP_SUMMARY"
+
+  quick-build:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.quick_build }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    environment: release
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.23.3'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: '1.97.1'
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+            target
+          key: release-macos-aarch64-apple-darwin-rust1971-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            release-macos-aarch64-apple-darwin-rust1971-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
+            release-macos-aarch64-apple-darwin-rust1971-
+      - name: Import existing macOS signing identity
+        env:
+          STYX_MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.STYX_MACOS_CERTIFICATE_P12_BASE64 }}
+          STYX_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.STYX_MACOS_CERTIFICATE_PASSWORD }}
+        run: python3 src/ci/release-ci.py mac-keychain --directory "$RUNNER_TEMP/mac-signing"
+      - name: Compile and sign macOS Core without quality gates
+        run: python3 -I -B src/ci/macos-quick-build.py --source-revision "$GITHUB_SHA" --target-dir "$CARGO_TARGET_DIR" --output "$RUNNER_TEMP/native-macos-quick" --local-signing "$RUNNER_TEMP/mac-signing/local-signing.json"
+      - name: Archive actual native output and compile-only receipt
+        run: python3 src/ci/release-ci.py bundle --source "$RUNNER_TEMP/native-macos-quick" --output "$RUNNER_TEMP/native-macos-quick.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-macos-quick
+          path: ${{ runner.temp }}/native-macos-quick.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remove temporary macOS signing identity
+        if: ${{ always() }}
+        run: python3 src/ci/release-ci.py mac-keychain-clean --directory "$RUNNER_TEMP/mac-signing"
+
+  quick_seal:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.quick_build }}
+    needs: quick-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.23.3'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: native-macos-quick
+          path: ${{ runner.temp }}/native-input
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: workers-macos
+          path: ${{ runner.temp }}/worker-input
+          github-token: ${{ github.token }}
+          run-id: '43415867539'
+      - name: Restore compiled Core and existing signed workers
+        run: |
+          python3 src/ci/release-ci.py extract --source "$RUNNER_TEMP/native-input/native-macos-quick.tar.gz" --output "$RUNNER_TEMP/native"
+          python3 src/ci/release-ci.py extract --source "$RUNNER_TEMP/worker-input/workers-macos.tar.gz" --output "$RUNNER_TEMP/workers"
+      - name: Seal macOS Runtime without quality gates
+        env:
+          STYX_PUBLISHER_PRIVATE_KEY_PEM: ${{ secrets.STYX_PUBLISHER_PRIVATE_KEY_PEM }}
+        run: |
+          python3 src/ci/release-ci.py publisher-key --output "$RUNNER_TEMP/publisher-private.pem"
+          trap 'rm -f "$RUNNER_TEMP/publisher-private.pem"' EXIT
+          python3 -I -B src/ci/macos-quick-package.py seal --revision "$GITHUB_SHA" --native "$RUNNER_TEMP/native" --workers "$RUNNER_TEMP/workers" --key "$RUNNER_TEMP/publisher-private.pem" --output "$RUNNER_TEMP/sealed" --version "0.4.0-macos-unlimited.${GITHUB_SHA:0:8}"
+      - name: Archive immutable package inputs
+        run: |
+          mkdir "$RUNNER_TEMP/quick-package-inputs"
+          python3 src/ci/release-ci.py bundle --source "$RUNNER_TEMP/sealed" --output "$RUNNER_TEMP/quick-package-inputs/sealed.tar.gz"
+          python3 src/ci/release-ci.py bundle --source "$RUNNER_TEMP/workers" --output "$RUNNER_TEMP/quick-package-inputs/workers.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: quick-package-inputs
+          path: ${{ runner.temp }}/quick-package-inputs/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  quick_app:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.quick_build }}
+    needs: quick_seal
+    runs-on: macos-15
+    timeout-minutes: 30
+    environment: release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.23.3'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: quick-package-inputs
+          path: ${{ runner.temp }}/package-inputs
+      - name: Restore immutable Runtime and worker inputs
+        run: |
+          python3 src/ci/release-ci.py extract --source "$RUNNER_TEMP/package-inputs/sealed.tar.gz" --output "$RUNNER_TEMP/sealed"
+          python3 src/ci/release-ci.py extract --source "$RUNNER_TEMP/package-inputs/workers.tar.gz" --output "$RUNNER_TEMP/workers"
+      - name: Identify existing Swift cache inputs
+        id: sdk
+        run: |
+          xcrun swiftc --version > "$RUNNER_TEMP/swift-sdk.txt"
+          xcrun --show-sdk-path >> "$RUNNER_TEMP/swift-sdk.txt"
+          echo "key=$(shasum -a 256 "$RUNNER_TEMP/swift-sdk.txt" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/styx-swift-modules
+          key: styx-swift-${{ steps.sdk.outputs.key }}-${{ github.sha }}
+          restore-keys: |
+            styx-swift-${{ steps.sdk.outputs.key }}-
+      - name: Import existing macOS signing identity
+        env:
+          STYX_MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.STYX_MACOS_CERTIFICATE_P12_BASE64 }}
+          STYX_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.STYX_MACOS_CERTIFICATE_PASSWORD }}
+        run: python3 src/ci/release-ci.py mac-keychain --directory "$RUNNER_TEMP/mac-signing"
+      - name: Package signed macOS App and DMG without quality gates
+        run: python3 -I -B src/ci/macos-quick-package.py app --revision "$GITHUB_SHA" --runtime "$RUNNER_TEMP/sealed" --cua "$RUNNER_TEMP/workers/cua-driver" --local-signing "$RUNNER_TEMP/mac-signing/local-signing.json" --output "$RUNNER_TEMP/app" --build-number "$((2000 + GITHUB_RUN_NUMBER))" --module-cache "$HOME/.cache/styx-swift-modules"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-quick-app
+          path: |
+            ${{ runner.temp }}/app/final/*.dmg
+            ${{ runner.temp }}/app/final/*receipt*.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remove temporary macOS signing identity
+        if: ${{ always() }}
+        run: python3 src/ci/release-ci.py mac-keychain-clean --directory "$RUNNER_TEMP/mac-signing"

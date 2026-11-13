@@ -69,12 +69,15 @@ impl HostAuthority {
             return Err(ErrorCategory::Unauthorized.into());
         }
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
+        #[cfg(not(target_os = "macos"))]
         let slot = self
             .inner
             .slots
             .clone()
             .try_acquire_owned()
             .map_err(|_| CoordinatorError::Busy)?;
+        #[cfg(target_os = "macos")]
+        let slot: Option<tokio::sync::OwnedSemaphorePermit> = None;
         let until = tokio::time::Instant::now() + budget;
         let handle = handle.clone();
         let (response, receiver) = oneshot::channel();

@@ -118,7 +118,10 @@ impl CodexStdio {
             }
         }
         if record.pending_output.is_none() && !record.drained {
+            #[cfg(not(target_os = "macos"))]
             let slot = self.rpc.reserve_read_buffer()?;
+            #[cfg(target_os = "macos")]
+            let slot = self.rpc.reserve_read_buffer_wait().await?;
             let reply = self
                 .rpc
                 .request_budgeted(

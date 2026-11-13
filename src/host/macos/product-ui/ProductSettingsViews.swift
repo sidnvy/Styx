@@ -100,19 +100,20 @@ struct ProductSettingsView: View {
                     Button(productText("更改这台电脑的角色…", "Change this computer's role…")) { model.nativeChangeRole() }.disabled(model.busy)
                 }
                 if model.nativeSupportsOperation("stageRuntime") || model.nativeSupportsOperation("recoverRuntimeUpdate") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(productText("原生运行组件", "Native runtime components")).font(.headline)
-                    Text(productText("候选来自此签名 App。更新保留身份、配对和设置，完成后不会自动连接。", "The candidate comes from this signed App. Updating keeps identity, pairing and settings, and does not reconnect automatically.")).font(.caption).foregroundStyle(.secondary)
-                    HStack {
-                        Button(productText("准备候选", "Stage candidate")) { model.nativeStageRuntime() }.disabled(model.busy || ![nil, "not_started", "committed"].contains(model.nativeRuntimeUpdate["status"].string))
-                        Button(productText("更新…", "Update…")) { model.nativeUpdateRuntime() }.disabled(model.busy || model.nativeRuntimeUpdate["status"].string != "staged")
-                        Button(productText("检查状态", "Check status")) { model.nativeCheckRuntimeUpdate() }.disabled(model.busy)
-                        if model.nativeRuntimeUpdate["can_recover"] == .bool(true) {
-                            Button(productText("恢复原事务", "Recover original transaction")) { model.nativeRecoverRuntimeUpdate() }.disabled(model.busy)
-                        }
+                    DisclosureGroup(productText("高级：运行组件更新", "Advanced: runtime component updates")) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(productText("使用此 App 随附的运行组件更新本机。身份、配对和设置会保留；完成后请重新连接。", "Update this computer with the runtime components included in this App. Identity, pairing and settings are kept; reconnect after updating.")).font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                                Button(productText("准备更新", "Prepare update")) { model.nativeStageRuntime() }.disabled(model.busy || ![nil, "not_started", "committed"].contains(model.nativeRuntimeUpdate["status"].string))
+                                Button(productText("更新组件…", "Update components…")) { model.nativeUpdateRuntime() }.disabled(model.busy || model.nativeRuntimeUpdate["status"].string != "staged")
+                                Button(productText("检查更新状态", "Check update status")) { model.nativeCheckRuntimeUpdate() }.disabled(model.busy)
+                                if model.nativeRuntimeUpdate["can_recover"] == .bool(true) {
+                                    Button(productText("恢复更新", "Recover update")) { model.nativeRecoverRuntimeUpdate() }.disabled(model.busy)
+                                }
+                            }
+                            Text(runtimeUpdateDescription).font(.caption).foregroundStyle(.secondary)
+                        }.padding(.top, 8)
                     }
-                    if let state = model.nativeRuntimeUpdate["status"].string { Text(state).font(.caption) }
-                }
                 }
                 if model.nativeSupportsOperation("transferToService") || model.nativeHasServiceState {
                     ProductServiceSettings(model: model)
@@ -140,6 +141,16 @@ struct ProductSettingsView: View {
                 }
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+    private var runtimeUpdateDescription: String {
+        switch model.nativeRuntimeUpdate["status"].string {
+        case nil, "not_started": return productText("尚未开始组件更新。", "No component update has started.")
+        case "staging": return productText("正在准备更新…", "Preparing the update…")
+        case "staged": return productText("更新已准备好。请选择“更新组件”继续。", "The update is prepared. Choose Update components to continue.")
+        case "updating": return productText("正在更新组件…", "Updating components…")
+        case "committed": return productText("组件已更新，可以重新连接。", "Components are updated. You can reconnect.")
+        default: return productText("更新状态需要检查。请先检查更新状态；如显示恢复按钮，可继续恢复更新。", "The update needs review. Check update status, then use Recover update if it is available.")
+        }
     }
     private var componentNotice: String? {
         switch model.status["components"]["host"]["status"].string {
@@ -226,6 +237,7 @@ struct ProductSettingsView: View {
                 ProductNativeChatView(model: model)
             } else if model.joined {
                 Label(productText("聊天连接由管理电脑管理", "Chat is managed on the main computer"), systemImage: "globe")
+                Text(productText("这台电脑只需加入管理电脑（Gateway）。Tunnel 和 ChatGPT 插件只在管理电脑设置一次，所有已加入的电脑共用该 Styx 连接。", "This computer only needs to join the Gateway. Set up the tunnel and ChatGPT plugin once on that Gateway; all joined computers use the same Styx connection.")).font(.callout).foregroundStyle(.secondary)
             } else {
                 GroupBox {
                     VStack(alignment: .leading, spacing: 12) {
@@ -278,6 +290,53 @@ struct ProductSettingsView: View {
     }
 }
 
+// The same field guide is used by first-run and Settings. All external setup
+// stays with the user; these buttons only open ChatGPT, copy an ID or save art.
+struct ProductChatGPTConnectionSteps: View {
+    @ObservedObject var model: ProductModel
+    var identifierPrefix = "styx-custom-mcp"
+    var requireReadyToOpen = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(productText("一个 Gateway 只需添加一个 Styx 插件；Windows、Mac 和 Linux Host 加入同一 Gateway 后共用它。", "Add one Styx plugin for each Gateway. Windows, Mac and Linux Hosts that join it use that same connection.")).font(.callout).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(productText("1. 打开 ChatGPT 插件页", "1. Open ChatGPT Plugins")).font(.headline)
+                Text(productText("使用目标账号和工作区。已有这个 Gateway 的 Styx 连接时直接复用；首次添加时，点 ＋ → Add custom MCP server。", "Use the intended account and workspace. Reuse this Gateway’s existing Styx connection, or select + → Add custom MCP server to add it for the first time."))
+                Button(productText("打开 ChatGPT Plugins", "Open ChatGPT Plugins")) { model.openOfficial("https://chatgpt.com/plugins") }
+                    .disabled(requireReadyToOpen && model.tunnelConnection != .connected)
+                    .accessibilityIdentifier(identifierPrefix + "-open")
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text(productText("2. 按下表填写", "2. Enter these values")).font(.headline)
+                LabeledContent("Name", value: "Styx")
+                LabeledContent("Connection", value: "Tunnel")
+                HStack {
+                    Text("Tunnel ID").foregroundStyle(.secondary)
+                    Spacer()
+                    if model.connectionTunnelID.isEmpty {
+                        Text(productText("先在管理电脑配置 Tunnel", "Configure the tunnel on the Gateway first")).font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text(model.connectionTunnelID).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                        Button(productText("复制 Tunnel ID", "Copy Tunnel ID")) { model.copy(model.connectionTunnelID) }
+                    }
+                }
+                LabeledContent("Authentication", value: "No authentication")
+                Text(productText("运行密钥（Runtime API key）只保存在管理电脑的 Styx 中，不要填入 ChatGPT。", "Keep the runtime API key in Styx on the Gateway; do not enter it in ChatGPT.")).font(.caption).foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text(productText("3. 保存并上传图标", "3. Save and upload the icon")).font(.headline)
+                Text(productText("先保存 Styx PNG，再在 ChatGPT 的图标选择处上传这个文件。", "Save the Styx PNG, then upload that file using ChatGPT’s icon picker."))
+                Button(productText("保存 Styx 图标…", "Save Styx icon…")) { model.saveBrandIcon() }.accessibilityIdentifier(identifierPrefix + "-save-icon")
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text(productText("4. 创建并使用 Styx", "4. Create and use Styx")).font(.headline)
+                Text(productText("阅读页面提示，选择 I understand and want to continue，再点 Create as a plugin，按页面提示完成安装或 Connect。在聊天中选择 @Styx，发送“列出我的 Styx 电脑”，确认显示已加入的电脑。", "Review the notice, select I understand and want to continue, then Create as a plugin. Follow the page to install or Connect. Select @Styx in a chat and ask it to list your Styx computers."))
+                Text(productText("如果没有添加入口，请检查开发者模式和工作区权限。设置由你在 ChatGPT 中完成，Styx 不会自动创建插件。", "If Add is unavailable, check Developer mode and workspace permissions. You complete setup in ChatGPT; Styx does not create a plugin automatically.")).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
 // Both first-run and Settings use the same Rust-backed connection editor.
 struct ProductNativeChatView: View {
     @ObservedObject var model: ProductModel
@@ -287,17 +346,19 @@ struct ProductNativeChatView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text(productText("ChatGPT 中的 Styx", "Styx in ChatGPT")).font(.headline)
             if model.nativeSupportsOperation("tunnelSave") {
+                Text(productText("只在管理电脑（Gateway）上配置 Tunnel。先等待连接就绪，再按下面四步添加到 ChatGPT。", "Configure the tunnel only on the Gateway. Wait for it to connect, then follow the four steps below."))
                 ProductTunnelStatus(model: model, showNextStep: false)
-                if !model.tunnelID.isEmpty { Text(model.tunnelID).textSelection(.enabled) }
                 Button(productText("配置 Tunnel…", "Configure Tunnel…")) { editTunnel = true }.disabled(model.busy)
                 Text(productText("保存时会短暂断开本 App 管理的连接，随后自动恢复。请先完成正在运行的任务。", "Saving briefly pauses connections managed by this App, then reconnects. Finish active tasks first.")).font(.caption)
+                ProductChatGPTConnectionSteps(model: model, identifierPrefix: "styx-native-custom-mcp")
+            } else if model.status["configuration"] != .null {
+                Text(productText("这台 Mac 作为 Host 加入管理电脑（Gateway），无需配置自己的 Tunnel 或另建 ChatGPT 插件。", "This Mac joins a Gateway as a Host. It does not need its own tunnel or a separate ChatGPT plugin."))
+                Text(productText("请在管理电脑完成一次 ChatGPT 设置，然后在已有的 Styx 聊天中选择这台 Mac。所有已加入的电脑共用同一个 Styx 连接。", "Complete ChatGPT setup once on the Gateway, then choose this Mac in a chat using the existing Styx plugin. All joined computers share that connection."))
+                Button(productText("打开 ChatGPT Plugins", "Open ChatGPT Plugins")) { model.openOfficial("https://chatgpt.com/plugins") }
             } else {
-                Text(productText("这台电脑已加入其他管理电脑，请复用那里的 Styx 连接。", "This computer uses another hub. Use that hub's existing Styx connection."))
+                Text(productText("先完成这台 Mac 的设置。已有管理电脑（Gateway）时选择加入，Tunnel 和 ChatGPT 插件在管理电脑设置一次即可。", "Finish setting up this Mac first. If you already have a Gateway, join it; configure the tunnel and ChatGPT plugin once on that Gateway."))
+                Button(productText("打开 ChatGPT Plugins", "Open ChatGPT Plugins")) { model.openOfficial("https://chatgpt.com/plugins") }
             }
-            Text(productText("等待 Tunnel 就绪后，在目标 ChatGPT 账号打开 Plugins → Add → Add custom MCP server。填写名称，通过 Choose icon 上传下方图标，Connection 选择 Tunnel，粘贴这里显示的 Tunnel ID，Authentication 选择 No authentication。运行密钥只保存在 Styx。", "When the tunnel is ready, open Plugins → Add → Add custom MCP server in the intended ChatGPT account. Enter a name, upload the icon below with Choose icon, select Connection: Tunnel, paste the Tunnel ID shown here, and select Authentication: No authentication. Keep the runtime key only in Styx."))
-            Button(productText("保存 Styx 上传图标…", "Save Styx upload icon…")) { model.saveBrandIcon() }.accessibilityIdentifier("styx-native-custom-mcp-save-icon")
-            Text(productText("复用已有连接，不要删除正式插件。创建并连接后刷新已安装详情页，检查 Styx Logo，再选择 Try in chat 并发送 List my Styx computers。Custom MCP 不会安装 ZIP 中的技能。", "Reuse an existing connection; do not delete a production plugin. After creating and connecting, refresh the installed details and check the Styx logo. Choose Try in chat and send: List my Styx computers. Custom MCP does not install the ZIP’s skills."))
-            Button(productText("打开 ChatGPT Plugins", "Open ChatGPT Plugins")) { model.openOfficial("https://chatgpt.com/plugins") }
             DisclosureGroup(productText("高级：旧版 ZIP 导出", "Advanced: legacy ZIP export")) {
                 ProductPluginCompatibilityNote()
                 if model.nativeSupportsOperation("pluginRead") {

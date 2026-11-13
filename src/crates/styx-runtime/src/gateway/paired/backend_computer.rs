@@ -6,6 +6,7 @@ use crate::{
     providers::cua::{CuaAction, public_contract},
 };
 use styx_contracts::error::{ErrorCategory, ExecutionCertainty};
+#[cfg(not(target_os = "macos"))]
 const MAX_COMPUTER_CONTEXTS: usize = 64;
 const COMPUTER_STARTUP_WAIT: Duration = Duration::from_secs(20);
 const MAX_COMPUTER_RESULT_BYTES: usize = styx_contracts::DESKTOP_BROWSER_FRAME_BYTES;
@@ -201,6 +202,7 @@ impl PairedGatewayBackend {
         if !create {
             return Ok(None);
         }
+        #[cfg(not(target_os = "macos"))]
         if state.computers.entries.len() >= MAX_COMPUTER_CONTEXTS
             || (!state.owners.contains_key(owner.owner_id()) && state.owners.len() >= MAX_OWNERS)
         {

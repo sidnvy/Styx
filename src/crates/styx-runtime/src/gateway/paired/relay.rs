@@ -17,7 +17,9 @@ use std::{
 };
 use styx_contracts::{identity::*, operation::OperationId};
 use styx_core::enrollment::{ConnectionLease, Lane};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
+#[cfg(any(not(target_os = "macos"), test))]
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum RelayError {
@@ -28,6 +30,8 @@ pub enum RelayError {
     /// Capacity/admission refusal before this request's frame was sent.
     #[error("busy")]
     Busy,
+    #[error("request not dispatched before deadline")]
+    NotSent,
     #[error("invalid request")]
     Invalid,
     #[error("outcome unknown; do not replay")]
@@ -41,6 +45,7 @@ impl RelayError {
             Self::Unauthorized => "unauthorized",
             Self::Offline => "offline",
             Self::Busy => "busy",
+            Self::NotSent => "not_dispatched",
             Self::Invalid => "invalid",
             Self::Unknown => "outcome_unknown",
             Self::Unsupported => "unsupported",
@@ -224,9 +229,26 @@ pub(crate) struct Inner {
 }
 /// The reservation lives at least as long as every admitted socket task.
 pub(crate) struct LinkSlots {
+    #[cfg(any(not(target_os = "macos"), test))]
     slots: Arc<Semaphore>,
+    #[cfg(any(not(target_os = "macos"), test))]
     capacity: usize,
     _budget: OwnedSemaphorePermit,
+    #[cfg(target_os = "macos")]
+    active: Arc<AtomicUsize>,
+}
+#[derive(Debug)]
+pub(crate) struct LinkPermit {
+    #[cfg(not(target_os = "macos"))]
+    _permit: OwnedSemaphorePermit,
+    #[cfg(target_os = "macos")]
+    active: Arc<AtomicUsize>,
+}
+#[cfg(target_os = "macos")]
+impl Drop for LinkPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 impl LinkSlots {
     fn new(budget: OwnedSemaphorePermit) -> Result<Self, RelayError> {
@@ -237,16 +259,31 @@ impl LinkSlots {
             return Err(RelayError::Invalid);
         }
         Ok(Self {
+            #[cfg(any(not(target_os = "macos"), test))]
             slots: Arc::new(Semaphore::new(bytes / PAIRED_LINK_BYTES)),
+            #[cfg(any(not(target_os = "macos"), test))]
             capacity: bytes / PAIRED_LINK_BYTES,
             _budget: budget,
+            #[cfg(target_os = "macos")]
+            active: Arc::new(AtomicUsize::new(0)),
         })
     }
-    pub(crate) fn admit(&self) -> Result<OwnedSemaphorePermit, &'static str> {
-        self.slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| super::CAPACITY_ERROR_CODE)
+    pub(crate) fn admit(&self) -> Result<LinkPermit, &'static str> {
+        #[cfg(target_os = "macos")]
+        {
+            self.active.fetch_add(1, Ordering::AcqRel);
+            Ok(LinkPermit {
+                active: self.active.clone(),
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.slots
+                .clone()
+                .try_acquire_owned()
+                .map(|permit| LinkPermit { _permit: permit })
+                .map_err(|_| super::CAPACITY_ERROR_CODE)
+        }
     }
 }
 impl State {
@@ -301,10 +338,18 @@ impl RelayHandle {
     /// It does not count three capability lanes as three computers.
     pub fn connection_counts(&self) -> (usize, usize) {
         let links = &self.inner.links;
-        (
-            links.capacity - links.slots.available_permits(),
-            links.capacity,
-        )
+        #[cfg(target_os = "macos")]
+        {
+            // Zero denotes no fixed connection-count ceiling.
+            (links.active.load(Ordering::Acquire), 0)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            (
+                links.capacity - links.slots.available_permits(),
+                links.capacity,
+            )
+        }
     }
     pub(crate) async fn authorize(&self, e: &Entry) -> Result<(), RelayError> {
         self.authorize_for(e, Lane::Exec).await
@@ -450,16 +495,28 @@ impl RelayHandle {
     ) -> Result<Reply, RelayError> {
         let response_budget = call.response_budget();
         let (tx, rx) = oneshot::channel();
-        queue
-            .try_send(Command {
-                call,
-                result: tx,
-                gate,
-            })
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => RelayError::Busy,
-                mpsc::error::TrySendError::Closed(_) => RelayError::Offline,
-            })?;
+        #[cfg(target_os = "macos")]
+        let until = tokio::time::Instant::now() + response_budget;
+        let command = Command {
+            call,
+            result: tx,
+            gate,
+        };
+        #[cfg(target_os = "macos")]
+        {
+            let reservation = tokio::time::timeout_at(until, queue.reserve())
+                .await
+                .map_err(|_| RelayError::NotSent)?
+                .map_err(|_| RelayError::Offline)?;
+            reservation.send(command);
+        }
+        #[cfg(not(target_os = "macos"))]
+        queue.try_send(command).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => RelayError::Busy,
+            mpsc::error::TrySendError::Closed(_) => RelayError::Offline,
+        })?;
+        #[cfg(target_os = "macos")]
+        let response_budget = until.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(response_budget, rx).await {
             Ok(Ok(r)) => r,
             _ => Err(RelayError::Unknown),
@@ -647,7 +704,7 @@ impl RelayHandle {
             }) {
                 Some(binding.clone())
             } else {
-                if bindings.len() >= 128 {
+                if !cfg!(target_os = "macos") && bindings.len() >= 128 {
                     return Err(RelayError::Busy);
                 }
                 None
@@ -697,7 +754,7 @@ impl RelayHandle {
                         .bindings
                         .lock()
                         .map_err(|_| RelayError::Unknown)?;
-                    if b.len() >= 128
+                    if (!cfg!(target_os = "macos") && b.len() >= 128)
                         || b.iter().any(|existing| {
                             existing.owner.owner_id() == owner.owner_id()
                                 && existing.owner.principal_fingerprint()
@@ -973,7 +1030,7 @@ impl RelayHandle {
             }) {
                 return Err(RelayError::Unauthorized);
             }
-            if new_record && targets.len() >= 256 {
+            if !cfg!(target_os = "macos") && new_record && targets.len() >= 256 {
                 return Err(RelayError::Busy);
             }
         }
@@ -981,7 +1038,11 @@ impl RelayHandle {
             && b.inner
                 .admitted_records
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                    (n < 256).then_some(n + 1)
+                    if cfg!(target_os = "macos") {
+                        n.checked_add(1)
+                    } else {
+                        (n < 256).then_some(n + 1)
+                    }
                 })
                 .is_err()
         {
@@ -991,11 +1052,11 @@ impl RelayHandle {
             .exchange(&entry, call, Some(b.inner.revoked.clone()))
             .await
         {
-            Err(RelayError::Busy) => {
+            Err(error @ (RelayError::Busy | RelayError::NotSent)) => {
                 if new_record {
                     b.inner.admitted_records.fetch_sub(1, Ordering::AcqRel);
                 }
-                return Err(RelayError::Busy);
+                return Err(error);
             }
             result => result?,
         };
@@ -1065,7 +1126,7 @@ impl RelayHandle {
                     return Err(RelayError::Unknown);
                 }
             } else if new_record {
-                if targets.len() >= 256 {
+                if !cfg!(target_os = "macos") && targets.len() >= 256 {
                     return Err(RelayError::Unknown);
                 }
                 targets.insert(

@@ -373,6 +373,15 @@ def deterministic_archive(payload, destination, names, executable):
 
 
 
+def native_build_producer(receipt, target):
+    if receipt.get('producer') == 'src/tools/release/build-native-binary.py':
+        return True
+    return (target.endswith('apple-darwin')
+            and receipt.get('producer') == 'src/ci/macos-quick-build.py'
+            and receipt.get('qualification') == 'COMPILE_ONLY_NOT_STABLE'
+            and receipt.get('quality') == 'NOT RUN')
+
+
 def release_reader(receipt, binary_hash, target, inputs):
     """Missing historical evidence never upgrades an old signed candidate.
 
@@ -382,7 +391,7 @@ def release_reader(receipt, binary_hash, target, inputs):
     evidence = receipt.get('cli_build_info')
     if evidence is None:
         return 'native_runtime_v1'
-    require(isinstance(evidence, dict) and receipt.get('producer') == 'src/tools/release/build-native-binary.py'
+    require(isinstance(evidence, dict) and native_build_producer(receipt, target)
             and receipt['producer'] in inputs, 'reader_evidence_original_producer_required')
     require(evidence.get('actual_wait') is True and type(evidence.get('exit_code')) is int
             and evidence['exit_code'] == 0 and evidence.get('binary_sha256') == binary_hash,
@@ -422,7 +431,7 @@ def validate_binary_location(receipt, binary, target, relocated, minimum_reader)
     # build-info observation. Its original locator is provenance, never opened
     # on this machine. This flag cannot upgrade historical receipts.
     require(minimum_reader in ['native_runtime_migrated_v1', 'native_runtime_migrated_v2', 'native_runtime_migrated_v3', 'native_runtime_selected_v1', 'native_app_runtime_selected_v1', 'native_service_runtime_selected_v1', 'native_app_service_transferred_v1', 'native_pairing_lifecycle_v1']
-            and receipt.get('producer') == 'src/tools/release/build-native-binary.py'
+            and native_build_producer(receipt, target)
             and isinstance(receipt.get('cli_build_info'), dict),
             'relocation_original_producer_evidence_required')
     original = receipt.get('cli_binary')

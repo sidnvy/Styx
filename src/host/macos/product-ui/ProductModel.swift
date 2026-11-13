@@ -48,6 +48,20 @@ enum ProductTunnelConnection: Equatable {
     func open(_ screen: Bool) { openSettings(screen) }
 }
 
+// Keep only the unfinished UI step across the OS-owned Quit and Reopen action.
+// Core still owns configuration/approval, and macOS still owns both grants.
+struct ProductPermissionResume {
+    let defaults: UserDefaults
+    private let key: String
+    init(profileScope: String, defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        key = "Styx.nativePermissionStep.v1." + profileScope
+    }
+    var pending: Bool { defaults.bool(forKey: key) }
+    func begin() { defaults.set(true, forKey: key) }
+    func complete() { defaults.removeObject(forKey: key) }
+}
+
 enum ProductPreparationPhase: String { case components, connection, browser }
 struct ProductPreparationStage: Identifiable {
     enum State: Equatable { case pending, working, completed, blocked, awaitingApproval, needsReview, notApproved }
@@ -203,6 +217,7 @@ enum ProductRestorationPolicy {
             try applyNative(result)
             nativeLocalSetupSubmitted = false
             inspection = .null; joinAcceptance = .null; joining = false
+            permissionResume?.complete()
             page = .welcome
         }
     }
@@ -240,7 +255,12 @@ enum ProductRestorationPolicy {
     var testObservationConsumerCount: Int { observationConsumers.count }
     var testObservationLoopRunning: Bool { observationTask != nil }
     #endif
-    @Published var page: ProductPage = .welcome { didSet { if page != oldValue { ProductNativeDiagnostics.event("page " + String(describing: page)) } } }
+    @Published var page: ProductPage = .welcome {
+        didSet {
+            if page == .permissions { permissionResume?.begin() }
+            if page != oldValue { ProductNativeDiagnostics.event("page " + String(describing: page)) }
+        }
+    }
     @Published var busy = false
     @Published var signingUpgrade: ProductJSON = .null
     @Published var signingUpgradeState: ProductJSON = .null
@@ -444,6 +464,7 @@ enum ProductRestorationPolicy {
     private var restoredPage = false
     private let permissionReader: () -> (accessibility: Bool, screenRecording: Bool)
     private let permissionActions: ProductPermissionActions
+    private let permissionResume: ProductPermissionResume?
     var launchPayloadUpdater: ((String) throws -> Void)?
     private var automaticPayloadUpdateAttempted = false
     @Published var payloadUpdateStatus: ProductJSON = .null
@@ -486,6 +507,7 @@ enum ProductRestorationPolicy {
     }
     init(owned: ProductOwnedCore) {
         client = ProductCoreClient(owned: owned)
+        permissionResume = ProductPermissionResume(profileScope: owned.uiPreferenceScope)
         permissionReader = { (AXIsProcessTrusted(), CGPreflightScreenCaptureAccess()) }
         permissionActions = .system
         computer = false; browser = false; joining = false
@@ -495,15 +517,25 @@ enum ProductRestorationPolicy {
         status = value; browserObservation = .null; acceptance = .null
         if !restoredPage {
             restoredPage = true
-            page = value["configuration"] == .null && value["enrollment"] == .null && value["gateway"] == .null && value["admission_fenced"] == .bool(false) ? .welcome : .overview
+            observePermissions()
+            let unconfigured = value["configuration"] == .null && value["enrollment"] == .null && value["gateway"] == .null && value["admission_fenced"] == .bool(false)
+            if unconfigured {
+                permissionResume?.complete()
+                page = .welcome
+            } else if permissionResume?.pending == true || value["desktop_intent"]["computer_requested"].bool && !(axGranted && screenGranted) {
+                // A grant observed after relaunch does not complete the user's
+                // explicit Continue/recovery step or repeat setup/pairing.
+                page = .permissions
+            } else { page = .overview }
         }
     }
     init(sessionURL: URL, permissionReader: @escaping () -> (accessibility: Bool, screenRecording: Bool) = {
         (AXIsProcessTrusted(), CGPreflightScreenCaptureAccess())
-    }, permissionActions: ProductPermissionActions? = nil) throws {
+    }, permissionActions: ProductPermissionActions? = nil, permissionResume: ProductPermissionResume? = nil) throws {
         client = try ProductCoreClient(sessionURL: sessionURL)
         self.permissionReader = permissionReader
         self.permissionActions = permissionActions ?? .system
+        self.permissionResume = permissionResume
     }
 
     func bootstrap() async {
@@ -681,7 +713,7 @@ enum ProductRestorationPolicy {
                 return
             }
             if case .servicePreparationRequired = core {
-                error = productText("请先在“原生运行组件”中准备候选并完成更新，再转为后台管理。现有身份和配对会保留。", "First stage the candidate and complete the update under Native runtime components, then transfer to background management. Identity and pairing will be preserved.")
+                error = productText("请先在“设置 → 通用”的“高级：运行组件更新”中完成更新，再转为后台管理。现有身份和配对会保留。", "First complete the update under Advanced: runtime component updates in Settings → General, then transfer to background management. Identity and pairing will be preserved.")
                 return
             }
         }
@@ -896,23 +928,29 @@ enum ProductRestorationPolicy {
         try await recover()
         observePermissions()
         guard axGranted && screenGranted else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
+        permissionResume?.complete()
     }
     func continueAfterPermissions() {
         perform { [self] in
             try await verifyPermissionsAndRecover()
-            page = joined ? .overview : .chat
+            page = nativeHost || joined ? .overview : .chat
         }
     }
     func permissionWasRequested(_ screen: Bool) -> Bool { permissionActions.wasRequested(screen) }
     func requestPermission(_ screen: Bool) {
         observePermissions()
         guard !(screen ? screenGranted : axGranted) else { return }
+        permissionResume?.begin()
         // Only the matching explicit action requests permission. macOS owns
         // this prompt and any navigation from its Open System Settings button.
         permissionActions.requestOnce(screen)
         observePermissions()
     }
-    func openPermission(_ screen: Bool) { permissionActions.open(screen) }
+    func openPermission(_ screen: Bool) {
+        observePermissions()
+        if !(screen ? screenGranted : axGranted) { permissionResume?.begin() }
+        permissionActions.open(screen)
+    }
     func beginJoinRecovery() {
         guard canRecoverJoin, !busy else { return }
         invite = ""; inspection = .null; joinAcceptance = .null

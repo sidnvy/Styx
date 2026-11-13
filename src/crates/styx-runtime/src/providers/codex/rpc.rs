@@ -224,7 +224,9 @@ impl Rpc {
     }
     pub fn register(&self, id: &str) -> Result<(), ExecError> {
         let mut observations = self.observations.lock().expect("observation mutex");
-        if observations.len() >= self.observation_limit || observations.contains_key(id) {
+        if (!cfg!(target_os = "macos") && observations.len() >= self.observation_limit)
+            || observations.contains_key(id)
+        {
             return Err(ExecError::Capacity);
         }
         observations.insert(id.to_owned(), Observation::default());
@@ -287,6 +289,7 @@ impl Rpc {
             observation.lost = true;
         }
     }
+    #[cfg(any(not(target_os = "macos"), test))]
     pub(super) fn reserve_read_buffer(
         &self,
     ) -> Result<tokio::sync::OwnedSemaphorePermit, ExecError> {
@@ -294,6 +297,15 @@ impl Rpc {
             .clone()
             .try_acquire_owned()
             .map_err(|_| ExecError::Capacity)
+    }
+    #[cfg(target_os = "macos")]
+    pub(super) async fn reserve_read_buffer_wait(
+        &self,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, ExecError> {
+        tokio::time::timeout(self.timeout, self.read_buffers.clone().acquire_owned())
+            .await
+            .map_err(|_| ExecError::NotSent)?
+            .map_err(|_| ExecError::NotSent)
     }
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, ExecError> {
         self.request_budgeted(method, params).await?.result
@@ -313,8 +325,14 @@ impl Rpc {
             })
             .map_err(|_| ExecError::Capacity)?
             + 1;
-        // Reject saturated work before serializing a wire buffer; queued
-        // callers do not accumulate maximum-size request strings here.
+        // Reserve wire capacity before serializing a maximum-size request.
+        // macOS waits within the request budget rather than rejecting concurrency.
+        #[cfg(target_os = "macos")]
+        let permit = tokio::time::timeout(self.timeout, self.permits.clone().acquire_owned())
+            .await
+            .map_err(|_| ExecError::NotSent)?
+            .map_err(|_| ExecError::NotSent)?;
+        #[cfg(not(target_os = "macos"))]
         let permit = self
             .permits
             .clone()

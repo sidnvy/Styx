@@ -299,7 +299,7 @@ impl RelayHandle {
                                             Err(error)=>{let _=command.result.send(Err(error));continue},
                                         };
                                         let business=pending.values().filter(|p|!p.control).count();
-                                        if (!control&&business>=2)||pending.len()>=3 {
+                                        if !cfg!(target_os="macos") && ((!control&&business>=2)||pending.len()>=3) {
                                             let _=command.result.send(Err(RelayError::Busy));continue
                                         }
                                         let response_budget=command.call.response_budget();

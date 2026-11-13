@@ -392,7 +392,9 @@ use styx_contracts::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 
+#[cfg(not(target_os = "macos"))]
 const MAX_RESOURCES: usize = 64;
+#[cfg(not(target_os = "macos"))]
 const MAX_OWNERS: usize = 128;
 struct Resource {
     binding: BoundOwner,
@@ -499,10 +501,13 @@ impl PairedGatewayBackend {
         {
             return Err("permission_denied");
         }
+        #[cfg(not(target_os = "macos"))]
         if state.sessions.len() >= MAX_RESOURCES
             || (!state.owners.contains_key(owner.owner_id()) && state.owners.len() >= MAX_OWNERS)
-            || state.next_session >= (1_u64 << 48)
         {
+            return Err("capacity");
+        }
+        if state.next_session >= (1_u64 << 48) {
             return Err("capacity");
         }
         state

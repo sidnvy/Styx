@@ -453,7 +453,7 @@ impl CodexStdio {
                     error: ExecError::AlreadyDispatched,
                 });
             }
-            if operations.len() >= self.limit {
+            if !cfg!(target_os = "macos") && operations.len() >= self.limit {
                 return Err(not_dispatched(ExecError::Capacity));
             }
             operations.insert(operation.clone(), handle.clone());

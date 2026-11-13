@@ -182,6 +182,7 @@ pub struct OperationLedger {
     next_sequence: u64,
     next_owner_incarnation: u64,
     budget: usize,
+    enforce_budget: bool,
     retained_bytes: usize,
     retention_ms: u64,
     maintenance_fenced: bool,
@@ -197,11 +198,14 @@ impl OperationLedger {
         &self.host
     }
     pub fn new(host: HostGeneration) -> Self {
-        Self::with_budget(
+        let ledger = Self::with_budget(
             host,
             styx_contracts::OPERATION_METADATA_BYTES,
             styx_contracts::TERMINAL_OPERATION_RETENTION_MS,
-        )
+        );
+        #[cfg(target_os = "macos")]
+        let ledger = Self { enforce_budget: false, ..ledger };
+        ledger
     }
     pub fn with_budget(host: HostGeneration, budget: usize, retention_ms: u64) -> Self {
         Self {
@@ -211,6 +215,7 @@ impl OperationLedger {
             next_sequence: 0,
             next_owner_incarnation: 0,
             budget,
+            enforce_budget: true,
             retained_bytes: 0,
             retention_ms,
             maintenance_fenced: false,
@@ -244,7 +249,7 @@ impl OperationLedger {
     }
     fn reserve_capacity(&self, bytes: usize) -> Result<(), ErrorCategory> {
         match self.retained_bytes.checked_add(bytes) {
-            Some(total) if total <= self.budget => Ok(()),
+            Some(total) if !self.enforce_budget || total <= self.budget => Ok(()),
             _ => Err(ErrorCategory::Busy),
         }
     }
