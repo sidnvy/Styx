@@ -11,18 +11,26 @@
 ### 当前：0.4.0 Stable 收尾（2026-11-13）
 
 用户授权并行关闭 Windows 17 项失败和新版 Mac GUI，复用已经通过的证据。
-0.47.24 Cua 收敛源码 `0468ec5` 的三平台构建、签封和四份分发包已通过
-[GitHub Actions 43378177340](https://github.com/sidnvy/Styx/actions/runs/43378177340)；
-它仍是 `0.4.0-dev.1`，不能当作正式 Stable 或三台设备已更新。
+正式版本已定为 `0.4.0`，构件冻结源码为 `4d03b72f25cfb4cafcac93763b6a6d3a0b08da25`。
+[最终 contracts](https://github.com/sidnvy/Styx/actions/runs/43388111573) 四个 job 全部通过；
+Windows 为 92 PASS、0 FAIL、15 个平台/环境限定 skip。17 项旧失败已收口：修复安装器真实
+8.3 路径别名比较，修正测试路径/权限/换行及 Quit 各分支计数，不删除有效负控。
+原 Windows 安装准入 3 项及 Quit 14 模式也在 NAB5 实际通过，未改该设备安装或身份。
 
-当前准备正式 `0.4.0`：Windows 安装器对真实 8.3 短路径注册的比较错误已重现，
-其余失败按实际平台路径、权限与操作计数修正，保留有效负控，不重跑旧角色矩阵。
-Mac 只补最终新签名 App、实际所选 Runtime、受影响 Computer/session 和正常退出恢复。
-PilotMac 现有 TCC 授权绑定旧 `cb50` 证书，新 `9a4` 证书尚未获代码签名信任；
-用户已明确授权新身份的 codeSign-only 信任及正常 OS 辅助功能/屏幕录制授权，
-按系统正常流程执行，不直接编辑 TCC 或更改 SIP/Gatekeeper；需要本人确认时停在具体提示。
+[正式发布构建](https://github.com/sidnvy/Styx/actions/runs/43388310324) 已全部通过：
+20 项质量门、三平台 Core/Cua、签封及四份正式包。`complete-release` artifact 为
+`14021976762`，四文件 SHA256 和固定 publisher pin 已独立核对；正式 tag/Release 尚未创建。
+
+Mac 最终 DMG/build1151 已验签并原位安装，App/Core 为冻结源码，新 Cua 为 0.47.24。
+旧四个原进程均正常 exit0，原身份/凭据/CA/seed/deployment 保留。用户已明确授权并完成
+新 `9a4` 证书的正常系统确认，只读核实其信任仅限 CodeSigning。
+**当前还不能算 Mac 通过：**App 已更新，但持久状态仍选旧 `.33` Runtime `8e631746…`，
+尚未正常 GUI 选择新 `335dbd57…`；AX/SR 仍 false，TCC 授权仍绑定旧 `cb50`。
+用户切换 AX 开关后旧签名绑定未变，已请用户在正常辅助功能页移除旧 Styx 授权行并重新
+添加 `/Applications/Styx.app`。不直接编辑 TCC、不改 SIP/Gatekeeper、不重复未知操作。
+授权生效后仅补新 Runtime 选择、真实 Gateway→Host/Core 的受影响 Computer 效果及正常退出恢复。
 旧配对、Browser/Exec、安全、卸载等未变路径证据复用；不自动重建用户已删除的插件。
-**Stable 暂未放行：还需上述受影响项通过、正式版本四包和 GitHub Release。**
+**Stable 暂未放行：仅剩上述 Mac 必需场景及随后正式 GitHub Release 交付。**
 正常用户步骤见 [0.4.0 设置指南](../stable-setup.md)。
 
 ### 最新更正：验收通过不等于正式 Stable 发布（2026-11-13）
