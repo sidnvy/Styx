@@ -2541,6 +2541,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "styx-crypto"
+version = "0.4.0"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "hex",
+ "rcgen",
+ "rustls",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "styx-runtime"
 version = "0.4.0"
 dependencies = [
@@ -2571,7 +2587,6 @@ dependencies = [
  "rustix",
  "rustls",
  "rustls-pemfile",
- "rustls-webpki",
  "security-framework",
  "security-framework-sys",
  "serde",
@@ -2579,6 +2594,8 @@ dependencies = [
  "sha2",
  "styx-contracts",
  "styx-core",
+ "styx-crypto",
+ "styx-tls",
  "thiserror 2.0.18",
  "time",
  "tokio",
@@ -2592,6 +2609,25 @@ dependencies = [
  "windows-sys 0.61.2",
  "x509-parser",
  "zbus",
+ "zeroize",
+]
+
+[[package]]
+name = "styx-tls"
+version = "0.4.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-webpki",
+ "styx-contracts",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "url",
+ "x509-parser",
  "zeroize",
 ]
 

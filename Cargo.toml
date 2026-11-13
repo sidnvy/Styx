@@ -1,5 +1,5 @@
 [workspace]
-members = ["src/crates/styx-contracts", "src/crates/styx-core", "src/crates/styx-runtime", "src/crates/styx"]
+members = ["src/crates/styx-contracts", "src/crates/styx-core", "src/crates/styx-crypto", "src/crates/styx-tls", "src/crates/styx-runtime", "src/crates/styx"]
 resolver = "3"
 
 [workspace.package]
@@ -11,6 +11,8 @@ license = "MIT"
 [workspace.dependencies]
 styx-contracts = { path = "src/crates/styx-contracts" }
 styx-core = { path = "src/crates/styx-core" }
+styx-crypto = { path = "src/crates/styx-crypto" }
+styx-tls = { path = "src/crates/styx-tls" }
 styx-runtime = { path = "src/crates/styx-runtime" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.150", features = ["raw_value"] }

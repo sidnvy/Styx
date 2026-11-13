@@ -18,21 +18,8 @@ pub(crate) fn lan_address(
     enabled: bool,
     address: Option<&str>,
 ) -> Result<Option<std::net::Ipv4Addr>, GatewayAuthError> {
-    match (enabled, address) {
-        (false, None) => Ok(None),
-        (true, Some(address)) => {
-            let ip: std::net::Ipv4Addr = address
-                .parse()
-                .map_err(|_| GatewayAuthError::InvalidConfiguration)?;
-            let [a, b, _, _] = ip.octets();
-            if ip.is_private() || (a == 100 && (64..=127).contains(&b)) {
-                Ok(Some(ip))
-            } else {
-                Err(GatewayAuthError::InvalidConfiguration)
-            }
-        }
-        _ => Err(GatewayAuthError::InvalidConfiguration),
-    }
+    crate::tls::validate_lan_address(enabled, address)
+        .map_err(|_| GatewayAuthError::InvalidConfiguration)
 }
 
 /// Compatibility input and the bounded multi-interface input are exclusive.
@@ -41,27 +28,8 @@ pub(crate) fn lan_addresses(
     address: Option<&str>,
     addresses: Option<&[String]>,
 ) -> Result<Vec<std::net::Ipv4Addr>, GatewayAuthError> {
-    if address.is_some() && addresses.is_some() {
-        return Err(GatewayAuthError::InvalidConfiguration);
-    }
-    match addresses {
-        None => Ok(lan_address(enabled, address)?.into_iter().collect()),
-        Some(addresses) => {
-            if !enabled || !(1..=4).contains(&addresses.len()) {
-                return Err(GatewayAuthError::InvalidConfiguration);
-            }
-            let mut result = Vec::with_capacity(addresses.len());
-            for address in addresses {
-                let ip = lan_address(true, Some(address))?
-                    .ok_or(GatewayAuthError::InvalidConfiguration)?;
-                if result.contains(&ip) {
-                    return Err(GatewayAuthError::InvalidConfiguration);
-                }
-                result.push(ip);
-            }
-            Ok(result)
-        }
-    }
+    crate::tls::validate_lan_addresses(enabled, address, addresses)
+        .map_err(|_| GatewayAuthError::InvalidConfiguration)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

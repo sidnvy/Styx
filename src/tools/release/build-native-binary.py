@@ -377,6 +377,7 @@ def main():
             # signing completion above never cleans or rebuilds an original image.
             clean_argv = ['cargo', 'clean', '--release', '--target', target,
                           '-p', 'styx-contracts', '-p', 'styx-core',
+                          '-p', 'styx-crypto', '-p', 'styx-tls',
                           '-p', 'styx-runtime', '-p', 'styx', '--locked', '--offline']
             clean = {'command': clean_argv, 'actual_wait': False,
                      'exit_code': None, 'scope': 'workspace_packages_release_target_only'}

@@ -1,0 +1,24 @@
+[package]
+name = "styx-tls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+styx-contracts.workspace = true
+getrandom.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+url.workspace = true
+webpki.workspace = true
+x509-parser.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

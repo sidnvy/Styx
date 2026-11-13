@@ -2,15 +2,13 @@
 //! No filesystem, network, clock reads, logging or admission authority.
 //! The trusted caller owns bootstrap or original protected observations,
 //! transaction/writer custody, and one-time durable publication.
-#[cfg(test)]
-use super::GatewayLeafPin;
-use super::{PrivateKeyPem, TrustAnchorPin, certificate_chain, private_key};
+use super::{GatewayLeafPin, PrivateKeyPem, TrustAnchorPin, certificate_chain, private_key};
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
     Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PKCS_RSA_SHA256, PublicKeyData,
     RsaKeySize, SanType, SerialNumber,
 };
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use time::OffsetDateTime;
 use url::{Host, Url};
 use x509_parser::{extensions::ParsedExtension, public_key::PublicKey};
@@ -24,7 +22,7 @@ const MAX_ISSUED_CHAIN: usize = 128 * 1024;
 
 /// Static, secret-free errors only. Do not attach upstream parser/key text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IssuerError {
+pub enum IssuerError {
     InvalidMaterial,
     AnchorMismatch,
     UnsupportedIssuer,
@@ -36,9 +34,8 @@ pub(crate) enum IssuerError {
     EntropyUnavailable,
     IssuanceFailed,
 }
-#[cfg(test)]
 impl IssuerError {
-    pub(crate) fn code(self) -> &'static str {
+    pub fn code(self) -> &'static str {
         match self {
             Self::InvalidMaterial => "tls_issuer_invalid_material",
             Self::AnchorMismatch => "tls_issuer_anchor_mismatch",
@@ -54,31 +51,80 @@ impl IssuerError {
     }
 }
 
+/// An explicit LAN bind is limited to private networks and user-run overlays.
+/// Never turn a missing address into a wildcard bind.
+pub fn validate_lan_address(
+    enabled: bool,
+    address: Option<&str>,
+) -> Result<Option<Ipv4Addr>, IssuerError> {
+    match (enabled, address) {
+        (false, None) => Ok(None),
+        (true, Some(address)) => {
+            let ip: Ipv4Addr = address.parse().map_err(|_| IssuerError::InvalidOrigin)?;
+            let [a, b, _, _] = ip.octets();
+            if ip.is_private() || (a == 100 && (64..=127).contains(&b)) {
+                Ok(Some(ip))
+            } else {
+                Err(IssuerError::InvalidOrigin)
+            }
+        }
+        _ => Err(IssuerError::InvalidOrigin),
+    }
+}
+
+/// Compatibility input and the bounded multi-interface input are exclusive.
+pub fn validate_lan_addresses(
+    enabled: bool,
+    address: Option<&str>,
+    addresses: Option<&[String]>,
+) -> Result<Vec<Ipv4Addr>, IssuerError> {
+    if address.is_some() && addresses.is_some() {
+        return Err(IssuerError::InvalidOrigin);
+    }
+    match addresses {
+        None => Ok(validate_lan_address(enabled, address)?
+            .into_iter()
+            .collect()),
+        Some(addresses) => {
+            if !enabled || !(1..=4).contains(&addresses.len()) {
+                return Err(IssuerError::InvalidOrigin);
+            }
+            let mut result = Vec::with_capacity(addresses.len());
+            for address in addresses {
+                let ip =
+                    validate_lan_address(true, Some(address))?.ok_or(IssuerError::InvalidOrigin)?;
+                if result.contains(&ip) {
+                    return Err(IssuerError::InvalidOrigin);
+                }
+                result.push(ip);
+            }
+            Ok(result)
+        }
+    }
+}
+
 /// Generated DATA, not a C07 proof, selected endpoint or publication capability.
 /// No Clone, Debug or Serde: the private key must never enter a generic report.
 /// The caller retains the original CA certificate/key observations separately.
-pub(crate) struct IssuedGatewayEndpoint {
-    pub(crate) certificate_chain_pem: Vec<u8>,
-    pub(crate) private_key: PrivateKeyPem,
-    #[cfg(test)]
-    pub(crate) anchor_pin: TrustAnchorPin,
-    #[cfg(test)]
-    pub(crate) leaf_pin: GatewayLeafPin,
-    #[cfg(test)]
-    pub(crate) origin: String,
-    pub(crate) not_before_unix: i64,
-    pub(crate) not_after_unix: i64,
+pub struct IssuedGatewayEndpoint {
+    pub certificate_chain_pem: Vec<u8>,
+    pub private_key: PrivateKeyPem,
+    pub anchor_pin: TrustAnchorPin,
+    pub leaf_pin: GatewayLeafPin,
+    pub origin: String,
+    pub not_before_unix: i64,
+    pub not_after_unix: i64,
 }
 
 /// Fresh DATA for a single explicit bootstrap, not durable publication or
 /// enrollment authority. The private PEM is owned/zeroized by `PrivateKeyPem`.
 /// No Clone, Debug or Serde; persistence remains the caller's same-writer job.
-pub(crate) struct IssuedGatewayCa {
-    pub(crate) certificate_pem: Vec<u8>,
-    pub(crate) private_key: PrivateKeyPem,
-    pub(crate) anchor_pin: TrustAnchorPin,
-    pub(crate) not_before_unix: i64,
-    pub(crate) not_after_unix: i64,
+pub struct IssuedGatewayCa {
+    pub certificate_pem: Vec<u8>,
+    pub private_key: PrivateKeyPem,
+    pub anchor_pin: TrustAnchorPin,
+    pub not_before_unix: i64,
+    pub not_after_unix: i64,
 }
 
 /// Generate one fresh RSA-3072 trust anchor, compatible with `issue_server_leaf`.
@@ -87,7 +133,7 @@ pub(crate) struct IssuedGatewayCa {
 /// no expiry default, wall-clock read, persistence, implicit retry or CA rotation
 /// happens here. Invalid UTC/window input is refused before RSA/entropy work.
 /// This synchronous crypto operation belongs on the caller's owned blocking job.
-pub(crate) fn generate_gateway_ca(
+pub fn generate_gateway_ca(
     trusted_now_unix: u64,
     not_before_unix: u64,
     not_after_unix: u64,
@@ -198,8 +244,7 @@ fn endpoint(origin: &str) -> Result<(String, SanType), IssuerError> {
 /// Unknown constraints/extensions are refused, not silently copied or ignored.
 /// `trusted_now_unix` is supplied by the trusted coordinator's monotonic floor /
 /// wall-clock policy; this function cannot authenticate a caller-supplied time.
-#[cfg(test)]
-pub(crate) fn issue_server_leaf(
+pub fn issue_server_leaf(
     ca_pem: &[u8],
     ca_key: &PrivateKeyPem,
     expected_anchor: &TrustAnchorPin,
@@ -216,8 +261,7 @@ pub(crate) fn issue_server_leaf(
     )
 }
 
-#[cfg(test)]
-pub(crate) fn issue_server_leaf_with_lan(
+pub fn issue_server_leaf_with_lan(
     ca_pem: &[u8],
     ca_key: &PrivateKeyPem,
     expected_anchor: &TrustAnchorPin,
@@ -235,7 +279,7 @@ pub(crate) fn issue_server_leaf_with_lan(
     )
 }
 
-pub(crate) fn issue_server_leaf_with_lan_addresses(
+pub fn issue_server_leaf_with_lan_addresses(
     ca_pem: &[u8],
     ca_key: &PrivateKeyPem,
     expected_anchor: &TrustAnchorPin,
@@ -247,12 +291,11 @@ pub(crate) fn issue_server_leaf_with_lan_addresses(
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
-    crate::gateway::auth::lan_addresses(
+    validate_lan_addresses(
         !addresses.is_empty(),
         None,
         (!addresses.is_empty()).then_some(addresses.as_slice()),
-    )
-    .map_err(|_| IssuerError::InvalidOrigin)?;
+    )?;
     let certificates = certificate_chain(ca_pem).map_err(|_| IssuerError::InvalidMaterial)?;
     if certificates.len() != 1 {
         return Err(IssuerError::InvalidMaterial);
@@ -326,7 +369,7 @@ pub(crate) fn issue_server_leaf_with_lan_addresses(
     {
         return Err(IssuerError::IssuerNotCurrentlyValid);
     }
-    let (_origin, san) = endpoint(original_origin)?;
+    let (origin, san) = endpoint(original_origin)?;
     let not_before_date =
         OffsetDateTime::from_unix_timestamp(not_before).map_err(|_| IssuerError::InvalidClock)?;
     let not_after_date =
@@ -393,7 +436,6 @@ pub(crate) fn issue_server_leaf_with_lan_addresses(
     generated
         .verify_signature(Some(ca.public_key()))
         .map_err(|_| IssuerError::IssuanceFailed)?;
-    #[cfg(test)]
     let leaf_pin = GatewayLeafPin::from_certificate_der(leaf.der().as_ref());
     let mut certificate_chain_pem = leaf.pem().into_bytes();
     if certificate_chain_pem
@@ -410,12 +452,9 @@ pub(crate) fn issue_server_leaf_with_lan_addresses(
     Ok(IssuedGatewayEndpoint {
         certificate_chain_pem,
         private_key,
-        #[cfg(test)]
         anchor_pin,
-        #[cfg(test)]
         leaf_pin,
-        #[cfg(test)]
-        origin: _origin,
+        origin,
         not_before_unix: not_before,
         not_after_unix: not_after,
     })

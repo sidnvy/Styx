@@ -25,10 +25,48 @@
         "serde_json"
       ]
     },
+    "styx-crypto": {
+      "workspace_allowed": [],
+      "external_allowed": [
+        "aws-lc-rs",
+        "base64",
+        "ed25519-dalek",
+        "hex",
+        "rcgen",
+        "rustls",
+        "sha2",
+        "thiserror",
+        "zeroize"
+      ],
+      "dev_external_allowed": [
+        "tokio"
+      ]
+    },
+    "styx-tls": {
+      "workspace_allowed": [
+        "styx-contracts"
+      ],
+      "external_allowed": [
+        "getrandom",
+        "rcgen",
+        "rustls",
+        "rustls-pemfile",
+        "rustls-webpki",
+        "thiserror",
+        "time",
+        "tokio",
+        "tokio-rustls",
+        "url",
+        "x509-parser",
+        "zeroize"
+      ]
+    },
     "styx-runtime": {
       "workspace_allowed": [
         "styx-contracts",
-        "styx-core"
+        "styx-core",
+        "styx-crypto",
+        "styx-tls"
       ],
       "external_allowed": [
         "serde",
@@ -40,7 +78,6 @@
         "getrandom",
         "tokio",
         "aws-lc-rs",
-        "ed25519-dalek",
         "base64",
         "hex",
         "zeroize",
@@ -64,7 +101,6 @@
         "tower",
         "reqwest",
         "regex",
-        "rustls-webpki",
         "zbus",
         "jsonschema",
         "security-framework",
@@ -72,12 +108,15 @@
         "core-foundation",
         "core-foundation-sys",
         "rustix",
-        "rcgen",
         "x509-parser",
         "time",
         "windows-sys",
         "windows",
         "png"
+      ],
+      "dev_external_allowed": [
+        "ed25519-dalek",
+        "rcgen"
       ]
     },
     "styx": {

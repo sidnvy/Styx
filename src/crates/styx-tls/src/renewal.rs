@@ -93,13 +93,13 @@ impl EndpointRenewal {
 }
 impl GatewayServerTls {
     /// Called only in the original Gateway's owned blocking validation job.
-    pub(crate) fn renew_endpoint(&self) -> Result<(), TlsError> {
+    pub fn renew_endpoint(&self) -> Result<(), TlsError> {
         self.renewal
             .as_ref()
             .map_or(Ok(()), |r| r.refresh_at(clock()?))
     }
 
-    pub(crate) fn renewing(
+    pub fn renewing(
         ca: Vec<u8>,
         key: PrivateKeyPem,
         pin: TrustAnchorPin,

@@ -1,4 +1,5 @@
 use super::*;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 #[test]
 fn claim_confirmation_uses_original_ascii_token_and_exact_request_domain() {

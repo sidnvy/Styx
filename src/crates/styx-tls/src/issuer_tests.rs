@@ -1,7 +1,7 @@
 //! Self-contained synthetic issuer crypto + actual loopback standard TLS.
 //! No original profile/key, service, installed Gateway or C07 completion claim.
 use super::*;
-use crate::tls::{CertificateFailure, GatewayClientTls, GatewayServerTls, TlsError};
+use crate::{CertificateFailure, GatewayClientTls, GatewayServerTls, TlsError};
 // BasicConstraints/RsaKeySize are inherited from the issuer imports.
 use std::{
     sync::Arc,
