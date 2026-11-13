@@ -1479,17 +1479,10 @@ impl HostApp {
             self.startup_profile = None;
         }
         self.reap_runtime_update(false).await;
-        if matches!(operation, Operation::QuitAdmission) && !self.maintenance_fenced() {
-            if self
-                .running
-                .as_ref()
-                .is_some_and(|r| r.worker.is_finished())
-            {
-                self.settle_host(true).await?;
-            }
-        } else {
-            self.reap().await?;
+        if matches!(operation, Operation::QuitAdmission) {
+            return self.admit_quit().await;
         }
+        self.reap().await?;
         match operation {
             Operation::Computers
             | Operation::InviteComputer
@@ -1507,13 +1500,7 @@ impl HostApp {
             Operation::AppLifecycle => return self.login_read(input),
             Operation::AppLogin => return self.login_authorize(input),
             Operation::AppLoginResult => return self.login_complete(input),
-            Operation::QuitAdmission if self.login.pending() => {
-                return Err(AppError("app_login_in_progress"));
-            }
             _ => (),
-        }
-        if matches!(operation, Operation::QuitAdmission) && self.service_client_or_unknown() {
-            return self.service_quit_admission().await;
         }
         if matches!(operation, Operation::TransferToService) {
             self.transfer_to_service(decode_input(&input)?).await?;
@@ -1578,41 +1565,11 @@ impl HostApp {
             self.connect_host().await?;
             return Ok(self.snapshot().await);
         }
-        if matches!(operation, Operation::QuitAdmission) && self.resume_local_available {
-            // This is a positively revalidated never-dispatched checkpoint,
-            // not permission to clear an arbitrary failed pairing/role outcome.
-            self.check_pre_invite_local().await?;
-            // Only the positively checked never-dispatched setup is known;
-            // settle itself must not inherit that incomplete-setup sentinel.
-            self.unknown = false;
-            if let Err(error) = self.settle_all().await.and_then(|()| self.scope.validate()) {
-                self.unknown = true;
-                return Err(error);
-            }
-            let ticket = uuid::Uuid::new_v4().simple().to_string();
-            self.quit_ticket = Some(ticket.clone());
-            self.resume_local_available = false;
-            self.unknown = false;
-            return Ok(
-                json!({"quit":{"status":"ready_to_quit","ticketId":ticket},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status())}),
-            );
-        }
-        // A queued runtime update owns its original writer. A UI Quit must
-        // return promptly and must never abort it or pretend it has settled.
-        if matches!(operation, Operation::QuitAdmission) && self.runtime_update_running() {
-            return Err(AppError("app_runtime_update_in_progress"));
-        }
-        // Stopping our own captured role remains safe even if scope validation
-        // has failed. Never leave it running because a configuration write was refused.
-        if matches!(operation, Operation::QuitAdmission) {
-            self.settle_for_quit().await?;
-        } else if matches!(operation, Operation::Disconnect) {
+        let disconnecting = matches!(operation, Operation::Disconnect);
+        if disconnecting {
             self.settle_host(true).await?;
         }
-        self.available_for(
-            (matches!(operation, Operation::QuitAdmission) && !self.maintenance_fenced())
-                || matches!(operation, Operation::Disconnect),
-        )?;
+        self.available_for(disconnecting)?;
         match operation {
             Operation::ResumeLocal => Err(AppError("app_local_checkpoint_refused")),
             Operation::CreateLocal => {
@@ -1709,18 +1666,8 @@ impl HostApp {
                     .await?;
                 Ok(self.snapshot().await)
             }
-            Operation::QuitAdmission => {
-                // This ticket is only admission. Here admission is deliberately
-                // issued after actual owned-role settlement, never after kill.
-                self.settle_for_quit().await?;
-                let ticket = uuid::Uuid::new_v4().simple().to_string();
-                self.record_exit_uncertainty(&ticket).await?;
-                self.quit_ticket = Some(ticket.clone());
-                Ok(
-                    json!({"quit":{"status":"ready_to_quit","scope":"local_app","ticketId":ticket},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g|g.status())}),
-                )
-            }
-            Operation::Computers
+            Operation::QuitAdmission
+            | Operation::Computers
             | Operation::InviteComputer
             | Operation::PendingComputers
             | Operation::ApproveComputer

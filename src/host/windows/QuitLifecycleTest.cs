@@ -37,7 +37,7 @@ namespace StyxNative {
      if(worker.IdSafe()!=0){worker.StandardInput.Close();worker.WaitForExit();File.WriteAllText(Path.Combine(dir,"worker-exit"),worker.ExitCode.ToString());}
      if(mode=="active"||mode=="disconnected"||mode=="busy")System.Threading.Thread.Sleep(150);
      int id=Convert.ToInt32(Json.Get(request,"id"));
-     Console.WriteLine(Json.Codec.Serialize(Json.Obj("id",mode=="lost"?id+1:id,"ok",!refuse,"error",refuse?"app_runtime_update_in_progress":null,"result",Json.Obj("quit",Json.Obj("status","ready_to_quit","ticketId",new string('a',32))))));Console.Out.Flush();
+     Console.WriteLine(Json.Codec.Serialize(Json.Obj("id",mode=="lost"?id+1:id,"ok",!refuse,"error",refuse?"app_runtime_update_in_progress":null,"result",Json.Obj("quit",Json.Obj("status","ready_to_quit","ticketId",mode=="disconnected"?null:new string('a',32))))));Console.Out.Flush();
     }
     if(mode=="slow"||mode=="dispose")while(!File.Exists(Path.Combine(dir,"release")))System.Threading.Thread.Sleep(20);
     // Larger than ordinary OS pipe buffers: the owner must drain while waiting.
@@ -69,7 +69,7 @@ namespace StyxNative {
    }
    var context=new StyxContext(resources,dir,true);var settings=(Settings)Get(context,"settings");settings.CreateControl();var handle=settings.Handle;
    if(mode=="capability-draft"){
-    var operations=new object[]{"status","quitAdmission","createLocal","inspectJoin","join","retireRole"};
+    var operations=new object[]{"status","quitAdmission","createLocal","inspectJoin","join","claimJoin","retireRole"};
     var fresh=Json.Obj("mode","rust_host","supportedOperations",operations);
     Set(context,"snapshot",fresh);settings.ShowPage("general");
     var freshJoin=FindButton(settings,"Join an existing Gateway");Check(freshJoin!=null&&freshJoin.Enabled,"fresh_general_join_missing");
@@ -175,7 +175,7 @@ namespace StyxNative {
       Check(File.ReadAllText(Path.Combine(dir,"calls"))=="1","unknown_quit_replayed");
      }else if(mode=="failed"||mode=="startup-failed"||mode=="crashed"){
       Check(Json.Str(result,"code")!=null&&context.ResultCode==4,"abnormal_exit_reported_clean");
-     }else Check(child.ExitCode==0&&core.CleanupConfirmed,"clean_exit_not_confirmed");
+     }else Check(child.ExitCode==0&&core.CleanupConfirmed&&context.ResultCode==0&&Json.Get(result,"code")==null,"clean_exit_not_confirmed");
      if(mode=="active")Check(File.ReadAllText(Path.Combine(dir,"worker-exit"))=="0","owned_worker_not_joined");
      File.WriteAllText(Path.Combine(dir,"result.json"),Json.Codec.Serialize(Json.Obj("status","PASS","mode",mode,"quitStatus",Json.Str(result,"status"),"scope","native_winforms_pipe_lifecycle_fixture_not_host_acceptance","coreExit",child.ExitCode,"cleanupConfirmed",core.CleanupConfirmed,"calls",File.Exists(Path.Combine(dir,"calls"))?File.ReadAllText(Path.Combine(dir,"calls")):"0","quitCalls",File.Exists(Path.Combine(dir,"quit-calls"))?File.ReadAllText(Path.Combine(dir,"quit-calls")):"0")));code=0;
     }catch(Exception e){File.WriteAllText(Path.Combine(dir,"failure.txt"),e.ToString());}

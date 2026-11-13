@@ -3,6 +3,55 @@
 use super::*;
 
 impl HostApp {
+    pub(super) async fn admit_quit(&mut self) -> Result<Value, AppError> {
+        // Preserve the result of a Host that already exited, even when the
+        // caller must wait for a login change or update before it can quit.
+        if self
+            .running
+            .as_ref()
+            .is_some_and(|role| role.worker.is_finished())
+        {
+            self.settle_host(!self.maintenance_fenced()).await?;
+        }
+        if self.login.pending() {
+            return Err(AppError("app_login_in_progress"));
+        }
+        if self.service_client_or_unknown() {
+            return self.service_quit_admission().await;
+        }
+        if self.resume_local_available {
+            // This is a positively revalidated never-dispatched checkpoint,
+            // not permission to clear an arbitrary failed pairing/role outcome.
+            self.check_pre_invite_local().await?;
+            // Only the positively checked never-dispatched setup is known;
+            // settle itself must not inherit that incomplete-setup sentinel.
+            self.unknown = false;
+            if let Err(error) = self.settle_all().await.and_then(|()| self.scope.validate()) {
+                self.unknown = true;
+                return Err(error);
+            }
+            let ticket = uuid::Uuid::new_v4().simple().to_string();
+            self.quit_ticket = Some(ticket.clone());
+            self.resume_local_available = false;
+            self.unknown = false;
+            return Ok(
+                json!({"quit":{"status":"ready_to_quit","ticketId":ticket},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status())}),
+            );
+        }
+        if self.runtime_update_running() {
+            return Err(AppError("app_runtime_update_in_progress"));
+        }
+        self.settle_for_quit().await?;
+        self.available_for(!self.maintenance_fenced())?;
+        let ticket = uuid::Uuid::new_v4().simple().to_string();
+        self.record_exit_uncertainty(&ticket).await?;
+        self.quit_ticket = Some(ticket.clone());
+        Ok(
+            json!({"quit":{"status":"ready_to_quit","scope":"local_app","ticketId":ticket},
+            "cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g|g.status())}),
+        )
+    }
+
     pub(super) fn remote_cleanup_unconfirmed(&self) -> bool {
         self.cleanup
             .as_ref()

@@ -4,11 +4,12 @@
 
 - Product source is only src/. Rust owns Gateway, Host, Core, state and policy. Retain mature Codex/Cua/Playwright executors and native Swift/C# bridges; Node is limited to the Browser worker. Use mature, pinned libraries rather than rebuilding standard protocols.
 - Preserve Gateway/Host/Core boundaries and the owner's chosen scope in src/docs/rust-core-rewrite/REDUCED-SCOPE.md. Do not add product features or restore a legacy management runtime during convergence.
+- Start with the platform framework or upstream executor's normal behavior. Add a process, durable state or protocol only for a concrete user-visible requirement. When ownership moves, remove the superseded path and verify the change through its normal entry point.
 
 ## Default development loop
 
 - Work in the existing project and native cache. WORKSPACE.md maps paths and commands; read only the relevant section. On the workstation, integrate into /home/sid/Developer/Styx on develop; origin is GitHub.
-- Reuse the known working build command, dependency cache and target directory. Preserve cache-affecting target triple, profile, features and RUSTFLAGS; the same cache root alone does not guarantee a hit. Inspect CPU/memory and the current compile/link stage, then use the available parallelism instead of defaulting to a conservative job cap. Reduce jobs for observed contention, not hypothetical load.
+- Reuse the existing development command and cache in WORKSPACE.md. Match build settings to the warm artifacts and size parallelism to observed resources.
 - Develop and reproduce locally before release production: incremental affected-crate check, the changed scenario, and actual native execution when runtime behavior needs it. A typecheck is sufficient for a typecheck task, not for a startup/recovery fix.
 - A candidate freezes release outputs; it is not a development project, cache or prerequisite for every GUI run. Run workspace quality at integration/release checkpoints. Reuse unaffected evidence; rerun when a relevant change, failure or uncertainty justifies it.
 - Reuse existing installation paths and persisted profiles for authorized fixes and recovery. Do not accumulate new acceptance scopes or isolated projects for each step; keep ordinary disposable unit-test fixtures separate from product delivery.

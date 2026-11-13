@@ -92,10 +92,8 @@ namespace StyxNative {
   }
   int shutdownCustody;
   internal object MaintenanceIdentity(){var p=child;if(p==null||Volatile.Read(ref closed)!=0||p.HasExited)throw new IOException("maintenance_core_unavailable");IntPtr held=p.Handle;return Json.Obj("pid",p.Id,"creationFileTime",MaintenancePeer.Birth(p));}
-  internal async Task BeginMaintenanceCustody(){await gate.WaitAsync();try{if(Volatile.Read(ref closed)!=0||pendingRead!=null||child==null||child.HasExited||Interlocked.CompareExchange(ref shutdownCustody,1,0)!=0)throw new IOException("maintenance_core_custody_unavailable");}finally{gate.Release();}}
-  internal void ReleaseMaintenanceCustody(){if(Volatile.Read(ref closed)!=0||pendingRead!=null)throw new IOException("maintenance_core_custody_unknown");Interlocked.Exchange(ref shutdownCustody,0);}
-  internal Task BeginQuitCustody(){return BeginMaintenanceCustody();}
-  internal void ReleaseQuitCustody(){ReleaseMaintenanceCustody();}
+  internal async Task BeginShutdown(){await gate.WaitAsync();try{if(Volatile.Read(ref closed)!=0||pendingRead!=null||child==null||child.HasExited||Interlocked.CompareExchange(ref shutdownCustody,1,0)!=0)throw new IOException("maintenance_core_custody_unavailable");}finally{gate.Release();}}
+  internal void CancelShutdown(){if(Volatile.Read(ref closed)!=0||pendingRead!=null)throw new IOException("maintenance_core_custody_unknown");Interlocked.Exchange(ref shutdownCustody,0);}
   internal Task<object> SettleQuit(){return SettleOwnedExit(true);}
   internal Task<object> SettleMaintenance(){return SettleOwnedExit(false);}
   async Task<object> SettleOwnedExit(bool quit){
@@ -109,11 +107,14 @@ namespace StyxNative {
     // no RPC, action or process signal is repeated.
     var reading=pendingRead;if(reading!=null){try{await reading;}catch(IOException){}pendingRead=null;}
     // No deadline or signal: keep this exact Process and both readers until
-    // EOF and actual exit. Core's full quit ticket precedes this method.
+    // EOF and actual exit. The original exit code determines local cleanup status.
     var stdout=Drain(p.StandardOutput);await Task.Run(()=>p.WaitForExit());await stdout;if(stderrDrain!=null)await stderrDrain;
-    int code=p.ExitCode;ObservedExit=Json.Obj("pid",pid,"creationFileTime",birth,"exitCode",code,"stdinEof",true,"ioJoined",true);if(code!=0)throw new IOException("maintenance_core_exit_unconfirmed");
-    CleanupConfirmed=true;ReleasePins();cancellationRegistration.Dispose();p.Dispose();child=null;
-    return Json.Obj("pid",pid,"creationFileTime",birth,"exitCode",code,"stdinEof",true,"ioJoined",true);
+    int code=p.ExitCode;
+    ObservedExit=Json.Obj("pid",pid,"creationFileTime",birth,"exitCode",code,"stdinEof",true,"ioJoined",true);
+    CleanupConfirmed=code==0;
+    if(!quit&&!CleanupConfirmed)throw new IOException("maintenance_core_exit_unconfirmed");
+    ReleasePins();cancellationRegistration.Dispose();p.Dispose();child=null;
+    return ObservedExit;
    }finally{gate.Release();}
   }
   public void Dispose(){
@@ -270,7 +271,7 @@ namespace StyxNative {
   readonly string root,state;readonly NotifyIcon tray;readonly Icon icon;readonly Form panel;readonly Settings settings;readonly CancellationTokenSource startupCancellation=new CancellationTokenSource();readonly Stopwatch startupClock=Stopwatch.StartNew();readonly bool startupTest,loginStartup;readonly System.Windows.Forms.Timer startupTimer,statusTimer;
   VerificationTiming verificationTiming;Core core;bool busy,closing,starting,startupHostUpdateAttempted,loginChangeUnconfirmed,actionsGatedDuringStartup=true;int mutationRevision,progressEvents;long firstPaintTicks=-1,verificationStartedTicks=-1,verifiedTicks=-1,readyTicks=-1;object snapshot;Task<object> observation;TaskCompletionSource<bool> mutationDone;readonly Label message;
   internal int ResultCode=0;
-  LocalAppControl localControl;Task<object> quitWork;string quitPhase="running";object quitResult,startupCoreExit;
+  LocalAppControl localControl;Task<object> quitWork;string quitPhase="running";object startupCoreExit;
   internal object CurrentStatus { get { return snapshot; } }
   internal bool RustHost {get{return Json.Str(snapshot,"mode")=="rust_host";}}
   internal bool Supports(string operation){var values=Json.Get(snapshot,"supportedOperations") as object[];if(values==null)return false;foreach(var item in values)if(Equals(item,operation))return true;return false;}
@@ -343,7 +344,7 @@ namespace StyxNative {
    maintenanceAttempted=true;mutationRevision++;settings.Enabled=false;settings.Feedback("Preparing the original App for Setup…");object prepared=null,login=null,quit=null,exit=null;Exception failure=null;bool custody=false,mutationDispatched=false;
    try{
     var reading=observation;if(reading!=null){try{await reading;}catch{}if(observation==reading)observation=null;}
-    await core.BeginMaintenanceCustody();custody=true;
+    await core.BeginShutdown();custody=true;
     if(action=="uninstall"){
      if(loginChangeUnconfirmed)throw new NativeOperationException("app_login_result_unknown_no_replay");using(var before=NativeLoginStartup.Observe(root,state)){if(before.Status=="registered_unverified"){mutationDispatched=true;await Call("appLogin",Json.Obj("enabled",false));}else if(before.Status!="not_registered")throw new NativeOperationException("app_login_observation_changed");}
      using(var current=NativeLoginStartup.Observe(root,state)){if(current.Status!="not_registered"||loginChangeUnconfirmed)throw new NativeOperationException("app_login_result_unknown_no_replay");login=current.Wire;}
@@ -359,7 +360,7 @@ namespace StyxNative {
     // Only a local preflight before any dispatched mutation can release custody.
     // A rejected maintenance Quit fences the original Core as unknown, even if
     // its error names a busy task. Never cancel or replay that original attempt.
-    if(custody&&!mutationDispatched){try{core.ReleaseMaintenanceCustody();released=true;}catch{}}
+    if(custody&&!mutationDispatched){try{core.CancelShutdown();released=true;}catch{}}
     if(released){busy=false;settings.Enabled=true;mutationDone.TrySetResult(true);settings.Feedback("Setup could not prepare this App. No program files were changed. Review the connection before starting a new Setup attempt.");}else settings.Feedback("The installation handoff is unconfirmed. Keep this App open for review. No operation will be repeated.");
     return Json.Obj("status",released?"blocked":"unknown");
    }
@@ -543,38 +544,39 @@ namespace StyxNative {
   async Task<object> PrepareQuit(){
    busy=true;mutationDone=new TaskCompletionSource<bool>();quitPhase="stopping";mutationRevision++;settings.Enabled=false;
    message.Text="Stopping Styx…";settings.Feedback("Stopping this Styx instance and its tasks…");
-   try{
-    var reading=observation;if(reading!=null){try{await reading;}catch{}if(observation==reading)observation=null;}
-    object exit=null;
-    if(core==null&&startupCoreExit!=null){ResultCode=4;quitPhase="ready_to_exit";quitResult=QuitReply("ready_to_exit","app_core_exited_unclean",startupCoreExit);return quitResult;}
-    if(core!=null&&core.ObservedExit!=null){
-     if(!core.CleanupConfirmed)ResultCode=4;
-     quitPhase="ready_to_exit";quitResult=QuitReply("ready_to_exit",core.CleanupConfirmed?null:"app_core_exited_unclean",core.ObservedExit);return quitResult;
-    }
-    if(core!=null){
-     // Retain the original child/readers; Quit never enters the timed kill path.
-     await core.BeginQuitCustody();
-     try{await AdmitQuit();}
-     catch(NativeOperationException e){
-      if(e.Code=="app_runtime_update_in_progress"||e.Code=="app_login_in_progress"){
-       core.ReleaseQuitCustody();quitPhase="running";quitWork=null;busy=false;settings.Enabled=true;mutationDone.TrySetResult(true);
-       settings.Feedback("Styx is finishing another operation. Try Quit again when it finishes.");
-       quitResult=QuitReply("busy",e.Code);return quitResult;
-      }
-      throw;
+   var reading=observation;
+   if(reading!=null){try{await reading;}catch{}if(observation==reading)observation=null;}
+
+   string failure=null;
+   if(core!=null&&core.ObservedExit==null){
+    try{
+     await core.BeginShutdown();
+     var result=await core.Call("quitAdmission",Json.Obj());
+     if(Json.Str(result,"quit","status")!="ready_to_quit")throw new IOException();
+    }catch(NativeOperationException error){
+     if(error.Code=="app_runtime_update_in_progress"||error.Code=="app_login_in_progress"){
+      core.CancelShutdown();
+      quitPhase="running";busy=false;settings.Enabled=true;mutationDone.TrySetResult(true);
+      return QuitReply("busy",error.Code);
      }
-     exit=await core.SettleQuit();
-    }
-    quitPhase="ready_to_exit";quitResult=QuitReply("ready_to_exit",null,exit);return quitResult;
-   }catch{}
-   // Framework C# cannot await in catch. This is still the same retained
-   // shutdown job: EOF joins original work, never another Quit RPC or a kill.
-   if(core!=null&&core.ObservedExit==null){try{await core.SettleQuit();}catch{}}
-   ResultCode=4;
-   if(core!=null&&core.ObservedExit!=null){quitPhase="ready_to_exit";quitResult=QuitReply("ready_to_exit","app_quit_admission_unconfirmed",core.ObservedExit);return quitResult;}
-   quitPhase="unknown";quitResult=QuitReply("unknown","app_quit_unconfirmed");
-   settings.Feedback("Styx could not confirm that its tasks have stopped. The original shutdown is retained; it will not be repeated or force-killed.");
-   return quitResult;
+     failure="app_quit_admission_unconfirmed";
+    }catch{failure="app_quit_admission_unconfirmed";}
+
+    // Closing this child's input joins the original Rust work, including after
+    // a lost reply. The same request is never dispatched a second time.
+    try{await core.SettleQuit();}catch{failure="app_quit_unconfirmed";}
+   }
+   object exit=core==null?startupCoreExit:core.ObservedExit;
+   if(core!=null&&exit==null){
+    ResultCode=4;quitPhase="unknown";
+    settings.Feedback("Styx could not confirm that its local process stopped.");
+    return QuitReply(quitPhase,"app_quit_unconfirmed");
+   }
+   if(exit!=null&&(core==null||!core.CleanupConfirmed))
+    failure="app_core_exited_unclean";
+   if(failure!=null)ResultCode=4;
+   quitPhase="ready_to_exit";
+   return QuitReply(quitPhase,failure,exit);
   }
   internal async Task RequestQuit(){
    var result=await RequestQuitResult();
