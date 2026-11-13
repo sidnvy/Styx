@@ -42,7 +42,8 @@ test('HTTPS package is allowlisted and declares bearer without embedding receipt
  assert.equal(m.extensions['com.openai'].interface.logo,'./assets/icon.png');
  const skill=fs.readFileSync(path.join(f.output,'skills/styx-native-onboarding/SKILL.md'),'utf8');
  assert.match(skill,/^---\nname: styx-native-onboarding\ndescription: [^\n]+\n---\n/);
- assert.match(skill,/setup-native\.mjs prepare/);assert.match(skill,/owner\/admin keys/);
+ assert.match(skill,/`styx setup`/);assert.match(skill,/owner\/admin credentials/);
+ assert.doesNotMatch(skill,/setup-native\.mjs/);
  assert.throws(()=>buildPackage(f.config,f.output,{now}),/output_must_be_fresh/);
 });
 test('fresh verified tunnel excludes URL and lives in OpenAI connection options',t=>{
