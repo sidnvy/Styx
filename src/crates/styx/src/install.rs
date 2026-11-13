@@ -84,11 +84,16 @@ pub(super) async fn run(
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use std::os::unix::fs::DirBuilderExt;
     #[test]
     fn existing_command_is_never_replaced() {
         let root = std::env::temp_dir().join(format!("styx-cli-install-{}", std::process::id()));
         let bin = root.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o755)
+            .create(&bin)
+            .unwrap();
         let payload = root.join("release");
         link(&payload, &bin).unwrap();
         assert_eq!(

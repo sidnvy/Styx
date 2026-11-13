@@ -381,7 +381,7 @@ mod tests {
                 .unwrap();
             f.write_all(b"original input preserved").unwrap();
         }
-        app.enrollment = Some(json!({"status":"ready_to_connect"}));
+        app.enrollment = Some(AppEnrollment::ready_for_test());
         let lease = app.scope.root.get().unwrap().try_execution_lease().unwrap();
         let worker = tokio::spawn(async move {
             let _lease = lease;

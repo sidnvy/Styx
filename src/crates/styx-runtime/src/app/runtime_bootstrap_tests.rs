@@ -252,7 +252,7 @@ async fn fresh_profile_reopens_from_external_runtime_after_bundle_replacement() 
     .await
     .unwrap();
     assert_eq!(
-        app.enrollment.as_ref().unwrap()["status"],
+        app.enrollment.as_ref().unwrap().status(),
         "ready_to_connect"
     );
     assert!(
@@ -262,7 +262,7 @@ async fn fresh_profile_reopens_from_external_runtime_after_bundle_replacement() 
     async fn paired_devices(app: &mut HostApp) -> Vec<Value> {
         let rows = app
             .gateway_ui_request(
-                Operation::Computers,
+                gateway_ui::GatewayUiOperation::Computers,
                 serde_json::value::to_raw_value(&json!({})).unwrap(),
             )
             .await
@@ -392,7 +392,7 @@ async fn fresh_profile_reopens_from_external_runtime_after_bundle_replacement() 
         .unwrap();
     assert_eq!(selections(&reopened, &bundle), before);
     assert_eq!(
-        reopened.enrollment.as_ref().unwrap()["status"],
+        reopened.enrollment.as_ref().unwrap().status(),
         "ready_to_connect"
     );
     assert!(!reopened.unknown);

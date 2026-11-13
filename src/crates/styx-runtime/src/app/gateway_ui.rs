@@ -42,6 +42,18 @@ struct TunnelSave {
     tunnel_id: String,
     api_key: Option<String>,
 }
+#[derive(Clone, Copy)]
+pub(super) enum GatewayUiOperation {
+    Computers,
+    InviteComputer,
+    PendingComputers,
+    ApproveComputer,
+    RejectComputer,
+    RevokeComputer,
+    TunnelStatus,
+    TunnelSave,
+}
+
 impl HostApp {
     fn gateway_admin_error(&mut self, error: admin::AdminError) -> AppError {
         // Retain a lost mutation outcome; the GUI cannot repeat it on this owner.
@@ -52,7 +64,7 @@ impl HostApp {
     }
     pub(super) async fn gateway_ui_request(
         &mut self,
-        operation: Operation,
+        operation: GatewayUiOperation,
         input: Box<serde_json::value::RawValue>,
     ) -> Result<Value, AppError> {
         self.available()?;
@@ -63,15 +75,12 @@ impl HostApp {
         gateway.validate()?;
         let scope = gateway.scope.clone();
         match operation {
-            Operation::Computers => {
+            GatewayUiOperation::Computers => {
                 let rows = admin::computers_for_app(scope.clone())
                     .await
                     .map_err(|e| self.gateway_admin_error(e))?;
                 scope.validate()?;
-                let local = self
-                    .enrollment
-                    .as_ref()
-                    .and_then(|e| e["device_id"].as_str());
+                let local = self.enrollment.as_ref().and_then(AppEnrollment::device_id);
                 let rows: Vec<Value> = rows
                     .into_iter()
                     .filter(|r| r.status == "approved")
@@ -83,14 +92,14 @@ impl HostApp {
                     .collect();
                 Ok(json!({"devices":rows}))
             }
-            Operation::PendingComputers => {
+            GatewayUiOperation::PendingComputers => {
                 let report = admin::pending_for_app(scope.clone())
                     .await
                     .map_err(|e| self.gateway_admin_error(e))?;
                 scope.validate()?;
                 serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))
             }
-            Operation::InviteComputer => {
+            GatewayUiOperation::InviteComputer => {
                 let selected: Authorized = decode_input(&input)?;
                 if !selected.authorize {
                     return Err(AppError("app_confirmation_required"));
@@ -128,7 +137,7 @@ impl HostApp {
                     .map_err(|e| AppError(e.code()))?;
                 Ok(json!({"link":link.as_str(),"expiresAt":expires,"origin":origin}))
             }
-            Operation::ApproveComputer => {
+            GatewayUiOperation::ApproveComputer => {
                 let choice: Approval = decode_input(&input)?;
                 if !choice.authorize {
                     return Err(AppError("app_confirmation_required"));
@@ -149,7 +158,7 @@ impl HostApp {
                 scope.validate()?;
                 serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))
             }
-            Operation::RejectComputer => {
+            GatewayUiOperation::RejectComputer => {
                 let choice: Rejection = decode_input(&input)?;
                 if !choice.authorize {
                     return Err(AppError("app_confirmation_required"));
@@ -168,7 +177,7 @@ impl HostApp {
                 scope.validate()?;
                 serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))
             }
-            Operation::RevokeComputer => {
+            GatewayUiOperation::RevokeComputer => {
                 let choice: Revoke = decode_input(&input)?;
                 if !choice.authorize {
                     return Err(AppError("app_confirmation_required"));
@@ -176,7 +185,7 @@ impl HostApp {
                 let local = self
                     .enrollment
                     .as_ref()
-                    .and_then(|e| e["device_id"].as_str())
+                    .and_then(AppEnrollment::device_id)
                     .ok_or(AppError("app_local_identity_unavailable"))?;
                 if choice.device_id.as_str() == local {
                     return Err(AppError("app_cannot_revoke_this_computer"));
@@ -187,14 +196,14 @@ impl HostApp {
                 scope.validate()?;
                 serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))
             }
-            Operation::TunnelStatus => {
+            GatewayUiOperation::TunnelStatus => {
                 let status = foreground::tunnel::status(&scope.state_dir)
                     .await
                     .map_err(|e| AppError(e.code()))?;
                 scope.validate()?;
                 serde_json::to_value(status).map_err(|_| AppError("app_response_invalid"))
             }
-            Operation::TunnelSave => {
+            GatewayUiOperation::TunnelSave => {
                 let choice: TunnelSave = decode_input(&input)?;
                 let secret = choice.api_key.map(zeroize::Zeroizing::new);
                 if !choice.authorize {
@@ -246,7 +255,6 @@ impl HostApp {
                 }
                 serde_json::to_value(configured).map_err(|_| AppError("app_response_invalid"))
             }
-            _ => unreachable!(),
         }
     }
 }

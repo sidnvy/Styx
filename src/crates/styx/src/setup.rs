@@ -110,12 +110,22 @@ pub(super) struct Answers {
 fn default_port() -> u16 {
     22022
 }
+enum FailureOwner {
+    #[allow(dead_code)]
+    Native(native::NativeManagementError),
+    Join(native_join::JoinError),
+    #[allow(dead_code)]
+    Bootstrap(native_gateway::BootstrapError),
+    #[allow(dead_code)]
+    Admin(admin::AdminError),
+}
+
 pub(super) struct Failure {
     pub code: &'static str,
     pub exit: u8,
     // Unknown errors may own the original coordinator/OS job. Retain them until
     // the CLI's explicit whole-process teardown, just like native_recovery_result.
-    _owner: Option<Box<dyn std::any::Any + Send>>,
+    _owner: Option<FailureOwner>,
 }
 impl std::fmt::Debug for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -124,10 +134,7 @@ impl std::fmt::Debug for Failure {
 }
 impl Failure {
     pub fn hint(&self) -> Option<&'static str> {
-        if let Some(error) = self
-            ._owner
-            .as_ref()
-            .and_then(|owner| owner.downcast_ref::<native_join::JoinError>())
+        if let Some(FailureOwner::Join(error)) = &self._owner
             && let Some(hint) = error.hint()
         {
             return Some(hint);
@@ -186,28 +193,28 @@ impl Failure {
         Self {
             code: value.code(),
             exit,
-            _owner: Some(Box::new(value)),
+            _owner: Some(FailureOwner::Native(value)),
         }
     }
     fn join(value: native_join::JoinError) -> Self {
         Self {
             code: value.code(),
             exit: value.exit_code(),
-            _owner: Some(Box::new(value)),
+            _owner: Some(FailureOwner::Join(value)),
         }
     }
     fn bootstrap(value: native_gateway::BootstrapError) -> Self {
         Self {
             code: value.code(),
             exit: value.exit_code(),
-            _owner: Some(Box::new(value)),
+            _owner: Some(FailureOwner::Bootstrap(value)),
         }
     }
     pub(super) fn admin(value: admin::AdminError) -> Self {
         Self {
             code: value.code(),
             exit: value.exit_code(),
-            _owner: Some(Box::new(value)),
+            _owner: Some(FailureOwner::Admin(value)),
         }
     }
 }
@@ -702,13 +709,18 @@ impl Foreground {
         let (send, mut receive) =
             tokio::sync::mpsc::channel::<styx_runtime::foreground::ForegroundEvent>(32);
         let events = tokio::spawn(async move {
+            use styx_runtime::foreground::ForegroundEventKind;
             while let Some(event) = receive.recv().await {
                 if prompt::enhanced() {
                     match event.event {
-                        "gateway_loading" => prompt::info("Starting Gateway…"),
-                        "gateway_listening" => prompt::success("Gateway is listening"),
-                        "gateway_stopped" => prompt::info("Gateway stopped"),
-                        "connected" => prompt::success("This computer is connected"),
+                        ForegroundEventKind::GatewayLoading => prompt::info("Starting Gateway…"),
+                        ForegroundEventKind::GatewayListening => {
+                            prompt::success("Gateway is listening")
+                        }
+                        ForegroundEventKind::GatewayStopped => prompt::info("Gateway stopped"),
+                        ForegroundEventKind::Connected => {
+                            prompt::success("This computer is connected")
+                        }
                         _ => prompt::info(&runtime_event_line(&event)),
                     }
                 } else {
@@ -1185,7 +1197,7 @@ async fn pair(session: &Session, gateway: Option<&Path>) -> Result<Option<String
         if claimed.status == "rejected" {
             return Err(rejected_join(session, &claimed));
         }
-        if matches!(claimed.status, "ready_to_connect" | "already_ready") {
+        if claimed.status.is_ready() {
             session.done(&step)?;
             session.done("claim")?;
             break;
@@ -2427,7 +2439,7 @@ mod tests {
             matches!(result, Err(error) if error.code() == "absolute_state_directory_required")
         );
         let mut event = receive.recv().await.unwrap();
-        event.event = "connecting";
+        event.event = styx_runtime::foreground::ForegroundEventKind::Connecting;
         event.device_id = Some("setup-computer".to_owned().try_into().unwrap());
         assert_eq!(runtime_event_line(&event), "This computer: connecting");
         event.reason = Some("waiting");
@@ -2436,7 +2448,7 @@ mod tests {
             "This computer: connecting (waiting)"
         );
         event.device_id = None;
-        event.event = "gateway_loading";
+        event.event = styx_runtime::foreground::ForegroundEventKind::GatewayLoading;
         event.reason = None;
         assert_eq!(runtime_event_line(&event), "Runtime: gateway_loading");
     }

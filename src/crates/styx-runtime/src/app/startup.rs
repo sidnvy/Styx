@@ -384,22 +384,19 @@ impl HostApp {
             Ok(report) => {
                 if profile.revalidate().is_err() {
                     self.unknown = true;
-                    self.enrollment = Some(
-                        json!({"status":"incomplete","error":"app_startup_observation_changed"}),
-                    );
+                    self.enrollment =
+                        Some(AppEnrollment::incomplete("app_startup_observation_changed"));
                     return Ok(true);
                 }
                 self.native_computer_requested = Some(report.computer_requested);
                 self.native_runtime = Some(report.verified_runtime.clone());
-                self.enrollment = Some(
-                    serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))?,
-                );
+                self.enrollment = Some(AppEnrollment::Report(report));
                 self.startup_profile = Some(profile);
             }
             Err(error) => {
                 let code = self.join_error(error).code();
                 self.unknown = true;
-                self.enrollment = Some(json!({"status":"incomplete","error":code}));
+                self.enrollment = Some(AppEnrollment::incomplete(code));
             }
         }
         if let Some(d) = &self.startup_diagnostic {

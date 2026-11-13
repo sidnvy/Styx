@@ -187,7 +187,7 @@ impl HostApp {
                 // No setup write may continue after an uncertain copy. A later
                 // process may only observe the same fully published result.
                 self.unknown = true;
-                self.enrollment = Some(json!({"status":"incomplete","error":error.code()}));
+                self.enrollment = Some(AppEnrollment::incomplete(error.code()));
                 Err(error)
             }
         }

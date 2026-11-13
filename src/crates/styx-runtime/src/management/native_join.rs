@@ -9,11 +9,48 @@ use std::{
 };
 use styx_contracts::identity::{DeviceId, Sha256Digest};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinStatus {
+    AwaitingApproval,
+    Rejected,
+    ReadyToConnect,
+    AlreadyReady,
+}
+impl JoinStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AwaitingApproval => "awaiting_approval",
+            Self::Rejected => "rejected",
+            Self::ReadyToConnect => "ready_to_connect",
+            Self::AlreadyReady => "already_ready",
+        }
+    }
+    pub const fn is_ready(self) -> bool {
+        matches!(self, Self::ReadyToConnect | Self::AlreadyReady)
+    }
+}
+impl fmt::Display for JoinStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl PartialEq<&str> for JoinStatus {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+impl PartialEq<JoinStatus> for &str {
+    fn eq(&self, other: &JoinStatus) -> bool {
+        *self == other.as_str()
+    }
+}
+
 #[derive(Serialize)]
 pub struct JoinReport {
     pub schema: u16,
     pub operation: &'static str,
-    pub status: &'static str,
+    pub status: JoinStatus,
     pub state_dir: PathBuf,
     pub device_id: DeviceId,
     pub fingerprint: Sha256Digest,
@@ -694,7 +731,7 @@ mod platform {
         fn report(
             &self,
             operation: &'static str,
-            status: &'static str,
+            status: JoinStatus,
             pending: &protocol::PendingJoin,
         ) -> JoinReport {
             JoinReport {
@@ -1126,7 +1163,11 @@ mod platform {
         })
         .await?;
         work = next;
-        Ok(work.report("native_host_request", "awaiting_approval", &pending))
+        Ok(work.report(
+            "native_host_request",
+            JoinStatus::AwaitingApproval,
+            &pending,
+        ))
     }
     fn recover_unsent(work: Work, code: &'static str) -> Result<JoinReport> {
         // Never infer this permission from persisted phases on reopen. Only
@@ -1396,14 +1437,14 @@ mod platform {
                 let pending = pending(w, &reply, true)?;
                 validate_rejection(w, &pending, &rejected)?;
                 w.validate()?;
-                return Ok(w.report("native_host_inspect", "rejected", &pending));
+                return Ok(w.report("native_host_inspect", JoinStatus::Rejected, &pending));
             }
             let status;
             let observed_pending;
             match (credential, confirm, ready) {
                 (None, None, None) => {
                     observed_pending = pending(w, &reply, false)?;
-                    status = "awaiting_approval";
+                    status = JoinStatus::AwaitingApproval;
                 }
                 (Some(credential), Some(confirm), Some(raw)) => {
                     observed_pending = pending(w, &reply, true)?;
@@ -1432,7 +1473,7 @@ mod platform {
                     }
                     // This is the persisted local Ready proof, not a current
                     // GET-self observation. Connect still rechecks admission.
-                    status = "ready_to_connect";
+                    status = JoinStatus::ReadyToConnect;
                 }
                 _ => return Err(JoinError::new("native_join_phase_unknown_no_retry", 4)),
             }
@@ -1473,7 +1514,7 @@ mod platform {
         if let Some(raw) = rejected {
             let (_work, report) = io(work, move |w| {
                 validate_rejection(w, &pending, &raw)?;
-                Ok(w.report("native_host_claim", "rejected", &pending))
+                Ok(w.report("native_host_claim", JoinStatus::Rejected, &pending))
             })
             .await?;
             return Ok(report);
@@ -1505,7 +1546,11 @@ mod platform {
                 }
             };
             if response.status == 202 {
-                return Ok(work.report("native_host_claim", "awaiting_approval", &pending));
+                return Ok(work.report(
+                    "native_host_claim",
+                    JoinStatus::AwaitingApproval,
+                    &pending,
+                ));
             }
             if response.status != 200 {
                 return Err(JoinError::new("native_claim_response_rejected", 4).keep(
@@ -1537,7 +1582,7 @@ mod platform {
             work = next;
             pending = original_pending;
             let Some(value) = value else {
-                return Ok(work.report("native_host_claim", "rejected", &pending));
+                return Ok(work.report("native_host_claim", JoinStatus::Rejected, &pending));
             };
             credential = Some(value);
         }
@@ -1664,7 +1709,7 @@ mod platform {
                 ));
             }
             (work, ()) = io(work, |w| w.validate()).await?;
-            return Ok(work.report("native_host_claim", "already_ready", &pending));
+            return Ok(work.report("native_host_claim", JoinStatus::AlreadyReady, &pending));
         }
         let bytes = match serde_json::to_vec(&ready) {
             Ok(value) => value,
@@ -1675,7 +1720,7 @@ mod platform {
             }
         };
         (work, ()) = io(work, move |w| w.append(File::Ready, &bytes)).await?;
-        Ok(work.report("native_host_claim", "ready_to_connect", &pending))
+        Ok(work.report("native_host_claim", JoinStatus::ReadyToConnect, &pending))
     }
 
     #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

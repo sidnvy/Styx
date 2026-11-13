@@ -1635,7 +1635,7 @@ int main(int argc, char **argv) {
                 );
             let listening = tokio::time::timeout(Duration::from_secs(10), async {
                 while let Some(event) = received.recv().await {
-                    if event.event == "gateway_listening" {
+                    if event.event == crate::foreground::ForegroundEventKind::GatewayListening {
                         return true;
                     }
                 }

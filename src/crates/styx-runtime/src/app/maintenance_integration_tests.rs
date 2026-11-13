@@ -224,7 +224,7 @@ async fn enroll_on(
     .await
     .unwrap();
     assert_eq!(
-        app.enrollment.as_ref().unwrap()["status"],
+        app.enrollment.as_ref().unwrap().status(),
         "ready_to_connect"
     );
     assert!(app.running.is_none());

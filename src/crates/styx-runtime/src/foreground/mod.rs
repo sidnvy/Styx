@@ -16,10 +16,94 @@ use std::path::Path;
 pub enum HostWireMode {
     PairedV3,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForegroundEventKind {
+    Connecting,
+    Reconnecting,
+    Connected,
+    Disconnected,
+    ConnectionResultUnknown,
+    LinkCloseDeadline,
+    ConfigurationPending,
+    Stopping,
+    CleanupUnknown,
+    Stopped,
+    BrowserUnavailable,
+    ComputerInitialProbe,
+    ComputerUnavailable,
+    GatewayLoading,
+    GatewayListening,
+    GatewayInputsChanged,
+    GatewayWaitingForOwnedJobs,
+    GatewayWaitingForOwnedLifecycle,
+    RemoteOwnerCleanupUnconfirmed,
+    RemoteTransportDrainUnconfirmed,
+    GatewayStopped,
+}
+impl ForegroundEventKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Connecting => "connecting",
+            Self::Reconnecting => "reconnecting",
+            Self::Connected => "connected",
+            Self::Disconnected => "disconnected",
+            Self::ConnectionResultUnknown => "connection_result_unknown",
+            Self::LinkCloseDeadline => "link_close_deadline",
+            Self::ConfigurationPending => "configuration_pending",
+            Self::Stopping => "stopping",
+            Self::CleanupUnknown => "cleanup_unknown",
+            Self::Stopped => "stopped",
+            Self::BrowserUnavailable => "browser_unavailable",
+            Self::ComputerInitialProbe => "computer_initial_probe",
+            Self::ComputerUnavailable => "computer_unavailable",
+            Self::GatewayLoading => "gateway_loading",
+            Self::GatewayListening => "gateway_listening",
+            Self::GatewayInputsChanged => "gateway_inputs_changed",
+            Self::GatewayWaitingForOwnedJobs => "gateway_waiting_for_owned_jobs",
+            Self::GatewayWaitingForOwnedLifecycle => "gateway_waiting_for_owned_lifecycle",
+            Self::RemoteOwnerCleanupUnconfirmed => "remote_owner_cleanup_unconfirmed",
+            Self::RemoteTransportDrainUnconfirmed => "remote_transport_drain_unconfirmed",
+            Self::GatewayStopped => "gateway_stopped",
+        }
+    }
+}
+impl std::fmt::Display for ForegroundEventKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitialConsoleEpoch {
+    Advanced,
+    Unchanged,
+}
+impl InitialConsoleEpoch {
+    pub const fn from_advanced(advanced: bool) -> Self {
+        if advanced {
+            Self::Advanced
+        } else {
+            Self::Unchanged
+        }
+    }
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Advanced => "initial_console_epoch_advanced",
+            Self::Unchanged => "initial_console_epoch_unchanged",
+        }
+    }
+    pub fn parse_advanced(reason: Option<&str>) -> Option<bool> {
+        match reason {
+            Some("initial_console_epoch_advanced") => Some(true),
+            Some("initial_console_epoch_unchanged") => Some(false),
+            _ => None,
+        }
+    }
+}
 #[derive(Serialize)]
 pub struct ForegroundEvent {
     pub schema: u32,
-    pub event: &'static str,
+    pub event: ForegroundEventKind,
     /// Fixed category only; never profile contents, native output or credentials.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,

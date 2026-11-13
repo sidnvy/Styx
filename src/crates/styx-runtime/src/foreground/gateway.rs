@@ -1,6 +1,6 @@
 //! Existing-only, current-user Gateway foreground composition. Configuration
 //! evidence is not a migration grant; legacy ownership is conservatively refused.
-use super::{ForegroundError, ForegroundEvent};
+use super::{ForegroundError, ForegroundEvent, ForegroundEventKind};
 use serde::Serialize;
 use std::path::Path;
 use tokio::sync::mpsc;
@@ -564,7 +564,11 @@ mod platform {
             gateway_id,
         })
     }
-    fn emit(events: &mpsc::Sender<ForegroundEvent>, stop: &CancellationToken, name: &'static str) {
+    fn emit(
+        events: &mpsc::Sender<ForegroundEvent>,
+        stop: &CancellationToken,
+        name: ForegroundEventKind,
+    ) {
         if events
             .try_send(ForegroundEvent {
                 schema: 1,
@@ -680,7 +684,7 @@ mod platform {
         let permit = LOADERS
             .try_acquire()
             .map_err(|_| error("gateway_reader_busy"))?;
-        emit(&events, &stop, "gateway_loading");
+        emit(&events, &stop, ForegroundEventKind::GatewayLoading);
         let Loaded {
             admitted,
             service,
@@ -945,7 +949,7 @@ mod platform {
         if let Some(d) = &diagnostic {
             d.mark("listening");
         }
-        emit(&events, &stop, "gateway_listening");
+        emit(&events, &stop, ForegroundEventKind::GatewayListening);
         // The original Gateway task owns and joins its tunnel supervisor. Listener
         // and local-control failures use the same stop token as SIGINT/SIGTERM.
         let tunnel = crate::foreground::tunnel::start(
@@ -981,7 +985,7 @@ mod platform {
                         Ok(Validation::StopRequested)=>stop.cancel(),
                         Err(error)=> {
                             if let Some(d) = &diagnostic { d.report(error.code()); }
-                            invalidated=true;emit(&events,&stop,"gateway_inputs_changed");stop.cancel();
+                            invalidated=true;emit(&events,&stop,ForegroundEventKind::GatewayInputsChanged);stop.cancel();
                         }
                     }
                 }
@@ -1015,7 +1019,11 @@ mod platform {
             worker_failure |= !control_joined;
         }
         while !joined {
-            emit(&events, &stop, "gateway_waiting_for_owned_jobs");
+            emit(
+                &events,
+                &stop,
+                ForegroundEventKind::GatewayWaitingForOwnedJobs,
+            );
             let next = app.wait_for_blocking(Duration::from_secs(30)).await;
             joined = next.blocking_jobs_joined;
             worker_failure |= next.worker_failure_observed;
@@ -1025,7 +1033,11 @@ mod platform {
             || !lifecycle.lifecycle_jobs_joined
             || !lifecycle.session_transports_joined
         {
-            emit(&events, &stop, "gateway_waiting_for_owned_lifecycle");
+            emit(
+                &events,
+                &stop,
+                ForegroundEventKind::GatewayWaitingForOwnedLifecycle,
+            );
             tokio::time::sleep(Duration::from_secs(1)).await;
             lifecycle = mcp_stop.shutdown(Duration::from_secs(5)).await;
         }
@@ -1043,12 +1055,20 @@ mod platform {
             listener_error_observed: facts.listener_error_observed,
         };
         if outcome.unconfirmed_owner_cleanups != 0 {
-            emit(&events, &stop, "remote_owner_cleanup_unconfirmed");
+            emit(
+                &events,
+                &stop,
+                ForegroundEventKind::RemoteOwnerCleanupUnconfirmed,
+            );
         }
         if outcome.unconfirmed_transport_drains != 0 {
-            emit(&events, &stop, "remote_transport_drain_unconfirmed");
+            emit(
+                &events,
+                &stop,
+                ForegroundEventKind::RemoteTransportDrainUnconfirmed,
+            );
         }
-        emit(&events, &stop, "gateway_stopped");
+        emit(&events, &stop, ForegroundEventKind::GatewayStopped);
         // This explicit command-scope teardown follows actual owned-job waits.
         // None above is not silently promoted to an SDK join claim.
         if invalidated {

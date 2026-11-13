@@ -73,7 +73,7 @@ async fn completed_stopped_host_control_binding_preserves_execution_refusal_and_
         .await
         .unwrap();
         assert_eq!(
-            app.enrollment.as_ref().unwrap()["status"],
+            app.enrollment.as_ref().unwrap().status(),
             "ready_to_connect"
         );
         app.settle_all().await.unwrap();
@@ -172,7 +172,7 @@ async fn reopen_resumes_gateway_intent_without_resuming_stopped_host() {
         .await
         .unwrap();
         assert_eq!(
-            app.enrollment.as_ref().unwrap()["status"],
+            app.enrollment.as_ref().unwrap().status(),
             "ready_to_connect"
         );
         assert!(app.running.is_none());

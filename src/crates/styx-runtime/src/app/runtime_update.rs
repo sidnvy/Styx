@@ -818,7 +818,7 @@ impl HostApp {
                 job: None,
                 work: Some(work),
             });
-            self.enrollment = Some(json!({"status":"runtime_update_pending"}));
+            self.enrollment = Some(AppEnrollment::runtime_update_pending());
             Ok(true)
         } else if work.roles.iter().any(|role| role.retained.is_some()) {
             // Never drop a newer pending coordinator merely because historical
@@ -1054,10 +1054,7 @@ impl HostApp {
                     .map_err(|e| self.join_error(e))?;
                 self.native_computer_requested = Some(enrollment.computer_requested);
                 self.native_runtime = Some(enrollment.verified_runtime.clone());
-                self.enrollment = Some(
-                    serde_json::to_value(enrollment)
-                        .map_err(|_| AppError("app_response_invalid"))?,
-                );
+                self.enrollment = Some(AppEnrollment::Report(enrollment));
                 if self.local_gateway.is_none()
                     && let Some(scope) = gateway_scope
                 {

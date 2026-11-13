@@ -452,6 +452,91 @@ impl RetainedFailure {
         }
     }
 }
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(crate) enum AppEnrollment {
+    Report(native_join::JoinReport),
+    Incomplete {
+        status: &'static str,
+        error: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        can_resume_local: Option<bool>,
+    },
+    LocalCheckpoint {
+        status: &'static str,
+        can_resume_local: bool,
+    },
+    RuntimeUpdatePending {
+        status: &'static str,
+    },
+    #[cfg(test)]
+    StatusOnly {
+        status: native_join::JoinStatus,
+    },
+}
+impl AppEnrollment {
+    pub(crate) const fn incomplete(error: &'static str) -> Self {
+        Self::Incomplete {
+            status: "incomplete",
+            error,
+            can_resume_local: None,
+        }
+    }
+    pub(crate) const fn incomplete_local(error: &'static str) -> Self {
+        Self::Incomplete {
+            status: "incomplete",
+            error,
+            can_resume_local: Some(false),
+        }
+    }
+    pub(crate) const fn local_pre_invite() -> Self {
+        Self::LocalCheckpoint {
+            status: "local_setup_pre_invite",
+            can_resume_local: true,
+        }
+    }
+    pub(crate) const fn local_continuation_dispatched() -> Self {
+        Self::LocalCheckpoint {
+            status: "local_setup_continuation_dispatched",
+            can_resume_local: false,
+        }
+    }
+    pub(crate) const fn runtime_update_pending() -> Self {
+        Self::RuntimeUpdatePending {
+            status: "runtime_update_pending",
+        }
+    }
+    #[cfg(test)]
+    pub(crate) const fn ready_for_test() -> Self {
+        Self::StatusOnly {
+            status: native_join::JoinStatus::ReadyToConnect,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) const fn status(&self) -> &'static str {
+        match self {
+            Self::Report(report) => report.status.as_str(),
+            Self::StatusOnly { status } => status.as_str(),
+            Self::Incomplete { status, .. }
+            | Self::LocalCheckpoint { status, .. }
+            | Self::RuntimeUpdatePending { status } => status,
+        }
+    }
+    pub(crate) const fn is_ready(&self) -> bool {
+        match self {
+            Self::Report(report) => report.status.is_ready(),
+            #[cfg(test)]
+            Self::StatusOnly { status } => status.is_ready(),
+            _ => false,
+        }
+    }
+    pub(crate) fn device_id(&self) -> Option<&str> {
+        match self {
+            Self::Report(report) => Some(report.device_id.as_str()),
+            _ => None,
+        }
+    }
+}
 struct HostApp {
     retire_failure: Option<crate::management::role_retire::RetireError>,
     runtime_update: Option<runtime_update::State>,
@@ -462,7 +547,7 @@ struct HostApp {
     configuration: Option<native::NativeManagementReport>,
     runtime_selection_file: Option<PathBuf>,
     inspected_join: Option<pairing_link::InspectedLink>,
-    enrollment: Option<Value>,
+    enrollment: Option<AppEnrollment>,
     // A verified false may disable optional desktop work; it cannot authorize Exec.
     native_computer_requested: Option<bool>,
     // Original signed object retained across adjacent enrollment/start boundaries.
@@ -551,7 +636,7 @@ impl HostApp {
                     return Err(error);
                 }
                 app.unknown = true;
-                app.enrollment = Some(json!({"status":"incomplete","error":error.code()}));
+                app.enrollment = Some(AppEnrollment::incomplete(error.code()));
                 return Ok(app);
             }
             if let Some(d) = &app.startup_diagnostic {
@@ -565,15 +650,12 @@ impl HostApp {
                     Ok(report) => {
                         app.native_computer_requested = Some(report.computer_requested);
                         app.native_runtime = Some(report.verified_runtime.clone());
-                        app.enrollment = Some(
-                            serde_json::to_value(report)
-                                .map_err(|_| AppError("app_response_invalid"))?,
-                        )
+                        app.enrollment = Some(AppEnrollment::Report(report));
                     }
                     Err(error) => {
                         let code = app.join_error(error).code();
                         app.unknown = true;
-                        app.enrollment = Some(json!({"status":"incomplete","error":code}));
+                        app.enrollment = Some(AppEnrollment::incomplete(code));
                     }
                 }
             }
@@ -604,7 +686,7 @@ impl HostApp {
                 Ok(gateway) => gateway,
                 Err(error) => {
                     app.unknown = true;
-                    app.enrollment = Some(json!({"status":"incomplete","error":error.code()}));
+                    app.enrollment = Some(AppEnrollment::incomplete(error.code()));
                     return Ok(app);
                 }
             };
@@ -633,14 +715,10 @@ impl HostApp {
                 match app.check_pre_invite_local().await {
                     Ok(()) => {
                         app.resume_local_available = true;
-                        app.enrollment = Some(
-                            json!({"status":"local_setup_pre_invite","can_resume_local":true}),
-                        );
+                        app.enrollment = Some(AppEnrollment::local_pre_invite());
                     }
                     Err(error) => {
-                        app.enrollment = Some(
-                            json!({"status":"incomplete","error":error.code(),"can_resume_local":false}),
-                        );
+                        app.enrollment = Some(AppEnrollment::incomplete_local(error.code()));
                     }
                 }
             }
@@ -940,23 +1018,23 @@ impl HostApp {
             let (events, mut received) = mpsc::channel::<foreground::ForegroundEvent>(16);
             let status = self.status.clone();
             let event_task = tokio::spawn(async move {
+                use crate::foreground::ForegroundEventKind;
                 while let Some(event) = received.recv().await {
                     // Computer initialization is independent of Exec transport.
                     // Retain its fixed failure code for this original Host; later
                     // connection events must not erase that optional-lane failure.
                     // A closed diagnostic fact, never readiness or permission.
                     #[cfg(target_os = "macos")]
-                    if event.event == "computer_initial_probe" {
+                    if event.event == ForegroundEventKind::ComputerInitialProbe {
                         status.send_modify(|value| {
-                            value.computer_initial_epoch_advanced = match event.reason {
-                                Some("initial_console_epoch_advanced") => Some(true),
-                                Some("initial_console_epoch_unchanged") => Some(false),
-                                _ => None,
-                            };
+                            value.computer_initial_epoch_advanced =
+                                crate::foreground::InitialConsoleEpoch::parse_advanced(
+                                    event.reason,
+                                );
                         });
                         continue;
                     }
-                    if event.event == "computer_unavailable" {
+                    if event.event == ForegroundEventKind::ComputerUnavailable {
                         status.send_modify(|value| {
                             value.computer_error =
                                 Some(event.reason.unwrap_or("computer_bootstrap_failed"));
@@ -985,12 +1063,17 @@ impl HostApp {
                         continue;
                     }
                     if status.borrow().error == Some(crate::gateway::paired::CAPACITY_ERROR_CODE)
-                        && matches!(event.event, "connecting" | "reconnecting" | "disconnected")
+                        && matches!(
+                            event.event,
+                            ForegroundEventKind::Connecting
+                                | ForegroundEventKind::Reconnecting
+                                | ForegroundEventKind::Disconnected
+                        )
                     {
                         continue;
                     }
                     let status_value = match event.event {
-                        "connected" => ConnectionStatus {
+                        ForegroundEventKind::Connected => ConnectionStatus {
                             status: "connected",
                             exec_connection: "connected",
                             error: None,
@@ -1001,18 +1084,20 @@ impl HostApp {
                             #[cfg(target_os = "macos")]
                             computer_initial_epoch_advanced,
                         },
-                        "connecting" | "reconnecting" => ConnectionStatus {
-                            status: "started",
-                            exec_connection: "connecting",
-                            error: None,
-                            hint: None,
-                            computer_error,
-                            #[cfg(target_os = "macos")]
-                            computer_probe,
-                            #[cfg(target_os = "macos")]
-                            computer_initial_epoch_advanced,
-                        },
-                        "disconnected" => ConnectionStatus {
+                        ForegroundEventKind::Connecting | ForegroundEventKind::Reconnecting => {
+                            ConnectionStatus {
+                                status: "started",
+                                exec_connection: "connecting",
+                                error: None,
+                                hint: None,
+                                computer_error,
+                                #[cfg(target_os = "macos")]
+                                computer_probe,
+                                #[cfg(target_os = "macos")]
+                                computer_initial_epoch_advanced,
+                            }
+                        }
+                        ForegroundEventKind::Disconnected => ConnectionStatus {
                             status: "started",
                             exec_connection: "disconnected",
                             error: None,
@@ -1313,12 +1398,10 @@ impl HostApp {
                                 && host.autostart == NativeAutostartDesired::Disabled
                         })
                 })
-                && self.enrollment.as_ref().is_some_and(|report| {
-                    matches!(
-                        report.get("status").and_then(Value::as_str),
-                        Some("ready_to_connect" | "already_ready")
-                    )
-                })
+                && self
+                    .enrollment
+                    .as_ref()
+                    .is_some_and(AppEnrollment::is_ready)
             {
                 supported.push("transferToService");
             }
@@ -1491,18 +1574,60 @@ impl HostApp {
             self.reap().await?;
         }
         match operation {
-            Operation::Computers
-            | Operation::InviteComputer
-            | Operation::PendingComputers
-            | Operation::ApproveComputer
-            | Operation::RejectComputer
-            | Operation::RevokeComputer
-            | Operation::TunnelStatus
-            | Operation::TunnelSave => {
-                return self.gateway_ui_request(operation, input).await;
+            Operation::Computers => {
+                return self
+                    .gateway_ui_request(gateway_ui::GatewayUiOperation::Computers, input)
+                    .await;
             }
-            Operation::PluginRead | Operation::PluginSave | Operation::PluginExport => {
-                return self.plugin_request(operation, input).await;
+            Operation::InviteComputer => {
+                return self
+                    .gateway_ui_request(gateway_ui::GatewayUiOperation::InviteComputer, input)
+                    .await;
+            }
+            Operation::PendingComputers => {
+                return self
+                    .gateway_ui_request(gateway_ui::GatewayUiOperation::PendingComputers, input)
+                    .await;
+            }
+            Operation::ApproveComputer => {
+                return self
+                    .gateway_ui_request(gateway_ui::GatewayUiOperation::ApproveComputer, input)
+                    .await;
+            }
+            Operation::RejectComputer => {
+                return self
+                    .gateway_ui_request(gateway_ui::GatewayUiOperation::RejectComputer, input)
+                    .await;
+            }
+            Operation::RevokeComputer => {
+                return self
+                    .gateway_ui_request(gateway_ui::GatewayUiOperation::RevokeComputer, input)
+                    .await;
+            }
+            Operation::TunnelStatus => {
+                return self
+                    .gateway_ui_request(gateway_ui::GatewayUiOperation::TunnelStatus, input)
+                    .await;
+            }
+            Operation::TunnelSave => {
+                return self
+                    .gateway_ui_request(gateway_ui::GatewayUiOperation::TunnelSave, input)
+                    .await;
+            }
+            Operation::PluginRead => {
+                return self
+                    .plugin_request(plugin::PluginOperation::Read, input)
+                    .await;
+            }
+            Operation::PluginSave => {
+                return self
+                    .plugin_request(plugin::PluginOperation::Save, input)
+                    .await;
+            }
+            Operation::PluginExport => {
+                return self
+                    .plugin_request(plugin::PluginOperation::Export, input)
+                    .await;
             }
             Operation::AppLifecycle => return self.login_read(input),
             Operation::AppLogin => return self.login_authorize(input),
@@ -1657,8 +1782,8 @@ impl HostApp {
                 self.native_computer_requested = Some(report.computer_requested);
                 self.native_runtime = Some(report.verified_runtime.clone());
                 let value =
-                    serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))?;
-                self.enrollment = Some(value.clone());
+                    serde_json::to_value(&report).map_err(|_| AppError("app_response_invalid"))?;
+                self.enrollment = Some(AppEnrollment::Report(report));
                 Ok(value)
             }
             Operation::ClaimJoin => {
@@ -1674,12 +1799,13 @@ impl HostApp {
                 self.read_configuration().await?;
                 self.native_computer_requested = Some(report.computer_requested);
                 self.native_runtime = Some(report.verified_runtime.clone());
+                let ready = report.status == native_join::JoinStatus::ReadyToConnect;
                 let value =
-                    serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))?;
-                self.enrollment = Some(value.clone());
+                    serde_json::to_value(&report).map_err(|_| AppError("app_response_invalid"))?;
+                self.enrollment = Some(AppEnrollment::Report(report));
                 // A confirmed join connects at once; the claim itself already
                 // succeeded, so a connect failure shows in status, not here.
-                if value["status"] == "ready_to_connect" {
+                if ready {
                     let _ = self.connect_host().await;
                 }
                 Ok(value)

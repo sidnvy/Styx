@@ -1,6 +1,8 @@
 //! Protected foreground execution, not a migration/service manager. All ownership
 //! refusals are conservative observations; the Rust lease cannot lock old JS.
-use super::{ForegroundError, ForegroundEvent, ForegroundOutcome, HostWireMode, profile};
+use super::{
+    ForegroundError, ForegroundEvent, ForegroundEventKind, ForegroundOutcome, HostWireMode, profile,
+};
 use crate::{
     host::{
         bootstrap::OwnedExecHost,
@@ -402,7 +404,7 @@ async fn prepare_computer(
 fn event(
     events: &mpsc::Sender<ForegroundEvent>,
     cancel: &CancellationToken,
-    name: &'static str,
+    name: ForegroundEventKind,
     device: &DeviceId,
     generation: Option<&ConnectionGeneration>,
 ) {
@@ -411,7 +413,7 @@ fn event(
 fn event_with_reason(
     events: &mpsc::Sender<ForegroundEvent>,
     cancel: &CancellationToken,
-    name: &'static str,
+    name: ForegroundEventKind,
     device: &DeviceId,
     generation: Option<&ConnectionGeneration>,
     reason: Option<&'static str>,
@@ -897,7 +899,7 @@ async fn run_owned(
                             event_with_reason(
                                 &events,
                                 &cancel,
-                                "browser_unavailable",
+                                ForegroundEventKind::BrowserUnavailable,
                                 &device,
                                 None,
                                 Some("configure_lane"),
@@ -917,7 +919,7 @@ async fn run_owned(
                     event_with_reason(
                         &events,
                         &cancel,
-                        "browser_unavailable",
+                        ForegroundEventKind::BrowserUnavailable,
                         &device,
                         None,
                         Some(error.stage),
@@ -928,7 +930,7 @@ async fn run_owned(
                     event_with_reason(
                         &events,
                         &cancel,
-                        "browser_unavailable",
+                        ForegroundEventKind::BrowserUnavailable,
                         &device,
                         None,
                         Some("prepare_task_join"),
@@ -1007,7 +1009,13 @@ async fn run_owned(
                     .to_string()
                     .try_into()
                     .expect("UUID identity");
-                event(&events, &cancel, "connecting", &device, Some(&connection));
+                event(
+                    &events,
+                    &cancel,
+                    ForegroundEventKind::Connecting,
+                    &device,
+                    Some(&connection),
+                );
                 let attempt = tokio::select! {
                     _=cancel.cancelled()=>break Ok(None),
                     result=connect(&admitted.profile,connection,host.link_budget())=>result,
@@ -1021,7 +1029,7 @@ async fn run_owned(
                         event_with_reason(
                             &events,
                             &cancel,
-                            "disconnected",
+                            ForegroundEventKind::Disconnected,
                             &device,
                             None,
                             Some(error.code()),
@@ -1110,7 +1118,7 @@ async fn run_owned(
                                     ready=&mut readiness, if awaiting_ready=>{
                                         awaiting_ready = false;
                                         if ready.is_ok() && !cancel.is_cancelled() {
-                                            event(&events,&cancel,"connected",&device,Some(&connection_generation));
+                                            event(&events,&cancel,ForegroundEventKind::Connected,&device,Some(&connection_generation));
                                         }
                                     },
                                     error=&mut housekeeping=>{
@@ -1137,9 +1145,9 @@ async fn run_owned(
                                 &events,
                                 &cancel,
                                 if result.is_ok() {
-                                    "disconnected"
+                                    ForegroundEventKind::Disconnected
                                 } else {
-                                    "connection_result_unknown"
+                                    ForegroundEventKind::ConnectionResultUnknown
                                 },
                                 &device,
                                 Some(&connection_generation),
@@ -1149,7 +1157,13 @@ async fn run_owned(
                         // EOF does not stop the executor. Always join the same
                         // physical link before reconnecting or native cleanup.
                         if link.shutdown(Duration::from_secs(3)).await.is_err() {
-                            event(&events, &cancel, "link_close_deadline", &device, None);
+                            event(
+                                &events,
+                                &cancel,
+                                ForegroundEventKind::LinkCloseDeadline,
+                                &device,
+                                None,
+                            );
                         }
                         if !disconnected || cancel.is_cancelled() {
                             break;
@@ -1165,7 +1179,13 @@ async fn run_owned(
                             }
                             if let Err(error) = validate(&admitted).await {
                                 if error.code() == "native_service_configuration_pending" {
-                                    event(&events, &cancel, "configuration_pending", &device, None);
+                                    event(
+                                        &events,
+                                        &cancel,
+                                        ForegroundEventKind::ConfigurationPending,
+                                        &device,
+                                        None,
+                                    );
                                     continue;
                                 }
                                 if error.code() == "native_service_stop_requested" {
@@ -1179,7 +1199,13 @@ async fn run_owned(
                                 .to_string()
                                 .try_into()
                                 .expect("UUID identity");
-                            event(&events, &cancel, "reconnecting", &device, Some(&generation));
+                            event(
+                                &events,
+                                &cancel,
+                                ForegroundEventKind::Reconnecting,
+                                &device,
+                                Some(&generation),
+                            );
                             let attempt = tokio::select! {
                                 _=cancel.cancelled()=>break,
                                 result=connect(&admitted.profile,generation,host.link_budget())=>result,
@@ -1192,7 +1218,7 @@ async fn run_owned(
                                 Err(error) => event_with_reason(
                                     &events,
                                     &cancel,
-                                    "disconnected",
+                                    ForegroundEventKind::Disconnected,
                                     &device,
                                     None,
                                     Some(error.code()),
@@ -1214,7 +1240,7 @@ async fn run_owned(
                     event_with_reason(
                         &events,
                         &cancel,
-                        "disconnected",
+                        ForegroundEventKind::Disconnected,
                         &device,
                         None,
                         Some(error.code()),
@@ -1228,7 +1254,13 @@ async fn run_owned(
         }
         Err(error) => failure = Some(error),
     }
-    event(&events, &cancel, "stopping", &device, None);
+    event(
+        &events,
+        &cancel,
+        ForegroundEventKind::Stopping,
+        &device,
+        None,
+    );
     let mut outcome = ForegroundOutcome {
         schema: 1,
         executor_started: host.coordinator().exec_configured(),
@@ -1279,10 +1311,22 @@ async fn run_owned(
         if outcome.local_stop_complete() {
             break;
         }
-        event(&events, &cancel, "cleanup_unknown", &device, None);
+        event(
+            &events,
+            &cancel,
+            ForegroundEventKind::CleanupUnknown,
+            &device,
+            None,
+        );
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    event(&events, &cancel, "stopped", &device, None);
+    event(
+        &events,
+        &cancel,
+        ForegroundEventKind::Stopped,
+        &device,
+        None,
+    );
     // Explicit drop order: observed signed files / lease outlive native cleanup.
     drop(host);
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -1383,7 +1427,7 @@ fn computer_unavailable_with_probe(
     if events
         .try_send(ForegroundEvent {
             schema: 1,
-            event: "computer_unavailable",
+            event: ForegroundEventKind::ComputerUnavailable,
             reason: Some(reason),
             computer_probe,
             device_id: Some(device.clone()),

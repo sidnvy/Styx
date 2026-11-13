@@ -272,14 +272,10 @@ impl ComputerStartup {
                             event_with_reason(
                                 &events,
                                 &cancel,
-                                "computer_initial_probe",
+                                ForegroundEventKind::ComputerInitialProbe,
                                 &device,
                                 None,
-                                Some(if advanced {
-                                    "initial_console_epoch_advanced"
-                                } else {
-                                    "initial_console_epoch_unchanged"
-                                }),
+                                Some(InitialConsoleEpoch::from_advanced(advanced).as_str()),
                             );
                         }
                     }
@@ -298,7 +294,7 @@ impl ComputerStartup {
                     event_with_reason(
                         &events,
                         &cancel,
-                        "computer_unavailable",
+                        ForegroundEventKind::ComputerUnavailable,
                         &device,
                         None,
                         Some(error.code()),

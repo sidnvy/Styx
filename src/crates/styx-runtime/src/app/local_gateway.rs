@@ -242,11 +242,17 @@ impl LocalGateway {
         let ready = self.ready.clone();
         ready.send_replace(false);
         let event_task = tokio::spawn(async move {
+            use crate::foreground::ForegroundEventKind;
             while let Some(event) = received.recv().await {
-                if event.event == "gateway_listening" {
-                    ready.send_replace(true);
-                } else if matches!(event.event, "gateway_stopped" | "gateway_inputs_changed") {
-                    ready.send_replace(false);
+                match event.event {
+                    ForegroundEventKind::GatewayListening => {
+                        ready.send_replace(true);
+                    }
+                    ForegroundEventKind::GatewayStopped
+                    | ForegroundEventKind::GatewayInputsChanged => {
+                        ready.send_replace(false);
+                    }
+                    _ => {}
                 }
             }
             ready.send_replace(false);
@@ -504,8 +510,7 @@ impl HostApp {
         };
         validate_choice(&choice)?;
         self.resume_local_available = false;
-        self.enrollment =
-            Some(json!({"status":"local_setup_continuation_dispatched","can_resume_local":false}));
+        self.enrollment = Some(AppEnrollment::local_continuation_dispatched());
         self.check_pre_invite_local().await?;
         self.input_writer = Some(
             self.scope
@@ -693,8 +698,7 @@ impl HostApp {
         }
         self.native_computer_requested = Some(claimed.computer_requested);
         self.native_runtime = Some(claimed.verified_runtime.clone());
-        self.enrollment =
-            Some(serde_json::to_value(claimed).map_err(|_| AppError("app_response_invalid"))?);
+        self.enrollment = Some(AppEnrollment::Report(claimed));
         self.unknown = false;
         if let Some(diagnostic) = &diagnostic {
             diagnostic.report("app_finish_local_pairing_done");

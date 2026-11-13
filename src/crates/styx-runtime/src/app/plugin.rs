@@ -25,10 +25,17 @@ struct Save {
 struct Export {
     authorize: bool,
 }
+#[derive(Clone, Copy)]
+pub(super) enum PluginOperation {
+    Read,
+    Save,
+    Export,
+}
+
 impl HostApp {
     pub(super) async fn plugin_request(
         &self,
-        operation: Operation,
+        operation: PluginOperation,
         input: Box<serde_json::value::RawValue>,
     ) -> Result<Value, AppError> {
         self.available()?;
@@ -42,7 +49,7 @@ impl HostApp {
             .await
             .map_err(|_| AppError("plugin_gateway_discovery_required"))?;
         gateway.scope.validate()?;
-        if matches!(operation, Operation::PluginSave) {
+        if matches!(operation, PluginOperation::Save) {
             let save: Save = decode_input(&input)?;
             if !save.authorize
                 || save.selection.mode != "update"
@@ -59,7 +66,7 @@ impl HostApp {
         }
         let saved = presentation::load(&directory).map_err(AppError)?;
 
-        if matches!(operation, Operation::PluginExport) {
+        if matches!(operation, PluginOperation::Export) {
             let export: Export = decode_input(&input)?;
             if !export.authorize {
                 return Err(AppError("plugin_confirmation_required"));
