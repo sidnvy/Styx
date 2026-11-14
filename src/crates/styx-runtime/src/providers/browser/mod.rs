@@ -745,7 +745,7 @@ impl BrowserOpenSlot {
             }
             }
             #[cfg(target_os = "windows")]
-            windows::start(&mut live, &config, resource._budget._partition.clone()).await?;
+            windows::start(&mut live, &config).await?;
             #[cfg(target_os = "macos")]
             macos::start(&mut live, &config).await?;
             let child = live.child.as_mut().ok_or(BrowserError::Unknown)?;

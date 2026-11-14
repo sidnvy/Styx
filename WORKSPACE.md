@@ -33,6 +33,12 @@ Reuse its pinned SDK/tool paths and one Cargo cache. PilotMac's logical Swift PC
 may alias the same physical cache; changing that path can invalidate PCM files.
 The Debian container uses a separate pinned environment.
 
+On NAB5, `tools/dev-env.cmd` sets environment variables only; it does not run its
+arguments. In the same `cmd.exe` invocation, call it, then call
+`"%STYX_VCVARS64%"`, then run Cargo from `source/`. Reuse
+`--release --target x86_64-pc-windows-msvc` for the existing native artifacts.
+Check Cargo's actual output and exit code; a successful environment setup is not a build.
+
 Native chats open the parent project, outside the source/ Git root. Its AGENTS.md is
 the thin pointer in src/ci/native-project-AGENTS.md; its .agents/skills links to
 source/.agents/skills (symlink on Mac, junction on Windows). Read source/AGENTS.md

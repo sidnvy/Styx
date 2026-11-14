@@ -2,11 +2,7 @@
 use super::*;
 use crate::{platform::windows_spawn, store::PrivateRoot};
 
-pub(super) async fn start(
-    live: &mut Live,
-    config: &OwnedBrowserConfig,
-    partition: Arc<OwnedSemaphorePermit>,
-) -> Result<()> {
+pub(super) async fn start(live: &mut Live, config: &OwnedBrowserConfig) -> Result<()> {
     let config = config.clone();
     // Protected file I/O, PE hashing and native suspension are bounded blocking
     // work. The outer provider task owns this await even if its observer leaves.
@@ -38,7 +34,6 @@ pub(super) async fn start(
             .collect();
         let child = windows_spawn::spawn_browser_suspended(
             config.node_pin,
-            partition,
             config.workspace_dir,
             env,
             config.worker_entry,

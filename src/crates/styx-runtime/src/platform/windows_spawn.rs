@@ -71,7 +71,7 @@ struct Shared {
     facts: Mutex<Facts>,
     changed: watch::Sender<u64>,
     _image: Arc<PinnedExecutable>,
-    _startup_budget: Arc<tokio::sync::OwnedSemaphorePermit>,
+    _startup_budget: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
 }
 pub(crate) struct RunningChild {
     shared: Arc<Shared>,
@@ -386,13 +386,12 @@ pub(crate) fn spawn_suspended(
     cwd: PathBuf,
     env: BTreeMap<OsString, OsString>,
 ) -> Result<SuspendedChild, SpawnFailure> {
-    spawn_fixed(image, startup_budget, cwd, env, Entry::Exec)
+    spawn_fixed(image, Some(startup_budget), cwd, env, Entry::Exec)
 }
 /// Fixed trusted Browser entry: no shell, Node flags, remote arguments or
 /// arbitrary program selection. The same native image/Job checks precede resume.
 pub(crate) fn spawn_browser_suspended(
     image: Arc<PinnedExecutable>,
-    startup_budget: Arc<tokio::sync::OwnedSemaphorePermit>,
     cwd: PathBuf,
     env: BTreeMap<OsString, OsString>,
     worker: PathBuf,
@@ -407,7 +406,9 @@ pub(crate) fn spawn_browser_suspended(
     }
     spawn_fixed(
         image,
-        startup_budget,
+        // Browser sessions own independent bounded codecs and Tokio pipes.
+        // They do not reserve the Host's former single-worker IO partition.
+        None,
         cwd,
         env,
         Entry::Browser { worker, config },
@@ -420,7 +421,7 @@ pub(crate) fn spawn_cua_suspended(
     cwd: PathBuf,
     env: BTreeMap<OsString, OsString>,
 ) -> Result<SuspendedChild, SpawnFailure> {
-    spawn_fixed(image, startup_budget, cwd, env, Entry::Cua)
+    spawn_fixed(image, Some(startup_budget), cwd, env, Entry::Cua)
 }
 /// Secure MCP Tunnel entry, constructed only by the trusted Gateway adapter.
 /// Reuses the same suspended-image verification, Job ownership and final wait.
@@ -431,7 +432,13 @@ pub(crate) fn spawn_tunnel_suspended(
     env: BTreeMap<OsString, OsString>,
     arguments: crate::foreground::tunnel::Arguments,
 ) -> Result<SuspendedChild, SpawnFailure> {
-    spawn_fixed(image, startup_budget, cwd, env, Entry::Tunnel(arguments))
+    spawn_fixed(
+        image,
+        Some(startup_budget),
+        cwd,
+        env,
+        Entry::Tunnel(arguments),
+    )
 }
 enum Entry {
     Tunnel(crate::foreground::tunnel::Arguments),
@@ -504,7 +511,7 @@ fn command_line(path: &OsStr, entry: &Entry) -> io::Result<Vec<u16>> {
 }
 fn spawn_fixed(
     image: Arc<PinnedExecutable>,
-    startup_budget: Arc<tokio::sync::OwnedSemaphorePermit>,
+    startup_budget: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     cwd: PathBuf,
     env: BTreeMap<OsString, OsString>,
     entry: Entry,
