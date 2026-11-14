@@ -127,7 +127,7 @@ struct ProductSettingsView: View {
                     if model.busy { ProgressView(productText("正在处理，请保持 Styx 打开…", "Working… Keep Styx open.")) }
                     Text(runtimeUpdateDescription).font(.caption).foregroundStyle(.secondary)
                 }
-                if model.nativeSupportsOperation("transferToService") || model.nativeHasServiceState {
+                if model.nativeHasServiceState {
                     ProductServiceSettings(model: model)
                 }
             } else {

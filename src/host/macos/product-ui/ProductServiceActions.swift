@@ -236,9 +236,6 @@ struct ProductServiceSettings: View {
                     Button(productText("在 Finder 中显示", "Show in Finder")) { NSWorkspace.shared.activateFileViewerSelecting([destination]) }
                 }
                 if let error = model.nativeServiceExportError { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
-            } else if model.nativeSupportsOperation("transferToService") {
-                Text(productText("先在上方准备候选并完成运行组件更新，再转为后台管理。转交会保留身份、配对和权限；服务安装需另行审核。", "Stage the candidate above and complete the runtime update before transferring to background management. Identity, pairing and permissions are preserved. Service installation requires separate review.")).font(.caption).foregroundStyle(.secondary)
-                Button(productText("转为后台管理…", "Transfer to background management…")) { model.nativeTransferToService() }.disabled(model.busy || !model.client.nativeServiceChangeAllowed)
             }
         }.accessibilityIdentifier("styx-background-service-settings")
     }
