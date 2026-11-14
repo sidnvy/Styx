@@ -336,18 +336,9 @@ impl PairedGatewayBackend {
             Ok(v) => v,
             Err(e) => return failure(e, None, false),
         };
-        let device = match request
-            .environment_id
-            .as_ref()
-            .map(|s| DeviceId::try_from(s.as_str()))
-            .transpose()
-        {
-            Ok(Some(d)) => d,
-            Ok(None) => match &self.default_device {
-                Some(d) => d.clone(),
-                None => return failure("environment_required", None, false),
-            },
-            Err(_) => return failure("invalid_arguments", None, false),
+        let device = match self.resolve_device(request.environment_id.as_deref()).await {
+            Ok(device) => device,
+            Err(error) => return failure(error, None, false),
         };
         let close = request.action.is_close();
         let cell = match self.browser_context(owner, &device, !close) {

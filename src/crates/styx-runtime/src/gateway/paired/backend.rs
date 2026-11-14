@@ -442,16 +442,14 @@ pub struct PairedGatewayBackend {
     #[cfg(test)]
     physical_cleanups_completed: std::sync::atomic::AtomicUsize,
     relay: RelayHandle,
-    default_device: Option<DeviceId>,
     state: Mutex<State>,
 }
 impl PairedGatewayBackend {
-    pub fn new(relay: RelayHandle, default_device: Option<DeviceId>) -> Self {
+    pub fn new(relay: RelayHandle) -> Self {
         Self {
             #[cfg(test)]
             physical_cleanups_completed: std::sync::atomic::AtomicUsize::new(0),
             relay,
-            default_device,
             state: Mutex::new(State {
                 next_session: 1,
                 owners: BTreeMap::new(),
@@ -468,6 +466,19 @@ impl PairedGatewayBackend {
     pub(crate) fn observed_physical_cleanups(&self) -> usize {
         self.physical_cleanups_completed
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// Explicit targets retain their identity when offline. An omitted target
+    /// resolves only when the deployment contains exactly one paired Host.
+    async fn resolve_device(&self, requested: Option<&str>) -> Result<DeviceId, &'static str> {
+        if let Some(id) = requested {
+            return DeviceId::try_from(id).map_err(|_| "invalid_arguments");
+        }
+        let devices = self.relay.devices().await.map_err(|error| error.code())?;
+        match devices.as_slice() {
+            [device] => Ok(device.device_id.clone()),
+            [] => Err("environment_unavailable"),
+            _ => Err("environment_required"),
+        }
     }
     async fn exchange(&self, binding: &BoundOwner, call: Call) -> Result<Reply, super::RelayError> {
         tokio::time::timeout(Duration::from_secs(5), self.relay.call(binding, call))
@@ -563,18 +574,9 @@ impl PairedGatewayBackend {
     }
     async fn execute(&self, owner: &VerifiedGatewayOwner, args: ExecArgs) -> CallToolResult {
         let began = Instant::now();
-        let device = match args
-            .environment_id
-            .as_ref()
-            .map(|s| DeviceId::try_from(s.as_str()))
-            .transpose()
-        {
-            Ok(Some(d)) => d,
-            Ok(None) => match &self.default_device {
-                Some(d) => d.clone(),
-                None => return failure("environment_required", None, false),
-            },
-            Err(_) => return failure("invalid_arguments", None, false),
+        let device = match self.resolve_device(args.environment_id.as_deref()).await {
+            Ok(device) => device,
+            Err(error) => return failure(error, None, false),
         };
         let binding =
             match tokio::time::timeout(Duration::from_secs(5), self.relay.bind(owner, &device))

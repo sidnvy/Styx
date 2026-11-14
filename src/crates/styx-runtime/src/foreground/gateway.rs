@@ -772,7 +772,7 @@ mod platform {
                 .map_err(|_| error("gateway_partition_unavailable"))?,
         )
         .map_err(|_| error("gateway_relay_invalid"))?;
-        let backend = Arc::new(PairedGatewayBackend::new(relay.clone(), None));
+        let backend = Arc::new(PairedGatewayBackend::new(relay.clone()));
         let budget = HttpBudget::from_reserved_partition(
             Arc::new(Semaphore::new(crate::gateway::http::GATEWAY_HTTP_BYTES))
                 .try_acquire_many_owned(crate::gateway::http::GATEWAY_HTTP_BYTES as u32)

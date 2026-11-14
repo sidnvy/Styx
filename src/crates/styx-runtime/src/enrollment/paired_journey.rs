@@ -421,7 +421,7 @@ async fn paired_journey(capacity: bool, computers: usize) {
             .unwrap(),
     )
     .unwrap();
-    let backend = Arc::new(PairedGatewayBackend::new(relay.clone(), None));
+    let backend = Arc::new(PairedGatewayBackend::new(relay.clone()));
     let http_budget = HttpBudget::from_reserved_partition(
         Arc::new(Semaphore::new(crate::gateway::http::GATEWAY_HTTP_BYTES))
             .try_acquire_many_owned(crate::gateway::http::GATEWAY_HTTP_BYTES as u32)
@@ -641,16 +641,19 @@ async fn paired_journey(capacity: bool, computers: usize) {
         } else {
             json!("covered by paired native journey")
         };
-        let no_default = owner_a
-            .call_tool(call("exec_command", json!({"cmd":"printf forbidden"})))
-            .await
-            .unwrap();
-        assert_eq!(no_default.is_error, Some(true));
         let nonce = uuid::Uuid::new_v4().to_string();
         let cmd = format!(
             "printf '%s\\n' '{nonce}' >> once.txt; printf ready; IFS= read -r value; printf '%s' \"$value\" > input.txt; printf done"
         );
-        let started = data(owner_a.call_tool(call("exec_command", json!({"cmd":cmd,"login":false,"environment_id":device.as_str(),"yield_time_ms":100}))).await.unwrap());
+        let started = data(
+            owner_a
+                .call_tool(call(
+                    "exec_command",
+                    json!({"cmd":cmd,"login":false,"yield_time_ms":100}),
+                ))
+                .await
+                .unwrap(),
+        );
         let sid = started["session_id"]
             .as_u64()
             .expect("live process presentation handle");
@@ -1230,24 +1233,41 @@ async fn many_connected_computers(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(relay.connection_counts(), (computers, 32));
-    let mut owners = Vec::new();
+    let config =
+        StreamableHttpClientTransportConfig::with_uri(format!("https://{}/mcp", client.host))
+            .auth_header(model.to_owned())
+            .reinit_on_expired_session(false)
+            .max_concurrent_requests(1);
+    let owner = ClientConfig::new(
+        ClientCapabilities::default(),
+        Implementation::new("many-computers-oracle", "1"),
+    )
+    .with_protocol_version(serde_json::from_value(json!("2025-11-25")).unwrap())
+    .serve_with_lifecycle(
+        StreamableHttpClientTransport::with_client(raw.clone(), config),
+        ClientLifecycleMode::Initialize,
+    )
+    .await
+    .unwrap();
+    // One MCP conversation targets every Host. Missing targets must remain
+    // ambiguous even when one device was used most recently.
+    for (name, arguments) in [
+        (
+            "exec_command",
+            json!({"cmd":"printf forbidden > ambiguous-effect.txt","login":false}),
+        ),
+        ("browser_tabs", json!({"action":"list"})),
+        ("list_windows", json!({})),
+    ] {
+        let result = owner.call_tool(call(name, arguments)).await.unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let wire = serde_json::to_value(result).unwrap();
+        let error: Value =
+            serde_json::from_str(wire["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(error["error"], "environment_required", "{name}");
+        assert_eq!(error["uncertain"], false);
+    }
     for (n, device) in devices.iter().enumerate() {
-        let config =
-            StreamableHttpClientTransportConfig::with_uri(format!("https://{}/mcp", client.host))
-                .auth_header(model.to_owned())
-                .reinit_on_expired_session(false)
-                .max_concurrent_requests(1);
-        let owner = ClientConfig::new(
-            ClientCapabilities::default(),
-            Implementation::new("many-computers-oracle", "1"),
-        )
-        .with_protocol_version(serde_json::from_value(json!("2025-11-25")).unwrap())
-        .serve_with_lifecycle(
-            StreamableHttpClientTransport::with_client(raw.clone(), config),
-            ClientLifecycleMode::Initialize,
-        )
-        .await
-        .unwrap();
         let effect = root.join(format!("computer-{n}/independent-effect.txt"));
         assert!(!effect.exists());
         // One dispatch per computer; a missing effect never causes replay.
@@ -1255,7 +1275,6 @@ async fn many_connected_computers(
         data(owner.call_tool(call("exec_command", json!({"cmd":command,"login":false,"environment_id":device.as_str(),"yield_time_ms":100}))).await.unwrap());
         file_within(&effect, &nonces[n]).await;
         assert_eq!(relay.connection_counts(), (computers, 32));
-        owners.push(owner);
     }
     // The status probe allocates no owner and observes physical computers once,
     // independently of how many Exec/Browser/Computer lanes each advertises.
@@ -1272,9 +1291,59 @@ async fn many_connected_computers(
         computers.to_string()
     );
     assert_eq!(status.headers()["x-styx-computers-capacity"], "32");
-    for owner in owners {
-        owner.cancel().await.unwrap();
+    // Keep the other Hosts online while the explicit target disconnects.
+    // Neither an explicit offline target nor an omitted target may fall back.
+    let (stop, job) = jobs.remove(0);
+    stop.cancel();
+    let (result, shutdown) = tokio::time::timeout(Duration::from_secs(20), job)
+        .await
+        .unwrap()
+        .unwrap();
+    result.unwrap();
+    shutdown.unwrap();
+    let until = tokio::time::Instant::now() + Duration::from_secs(5);
+    while relay
+        .devices()
+        .await
+        .unwrap()
+        .iter()
+        .any(|d| d.device_id == devices[0] && d.online)
+    {
+        assert!(
+            tokio::time::Instant::now() < until,
+            "selected Host must go offline"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    for (target, expected) in [
+        (Some(devices[0].as_str()), "offline"),
+        (None, "environment_required"),
+    ] {
+        let mut arguments = json!({"cmd":"printf forbidden > fallback-effect.txt","login":false});
+        if let Some(target) = target {
+            arguments["environment_id"] = json!(target);
+        }
+        let result = owner
+            .call_tool(call("exec_command", arguments))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let wire = serde_json::to_value(result).unwrap();
+        let error: Value =
+            serde_json::from_str(wire["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(error["error"], expected);
+        assert_eq!(error["uncertain"], false);
+    }
+    for (n, nonce) in nonces.iter().enumerate() {
+        let work = root.join(format!("computer-{n}"));
+        assert!(!work.join("fallback-effect.txt").exists());
+        assert!(!work.join("ambiguous-effect.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(work.join("independent-effect.txt")).unwrap(),
+            *nonce
+        );
+    }
+    owner.cancel().await.unwrap();
     for (stop, job) in jobs {
         stop.cancel();
         let (result, shutdown) = tokio::time::timeout(Duration::from_secs(20), job)
@@ -1303,6 +1372,7 @@ async fn many_connected_computers(
     }
     std::fs::write(root.join("many-computers-observation.json"), serde_json::to_vec_pretty(&json!({
         "connected_computers":computers,"capacity":32,"devices":devices,"independent_effect_nonces":nonces,
+        "mcp_conversations":1,"ambiguous_target":"not dispatched for Exec, Browser and Computer Use","offline_target":"not dispatched; no effect on any other Host",
         "effects":"computer-N/independent-effect.txt; exact unique nonce bytes read independently",
         "slots_after_disconnect":0,"scope":"owned loopback TLS/WSS and real native Exec; not installed-platform acceptance"
     })).unwrap()).unwrap();
@@ -1393,7 +1463,7 @@ async fn named_computers_revoke_requires_sockets() {
             .unwrap(),
     )
     .unwrap();
-    let backend = Arc::new(PairedGatewayBackend::new(relay.clone(), None));
+    let backend = Arc::new(PairedGatewayBackend::new(relay.clone()));
     let http_budget = HttpBudget::from_reserved_partition(
         Arc::new(Semaphore::new(crate::gateway::http::GATEWAY_HTTP_BYTES))
             .try_acquire_many_owned(crate::gateway::http::GATEWAY_HTTP_BYTES as u32)
@@ -1540,6 +1610,17 @@ async fn named_computers_revoke_requires_sockets() {
     assert_eq!(list["environments"].as_array().unwrap().len(), 1);
     assert_eq!(list["environments"][0]["environment_id"], second.as_str());
     assert_eq!(list["environments"][0]["label"], "Travel Mac");
+    // A single paired Host is selected even while offline; readiness must not
+    // change device identity or create a request for another target.
+    let offline = running
+        .call_tool(call("exec_command", json!({"cmd":"printf forbidden"})))
+        .await
+        .unwrap();
+    assert_eq!(offline.is_error, Some(true));
+    let wire = serde_json::to_value(offline).unwrap();
+    let error: Value = serde_json::from_str(wire["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(error["error"], "offline");
+    assert_eq!(error["uncertain"], false);
     let removed = running
         .call_tool(call(
             "get_execution_environment_status",
@@ -1560,6 +1641,28 @@ async fn named_computers_revoke_requires_sockets() {
             .unwrap()["status"],
         "revoked"
     );
+    let revoked = crate::management::native_join_http::exchange_local_computers(
+        &origin,
+        &client_tls,
+        Some(&encoded(&json!({"device_id":second.as_str()}))),
+        admin.as_bytes(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(revoked.status, 200);
+    for (name, args) in [
+        ("exec_command", json!({"cmd":"printf forbidden"})),
+        ("browser_tabs", json!({"action":"list"})),
+        ("list_windows", json!({})),
+    ] {
+        let result = running.call_tool(call(name, args)).await.unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let wire = serde_json::to_value(result).unwrap();
+        let error: Value =
+            serde_json::from_str(wire["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(error["error"], "environment_unavailable", "{name}");
+        assert_eq!(error["uncertain"], false);
+    }
     running.cancel().await.unwrap();
     node_a.lock().await.stop().await;
     node_b.lock().await.stop().await;

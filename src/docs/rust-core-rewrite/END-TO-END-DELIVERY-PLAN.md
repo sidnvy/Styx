@@ -6,6 +6,33 @@
 [GUI-CONVERGENCE.md](GUI-CONVERGENCE.md) 保留历史尝试与证据，不能把历史通过当作当前候选通过。
 本文中的计划项不代表已经执行；当前状态以最新检查点为准。**正式 Stable 0.4.0 已发布。**
 
+## 当前重构检查点（2026-11-14）
+
+本轮目标以 [REFACTOR-PLAN.md](REFACTOR-PLAN.md) 为准。下述结果是开发验证，
+不改变已发布 0.4.0 的历史结果，也不代表重构版已经完成原生交付。
+
+- `6c0177e` 已将桌面建 Gateway 的 Tunnel 配置纳入设置；`a53a602` 已实现
+  地址加一次性短码配对。短码授权一台设备加入，已提交的配对请求保留重启后的领取路径。
+- 本批统一 Gateway 的设备选择，移除 Exec、Browser、Computer Use 各自维护的默认目标判断。
+  唯一已配对 Host 可省略 ID；多台时必须明确目标；离线设备仍参与目标判断，不能被在线设备替代。
+  MCP 工具参数说明和 agent 指导同步采用这套规则，未增加默认设备配置或持久状态。
+- 原五 Host 测试使用五个 MCP 会话，现改为同一个会话操作五台独立配对的 Host。
+  真实 TLS/WSS、MCP 和 Codex 执行器已运行，每台独立读回各自 nonce 文件；断开指定 Host 后，
+  离线目标和缺少目标的命令均被拒绝，其余 Host 没有产生文件效果。三类能力的目标歧义拒绝通过。
+  单 Host 默认执行、撤销后单台离线及零设备路由也已通过。
+- 实测根目录：`/tmp/styx-multihost-20261114`；标准质量门 20 项 PASS：
+  `/tmp/styx-multihost-quality-final-20261114/receipt.json`。首轮测试在沙箱绑定端口前被拒绝，
+  授权本地监听后通过；首轮质量门的测试迭代写法 Clippy 失败已修正，失败收据保留。
+  此处没有跨设备原生 GUI、真实 ChatGPT 账号或新版发布验收结论。
+
+下一完整迁移单元是 **Host 能力设置的唯一归属**。当前 Gateway enrollment grant 和 Host
+本机 profile 仍共同限制 Browser/Computer；Gateway status 还把 Exec 配置写为固定 true。
+需要让本机与 MCP 调用同一个 Host 设置操作，由 Host 保存并应用 Exec/Browser/Computer
+开关、报告实际状态；Gateway 保留配对/撤销并转发设置请求。已有配对迁移时保留当前实际
+开关，不静默开启。即使三个开关全部关闭，设备仍须能通过原有认证连接接收设置请求。
+这项需要连同 Host 运行管理、协议、状态展示和本机入口一起迁移，不能只删除 Gateway 的
+检查或另加一套设置状态。随后再处理 Exec 跨对话任务、Browser 转交和正常退出/撤销旅程。
+
 ## 当前开发检查点（2026-11-12）
 
 ### 已交付：Stable 0.4.0（2026-11-13）

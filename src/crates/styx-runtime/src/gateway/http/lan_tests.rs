@@ -231,7 +231,7 @@ async fn gateway_lan_scenario_inner(
             .unwrap(),
     )
     .unwrap();
-    let backend = Arc::new(PairedGatewayBackend::new(relay.clone(), None));
+    let backend = Arc::new(PairedGatewayBackend::new(relay.clone()));
     let policy = Arc::new(
         GatewayBearerPolicy::new(model.as_bytes(), vec![local_host.clone()], vec![]).unwrap(),
     );
