@@ -900,6 +900,17 @@ impl RelayHandle {
         // exchange/actual-send/delivery still repeat the current authorization.
         let entry = self.route_binding(&b.inner, lane).await?;
         let (owner, target, revision, new_record, record_kind) = match &call {
+            Call::ExecTask {
+                owner,
+                grant_revision,
+                ..
+            } => (
+                owner,
+                None,
+                Some(*grant_revision),
+                false,
+                TargetKind::ExecResource,
+            ),
             Call::PrepareStart {
                 owner,
                 grant_revision,

@@ -263,3 +263,105 @@ async fn sixteen_live_execs_refuse_the_next_start_without_native_io_or_uncertain
     host.close_exec_fixture_for_test().await;
     driver.await.unwrap();
 }
+
+#[tokio::test]
+async fn host_tasks_survive_chat_cleanup_and_gateway_epoch_replacement() {
+    let (host, authority, peer, driver) = fixture();
+    peer.exited.store(false, Ordering::Relaxed);
+    peer.drained.store(false, Ordering::Relaxed);
+    let protocol = protocol(&host, &authority);
+    let first = owner(1);
+    assert!(matches!(
+        protocol.control(&Call::OwnerOpen {
+            owner: first.clone(),
+            grant_revision: 1
+        }),
+        Some(Reply::OwnerOpened { .. })
+    ));
+    let reply = protocol.handle(Call::ExecTask { owner:first.clone(), grant_revision:1, command:ExecTaskCommand::Run {
+        spec:serde_json::value::to_raw_value(&json!({"argv":["/bin/sh","-c","fixture-only"],"cwd_file_uri":"file:///owned","environment":{},"tty":false})).unwrap(), max_output_tokens:100, yield_time_ms:0,
+    }}).await;
+    let Reply::ExecTask { result } = reply else {
+        panic!("task response");
+    };
+    assert!(!result.is_error, "{}", result.value);
+    let id = result.value["session_id"].as_u64().unwrap();
+    protocol.control(&Call::OwnerRevoke {
+        owner: first.clone(),
+    });
+    assert!(matches!(
+        protocol
+            .handle(Call::OwnerCleanup {
+                owner: first.clone(),
+                timeout_ms: 5000
+            })
+            .await,
+        Reply::OwnerCleanup { complete: true, .. }
+    ));
+    // A different authenticated Gateway process fences old access leases. It
+    // must neither fence the local task owner nor recreate the native process.
+    let epoch: GatewayEpoch = "replacement-gateway-epoch".try_into().unwrap();
+    protocol.accept_epoch(&epoch).unwrap();
+    let second = OwnerRef {
+        owner_id: "fixture:replacement-chat".try_into().unwrap(),
+        owner_epoch: paired_owner_epoch(&epoch, 1),
+    };
+    assert!(matches!(
+        protocol.control(&Call::OwnerOpen {
+            owner: second.clone(),
+            grant_revision: 1
+        }),
+        Some(Reply::OwnerOpened { .. })
+    ));
+    assert!(matches!(
+        protocol
+            .handle(Call::ExecTask {
+                owner: first,
+                grant_revision: 1,
+                command: ExecTaskCommand::List
+            })
+            .await,
+        Reply::Error {
+            category: ErrorCategory::Unauthorized,
+            ..
+        }
+    ));
+    let Reply::ExecTask { result } = protocol
+        .handle(Call::ExecTask {
+            owner: second.clone(),
+            grant_revision: 1,
+            command: ExecTaskCommand::List,
+        })
+        .await
+    else {
+        panic!("list");
+    };
+    assert_eq!(result.value["tasks"][0]["session_id"], id);
+    peer.exited.store(true, Ordering::Relaxed);
+    peer.drained.store(true, Ordering::Relaxed);
+    for _ in 0..2 {
+        let Reply::ExecTask { result } = protocol
+            .handle(Call::ExecTask {
+                owner: second.clone(),
+                grant_revision: 1,
+                command: ExecTaskCommand::Poll {
+                    session_id: id,
+                    chars: String::new(),
+                    max_output_tokens: 100,
+                    yield_time_ms: 0,
+                },
+            })
+            .await
+        else {
+            panic!("poll");
+        };
+        assert!(!result.is_error, "{}", result.value);
+        assert_eq!(result.value["exit_code"], 0);
+    }
+    assert_eq!(
+        peer.starts.load(Ordering::Relaxed),
+        1,
+        "reconnect never redispatches start"
+    );
+    driver.abort();
+}

@@ -18,6 +18,7 @@ pub(crate) mod browser;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) mod computer;
 mod owner_order;
+mod tasks;
 pub mod wire;
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 pub(crate) use owner_order::epoch_key as paired_owner_epoch;
@@ -171,6 +172,7 @@ fn action_reply(
 /// v2 authority comes only from bootstrap; v3 owner-control DTOs are admitted
 /// only after fixed-endpoint TLS and explicit Gateway namespace negotiation.
 pub struct HostProtocol<'a> {
+    tasks: tasks::State,
     settings: Option<std::sync::Arc<crate::host::settings::HostSettings>>,
     profile: ProfileBinding,
     coordinator: HostCoordinator,
@@ -223,6 +225,7 @@ impl<'a> HostProtocol<'a> {
             return Err(ProtocolError::BootstrapMismatch);
         }
         Ok(Self {
+            tasks: tasks::State::default(),
             settings: None,
             profile,
             coordinator,
@@ -676,8 +679,52 @@ impl<'a> HostProtocol<'a> {
                 }
                 Reply::OwnerCleanup { owner, complete }
             }
-            Call::PrepareStart {
+            call @ (Call::PrepareStart { .. }
+            | Call::DispatchStart { .. }
+            | Call::InspectStart { .. }
+            | Call::Read { .. }
+            | Call::PrepareAction { .. }
+            | Call::DispatchAction { .. }
+            | Call::InspectAction { .. }) => {
+                let owner = match self.owner(call_owner(&call).expect("exec caller")) {
+                    Ok(owner) => owner,
+                    Err(error) => return rejection(error),
+                };
+                self.exec_operation(&owner, call).await
+            }
+            Call::ExecTask {
                 owner,
+                grant_revision,
+                command,
+            } => {
+                if self.owner(&owner).is_err()
+                    || grant_revision != self.coordinator.grant_revision()
+                {
+                    return rejection(ErrorCategory::Unauthorized);
+                }
+                Reply::ExecTask {
+                    result: tasks::Engine { protocol: self }.handle(command).await,
+                }
+            }
+            Call::Write {} => Reply::Unsupported {
+                feature: "write".into(),
+            },
+            Call::Terminate {} => Reply::Unsupported {
+                feature: "terminate".into(),
+            },
+            Call::GetCapabilities
+            | Call::SetCapabilities { .. }
+            | Call::Negotiate { .. }
+            | Call::OwnerOpen { .. }
+            | Call::OwnerRevoke { .. }
+            | Call::EnableTransportDrain
+            | Call::TransportDrainResult { .. } => invalid(),
+        }
+    }
+    async fn exec_operation(&self, owner: &OwnerLease, call: Call) -> Reply {
+        match call {
+            Call::PrepareStart {
+                owner: _,
                 grant_revision,
                 timeout_ms,
                 spec,
@@ -685,10 +732,6 @@ impl<'a> HostProtocol<'a> {
                 if spec.get().len() > SPEC_LIMIT {
                     return invalid();
                 }
-                let owner = match self.owner(&owner) {
-                    Ok(v) => v,
-                    Err(e) => return rejection(e),
-                };
                 let context = match self.context(grant_revision, timeout_ms) {
                     Ok(v) => v,
                     Err(e) => return rejection(e),
@@ -701,18 +744,14 @@ impl<'a> HostProtocol<'a> {
                     Ok(spec) => spec,
                     Err(_) => return invalid(),
                 };
-                match self.coordinator.prepare_start(&owner, context, &spec) {
+                match self.coordinator.prepare_start(owner, context, &spec) {
                     Ok(v) => Reply::Prepared { snapshot: v.into() },
                     Err(e) => coordinator_error(e, false),
                 }
             }
-            Call::DispatchStart { owner, target } => {
-                let owner = match self.owner(&owner) {
-                    Ok(v) => v,
-                    Err(e) => return rejection(e),
-                };
+            Call::DispatchStart { owner: _, target } => {
                 match self.coordinator.dispatch_start(
-                    &owner,
+                    owner,
                     &target.operation_id,
                     target.payload_digest,
                 ) {
@@ -744,13 +783,9 @@ impl<'a> HostProtocol<'a> {
                     Err(e) => coordinator_error(e, false),
                 }
             }
-            Call::InspectStart { owner, target } => {
-                let owner = match self.owner(&owner) {
-                    Ok(v) => v,
-                    Err(e) => return rejection(e),
-                };
+            Call::InspectStart { owner: _, target } => {
                 match self.coordinator.inspect_start(
-                    &owner,
+                    owner,
                     &target.operation_id,
                     target.payload_digest,
                 ) {
@@ -759,7 +794,7 @@ impl<'a> HostProtocol<'a> {
                 }
             }
             Call::Read {
-                owner,
+                owner: _,
                 target,
                 grant_revision,
                 timeout_ms,
@@ -769,17 +804,13 @@ impl<'a> HostProtocol<'a> {
                 if max_bytes == 0 || max_bytes > 16384 || wait_ms > 100 {
                     return invalid();
                 }
-                let owner = match self.owner(&owner) {
-                    Ok(v) => v,
-                    Err(e) => return rejection(e),
-                };
                 let context = match self.context(grant_revision, timeout_ms) {
                     Ok(v) => v,
                     Err(e) => return rejection(e),
                 };
                 match self
                     .read_exec(
-                        &owner,
+                        owner,
                         &target.operation_id,
                         target.payload_digest,
                         &context,
@@ -806,7 +837,7 @@ impl<'a> HostProtocol<'a> {
                 }
             }
             Call::PrepareAction {
-                owner,
+                owner: _,
                 target,
                 grant_revision,
                 timeout_ms,
@@ -815,10 +846,6 @@ impl<'a> HostProtocol<'a> {
                 if action.get().len() > SPEC_LIMIT {
                     return invalid();
                 }
-                let owner = match self.owner(&owner) {
-                    Ok(v) => v,
-                    Err(e) => return rejection(e),
-                };
                 let context = match self.context(grant_revision, timeout_ms) {
                     Ok(v) => v,
                     Err(e) => return rejection(e),
@@ -829,25 +856,21 @@ impl<'a> HostProtocol<'a> {
                 };
                 match self
                     .coordinator
-                    .prepare_action(&owner, target, context, &action)
+                    .prepare_action(owner, target, context, &action)
                 {
                     Ok(v) => Reply::Prepared { snapshot: v.into() },
                     Err(e) => coordinator_error(e, false),
                 }
             }
-            Call::DispatchAction { owner, action } => {
-                let owner = match self.owner(&owner) {
-                    Ok(v) => v,
-                    Err(e) => return rejection(e),
-                };
+            Call::DispatchAction { owner: _, action } => {
                 match self.coordinator.dispatch_action(
-                    &owner,
+                    owner,
                     &action.operation_id,
                     action.payload_digest,
                 ) {
                     Ok(ActionSubmission::Existing(snapshot)) => {
                         match self.coordinator.lookup_action(
-                            &owner,
+                            owner,
                             &action.operation_id,
                             action.payload_digest,
                         ) {
@@ -862,18 +885,14 @@ impl<'a> HostProtocol<'a> {
                     Err(e) => coordinator_error(e, false),
                 }
             }
-            Call::InspectAction { owner, action } => {
-                let owner = match self.owner(&owner) {
-                    Ok(v) => v,
-                    Err(e) => return rejection(e),
-                };
+            Call::InspectAction { owner: _, action } => {
                 match self.coordinator.inspect_action(
-                    &owner,
+                    owner,
                     &action.operation_id,
                     action.payload_digest,
                 ) {
                     Ok(snapshot) => match self.coordinator.lookup_action(
-                        &owner,
+                        owner,
                         &action.operation_id,
                         action.payload_digest,
                     ) {
@@ -883,19 +902,7 @@ impl<'a> HostProtocol<'a> {
                     Err(e) => coordinator_error(e, false),
                 }
             }
-            Call::Write {} => Reply::Unsupported {
-                feature: "write".into(),
-            },
-            Call::Terminate {} => Reply::Unsupported {
-                feature: "terminate".into(),
-            },
-            Call::GetCapabilities
-            | Call::SetCapabilities { .. }
-            | Call::Negotiate { .. }
-            | Call::OwnerOpen { .. }
-            | Call::OwnerRevoke { .. }
-            | Call::EnableTransportDrain
-            | Call::TransportDrainResult { .. } => invalid(),
+            _ => invalid(),
         }
     }
     fn features(&self) -> Vec<String> {
@@ -917,6 +924,7 @@ impl<'a> HostProtocol<'a> {
                 Vec::new()
             };
         if self.paired {
+            features.push(wire::HOST_EXEC_TASKS_V1.into());
             features.extend(
                 [
                     "owner_open",
@@ -1158,7 +1166,8 @@ impl<'a> HostProtocol<'a> {
 }
 fn call_owner(call: &Call) -> Option<&OwnerRef> {
     match call {
-        Call::PrepareStart { owner, .. }
+        Call::ExecTask { owner, .. }
+        | Call::PrepareStart { owner, .. }
         | Call::DispatchStart { owner, .. }
         | Call::InspectStart { owner, .. }
         | Call::Read { owner, .. }

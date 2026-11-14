@@ -11,6 +11,29 @@
 本轮目标以 [REFACTOR-PLAN.md](REFACTOR-PLAN.md) 为准。下述结果是开发验证，
 不改变已发布 0.4.0 的历史结果，也不代表重构版已经完成原生交付。
 
+### Exec 任务归属迁移（2026-11-14，本次最新源码检查点）
+
+Gateway 不再保存 Exec 任务表、输出游标或对话归属；Host 本次运行持有这些状态，
+沿用 Core 的操作证据和 Codex 执行器。MCP 增加 `list_execution_tasks`、
+`stop_execution_task`，`write_stdin` 按同一 `environment_id` 路由。
+关闭聊天只清理调用方访问；另一个已授权对话可以发现、继续和停止原 Host 任务。
+终态结果保留最后一段输出，不是完整日志；不自动重放结果未知的动作。
+
+已运行本机真实 TLS/MCP/WSS/Codex：Host 连接实际断开再接入后找回同一任务，
+独立文件确认命令只执行一次；聊天关闭后原 PID/出生时间仍在，显式停止后原进程消失，
+最终结果可读两次。五台独立 Host 的实际场景也通过，包括关闭/重新开启能力及另一台
+Host 原任务继续。Host/Core 场景验证更换 Gateway 进程代际时任务保留、旧调用方拒绝。
+标准集成质量门 20 项 PASS：`/tmp/styx-host-tasks-20261114/quality/receipt.json`；
+汇总 `/tmp/styx-host-tasks-20261114/host-task-boundary.json`。首轮受限环境的端口测试
+失败和重连测试程序在结束时误重连的失败保留；授权本地端口并修正测试退出分支后通过。
+
+AGENTS、MCP instructions、CLI skill 及旧 ADR 的适用边界已同步。此源码尚未安装到
+Mac/Windows；已安装客户端仍是上一检查点版本。真实桌面 Host 配合 Gateway 完整进程
+重启、新版正常退出、Browser 转交、显式设备撤销通知及任务停止仍需后续收敛与验证。
+这里不宣称原生 GUI 或 ChatGPT 账号验收。重构版 Stable 保持 NO-GO。
+
+### 已完成的设备选择基础
+
 - `6c0177e` 已将桌面建 Gateway 的 Tunnel 配置纳入设置；`a53a602` 已实现
   地址加一次性短码配对。短码授权一台设备加入，已提交的配对请求保留重启后的领取路径。
 - 本批统一 Gateway 的设备选择，移除 Exec、Browser、Computer Use 各自维护的默认目标判断。

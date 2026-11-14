@@ -50,6 +50,14 @@ Browser 与 Computer Use 优先沿用**固定版本**的 Playwright、Cua 工具
 | [Host 协调与清理](../../crates/styx-runtime/src/host/coordinator)、[操作记录](../../crates/styx-core/src/operations.rs)、[执行器适配](../../crates/styx-runtime/src/providers) | 保留原操作身份、已派发结果未知时的保护，以及实际进程清理。Exec 的任务寿命与对话解绑；Browser 明确转交现有会话；保留 Cua 实际需要的资源保护。 |
 | [Rust App 入口](../../crates/styx-runtime/src/app.rs)、[Mac](../../host/macos/product-ui/ProductViews.swift)、[Windows](../../host/windows/Styx.cs)、[CLI 设置](../../crates/styx/src/setup.rs) | 按安装模式组成向导。移除桌面独立「暂停连接」操作和旧的二次批准界面；底层断连、退出清理和撤销仍各有调用方。Host-only 隐去 Tunnel 设置，桌面建中心的流程必须完成 Tunnel 配置。 |
 
+## Exec 边界的实现落点
+
+Host 的 `protocol/tasks.rs` 保存本次运行的任务目录、输入与输出读取状态、停止操作记录及最后一段完成结果。Core 继续负责操作身份、派发证据和执行器清理；任务使用 Host 本地的所有者身份，不使用对话的访问身份。连接重建和 Gateway 进程代际变化只更新调用方访问，不重建任务。Host 退出仍由现有 Core 生命周期收回执行器和任务。
+
+Gateway 的公开适配只选择设备并转发 `host_exec_tasks_v1` 调用，不保存 Exec 任务表、输出游标或任务归属。旧 Host 未声明此能力时不启用新的 Exec 路由，避免静默使用会在聊天关闭时杀进程的旧行为。低层 prepare/dispatch 接口保留给现有私有协议消费者，公开 Exec 入口只走 Host 任务控制。
+
+`list_execution_tasks` 查询所选 Host；`write_stdin` 和 `stop_execution_task` 使用同一设备和任务 ID。完成结果在本次 Host 运行期间可重复读取，内容是最后一段输出，并非完整日志；运行中输出由调用者共用一个读取位置。`pending` 表示尚未观察到完成，不能据此断言进程仍在运行。结果未知时检查原任务，不能自动重新执行命令、输入或停止操作。Host 重启不会恢复任务表。
+
 ## 实施顺序与验证
 
 先做角色组合和配对：用 headless Gateway 接入桌面 Host，再用桌面组合模式自动加入本机并接入第二台 Host。两种拓扑都应只配置一次 Tunnel。GUI 强制完成 Tunnel 和 CLI 延后配置分别从各自正常入口验证。

@@ -16,11 +16,15 @@ and the requested native command. Prefer rg for file/text searches. Quote shell
 arguments for the target shell; never interpolate untrusted text as executable
 syntax. Keep credentials out of command arguments, output and chat.
 
-A running command returns its own session_id. Use write_stdin only for that owned
-session, preserving environment selection. Poll reasonably and report progress.
-Do not carry session IDs across conversations. A timeout or disconnect does not
-prove failure: inspect the known process or expected artifact before replaying
-any mutation. Stop only processes belonging to the authorized task.
+Exec tasks belong to the selected Host runtime and survive conversation closure
+or Gateway reconnection. Preserve both environment_id and session_id. In a new
+conversation, use list_execution_tasks on that Host, then write_stdin with empty
+chars to inspect progress or the retained terminal result. The live output cursor
+is shared by callers; a retained terminal result contains the final output chunk,
+not a complete transcript. Use stop_execution_task only for an authorized task.
+Quitting Host stops its tasks and does not resume them on the next launch.
+A timeout or disconnect does not prove failure: inspect the task or expected
+artifact before a fresh mutation. Never automatically replay an unknown action.
 
 Prefer Exec for files, Git, builds and CLI downloads. Do not open a GUI terminal
 to work around an Exec error or restriction. Use the Browser skill for web UI and

@@ -55,6 +55,7 @@ struct ExecArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WriteArgs {
+    environment_id: Option<String>,
     session_id: u64,
     chars: Option<String>,
     yield_time_ms: Option<u32>,
@@ -116,6 +117,7 @@ impl WriteArgs {
         bounds(a.yield_time_ms, a.max_output_tokens)?;
         if !(1..(1_u64 << 48)).contains(&a.session_id)
             || a.chars.as_ref().is_some_and(|s| s.len() > 65_536)
+            || a.environment_id.as_ref().is_some_and(|s| s.is_empty())
         {
             return Err("invalid_arguments");
         }
@@ -313,78 +315,16 @@ fn failure(code: &str, session: Option<u64>, uncertain: bool) -> CallToolResult 
     }
     CallToolResult::error(vec![ContentBlock::text(value.to_string())])
 }
-/// Facts from an explicit authenticated Host reply. Never constructed from a
-/// generic Relay error, missing reply, timeout, ACK, or public arguments.
-#[derive(Clone, Copy)]
-struct HostFailure {
-    category: styx_contracts::error::ErrorCategory,
-    certainty: styx_contracts::error::ExecutionCertainty,
-    cursor_may_be_consumed: bool,
-}
-impl HostFailure {
-    fn from_exchange(reply: &Result<Reply, super::RelayError>) -> Option<Self> {
-        match reply {
-            Ok(Reply::Error {
-                category,
-                certainty,
-                cursor_may_be_consumed,
-            }) => Some(Self {
-                category: *category,
-                certainty: *certainty,
-                cursor_may_be_consumed: *cursor_may_be_consumed,
-            }),
-            _ => None,
-        }
-    }
-    fn result(self, session: u64) -> CallToolResult {
-        let category = serde_json::to_value(self.category).expect("fixed error enum");
-        let busy = self.category == styx_contracts::error::ErrorCategory::Busy
-            && self.certainty == styx_contracts::error::ExecutionCertainty::NotDispatched
-            && !self.cursor_may_be_consumed;
-        let code = if busy {
-            "capacity_busy".to_owned()
-        } else {
-            category
-                .as_str()
-                .expect("fixed error name")
-                .to_ascii_lowercase()
-        };
-        CallToolResult::error(vec![ContentBlock::text(json!({
-            "error":code,"category":category,"execution_certainty":self.certainty,
-            "cursor_may_be_consumed":self.cursor_may_be_consumed,
-            "uncertain":self.certainty == styx_contracts::error::ExecutionCertainty::Unknown || self.cursor_may_be_consumed,
-            "session_id":session,"retryable":busy,
-        }).to_string())])
-    }
-    fn mutation_result(self, uncertain: &mut bool, session: u64) -> CallToolResult {
-        // Only this explicit Host proof clears action ambiguity. In particular,
-        // Completed without a WriteAccepted/resource snapshot is not synthesized
-        // into a successful action or a usable process resource.
-        if self.certainty == styx_contracts::error::ExecutionCertainty::NotDispatched {
-            *uncertain = false;
-        }
-        self.result(session)
-    }
-    fn read_result(self, cursor_unknown: &mut bool, session: u64) -> CallToolResult {
-        // The caller checked the cursor was known, then poisoned it before I/O.
-        // A typed proof that this read did not consume it safely clears only
-        // that temporary poison. Missing/generic replies never enter here.
-        *cursor_unknown = self.cursor_may_be_consumed;
-        self.result(session)
-    }
-}
-
 fn success(value: Value) -> CallToolResult {
     CallToolResult::structured(value)
 }
 
 use super::{BoundOwner, RelayHandle};
 use crate::gateway::http::lifecycle::{GatewayOwnerLifecycle, OwnerCleanup, OwnerFenceError};
-use crate::host::protocol::wire::{ActionAcknowledgmentDto, ActionRef, Call, Reply};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use crate::host::protocol::wire::{ActionRef, Call, ExecTaskCommand, Reply};
 use std::{
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use styx_contracts::{
     identity::{OwnerId, Sha256Digest},
@@ -393,46 +333,20 @@ use styx_contracts::{
 use tokio::sync::Mutex as AsyncMutex;
 
 #[cfg(not(target_os = "macos"))]
-const MAX_RESOURCES: usize = 64;
-#[cfg(not(target_os = "macos"))]
 const MAX_OWNERS: usize = 128;
-struct Resource {
-    binding: BoundOwner,
-    target: Option<ResourceTarget>,
-    start_unknown: bool,
-    input_unknown: bool,
-    cursor_unknown: bool,
-    pending_action: Option<ActionRef>,
-    start_refusal: Option<HostFailure>,
-}
-struct Entry {
-    owner: OwnerId,
-    principal: Sha256Digest,
-    resource: Arc<AsyncMutex<Resource>>,
-}
 struct OwnerState {
     principal: Sha256Digest,
     closing: bool,
 }
 struct State {
     capability_generations: BTreeMap<DeviceId, [u64; 3]>,
-    next_session: u64,
     owners: BTreeMap<OwnerId, OwnerState>,
-    sessions: BTreeMap<u64, Entry>,
     browsers: browser::BrowserContexts,
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     computers: computer::ComputerContexts,
 }
 impl State {
     fn collect_settled(&mut self) {
-        // try_lock never waits while holding State. An in-flight old waiter
-        // retains its cell; after release it can only use its revoked binding.
-        self.sessions.retain(|_, entry| {
-            !entry
-                .resource
-                .try_lock()
-                .is_ok_and(|resource| resource.binding.physically_settled())
-        });
         self.browsers.collect_settled();
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         self.computers.collect_settled();
@@ -453,9 +367,7 @@ impl PairedGatewayBackend {
             relay,
             state: Mutex::new(State {
                 capability_generations: BTreeMap::new(),
-                next_session: 1,
                 owners: BTreeMap::new(),
-                sessions: BTreeMap::new(),
                 browsers: browser::BrowserContexts::default(),
                 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
                 computers: computer::ComputerContexts::default(),
@@ -502,11 +414,6 @@ impl PairedGatewayBackend {
         }
         Ok(())
     }
-    async fn exchange(&self, binding: &BoundOwner, call: Call) -> Result<Reply, super::RelayError> {
-        tokio::time::timeout(Duration::from_secs(5), self.relay.call(binding, call))
-            .await
-            .unwrap_or(Err(super::RelayError::Unknown))
-    }
     fn active(&self, owner: &VerifiedGatewayOwner) -> bool {
         !owner.is_fenced()
             && self
@@ -517,85 +424,7 @@ impl PairedGatewayBackend {
                 .get(owner.owner_id())
                 .is_none_or(|o| o.principal == owner.principal_fingerprint() && !o.closing)
     }
-    fn reserve(
-        &self,
-        owner: &VerifiedGatewayOwner,
-        binding: BoundOwner,
-    ) -> Result<(u64, Arc<AsyncMutex<Resource>>), &'static str> {
-        let mut state = self.state.lock().expect("paired state");
-        state.collect_settled();
-        if binding.closed() {
-            return Err("permission_denied");
-        }
-        if state
-            .owners
-            .get(owner.owner_id())
-            .is_some_and(|o| o.closing || o.principal != owner.principal_fingerprint())
-        {
-            return Err("permission_denied");
-        }
-        #[cfg(not(target_os = "macos"))]
-        if state.sessions.len() >= MAX_RESOURCES
-            || (!state.owners.contains_key(owner.owner_id()) && state.owners.len() >= MAX_OWNERS)
-        {
-            return Err("capacity");
-        }
-        if state.next_session >= (1_u64 << 48) {
-            return Err("capacity");
-        }
-        state
-            .owners
-            .entry(owner.owner_id().clone())
-            .or_insert(OwnerState {
-                principal: owner.principal_fingerprint(),
-                closing: false,
-            });
-        let id = state.next_session;
-        state.next_session += 1;
-        let resource = Arc::new(AsyncMutex::new(Resource {
-            binding,
-            target: None,
-            start_unknown: true,
-            input_unknown: false,
-            cursor_unknown: false,
-            pending_action: None,
-            start_refusal: None,
-        }));
-        state.sessions.insert(
-            id,
-            Entry {
-                owner: owner.owner_id().clone(),
-                principal: owner.principal_fingerprint(),
-                resource: resource.clone(),
-            },
-        );
-        Ok((id, resource))
-    }
-    fn lookup(
-        &self,
-        owner: &VerifiedGatewayOwner,
-        id: u64,
-    ) -> Result<Arc<AsyncMutex<Resource>>, &'static str> {
-        let mut state = self.state.lock().expect("paired state");
-        state.collect_settled();
-        if state
-            .owners
-            .get(owner.owner_id())
-            .is_some_and(|o| o.closing || o.principal != owner.principal_fingerprint())
-        {
-            return Err("unknown_session");
-        }
-        state
-            .sessions
-            .get(&id)
-            .filter(|r| {
-                r.owner == *owner.owner_id() && r.principal == owner.principal_fingerprint()
-            })
-            .map(|r| r.resource.clone())
-            .ok_or("unknown_session")
-    }
     async fn execute(&self, owner: &VerifiedGatewayOwner, args: ExecArgs) -> CallToolResult {
-        let began = Instant::now();
         let device = match self.resolve_device(args.environment_id.as_deref()).await {
             Ok(device) => device,
             Err(error) => return failure(error, None, false),
@@ -626,392 +455,71 @@ impl PairedGatewayBackend {
             Ok(s) if s.get().len() <= 128 * 1024 => s,
             _ => return failure("invalid_arguments", None, false),
         };
-        let (id, cell) = match self.reserve(owner, binding) {
-            Ok(r) => r,
-            Err(e) => return failure(e, None, false),
-        };
-        let mut r = match tokio::time::timeout(Duration::from_secs(5), cell.lock()).await {
-            Ok(r) => r,
-            Err(_) => return failure("busy", None, false),
-        };
-        if !self.active(owner) {
-            return failure("permission_denied", Some(id), false);
-        }
-        let call = Call::PrepareStart {
-            owner: r.binding.owner_ref(),
-            grant_revision: r.binding.grant_revision(),
-            timeout_ms: 5_000,
-            spec,
-        };
-        let snapshot = match self.exchange(&r.binding, call).await {
-            Ok(Reply::Prepared { snapshot }) => snapshot,
-            Ok(Reply::Error {
-                category,
-                certainty,
-                cursor_may_be_consumed,
-            }) => {
-                let error = HostFailure {
-                    category,
-                    certainty,
-                    cursor_may_be_consumed,
-                };
-                if certainty == styx_contracts::error::ExecutionCertainty::NotDispatched {
-                    r.start_refusal = Some(error);
-                }
-                if certainty == styx_contracts::error::ExecutionCertainty::NotDispatched {
-                    self.state
-                        .lock()
-                        .expect("paired state")
-                        .sessions
-                        .remove(&id);
-                }
-                return error.mutation_result(&mut r.start_unknown, id);
-            }
-            _ => return failure("outcome_unknown", Some(id), true),
-        };
-        if snapshot.target.is_some()
-            || snapshot.operation_id.host_generation != *r.binding.host_generation()
-        {
-            return failure("outcome_unknown", Some(id), true);
-        }
-        let target = ResourceTarget {
-            operation_id: snapshot.operation_id,
-            payload_digest: snapshot.payload_digest,
-        };
-        r.target = Some(target.clone());
-        if !self.active(owner) {
-            return failure("permission_denied", Some(id), false);
-        }
-        match self
-            .exchange(
-                &r.binding,
-                Call::DispatchStart {
-                    owner: r.binding.owner_ref(),
-                    target,
-                },
-            )
-            .await
-        {
-            Ok(Reply::Start { snapshot, .. })
-                if r.target.as_ref().is_some_and(|t| {
-                    t.operation_id == snapshot.operation_id
-                        && t.payload_digest == snapshot.payload_digest
-                }) && snapshot.target.is_none()
-                    && snapshot.state != OperationState::Unknown
-                    && snapshot.liveness != ExecutionLiveness::NotStarted =>
-            {
-                r.start_unknown = false
-            }
-            Ok(Reply::Error {
-                category,
-                certainty,
-                cursor_may_be_consumed,
-            }) => {
-                let error = HostFailure {
-                    category,
-                    certainty,
-                    cursor_may_be_consumed,
-                };
-                if certainty == styx_contracts::error::ExecutionCertainty::NotDispatched {
-                    r.start_refusal = Some(error);
-                }
-                if certainty == styx_contracts::error::ExecutionCertainty::NotDispatched {
-                    self.state
-                        .lock()
-                        .expect("paired state")
-                        .sessions
-                        .remove(&id);
-                }
-                return error.mutation_result(&mut r.start_unknown, id);
-            }
-            _ => return failure("outcome_unknown", Some(id), true),
-        }
-        self.read(
-            owner,
-            id,
-            &mut r,
-            args.max_output_tokens.unwrap_or(10_000),
-            args.yield_time_ms.unwrap_or(10_000),
-            began,
+        self.task_call(
+            &binding,
+            ExecTaskCommand::Run {
+                spec,
+                max_output_tokens: args.max_output_tokens.unwrap_or(10_000),
+                yield_time_ms: args.yield_time_ms.unwrap_or(1_000),
+            },
         )
         .await
     }
-    async fn write(&self, owner: &VerifiedGatewayOwner, args: WriteArgs) -> CallToolResult {
-        let began = Instant::now();
-        let cell = match self.lookup(owner, args.session_id) {
-            Ok(r) => r,
-            Err(e) => return failure(e, None, false),
+    async fn task_call(&self, binding: &BoundOwner, command: ExecTaskCommand) -> CallToolResult {
+        // No task handles or output cursors live in Gateway. A current chat
+        // authorizes access; the selected Host resolves its own task IDs.
+        let call = Call::ExecTask {
+            owner: binding.owner_ref(),
+            grant_revision: binding.grant_revision(),
+            command,
         };
-        let mut r = match tokio::time::timeout(Duration::from_secs(5), cell.lock()).await {
-            Ok(r) => r,
-            Err(_) => return failure("busy", None, false),
-        };
-        if !self.active(owner) {
-            return failure("unknown_session", None, false);
+        match self.relay.call(binding, call).await {
+            Ok(Reply::ExecTask { mut result }) => {
+                result.value["environment_id"] = json!(binding.device());
+                if result.is_error { CallToolResult::error(vec![ContentBlock::text(result.value.to_string())]) }
+                else { success(result.value) }
+            }
+            Ok(Reply::Error { category, certainty, cursor_may_be_consumed }) => CallToolResult::error(vec![ContentBlock::text(json!({
+                "error":serde_json::to_value(category).expect("error category").as_str().expect("category name").to_ascii_lowercase(),
+                "execution_certainty":certainty,"cursor_may_be_consumed":cursor_may_be_consumed,
+                "uncertain":certainty == styx_contracts::error::ExecutionCertainty::Unknown || cursor_may_be_consumed,
+                "environment_id":binding.device(),
+            }).to_string())]),
+            Err(e) => failure(e.code(), None, !matches!(e, super::RelayError::Busy | super::RelayError::NotSent)),
+            _ => failure("outcome_unknown", None, true),
         }
-        if let Some(error) = r.start_refusal {
-            return error.result(args.session_id);
-        }
-        let Some(target) = r.target.clone() else {
-            return failure("outcome_unknown", Some(args.session_id), true);
-        };
-        let chars = args.chars.unwrap_or_default();
-        if !chars.is_empty() {
-            if r.start_unknown || r.input_unknown || r.cursor_unknown {
-                return failure("outcome_unknown", Some(args.session_id), true);
-            }
-            let action = match serde_json::value::to_raw_value(
-                &crate::providers::codex::ProcessAction::WriteStdin {
-                    input_base64: STANDARD.encode(chars.as_bytes()),
-                },
-            ) {
-                Ok(a) => a,
-                Err(_) => return failure("invalid_arguments", Some(args.session_id), false),
-            };
-            // Set before any await that can lose an action response. Never send
-            // the same input again after ambiguity.
-            r.input_unknown = true;
-            let prepared = self
-                .exchange(
-                    &r.binding,
-                    Call::PrepareAction {
-                        owner: r.binding.owner_ref(),
-                        target,
-                        grant_revision: r.binding.grant_revision(),
-                        timeout_ms: 5_000,
-                        action,
-                    },
-                )
-                .await;
-            let action = match prepared {
-                Ok(Reply::Prepared { snapshot }) if snapshot.target == r.target => ActionRef {
-                    operation_id: snapshot.operation_id,
-                    payload_digest: snapshot.payload_digest,
-                },
-                Ok(Reply::Error {
-                    category,
-                    certainty,
-                    cursor_may_be_consumed,
-                }) => {
-                    return HostFailure {
-                        category,
-                        certainty,
-                        cursor_may_be_consumed,
-                    }
-                    .mutation_result(&mut r.input_unknown, args.session_id);
-                }
-                _ => return failure("outcome_unknown", Some(args.session_id), true),
-            };
-            r.pending_action = Some(ActionRef {
-                operation_id: action.operation_id.clone(),
-                payload_digest: action.payload_digest,
-            });
-            if !self.active(owner) {
-                return failure("permission_denied", Some(args.session_id), true);
-            }
-            match self
-                .exchange(
-                    &r.binding,
-                    Call::DispatchAction {
-                        owner: r.binding.owner_ref(),
-                        action,
-                    },
-                )
-                .await
-            {
-                Ok(Reply::Action {
-                    acknowledgment: Some(ActionAcknowledgmentDto::WriteAccepted),
-                    snapshot,
-                    ..
-                }) if snapshot.state == OperationState::Succeeded
-                    && snapshot.target == r.target
-                    && r.pending_action.as_ref().is_some_and(|a| {
-                        a.operation_id == snapshot.operation_id
-                            && a.payload_digest == snapshot.payload_digest
-                    }) =>
-                {
-                    r.input_unknown = false;
-                    r.pending_action = None;
-                }
-                Ok(Reply::Error {
-                    category,
-                    certainty,
-                    cursor_may_be_consumed,
-                }) => {
-                    return HostFailure {
-                        category,
-                        certainty,
-                        cursor_may_be_consumed,
-                    }
-                    .mutation_result(&mut r.input_unknown, args.session_id);
-                }
-                _ => return failure("outcome_unknown", Some(args.session_id), true),
-            }
-        } else if r.start_unknown {
-            // Inspection is not a second dispatch. Unknown history stays sticky.
-            let inspected = self
-                .exchange(
-                    &r.binding,
-                    Call::InspectStart {
-                        owner: r.binding.owner_ref(),
-                        target: target.clone(),
-                    },
-                )
-                .await;
-            if let Some(error) = HostFailure::from_exchange(&inspected) {
-                return error.result(args.session_id);
-            }
-            if let Ok(Reply::Inspected { snapshot }) = inspected
-                && snapshot.operation_id == target.operation_id
-                && snapshot.payload_digest == target.payload_digest
-                && snapshot.state != OperationState::Unknown
-                && matches!(
-                    snapshot.liveness,
-                    ExecutionLiveness::Running | ExecutionLiveness::Exited
-                )
-            {
-                r.start_unknown = false;
-            }
-        }
-        if chars.is_empty()
-            && r.input_unknown
-            && let Some(original) = r.pending_action.as_ref()
-        {
-            let action = ActionRef {
-                operation_id: original.operation_id.clone(),
-                payload_digest: original.payload_digest,
-            };
-            let inspected = self
-                .exchange(
-                    &r.binding,
-                    Call::InspectAction {
-                        owner: r.binding.owner_ref(),
-                        action,
-                    },
-                )
-                .await;
-            if let Some(error) = HostFailure::from_exchange(&inspected) {
-                return error.result(args.session_id);
-            }
-            if let Ok(Reply::Action {
-                snapshot,
-                acknowledgment: Some(ActionAcknowledgmentDto::WriteAccepted),
-                ..
-            }) = inspected
-                && snapshot.state == OperationState::Succeeded
-                && snapshot.target == r.target
-                && r.pending_action.as_ref().is_some_and(|a| {
-                    a.operation_id == snapshot.operation_id
-                        && a.payload_digest == snapshot.payload_digest
-                })
-            {
-                r.input_unknown = false;
-                r.pending_action = None;
-            }
-        }
-
-        self.read(
-            owner,
-            args.session_id,
-            &mut r,
-            args.max_output_tokens.unwrap_or(10_000),
-            args.yield_time_ms
-                .unwrap_or(if chars.is_empty() { 5_000 } else { 250 }),
-            began,
-        )
-        .await
     }
-    async fn read(
+    async fn route_task(
         &self,
         owner: &VerifiedGatewayOwner,
-        id: u64,
-        r: &mut Resource,
-        max_bytes: usize,
-        wait_ms: u32,
-        began: Instant,
+        environment: Option<&str>,
+        command: ExecTaskCommand,
     ) -> CallToolResult {
-        if r.cursor_unknown {
-            return failure("read_cursor_unknown", Some(id), true);
-        }
-        if !self.active(owner) {
-            return failure("permission_denied", Some(id), false);
-        }
-        let Some(target) = r.target.clone() else {
-            return failure("outcome_unknown", Some(id), true);
+        let device = match self.resolve_device(environment).await {
+            Ok(d) => d,
+            Err(e) => return failure(e, None, false),
         };
-        // Current decoded cursor cannot resume. Conservatively poison before
-        // await; only a complete typed read clears the delivery uncertainty.
-        r.cursor_unknown = true;
-        let reply = self
-            .exchange(
-                &r.binding,
-                Call::Read {
-                    owner: r.binding.owner_ref(),
-                    target,
-                    grant_revision: r.binding.grant_revision(),
-                    timeout_ms: 5_000,
-                    max_bytes: max_bytes as u32,
-                    wait_ms: wait_ms.min(100),
-                },
-            )
-            .await;
-        let (chunks, liveness, drain, exit) = match reply {
-            Ok(Reply::Read {
-                chunks,
-                liveness,
-                output_drain,
-                exit_code,
-                ..
-            }) => (chunks, liveness, output_drain, exit_code),
-            Ok(Reply::Error {
-                category,
-                certainty,
-                cursor_may_be_consumed,
-            }) => {
-                return HostFailure {
-                    category,
-                    certainty,
-                    cursor_may_be_consumed,
-                }
-                .read_result(&mut r.cursor_unknown, id);
-            }
-            _ => return failure("read_cursor_unknown", Some(id), true),
-        };
-        if !self.active(owner) {
-            return failure("permission_denied", Some(id), true);
+        match self.relay.bind(owner, &device).await {
+            Ok(binding) => self.task_call(&binding, command).await,
+            Err(e) => failure(e.code(), None, matches!(e, super::RelayError::Unknown)),
         }
-        let output: String = chunks.into_iter().map(|c| c.text).collect();
-        if output.len() > max_bytes.saturating_mul(4).saturating_add(4) {
-            return failure("read_cursor_unknown", Some(id), true);
-        }
-        r.cursor_unknown = false;
-        if r.start_unknown
-            || r.input_unknown
-            || liveness == ExecutionLiveness::Unknown
-            || (drain == OutputDrain::Drained && liveness != ExecutionLiveness::Exited)
-        {
-            let mut result =
-                json!({"error":"outcome_unknown","uncertain":true,"session_id":id,"output":output});
-            if let Some(code) = exit {
-                result["observed_exit_code"] = json!(code);
-            }
-            return CallToolResult::error(vec![ContentBlock::text(result.to_string())]);
-        }
-        let mut result = json!({"wall_time_seconds":began.elapsed().as_secs_f64(),"output":output});
-        if liveness == ExecutionLiveness::Exited && drain == OutputDrain::Drained {
-            let Some(code) = exit else {
-                return failure("outcome_unknown", Some(id), true);
-            };
-            result["exit_code"] = json!(code);
-            self.state
-                .lock()
-                .expect("paired state")
-                .sessions
-                .remove(&id);
-        } else {
-            result["session_id"] = json!(id);
-        }
-        success(result)
+    }
+    async fn write(&self, owner: &VerifiedGatewayOwner, args: WriteArgs) -> CallToolResult {
+        let chars = args.chars.unwrap_or_default();
+        let wait = args
+            .yield_time_ms
+            .unwrap_or(if chars.is_empty() { 5_000 } else { 250 });
+        self.route_task(
+            owner,
+            args.environment_id.as_deref(),
+            ExecTaskCommand::Poll {
+                session_id: args.session_id,
+                chars,
+                max_output_tokens: args.max_output_tokens.unwrap_or(10_000),
+                yield_time_ms: wait,
+            },
+        )
+        .await
     }
 }
 impl GatewayToolBackend for PairedGatewayBackend {
@@ -1060,6 +568,35 @@ impl GatewayToolBackend for PairedGatewayBackend {
                 Ok(a) => self.write(owner, a).await,
                 Err(e) => failure(e, None, false),
             },
+            "list_execution_tasks" | "stop_execution_task" => {
+                let mut args = request.arguments.unwrap_or_default();
+                let environment = match args.remove("environment_id") {
+                    None => None,
+                    Some(Value::String(v)) if !v.is_empty() => Some(v),
+                    _ => return Ok(failure("invalid_arguments", None, false)),
+                };
+                let command = if request.name == "list_execution_tasks" && args.is_empty() {
+                    ExecTaskCommand::List
+                } else if request.name == "stop_execution_task" {
+                    #[derive(Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct Stop {
+                        session_id: u64,
+                    }
+                    match decode::<Stop>(Some(args)) {
+                        Ok(a) if (1..(1u64 << 48)).contains(&a.session_id) => {
+                            ExecTaskCommand::Stop {
+                                session_id: a.session_id,
+                            }
+                        }
+                        _ => return Ok(failure("invalid_arguments", None, false)),
+                    }
+                } else {
+                    return Ok(failure("invalid_arguments", None, false));
+                };
+                self.route_task(owner, environment.as_deref(), command)
+                    .await
+            }
             "set_execution_environment_capabilities" => {
                 let mut args = request.arguments.unwrap_or_default();
                 let target = match args.remove("environment_id") {
@@ -1144,21 +681,16 @@ impl GatewayOwnerLifecycle for PairedGatewayBackend {
         let Ok(state) = self.state.lock() else {
             return true;
         };
-        state
-            .sessions
-            .values()
-            .any(|e| e.owner == *owner.owner_id())
-            || state.browsers.owner_has_live_work(owner)
-            || {
-                #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-                {
-                    state.computers.owner_has_live_work(owner)
-                }
-                #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-                {
-                    false
-                }
+        state.browsers.owner_has_live_work(owner) || {
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+            {
+                state.computers.owner_has_live_work(owner)
             }
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+            {
+                false
+            }
+        }
     }
     fn fence_owner(&self, owner: &VerifiedGatewayOwner) -> Result<(), OwnerFenceError> {
         owner.fence();
@@ -1184,10 +716,6 @@ impl GatewayOwnerLifecycle for PairedGatewayBackend {
                 self.physical_cleanups_completed
                     .fetch_add(1, std::sync::atomic::Ordering::Release);
                 let mut state = self.state.lock().expect("paired state");
-                state.sessions.retain(|_, entry| {
-                    entry.owner != *owner.owner_id()
-                        || entry.principal != owner.principal_fingerprint()
-                });
                 state.owners.remove(owner.owner_id());
                 state.browsers.clear_owner(owner);
                 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]

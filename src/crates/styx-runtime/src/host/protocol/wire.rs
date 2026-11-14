@@ -16,6 +16,11 @@ pub struct Request {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
+    ExecTask {
+        owner: OwnerRef,
+        grant_revision: u64,
+        command: ExecTaskCommand,
+    },
     GetCapabilities,
     SetCapabilities {
         patch: crate::host::settings::CapabilityPatch,
@@ -99,6 +104,33 @@ pub enum Call {
     Terminate {},
 }
 pub const BROWSER_HEADLESS_V1: &str = "browser_headless_v1";
+pub const HOST_EXEC_TASKS_V1: &str = "host_exec_tasks_v1";
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecTaskCommand {
+    Run {
+        spec: Box<serde_json::value::RawValue>,
+        max_output_tokens: usize,
+        yield_time_ms: u32,
+    },
+    Poll {
+        session_id: u64,
+        chars: String,
+        max_output_tokens: usize,
+        yield_time_ms: u32,
+    },
+    List,
+    Stop {
+        session_id: u64,
+    },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecTaskResult {
+    pub value: serde_json::Value,
+    pub is_error: bool,
+}
 pub const COMPUTER_V1: &str = "computer_v1";
 pub const TRANSPORT_DRAIN_V1: &str = "transport_drain_v1";
 /// Private negotiated total stop budget, not a business-operation deadline.
@@ -219,6 +251,9 @@ pub struct Chunk {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Reply {
+    ExecTask {
+        result: ExecTaskResult,
+    },
     Capabilities {
         report: crate::host::settings::SettingsReport,
     },

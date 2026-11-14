@@ -15,6 +15,7 @@ fn independent_feature_families_never_synthesize_exec_support() {
     computer.push(COMPUTER_V1.into());
     assert!(!exec_negotiated(&computer, true, true, false));
     let exec: Vec<String> = [
+        crate::host::protocol::wire::HOST_EXEC_TASKS_V1,
         "prepare_start",
         "dispatch_start",
         "inspect_start",
@@ -30,6 +31,10 @@ fn independent_feature_families_never_synthesize_exec_support() {
     assert!(!exec_negotiated(&exec, false, true, false));
     assert!(!exec_negotiated(&exec, true, false, false));
     assert!(!exec_negotiated(&exec, true, true, true));
+    assert!(
+        !exec_negotiated(&exec[1..], true, true, false),
+        "legacy task ownership is not current Exec support"
+    );
     let mut incomplete = exec.clone();
     incomplete.pop();
     assert!(!exec_negotiated(&incomplete, true, true, false));

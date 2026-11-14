@@ -219,20 +219,27 @@ async fn tunnel_continuation(
     let process = PathBuf::from(format!("/proc/{pid}/stat"));
     let birth = read_process_birth(&process).unwrap();
     let second = connect().await.unwrap();
-    for field in ["openai/organization", "openai/subject", "openai/session"] {
-        let mut other = meta.clone();
-        other[field] = json!("different-scope");
-        let denied = second
+    // A new ChatGPT conversation can discover the same Host task. The
+    // authenticated deployment grants access; chat identity is not task ownership.
+    let mut next_meta = meta.clone();
+    next_meta["openai/session"] = json!("next-chat");
+    let listed = data(
+        second
             .call_tool(request(
-                "write_stdin",
-                json!({"session_id":sid,"chars":"forbidden-input\n","yield_time_ms":100}),
-                other,
+                "list_execution_tasks",
+                json!({"environment_id":device}),
+                next_meta.clone(),
             ))
             .await
-            .unwrap();
-        assert_eq!(denied.is_error, Some(true));
-        assert!(!root.join("tunnel-input.txt").exists());
-    }
+            .unwrap(),
+    );
+    assert!(
+        listed["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["session_id"] == sid)
+    );
     first.cancel().await.unwrap();
     assert_eq!(
         read_process_birth(&process).unwrap(),
@@ -244,7 +251,7 @@ async fn tunnel_continuation(
             .call_tool(request(
                 "write_stdin",
                 json!({"session_id":sid,"chars":"authorized-tunnel-input\n","yield_time_ms":100}),
-                meta.clone(),
+                next_meta.clone(),
             ))
             .await
             .unwrap(),
@@ -261,7 +268,7 @@ async fn tunnel_continuation(
                 .call_tool(request(
                     "write_stdin",
                     json!({"session_id":sid,"chars":"","yield_time_ms":100}),
-                    meta.clone(),
+                    next_meta.clone(),
                 ))
                 .await
                 .unwrap(),
@@ -289,7 +296,7 @@ async fn tunnel_continuation(
         format!("{nonce}\n")
     );
     second.cancel().await.unwrap();
-    json!({"native_nonce":nonce,"start_effect_count":1,"native_pid":pid,"native_starttime":birth,"first_transport_deleted":"original native process survived","different_chat_subject_organization":"stdin refused with no file effect","second_transport_stdin":"independent exact file readback","exit_code":0,"original_shell":"exited","scope":"owned strict-TLS paired Linux/Codex reference, not installed/account acceptance"})
+    json!({"native_nonce":nonce,"start_effect_count":1,"host_wss_reconnect":"original task rediscovered without restart","native_pid":pid,"native_starttime":birth,"first_transport_deleted":"original native process survived","different_chat_subject_organization":"stdin refused with no file effect","second_transport_stdin":"independent exact file readback","exit_code":0,"original_shell":"exited","scope":"owned strict-TLS paired Linux/Codex reference, not installed/account acceptance"})
 }
 async fn file_within(path: &Path, expected: &str) {
     let until = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -550,6 +557,8 @@ async fn paired_journey(capacity: bool, computers: usize) {
     let proto_device = device.clone();
     let proto_tls = client_tls.clone();
     let host_root = root.clone();
+    let (reconnect_tx, mut reconnect_rx) =
+        tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<()>>(1);
     let protocol_job = tokio::spawn(async move {
         let protocol = host_task
             .paired_protocol(PairedTrustedProfile {
@@ -566,20 +575,33 @@ async fn paired_journey(capacity: bool, computers: usize) {
         } else {
             protocol
         };
-        let tcp = TcpStream::connect(address).await.unwrap();
-        let mut link = HostWssLink::connect(
-            &endpoint,
-            &proto_tls,
-            tcp,
-            LinkAuthentication::Bearer(&bearer),
-            ConnectionGeneration::try_from(format!("host-wire-{}", uuid::Uuid::new_v4())).unwrap(),
-            host_task.link_budget(),
-        )
-        .await
-        .unwrap();
-        let result = protocol.run_connection(&mut link).await;
-        let shutdown = link.shutdown(Duration::from_secs(5)).await;
-        (result, shutdown)
+        let mut reconnected = None;
+        loop {
+            let tcp = TcpStream::connect(address).await.unwrap();
+            let mut link = HostWssLink::connect(
+                &endpoint,
+                &proto_tls,
+                tcp,
+                LinkAuthentication::Bearer(&bearer),
+                ConnectionGeneration::try_from(format!("host-wire-{}", uuid::Uuid::new_v4()))
+                    .unwrap(),
+                host_task.link_budget(),
+            )
+            .await
+            .unwrap();
+            if let Some(ready) = reconnected.take() {
+                let ready: tokio::sync::oneshot::Sender<()> = ready;
+                let _ = ready.send(());
+            }
+            let result = tokio::select! {
+                result = protocol.run_connection(&mut link) => Some(result),
+                Some(request) = reconnect_rx.recv() => { reconnected = Some(request); None },
+            };
+            let shutdown = link.shutdown(Duration::from_secs(5)).await;
+            if let Some(result) = result {
+                break (result, shutdown);
+            }
+        }
     });
     let root_work = root.clone();
     let policy_host = host.clone();
@@ -658,19 +680,56 @@ async fn paired_journey(capacity: bool, computers: usize) {
             .as_u64()
             .expect("live process presentation handle");
         file_within(&root_work.join("once.txt"), &format!("{nonce}\n")).await;
-        let denied = owner_b
-            .call_tool(call(
-                "write_stdin",
-                json!({"session_id":sid,"chars":"intruder\n","yield_time_ms":100}),
-            ))
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        reconnect_tx.send(ready_tx).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), ready_rx)
             .await
+            .unwrap()
             .unwrap();
-        assert_eq!(denied.is_error, Some(true));
-        assert!(
-            !root_work.join("input.txt").exists(),
-            "cross-owner input cannot reach process"
+        // Read-only discovery waits for the new authenticated socket. Neither
+        // reconnection nor polling is permission to resend the original start.
+        let until = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let listed = owner_b
+                .call_tool(call(
+                    "list_execution_tasks",
+                    json!({"environment_id":device}),
+                ))
+                .await
+                .unwrap();
+            if listed.is_error != Some(true) {
+                assert!(
+                    data(listed)["tasks"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|t| t["session_id"] == sid)
+                );
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < until,
+                "Host task rediscovery after actual WSS replacement"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let listed = data(
+            owner_b
+                .call_tool(call(
+                    "list_execution_tasks",
+                    json!({"environment_id":device}),
+                ))
+                .await
+                .unwrap(),
         );
-        let sent = owner_a
+        assert!(
+            listed["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["session_id"] == sid)
+        );
+        let sent = owner_b
             .call_tool(call(
                 "write_stdin",
                 json!({"session_id":sid,"chars":"authorized-input\n","yield_time_ms":100}),
@@ -703,11 +762,11 @@ async fn paired_journey(capacity: bool, computers: usize) {
         policy_host
             .authority()
             .replace_trusted_facts(facts(device.clone()));
-        // A live resource belonging to B must survive A's session cleanup.
+        // Host tasks from both conversations survive A's session cleanup.
         let waiting = data(owner_b.call_tool(call("exec_command", json!({"cmd":"printf waiting; IFS= read -r value; printf '%s' \"$value\" > survivor.txt","login":false,"environment_id":device.as_str(),"yield_time_ms":100}))).await.unwrap());
         let survivor = waiting["session_id"].as_u64().unwrap();
         let cleanup_resource = data(owner_a.call_tool(call("exec_command", json!({"cmd":"printf '%s' \"$$\" > cleanup.pid; printf cleanup-ready; IFS= read -r never; printf forbidden > cleanup-escaped.txt","login":false,"environment_id":device.as_str(),"yield_time_ms":100}))).await.unwrap());
-        assert!(cleanup_resource["session_id"].as_u64().is_some());
+        let stopped_id = cleanup_resource["session_id"].as_u64().unwrap();
         let pid_path = root_work.join("cleanup.pid");
         let until = tokio::time::Instant::now() + Duration::from_secs(5);
         while !pid_path.exists() {
@@ -721,21 +780,74 @@ async fn paired_journey(capacity: bool, computers: usize) {
             .expect("original owned shell has a valid kernel stat");
         owner_a.cancel().await.unwrap();
         let until = tokio::time::Instant::now() + Duration::from_secs(8);
-        loop {
-            let still_same = match read_process_birth(&process_path) {
-                Ok(birth) => birth == process_birth,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                Err(error) => panic!("kernel exit observation is unknown: {error}"),
-            };
-            if !still_same && backend.observed_physical_cleanups() >= 1 {
-                break;
-            }
+        while backend.observed_physical_cleanups() < 1 {
             assert!(
                 tokio::time::Instant::now() < until,
-                "original shell must exit and Host must attest physical drain/release after owner close"
+                "chat access cleanup deadline"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        assert_eq!(
+            read_process_birth(&process_path).unwrap(),
+            process_birth,
+            "closing chat must preserve Host task"
+        );
+        let listed = data(
+            owner_b
+                .call_tool(call(
+                    "list_execution_tasks",
+                    json!({"environment_id":device}),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            listed["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["session_id"] == stopped_id)
+        );
+        data(
+            owner_b
+                .call_tool(call(
+                    "stop_execution_task",
+                    json!({"environment_id":device,"session_id":stopped_id}),
+                ))
+                .await
+                .unwrap(),
+        );
+        let until = tokio::time::Instant::now() + Duration::from_secs(8);
+        while read_process_birth(&process_path).ok() == Some(process_birth) {
+            assert!(
+                tokio::time::Instant::now() < until,
+                "explicit stop must end original process"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let final_result = data(
+            owner_b
+                .call_tool(call(
+                    "write_stdin",
+                    json!({"environment_id":device,"session_id":stopped_id,"chars":""}),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(final_result["exit_code"].is_number());
+        let retained = data(
+            owner_b
+                .call_tool(call(
+                    "write_stdin",
+                    json!({"environment_id":device,"session_id":stopped_id,"chars":""}),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            final_result, retained,
+            "terminal result remains available after provider release"
+        );
         assert!(
             !root_work.join("cleanup-escaped.txt").exists(),
             "cleanup cannot replay stdin"
@@ -762,7 +874,7 @@ async fn paired_journey(capacity: bool, computers: usize) {
         assert_eq!(after.is_error, Some(true));
         assert!(!root_work.join("revoked.txt").exists());
         owner_b.cancel().await.unwrap();
-        json!({"native_nonce":nonce,"start_effect_count":1,"tunnel_continuation":tunnel,"wrong_device_legacy_route_wrong_credential_upgrades":"all rejected","cross_owner_input":"rejected_without_effect","host_policy_denial":"PERMISSION_DENIED/not_dispatched with no file effect","authorized_stdin":"observed_by_independent_file_read","closed_owner_shell":"original pid/starttime absent", "closed_owner_pid":pid,"closed_owner_starttime":process_birth,"host_physical_cleanup_complete":backend.observed_physical_cleanups()>=1, "other_owner_after_delete":"survived","revoked_device":"new_exec_rejected_without_effect","scope":"synthetic owned Linux loopback, not native package/account acceptance"})
+        json!({"native_nonce":nonce,"start_effect_count":1,"tunnel_continuation":tunnel,"wrong_device_legacy_route_wrong_credential_upgrades":"all rejected","cross_conversation_task_access":"listed_and_continued","host_policy_denial":"PERMISSION_DENIED/not_dispatched with no file effect","authorized_stdin":"observed_by_independent_file_read","closed_owner_shell":"survived_chat_close_then_explicit_stop_confirmed", "closed_owner_pid":pid,"closed_owner_starttime":process_birth,"host_physical_cleanup_complete":backend.observed_physical_cleanups()>=1, "other_owner_after_delete":"survived","revoked_device":"new_exec_rejected_without_effect","scope":"synthetic owned Linux loopback, not native package/account acceptance"})
     });
     let result = tokio::time::timeout(
         Duration::from_secs(if capacity { 900 } else { 90 }),
@@ -1407,7 +1519,7 @@ async fn many_connected_computers(
     assert_eq!(relay.connection_counts(), (computers, 32));
     let refused = owner.call_tool(call("exec_command", json!({"cmd":"printf forbidden > disabled-effect.txt","login":false,"environment_id":devices[0].as_str()}))).await.unwrap();
     assert_eq!(refused.is_error, Some(true));
-    data(owner.call_tool(call("write_stdin", json!({"session_id":other["session_id"],"chars":"still-running\n","yield_time_ms":100}))).await.unwrap());
+    data(owner.call_tool(call("write_stdin", json!({"environment_id":devices[1],"session_id":other["session_id"],"chars":"still-running\n","yield_time_ms":100}))).await.unwrap());
     file_within(
         &root.join("computer-1/unaffected-effect.txt"),
         "still-running",

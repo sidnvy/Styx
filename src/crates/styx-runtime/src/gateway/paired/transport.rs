@@ -541,6 +541,7 @@ fn exec_negotiated(features: &[String], write: bool, terminate: bool, read_resum
         && terminate
         && !read_resume
         && [
+            crate::host::protocol::wire::HOST_EXEC_TASKS_V1,
             "prepare_start",
             "dispatch_start",
             "inspect_start",

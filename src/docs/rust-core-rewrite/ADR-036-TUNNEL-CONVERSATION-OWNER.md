@@ -1,6 +1,6 @@
 # ADR-036 — Authenticated Tunnel conversation ownership
 
-Status: implementation decision for native GUI convergence; not acceptance.
+Status: historical conversation-access decision. The confirmed [refactor plan](REFACTOR-PLAN.md) supersedes its Exec resource isolation and cleanup assumptions: Exec belongs to Host runtime; authenticated conversations may discover and continue the same task. This ADR still describes Tunnel authentication and caller correlation, not task lifetime. Browser and Cua keep their capability-specific rules.
 
 C11's corrected full-request diagnostic proves that consecutive Work calls in
 one chat use different MCP transport sessions while the organization, subject
