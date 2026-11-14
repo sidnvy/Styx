@@ -11,7 +11,50 @@
 本轮目标以 [REFACTOR-PLAN.md](REFACTOR-PLAN.md) 为准。下述结果是开发验证，
 不改变已发布 0.4.0 的历史结果，也不代表重构版已经完成原生交付。
 
-### Browser 会话归属与显式转交（2026-11-14，最新开发检查点）
+### 工作方式审核与 Mac 原生 Browser 闭环（2026-11-14，最新检查点）
+
+审核确认仍沿用 Gateway 路由、Host 任务所有权、Core/原执行器的分工，没有增加
+管理运行时、网络保障或会话数据库。但此前验证入口不完整：Mac 主窗口和 Windows
+三个视图仍留有「暂停」；Windows Browser 启动仍引用已删除的共享预算字段。
+已删除残留控件及专用回调，修正 Windows 启动调用。Browser 由原 Tokio 管道和
+有界编解码器分配资源；其他执行器原预算、Job 所有权及清理路径保留。
+AGENTS 补充所有用户入口和平台条件编译消费者的检查；WORKSPACE 明确 Windows
+环境包装器只设置变量，之后必须实际调用 MSVC 环境与 Cargo。此类编译遗漏应在
+平台检查中发现，不能以 Linux 质量门代替 Windows 证据。
+
+Mac 使用原工程、缓存、签名身份与安装路径，源码 `284eff4`、App build 2007，
+Core SHA `260beb164bc5b422dc5100b3b8c2e65741a77c2ed5c6c7924026777972537938`。
+通过实际设置中的 Runtime 更新流程，已选 manifest 与 App 内 manifest 同为
+`f556bb60b4402f9f8a8eae4ef4d993f2cab4499ffac442bf761f0781aa5a4914`；
+退出重开后实际 Codex 仍从该 Runtime 运行。配对材料哈希及三项能力配置不变。
+
+真实 MCP → 原生 Host → Playwright 已验证：独立对话各有会话；明确接手保留页面输入，
+旧操作者被拒绝；提交后由独立 HTTP 服务记录唯一值。关闭对话并完整重启本机测试
+Gateway 后，原会话和页面状态可发现、接手。原生设置关闭 Browser 后 16 个原浏览器
+进程退出，新调用拒绝，同一 Exec 服务继续；重开能力后旧会话为空，新会话可用。
+菜单「退出 Styx」后本次 13 个 App/Core/Cua/Codex/任务/浏览器进程全部退出，Core
+exit 0；原配置重开自动连接，旧会话不恢复，新 Exec 文件效果和 Browser 快照成功，
+测试浏览器随后明确关闭。没有强制杀进程、重配对或修改生产 Tunnel。
+收据：`/tmp/styx-browser-handoff-20261114/mac-native.json`；原生原件保留在 PilotMac
+现有 `artifacts/pairing-dev/browser-handoff-native.json`。
+
+测试中单线程 HTTP fixture 被 Chrome 预连接占用，第二个导航超时：保留 Unknown，
+未重放该导航，明确接手并关闭失败会话后换用标准 ThreadingHTTPServer。正常操作结果
+和失败记录分别保留。重新打开后的 `about:blank` 导航被参数层明确拒绝；改用支持的
+快照入口取得新浏览器结果，不把该拒绝计为成功。
+
+Windows 原 HEAD 和 21 项本地修改已保留为现有 artifacts 中的 bundle 与 stash
+`184a3303b98374da131fd082ec93dc0aee926130`，源码快进到 `384d521`。
+Windows C# 原生编译通过，修正后的 Rust release 原生增量检查通过；未更换正在运行
+的 Windows 安装。Linux 增量检查及整合质量门全部通过，质量收据为
+`/tmp/styx-browser-handoff-20261114/quality-native-integration/receipt.json`，源码
+`384d521`。该提交的代码差异仅作用于 Windows，沿用 Mac `284eff4` 行为证据。
+
+下一出口是现有 Windows 安装的同配置更新与真实 Browser 接手、能力关闭和退出重开；
+随后补齐 ChatGPT 独立账号路线。编译、Mac 开发验证不替代 Windows 行为或账号验收。
+重构版 Stable 仍为 NO-GO。
+
+### Browser 会话归属与显式转交（2026-11-14，开发检查点）
 
 所有者已确认对话结束后保留 Browser。Host runtime 现在持有会话目录、当前操作者、
 Core 资源与输入准备任务；协议对象重建不会替换它们。Gateway 移除原 Browser 目录、
