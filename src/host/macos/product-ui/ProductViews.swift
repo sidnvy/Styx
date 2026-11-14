@@ -32,14 +32,16 @@ struct ProductPanel<Content: View>: View {
 struct ProductView: View {
     @ObservedObject var model: ProductModel
     weak var controller: ProductWindowController?
+    let isMainWindow: Bool
     @State private var usePluginPackage = false
     @State private var editTunnel = false
-    init(model: ProductModel, controller: ProductWindowController?, showPluginPackage: Bool = false) {
+    init(model: ProductModel, controller: ProductWindowController?, showPluginPackage: Bool = false, isMainWindow: Bool = false) {
         self.model = model; self.controller = controller
+        self.isMainWindow = isMainWindow
         _usePluginPackage = State(initialValue: showPluginPackage)
     }
     var body: some View {
-        if model.nativeHost && [.overview, .computers, .settings].contains(model.page) {
+        if (isMainWindow && model.settingsVisible) || (model.nativeHost && [.overview, .computers, .settings].contains(model.page)) {
             ProductSettingsView(model: model, controller: controller)
         } else {
             onboardingBody
@@ -600,7 +602,6 @@ struct ProductAcceptanceField: NSViewRepresentable {
     let acceptanceFields = ProductAcceptanceFields()
     let ownerAppPID = Int(ProcessInfo.processInfo.processIdentifier)
     private var observationTimer: Timer?
-    private var settingsWindow: NSWindow?
     private var menuPopover: NSPopover?
     private var menuSizeTimer: Timer?
     var showMenuInvitation: (() -> Void)?
@@ -613,8 +614,10 @@ struct ProductAcceptanceField: NSViewRepresentable {
         self.model = model
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 640), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "Styx"; window.minSize = NSSize(width: 620, height: 560)
+        window.isReleasedWhenClosed = false
+        window.identifier = NSUserInterfaceItemIdentifier("Styx.SettingsWindow")
         super.init(window: window)
-        window.delegate = self; window.contentView = NSHostingView(rootView: ProductView(model: model, controller: self))
+        window.delegate = self; window.contentView = NSHostingView(rootView: ProductView(model: model, controller: self, isMainWindow: true))
         window.center(); window.setFrameAutosaveName("Styx.ProductWindow.v6")
         observationTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let owner = self else { return }
@@ -626,7 +629,7 @@ struct ProductAcceptanceField: NSViewRepresentable {
         if model.nativeHost && [.overview, .computers, .settings].contains(model.page) {
             showSettings(.computers); return
         }
-        menuPopover?.performClose(nil); model.onboardingVisible = true; model.observePermissions(); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+        menuPopover?.performClose(nil); model.settingsVisible = false; model.onboardingVisible = true; model.observePermissions(); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     func showPreferences() { showSettings(.general) }
     func showOnboarding() {
         menuPopover?.performClose(nil)
@@ -635,19 +638,8 @@ struct ProductAcceptanceField: NSViewRepresentable {
     }
     func showSettings(_ section: ProductSettingsSection) {
         menuPopover?.performClose(nil)
-        model.requestSettings(section); model.settingsVisible = true; model.observePermissions()
-        if settingsWindow == nil {
-            let preferences = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 560), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-            preferences.title = productText("Styx 设置", "Styx Settings")
-            preferences.isReleasedWhenClosed = false
-            preferences.identifier = NSUserInterfaceItemIdentifier("Styx.SettingsWindow")
-            preferences.delegate = self
-            preferences.contentView = NSHostingView(rootView: ProductSettingsView(model: model, controller: self))
-            preferences.minSize = NSSize(width: 640, height: 500)
-            preferences.center(); preferences.setFrameAutosaveName("Styx.SettingsWindow.v1")
-            settingsWindow = preferences
-        }
-        settingsWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        model.requestSettings(section); model.settingsVisible = true; model.onboardingVisible = false; model.observePermissions()
+        window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
     func toggleMenu(relativeTo button: NSStatusBarButton, quit: @escaping () -> Void) {
         if menuPopover?.isShown == true { menuPopover?.performClose(nil); return }
@@ -676,8 +668,7 @@ struct ProductAcceptanceField: NSViewRepresentable {
 
     func windowWillClose(_ notification: Notification) {
         if let closing = notification.object as? NSWindow {
-            if closing === settingsWindow { model.settingsVisible = false }
-            if closing === window { model.onboardingVisible = false }
+            if closing === window { model.settingsVisible = false; model.onboardingVisible = false }
         }
         if !model.settingsVisible && !model.onboardingVisible { model.clearSecrets() }
     }
@@ -686,7 +677,7 @@ struct ProductAcceptanceField: NSViewRepresentable {
               let expected = model.acceptance["challenge"]["desktopValue"].string,
               let expires = model.acceptance["challenge"]["expiresAt"].number,
               expires > Date().timeIntervalSince1970 * 1000 else { return nil }
-        return acceptanceFields.readback(challengeID: challengeID, expected: expected, roots: [window, settingsWindow].compactMap { $0 })
+        return acceptanceFields.readback(challengeID: challengeID, expected: expected, roots: [window].compactMap { $0 })
     }
     private func observeDesktopReadback() async {
         guard !model.busy, let id = model.challengeID,
@@ -708,7 +699,7 @@ struct ProductAcceptanceField: NSViewRepresentable {
                 if model.nativeHost {
                     try await model.client.quitNative()
                     observationTimer?.invalidate(); observationTimer = nil
-                    menuSizeTimer?.invalidate(); menuSizeTimer = nil; menuPopover?.performClose(nil); settingsWindow?.close()
+                    menuSizeTimer?.invalidate(); menuSizeTimer = nil; menuPopover?.performClose(nil)
                     completion(true); return
                 }
                 let session = try await model.client.read("session")
@@ -718,7 +709,7 @@ struct ProductAcceptanceField: NSViewRepresentable {
                       lifecycle["loaded"] == .bool(false), lifecycle["running"] == .bool(false),
                       lifecycle["loginPreference"].string == "unchanged" else { throw ProductCoreError.invalidResponse }
                 observationTimer?.invalidate(); observationTimer = nil
-                menuSizeTimer?.invalidate(); menuSizeTimer = nil; menuPopover?.performClose(nil); settingsWindow?.close()
+                menuSizeTimer?.invalidate(); menuSizeTimer = nil; menuPopover?.performClose(nil)
                 completion(true)
             } catch {
                 // Resolve AppKit's pending termination before presenting UI.

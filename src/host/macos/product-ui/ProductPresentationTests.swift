@@ -97,6 +97,24 @@ import SwiftUI
             func require(_ value: Bool, _ message: String) throws {
                 if !value { throw NSError(domain: "Styx.PresentationTest", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
             }
+            // Completing onboarding already leaves the main window visible.
+            // Every menu/settings route must reuse that same AppKit window.
+            let controller = ProductWindowController(model: model)
+            guard let main = controller.window else { throw ProductCoreError.invalidResponse }
+            controller.present()
+            let visibleBefore = Set(app.windows.filter(\.isVisible).map(ObjectIdentifier.init))
+            for section in [ProductSettingsSection.general, .chat, .computers, .general] {
+                controller.showSettings(section)
+                try require(controller.window === main && main.isVisible, "Settings replaced the main window")
+                try require(Set(app.windows.filter(\.isVisible).map(ObjectIdentifier.init)) == visibleBefore, "A settings entry created another visible window")
+                try require(model.settingsSection == section, "Settings route did not navigate")
+            }
+            main.performClose(nil)
+            try require(!model.settingsVisible && !model.onboardingVisible, "Closing the main window retained a visible presentation")
+            controller.showPreferences()
+            try require(controller.window === main && main.isVisible, "Reopening Settings did not reuse the original window")
+            main.close()
+            print("PASS: main, settings and menu routes reuse one window, including close and reopen.")
             @MainActor func capture(_ window: NSWindow, _ name: String) throws {
                 guard let view = window.contentView else { throw ProductCoreError.invalidResponse }
                 view.layoutSubtreeIfNeeded()
