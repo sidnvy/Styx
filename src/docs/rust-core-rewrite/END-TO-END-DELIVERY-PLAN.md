@@ -11,7 +11,55 @@
 本轮目标以 [REFACTOR-PLAN.md](REFACTOR-PLAN.md) 为准。下述结果是开发验证，
 不改变已发布 0.4.0 的历史结果，也不代表重构版已经完成原生交付。
 
-### 工作方式审核与 Mac 原生 Browser 闭环（2026-11-14，最新检查点）
+### Windows 原生验证与更新后改配缺口（2026-11-14，最新检查点）
+
+Windows 复用原工程、缓存、发布者与安装路径，完成源码 `384d521` 的原生 release
+构建、Runtime/App 包装及正常安装；版本 `0.4.0.2008`。安装器退出 0，安装后原配对
+与配置未变。通过实际设置完成 Runtime 更新，已选 manifest 与 App 内 manifest 均为
+`4deab0ff7c7bd164090b6ccc10e0271fd04a3dfe2c60e61c97415980baf41d8a`；
+Core SHA `b0b4e0d8c623b6da15b9a0f7da6fbcfa2512194b2a5b0a6fe5e15f63e6562a47`。
+原源码 HEAD、21 项本地修改及旧安装继续保留；本轮没有修改产品代码或升级执行器。
+
+所有者明确授权备份后改配本机测试 Gateway。实际使用「加入另一个 Gateway」流程，
+原身份、凭据、CA 与部署配置保存在 Windows 原容器的
+`profile.retired-20261114T094638Z`，四项文件哈希与改配前一致；更新历史和原加入输入
+也由该流程归档。未操作 piermini。新配对使用 `https://10.0.38.2:38443` 加短码，
+界面证书指纹与本机 CA 一致，自动加入；三项能力由 Windows 本机选择，均保持开启。
+实际 Codex 从新 manifest 的 bootstrap Runtime 运行，不能仅凭安装成功推断组件已切换。
+
+真实 MCP → Windows 原生 Host → Playwright 验证通过：两个对话具有独立 Browser
+会话；明确接手保留页面输入；旧操作者返回 `browser_session_transferred`，独立 HTTP
+服务仅记录一次预期提交。关闭两段对话、正常停止并重启测试 Gateway 后，原 28 个
+App/Core/执行器/任务进程身份保持不变；两个 Browser 会话仍可发现、接手，页面值保留。
+Windows 本机设置关闭 Browser 后，18 个原 Node/Chrome 进程退出，新调用返回
+`permission_denied`，原 Exec 服务仍运行。重新开启后旧会话为空，新浏览器正常导航。
+
+通过正常「退出 Styx」，本次 20 个所属进程全部退出，包括实际启动的 Cua、Codex、
+Exec 与 Browser；App/Core/Cua/Codex 退出码为 0，部分任务及浏览器进程为 1，
+不将被取消的任务误报为成功完成。测试工具没有强杀进程。原配置重开后自动连接，
+新配对材料、三项能力及 manifest 不变，旧 Exec/Browser 任务均未恢复；新 Exec 写入
+独立文件且退出 0，新 Browser 快照成功并已明确关闭。本地清理收据完整，远端 transport
+drain 仍记为 Unknown，不声称远端清理已确认。
+
+**仍有独立缺口，不能写成全绿**：同一 App 内，Runtime 更新显示 committed 后立即
+改配，界面给出笼统 unconfirmed，备份尚未生成；随后正常退出 App 为 4、Core 为 0。
+原配置重开后改配成功。源码存在保留 Runtime 更新 owner 时拒绝退役的路径，但现场没有
+取得该次具体错误码，不能把它直接认定为根因。下一出口是复现并收敛「更新完成→改配→
+退出」的所有权释放与错误呈现，不能把重开、重装或手工重置配置当作最终修复。
+本次正常配对后的退出/重开通过，不覆盖此前更新与改配组合的失败。
+
+Windows 最终收据：`D:\Developer\Styx\artifacts\native-development\browser-native-final.json`；
+本机副本：`/tmp/styx-browser-handoff-20261114/windows-native-final.json`。同目录保留构建、
+封装、安装、原生界面及进程收据。测试工具的控件定位失败和首次邀请 TCP 拒绝均未计作
+产品成功；确认未提交后才修正测试方法，没有重放未知写入。复用源码 `384d521` 的
+20 项质量门与此前 Mac 证据。本轮属于本机独立 MCP 开发验证，未修改生产 Tunnel，
+不替代 ChatGPT 独立账号路线或最终发布验收；重构版 Stable 仍为 NO-GO。
+
+证据工具例外：只写中间 `browser-native-result.json` 的 PowerShell helper PID 12252
+未结束，自动审批拒绝强制终止。未绕过限制；最终收据使用独立文件，不能再把该中间文件
+当作最终结果。此工具不拥有 Styx 的 App/Core；后续先只读确认其状态，不重复调度原写入。
+
+### 工作方式审核与 Mac 原生 Browser 闭环（2026-11-14）
 
 审核确认仍沿用 Gateway 路由、Host 任务所有权、Core/原执行器的分工，没有增加
 管理运行时、网络保障或会话数据库。但此前验证入口不完整：Mac 主窗口和 Windows
