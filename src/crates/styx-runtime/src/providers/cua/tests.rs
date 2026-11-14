@@ -214,7 +214,7 @@ fn portable_catalogs_require_ten_tools_and_only_optional_strict_boolean() {
 }
 
 #[tokio::test]
-async fn exact_core_target_owner_and_session_are_required_and_io_credit_is_exclusive() {
+async fn exact_core_target_owner_and_session_are_required_without_exclusive_io_credit() {
     let (mut ledger, owner, other, facts, context) = authority();
     let open = ledger
         .prepare_desktop_agent(
@@ -321,7 +321,7 @@ async fn exact_core_target_owner_and_session_are_required_and_io_credit_is_exclu
         .is_err()
     );
     drop(permit);
-    let allocator = Arc::new(Semaphore::new(IO_BYTES));
+    let allocator = Arc::new(tokio::sync::Semaphore::new(IO_BYTES));
     let partition = allocator
         .clone()
         .acquire_many_owned(IO_BYTES as u32)
@@ -330,8 +330,11 @@ async fn exact_core_target_owner_and_session_are_required_and_io_credit_is_exclu
     let budget = CuaIoBudget::from_reserved(partition).unwrap();
     let worker = CuaWorker::new(budget);
     let first = worker.try_reserve_open().unwrap();
-    assert!(matches!(worker.try_reserve_open(), Err(CuaError::Busy)));
+    let second = worker
+        .try_reserve_open()
+        .expect("independent Computer sessions must coexist");
     drop(first);
+    drop(second);
     assert!(worker.try_reserve_open().is_ok());
-    assert_eq!(allocator.available_permits(), 0);
+    assert_eq!(allocator.available_permits(), IO_BYTES);
 }

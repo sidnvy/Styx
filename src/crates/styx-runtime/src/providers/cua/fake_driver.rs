@@ -47,7 +47,7 @@ impl FakeDriver {
                 }
             }
         });
-        let allocator = Arc::new(Semaphore::new(IO_BYTES));
+        let allocator = Arc::new(tokio::sync::Semaphore::new(IO_BYTES));
         let budget = CuaIoBudget::from_reserved(
             allocator.acquire_many_owned(IO_BYTES as u32).await.unwrap(),
         )

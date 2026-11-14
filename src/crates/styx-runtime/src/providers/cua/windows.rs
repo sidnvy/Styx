@@ -10,7 +10,6 @@ pub(super) async fn start(live: &mut Live, config: &OwnedCuaConfig) -> Result<()
         .fresh()
         .await
         .map_err(|_| CuaError::PermissionDenied)?;
-    let partition = live.slot.as_ref().ok_or(CuaError::Unknown)?.clone();
     let config = config.clone();
     // Owned open task awaits the actual blocking job even when public observer
     // disconnects. Native suspension/image checks never run on Host's mutex.
@@ -24,12 +23,8 @@ pub(super) async fn start(live: &mut Live, config: &OwnedCuaConfig) -> Result<()
             .into_iter()
             .map(|(k, v)| (k.into(), v.into()))
             .collect();
-        let child = windows_spawn::spawn_cua_suspended(
-            config.driver,
-            partition,
-            config.workspace,
-            environment,
-        );
+        let child =
+            windows_spawn::spawn_cua_suspended(config.driver, config.workspace, environment);
         Ok(match child {
             Ok(child) => {
                 let identity = Some(child.identity().clone());

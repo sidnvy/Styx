@@ -417,11 +417,10 @@ pub(crate) fn spawn_browser_suspended(
 /// Fixed original Cua entry. Never accepts caller argv or a daemon locator.
 pub(crate) fn spawn_cua_suspended(
     image: Arc<PinnedExecutable>,
-    startup_budget: Arc<tokio::sync::OwnedSemaphorePermit>,
     cwd: PathBuf,
     env: BTreeMap<OsString, OsString>,
 ) -> Result<SuspendedChild, SpawnFailure> {
-    spawn_fixed(image, Some(startup_budget), cwd, env, Entry::Cua)
+    spawn_fixed(image, None, cwd, env, Entry::Cua)
 }
 /// Secure MCP Tunnel entry, constructed only by the trusted Gateway adapter.
 /// Reuses the same suspended-image verification, Job ownership and final wait.

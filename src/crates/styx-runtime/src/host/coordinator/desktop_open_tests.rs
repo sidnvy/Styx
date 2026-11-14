@@ -1,5 +1,5 @@
-//! Slot handoff fixtures, not native desktop acceptance. Fake CUA uses the
-//! production MCP transport; a real child wait models the slow process reap.
+//! Independent Computer owners and cleanup-gate fixtures, not native desktop
+//! acceptance. Fake CUA uses the production MCP transport.
 use super::*;
 use crate::providers::cua::fake_driver::FakeDriver;
 use rmcp::model::CallToolResult;
@@ -121,136 +121,72 @@ fn running(host: &HostCoordinator, owner: &OwnerLease, open: &OperationSnapshot)
         .unwrap();
 }
 async fn action(driver: &FakeDriver) {
+    let before = driver.calls.lock().unwrap().len();
     let action = CuaAction::new("list_windows".into(), Default::default()).unwrap();
     assert_eq!(driver.call(&action).await.0, CuaEvidence::Acknowledged);
-    assert_eq!(driver.calls.lock().unwrap().len(), 1);
+    assert_eq!(driver.calls.lock().unwrap().len(), before + 1);
 }
 
 #[tokio::test]
-async fn desktop_open_waits_for_closing_owner_reap_but_refuses_live_owner() {
+async fn desktop_open_keeps_independent_live_and_closing_owners_admissible() {
     let (host, authority, a, b) = fixture().await;
     let open_a = prepare(&host, &a, Duration::from_secs(10));
-    let DesktopOpenAdmission {
-        execution: execution_a,
-        slot: slot_a,
-        ..
-    } = host
+    let admission_a = host
         .reserve_desktop_open(&a, &open_a.id, open_a.payload_digest)
         .await
         .unwrap();
-    let slot_a = slot_a.unwrap();
+    let slot_a = admission_a.slot.unwrap();
     running(&host, &a, &open_a);
-    drop(execution_a);
+    drop(admission_a.execution);
     let driver_a =
         FakeDriver::start(json!({}), CallToolResult::structured(json!({"windows":[]}))).await;
-    action(&driver_a).await;
     let open_b = prepare(&host, &b, Duration::from_secs(10));
-    let DesktopOpenAdmission { slot: refused, .. } = tokio::time::timeout(
-        Duration::from_millis(250),
-        host.reserve_desktop_open(&b, &open_b.id, open_b.payload_digest),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(
-        matches!(refused, Err(CuaError::Busy)),
-        "a live owner's context must refuse admission"
-    );
-    authority.fence_owner_for_cleanup(&a).unwrap();
-    let teardown_host = host.clone();
-    let teardown = tokio::spawn(async move {
-        // The original worker slot remains owned until actual child reap and
-        // the original MCP transport join, even if an open waiter is dropped.
-        let mut child = tokio::process::Command::new("/bin/sleep")
-            .arg("1.5")
-            .spawn()
-            .unwrap();
-        driver_a.close().await;
-        assert!(child.wait().await.unwrap().success());
-        let mut state = teardown_host.inner.state.lock().unwrap();
-        state
-            .ledger
-            .record_executor_fact(
-                &open_a.id,
-                ExecutorFact::Exited { successful: true },
-                teardown_host.now(),
-            )
-            .unwrap();
-        state
-            .ledger
-            .record_executor_fact(&open_a.id, ExecutorFact::OutputDrained, teardown_host.now())
-            .unwrap();
-        drop(slot_a);
-    });
-    let started = Instant::now();
-    let DesktopOpenAdmission {
-        execution: execution_b,
-        slot: slot_b,
-        ..
-    } = host
+    let admission_b = host
         .reserve_desktop_open(&b, &open_b.id, open_b.payload_digest)
         .await
         .unwrap();
-    let slot_b = slot_b.expect("closing owner's slot must be awaited instead of refused");
-    assert!(started.elapsed() >= Duration::from_millis(1400));
-    teardown.await.unwrap();
-    running(&host, &b, &open_b);
-    drop(execution_b);
+    let slot_b = admission_b
+        .slot
+        .expect("a live owner cannot block another owner");
+    assert!(!admission_b.waited);
+    drop(admission_b.execution);
     let driver_b =
         FakeDriver::start(json!({}), CallToolResult::structured(json!({"windows":[]}))).await;
+    action(&driver_a).await;
+    action(&driver_b).await;
+    authority.fence_owner_for_cleanup(&a).unwrap();
+    // A's original resources are still retained. B neither replaces nor waits
+    // for them; only the existing cleanup write gate serializes actual cleanup.
+    let during_cleanup = host
+        .reserve_desktop_open(&b, &open_b.id, open_b.payload_digest)
+        .await
+        .unwrap();
+    assert!(during_cleanup.slot.is_ok());
+    assert!(!during_cleanup.waited);
+    drop(during_cleanup);
+    driver_a.close().await;
+    drop(slot_a);
     action(&driver_b).await;
     driver_b.close().await;
     drop(slot_b);
 }
 
 #[tokio::test]
-async fn desktop_open_teardown_wait_obeys_deadline_and_preserves_original_slot() {
-    let (host, authority, a, b) = fixture().await;
-    let open_a = prepare(&host, &a, Duration::from_secs(10));
-    let DesktopOpenAdmission {
-        execution, slot, ..
-    } = host
-        .reserve_desktop_open(&a, &open_a.id, open_a.payload_digest)
-        .await
-        .unwrap();
-    let slot = slot.unwrap();
-    running(&host, &a, &open_a);
-    drop(execution);
-    authority.fence_owner_for_cleanup(&a).unwrap();
-    let abandoned = prepare(&host, &b, Duration::from_secs(10));
-    {
-        let waiting = host.reserve_desktop_open(&b, &abandoned.id, abandoned.payload_digest);
-        tokio::pin!(waiting);
-        assert!(futures_util::poll!(&mut waiting).is_pending());
-    }
-    assert_eq!(
-        host.inspect_desktop(&b, &abandoned.id, abandoned.payload_digest, false)
-            .unwrap()
-            .state,
-        OperationState::Reserved
-    );
-    let open_b = prepare(&host, &b, Duration::from_millis(100));
+async fn desktop_open_cleanup_gate_deadline_preserves_original_reservation() {
+    let (host, _, _, b) = fixture().await;
+    let open = prepare(&host, &b, Duration::from_millis(100));
+    let writer = host.inner.execution_gate.clone().write_owned().await;
+    let waiting = host.reserve_desktop_open(&b, &open.id, open.payload_digest);
     let started = Instant::now();
-    let result = host
-        .reserve_desktop_open(&b, &open_b.id, open_b.payload_digest)
-        .await;
-    assert!(matches!(result, Err(CoordinatorError::Busy)));
+    assert!(matches!(waiting.await, Err(CoordinatorError::Busy)));
     assert!(started.elapsed() >= Duration::from_millis(90));
-    assert!(started.elapsed() < Duration::from_secs(1));
     assert_eq!(
-        host.inspect_desktop(&b, &open_b.id, open_b.payload_digest, false)
+        host.inspect_desktop(&b, &open.id, open.payload_digest, false)
             .unwrap()
             .state,
         OperationState::Reserved
     );
-    assert!(matches!(
-        desktop(&host.inner.state.lock().unwrap())
-            .unwrap()
-            .worker
-            .try_reserve_open(),
-        Err(CuaError::Busy)
-    ));
-    drop(slot);
+    drop(writer);
 }
 
 #[tokio::test]

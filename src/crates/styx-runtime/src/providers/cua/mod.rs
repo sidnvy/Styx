@@ -57,8 +57,6 @@ pub(crate) mod window_capture;
 use crate::platform::windows_spawn::RunningChild as Child;
 #[cfg(target_os = "linux")]
 use tokio::process::Child;
-#[cfg(not(target_os = "macos"))]
-use tokio::sync::Semaphore;
 use tokio::{
     sync::{OwnedMutexGuard, OwnedSemaphorePermit},
     task::JoinHandle,
@@ -74,10 +72,6 @@ const FRAME_BYTES: usize = 1024 * 1024;
 const REQUEST_BYTES: usize = 64 * 1024;
 #[cfg(not(target_os = "macos"))]
 const ACTION_RECORDS: usize = 256;
-#[cfg(not(target_os = "macos"))]
-type WorkerSlot = OwnedSemaphorePermit;
-#[cfg(target_os = "macos")]
-type WorkerSlot = ();
 type Result<T> = std::result::Result<T, CuaError>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum CuaError {
@@ -471,33 +465,19 @@ pub(crate) fn trace_write_settlement(
         })
     );
 }
-pub struct CuaIoBudget {
-    #[cfg(not(target_os = "macos"))]
-    _partition: OwnedSemaphorePermit,
-    #[cfg(not(target_os = "macos"))]
-    active: Arc<Semaphore>,
-}
+/// Each Cua transport allocates its bounded codec buffers on demand. A live
+/// conversation does not reserve exclusive access to the Host's Computer lane.
+pub struct CuaIoBudget {}
 impl CuaIoBudget {
-    #[cfg(target_os = "macos")]
     pub(crate) fn platform_managed() -> Arc<Self> {
-        // Each original proxy owns its IO allocation and lifetime. This marker
-        // no longer claims a fixed shared Host partition covers every proxy.
         Arc::new(Self {})
     }
     pub fn from_reserved(partition: OwnedSemaphorePermit) -> Result<Arc<Self>> {
         if partition.num_permits() != IO_BYTES {
             return Err(CuaError::InvalidRequest);
         }
-        #[cfg(target_os = "macos")]
-        {
-            drop(partition);
-            Ok(Self::platform_managed())
-        }
-        #[cfg(not(target_os = "macos"))]
-        Ok(Arc::new(Self {
-            _partition: partition,
-            active: Arc::new(Semaphore::new(1)),
-        }))
+        drop(partition);
+        Ok(Self::platform_managed())
     }
 }
 #[derive(Clone)]
@@ -544,7 +524,6 @@ struct Live {
     close_job: Option<JoinHandle<bool>>,
     stderr: Option<JoinHandle<std::io::Result<u64>>>,
     config: Arc<OwnedCuaConfig>,
-    slot: Option<Arc<WorkerSlot>>,
     retired: bool,
     cleanup: Option<CuaCleanup>,
     uncertain: bool,
@@ -603,7 +582,6 @@ impl CuaHandle {
 }
 pub struct CuaOpenSlot {
     worker: CuaWorker,
-    slot: WorkerSlot,
 }
 pub struct CuaActionSlot {
     resource: Arc<Resource>,
@@ -641,19 +619,8 @@ impl CuaWorker {
         {
             return Err(CuaError::Busy);
         }
-        #[cfg(not(target_os = "macos"))]
-        let slot = self
-            .inner
-            .budget
-            .active
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| CuaError::Busy)?;
-        #[cfg(target_os = "macos")]
-        let slot = ();
         Ok(CuaOpenSlot {
             worker: self.clone(),
-            slot,
         })
     }
     pub fn try_reserve_action(&self, handle: &CuaHandle) -> Result<CuaActionSlot> {
@@ -830,7 +797,6 @@ impl CuaOpenSlot {
                 close_job: None,
                 stderr: None,
                 config: config.clone(),
-                slot: Some(Arc::new(self.slot)),
                 retired: false,
                 cleanup: None,
                 uncertain: false,
@@ -858,7 +824,7 @@ impl CuaOpenSlot {
                 cause: CuaError::Unknown,
             })?
             .insert(operation.clone(), resource.clone());
-        // Keep the original process/pin/partition alive independently of public
+        // Keep the original process and image pin alive independently of public
         // waiters and even the last Worker/Handle dropping. No detached child owner.
         let owned = resource.clone();
         let host_stop = self.worker.inner.stop.clone();
@@ -1401,7 +1367,6 @@ async fn cleanup(live: &mut Live, budget: Duration) -> CuaCleanup {
     };
     if facts.complete() {
         live.child.take();
-        live.slot.take();
         live.cleanup = Some(facts);
     } else {
         live.uncertain = true;
@@ -1549,7 +1514,6 @@ async fn cleanup(live: &mut Live, budget: Duration) -> CuaCleanup {
     };
     if facts.complete() {
         live.mac_proxy.take();
-        live.slot.take();
         live.cleanup = Some(facts);
     } else {
         live.uncertain = true;

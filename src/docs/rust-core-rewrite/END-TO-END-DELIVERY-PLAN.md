@@ -11,7 +11,22 @@
 本轮目标以 [REFACTOR-PLAN.md](REFACTOR-PLAN.md) 为准。下述结果是开发验证，
 不改变已发布 0.4.0 的历史结果，也不代表重构版已经完成原生交付。
 
-### 独立 ChatGPT 账号路线（2026-11-14，最新检查点）
+### Computer 单会话门禁删除（2026-11-14，开发检查点）
+
+NAB5 原 App PID 11000、Core PID 11768 和 Cua PID 8668 仍运行时，新的独立 MCP
+窗口读取立即返回 `capacity_busy / uncertain:false`。源码确认 Windows/Linux 的
+`CuaIoBudget` 仍持有 `Semaphore(1)`，名额随整段 Computer 会话保留；macOS 已取消该
+门禁。此前仅删除 Browser 单 worker 限制，不能据此声称 Computer 跨对话已实现。
+
+现已删除 Computer 的独占名额、Windows 启动传递及整会话退出等待；每条原生传输使用
+自身有界编解码器，进程仍由原 Job/scope 管理。同一资源的操作锁、身份/权限与未知结果
+保护不变。已有记录数量边界并未在本次扩大或宣称全部删除。原双 owner 场景先在旧实现
+因 Busy 失败，修改后通过；覆盖两个活跃 owner、一个 owner 清理时另一个继续，以及
+清理写锁超时不派发。Runtime 回归 351 PASS、74 项按声明忽略；首次受限环境运行的
+13 项网络/IPC PermissionDenied 保留，获本地套接字权限后同组通过。AGENTS 补充同 Host
+跨对话及各平台分支的验证要求。此处仅为开发证据，Windows 安装与真实双对话待完成。
+
+### 独立 ChatGPT 账号路线（2026-11-14）
 
 所有者手动完成测试插件 Connect 后，已从 ChatGPT 的 Try in chat 实际执行，
 不是用本机 MCP 客户端代替账号验证。测试插件 `Styx Refactor Acceptance` 的安装

@@ -151,18 +151,12 @@ impl OwnedExecHost {
     ) -> Result<Arc<crate::providers::browser::BrowserIoBudget>, BootstrapError> {
         Ok(crate::providers::browser::BrowserIoBudget::platform_managed())
     }
-    /// Final8MiB native Desktop partition from the same64MiB Host allocator.
+    /// Computer transports own their bounded buffers and native process lifetime.
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     pub(crate) fn reserve_computer_io(
         &self,
     ) -> Result<Arc<crate::providers::cua::CuaIoBudget>, BootstrapError> {
-        let partition = self
-            .budget
-            .clone()
-            .try_acquire_many_owned((8 * 1024 * 1024) as u32)
-            .map_err(|_| BootstrapError::Capacity)?;
-        crate::providers::cua::CuaIoBudget::from_reserved(partition)
-            .map_err(|_| BootstrapError::InvalidConfiguration)
+        Ok(crate::providers::cua::CuaIoBudget::platform_managed())
     }
     /// Remaining logical queued-I/O capacity, never total resident memory.
     pub fn unreserved_queued_bytes(&self) -> usize {

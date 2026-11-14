@@ -541,9 +541,8 @@ impl HostCoordinator {
         ));
         Ok(snapshot)
     }
-    /// Wait only for fenced owners' original workers. A live context is a real
-    /// capacity refusal. No job/worker permit or execution read gate is held
-    /// while waiting, so cleanup can reap and collect under its write gate.
+    /// Cleanup still serializes through the existing execution gate. Independent
+    /// owners do not wait for another conversation's native worker to exit.
     async fn reserve_desktop_open(
         &self,
         owner: &OwnerLease,
@@ -554,85 +553,33 @@ impl HostCoordinator {
             let state = self.inner.state.lock().expect("Host state mutex");
             state.ledger.inspect_context(owner, id, digest)?.deadline
         };
+        if self.now().0 >= deadline.0 {
+            return Err(CoordinatorError::Busy);
+        }
         let until = tokio::time::Instant::now()
             + Duration::from_millis(deadline.0.saturating_sub(self.now().0));
         let mut waited = false;
-        loop {
-            if self.now().0 >= deadline.0 {
-                return Err(CoordinatorError::Busy);
+        let execution = match self.inner.execution_gate.clone().try_read_owned() {
+            Ok(execution) => execution,
+            Err(_) => {
+                waited = true;
+                tokio::time::timeout_at(until, self.inner.execution_gate.clone().read_owned())
+                    .await
+                    .map_err(|_| CoordinatorError::Busy)?
             }
-            let execution = match self.inner.execution_gate.clone().try_read_owned() {
-                Ok(execution) => execution,
-                Err(_) => {
-                    waited = true;
-                    tokio::time::timeout_at(until, self.inner.execution_gate.clone().read_owned())
-                        .await
-                        .map_err(|_| CoordinatorError::Busy)?
-                }
-            };
-            {
-                let state = self.inner.state.lock().expect("Host state mutex");
-                let context = state.ledger.inspect_context(owner, id, digest)?;
-                let lane = desktop(&state)?;
-                validate_context(lane, &context)?;
-                if state.shutting_down || self.now().0 >= deadline.0 {
-                    return Err(CoordinatorError::Busy);
-                }
-                let slot = lane.worker.try_reserve_open();
-                if !matches!(slot, Err(CuaError::Busy)) {
-                    return Ok(DesktopOpenAdmission {
-                        execution,
-                        slot,
-                        waited,
-                    });
-                }
-                // Include starts dispatched before the provider has registered
-                // a handle. The ledger and opaque owner lease remain authoritative
-                // during that registration gap; profile presence alone is not
-                // evidence that a worker occupies the desktop.
-                let mut closing = false;
-                let mut live = false;
-                for resource_owner in lane.worker.resources()?.iter().map(CuaHandle::owner).chain(
-                    state
-                        .ledger
-                        .retained_provider_records()
-                        .iter()
-                        .filter(|key| {
-                            key.resource_domain() == ResourceDomain::DesktopAgent
-                                && key.snapshot().target.is_none()
-                                && matches!(
-                                    key.snapshot().state,
-                                    OperationState::Dispatched
-                                        | OperationState::Running
-                                        | OperationState::Unknown
-                                )
-                                && key.snapshot().liveness != ExecutionLiveness::Exited
-                        })
-                        .map(ProviderRecordKey::owner),
-                ) {
-                    if state.ledger.validate_owner(resource_owner).is_ok() {
-                        live = true;
-                    } else {
-                        closing = true;
-                    }
-                }
-                if live || !closing {
-                    return Ok(DesktopOpenAdmission {
-                        execution,
-                        slot,
-                        waited,
-                    });
-                }
-            }
-            drop(execution);
-            waited = true;
-            // Provider cleanup is independently supervised and may outlive this
-            // deadline or a dropped waiter. Never cancel/recreate its worker.
-            tokio::time::sleep_until(
-                until.min(tokio::time::Instant::now() + Duration::from_millis(10)),
-            )
-            .await;
+        };
+        let state = self.inner.state.lock().expect("Host state mutex");
+        let context = state.ledger.inspect_context(owner, id, digest)?;
+        let lane = desktop(&state)?;
+        validate_context(lane, &context)?;
+        if state.shutting_down || self.now().0 >= deadline.0 {
+            return Err(CoordinatorError::Busy);
         }
+        Ok(DesktopOpenAdmission {
+            execution,
+            slot: lane.worker.try_reserve_open(),
+            waited,
+        })
     }
     pub(crate) async fn dispatch_desktop_open(
         &self,
@@ -650,7 +597,7 @@ impl HostCoordinator {
             if !admission.waited {
                 break admission;
             }
-            // Source/provider facts can expire during a slow reap. Release this
+            // Source/provider facts can expire while cleanup holds the gate. Release this
             // provisional reservation and refresh before the final reservation;
             // never hold a worker slot across a fresh asynchronous observation.
         };
