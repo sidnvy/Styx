@@ -11,6 +11,51 @@
 本轮目标以 [REFACTOR-PLAN.md](REFACTOR-PLAN.md) 为准。下述结果是开发验证，
 不改变已发布 0.4.0 的历史结果，也不代表重构版已经完成原生交付。
 
+### 取消运行时配额与双对话实机验证（2026-11-15）
+
+Product / Architecture：`7d15651` 至 `d1cb41c` 按已确认边界删除 Styx 自设的设备、
+对话、连接、并发请求、Host 任务、Browser/Cua 会话和历史记录配额，以及原生读取工作
+数量限制。原有传输背压、请求期限、权限、单资源操作与退出/更新的生命周期所有权保留。
+已更新 REFACTOR-PLAN 与 HTTP 所有权说明；没有增加队列、重试或新的并发限制。
+
+Reliability：仅删除数量限制后，真实 Linux Browser 打开以及 Windows 对话 A 退出后的
+对话 B 窗口树读取仍出现 `capacity_busy`。定位到 Host 共享生命周期锁使用立即尝试读取：
+其他资源清理持有或等待写锁时，普通请求被错误拒绝。`d1cb41c` 改为在原请求期限内等待
+同一把锁，并沿用派发前所有权/策略检查。确定性锁竞争回归、真实 Codex 清理与未知结果
+回归均通过。原失败保留，不能把最终通过写成旧版本也通过。
+
+Integration：实际测试产品源码为 `d1cb41ce2f85b09af4e78b0b943ce265c168cb47`，已整合
+到工作站 develop。既有完整质量检查、workspace clippy、Windows/Linux 原生构建及 Mac
+原生编译通过。Mac 本轮只验证编译，未安装这次新包；既有 Mac 安装证据不冒充本次验收。
+
+Release / Linux：沿用原本机测试 Gateway 与本轮已配对的 Linux Host，正常停止后通过
+原 CLI 选择已签名组件并恢复，未重新配对。保存的 manifest 与实际运行 Core 一致：
+manifest `46231db0fcec2d04bfd8c189c08967a1f7656957b48a46f42018bec1d5335bf8`，Core
+`404f5a776450ecfbed4d51d37912814a522a9f70bdd04b50318ad0006e2dfd50`。
+Windows：正常退出旧 App/Core 后，以原安装路径安装 `0.4.0.2016`，包摘要
+`9d2ef6b0443864aee9f9fbbe0ccd44b8c28441326774c2d843feeade84dba04d`。从唯一
+Update Styx 入口确认一次，界面显示更新并连接完成。再正常退出 App/Core（均为 0）并
+用原配置重开，实际 App/Core 为 `3412/10020`。安装与选定 manifest 均为
+`8933c4578bc1dcc4c3ea0690d350b74508b962ccf8bb588e70cc4de7f2fbe33c`，实际 Core
+`a1cabdf47e707f278ed9fe89b39152fff25dc0d1327442a71806cfc1b746d2e5`；两个实际 Cua
+进程均匹配选定包。四项原部署/配对文件哈希不变，用户无需维护内部组件选择。
+
+Acceptance：Windows、Linux 各使用两个独立 MCP 会话，均完成 17 次窗口列表/界面树
+读取，包括六组重叠读取及 A DELETE 后 B 的三次继续读取；最终 Busy/Unknown 均为 0。
+两端另验证独立 Browser 上下文、A 关闭其页面并退出对话后，原 A Exec 任务正常完成，
+B 仍可运行 Exec 并读取自己的页面。所有最终测试正常关闭自有页面与 MCP 会话。
+早期测试脚本曾错误要求异步任务立即返回输出，独立读取原任务确认退出 0 后修正测试
+等待与分块输出收集，最终完整场景通过；未重放未知任务。测试窗口/网页服务随后正常停止。
+
+Decision：本轮是开发交付，重构版 Stable 仍为 NO-GO。未复测未受影响的账号/发布矩阵，
+未操作 piermini 或生产 Tunnel/plugin。证据位于既有
+`/tmp/styx-browser-handoff-20261114/computer-concurrency/`：`quota-removal-quality-v4`、
+`quota-removal-gate-native-regression.log`、`quota-removal-linux-gate-overlap`、
+`quota-removal-linux-gate-exec-browser`、`quota-removal-windows-gate-overlap`（含重开后
+组件核对）、`quota-removal-windows-gate-exec-browser-complete`，以及原生项目 artifacts。
+封装曾因临时文件系统配额失败，失败产物和已替代副本移入原项目 Artifacts 后重新封装
+通过；没有修改运行中的封装或系统配额。
+
 ### 桌面统一入口与单窗口收敛（2026-11-15）
 
 Product：`072e36e` 至 `1de51ec` 统一两端“电脑 / ChatGPT / 通用”、设备状态与本机能力，
