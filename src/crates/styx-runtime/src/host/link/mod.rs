@@ -5,7 +5,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::{
     fmt,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU8, Ordering},
     },
     time::Duration,
@@ -21,7 +21,7 @@ use tokio_tungstenite::{
     tungstenite::{
         Utf8Bytes,
         client::IntoClientRequest,
-        protocol::{Message, WebSocketConfig},
+        protocol::{CloseFrame, Message, WebSocketConfig},
     },
 };
 use tokio_util::sync::CancellationToken;
@@ -172,6 +172,7 @@ impl Drop for PendingSend {
 }
 
 pub struct HostWssLink {
+    close_frame: Arc<Mutex<Option<CloseFrame>>>,
     endpoint: String,
     generation: ConnectionGeneration,
     outgoing: mpsc::Sender<Outgoing>,
@@ -269,6 +270,8 @@ impl HostWssLink {
         let reader_stop = stop.clone();
         let reader_generation = generation.clone();
         let reader_lease = lease.clone();
+        let close_frame = Arc::new(Mutex::new(None));
+        let received_close = close_frame.clone();
         let reader = tokio::spawn(async move {
             let lease = reader_lease;
             loop {
@@ -302,7 +305,8 @@ impl HostWssLink {
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {}
-                    Some(Ok(Message::Close(_))) => {
+                    Some(Ok(Message::Close(frame))) => {
+                        *received_close.lock().expect("link close frame") = frame;
                         let _ = control_tx.try_send(());
                         break;
                     }
@@ -335,6 +339,7 @@ impl HostWssLink {
             let _ = tokio::time::timeout(Duration::from_millis(100), sink.close()).await;
         });
         Ok(Self {
+            close_frame,
             endpoint: endpoint.0.as_str().to_owned(),
             generation,
             outgoing,
@@ -343,6 +348,9 @@ impl HostWssLink {
             stop,
             tasks: vec![reader, writer],
         })
+    }
+    pub(crate) fn close_frame(&self) -> Option<CloseFrame> {
+        self.close_frame.lock().expect("link close frame").clone()
     }
     pub async fn recv(&mut self) -> Option<ReceivedText> {
         self.incoming.recv().await

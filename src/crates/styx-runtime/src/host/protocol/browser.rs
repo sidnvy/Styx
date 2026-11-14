@@ -2,6 +2,7 @@
 //! Blocking validation jobs outlive dropped connection waiters and are joined
 //! before explicit Host shutdown can release its original input/lease owners.
 use super::*;
+use crate::host::coordinator::CoordinatorError;
 use crate::{
     host::coordinator::{BrowserActionSubmission, BrowserOpenSubmission},
     providers::browser::{

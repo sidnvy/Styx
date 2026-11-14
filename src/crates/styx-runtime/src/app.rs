@@ -401,6 +401,20 @@ struct ConnectionStatus {
     computer_initial_epoch_advanced: Option<bool>,
 }
 impl ConnectionStatus {
+    fn stopped_with_reason(reason: &'static str) -> Self {
+        match reason {
+            crate::gateway::paired::CAPACITY_ERROR_CODE => Self::hub_full(),
+            "gateway_wss_admission_refused" | "gateway_pairing_revoked" => {
+                let mut status = Self::pairing_refused();
+                status.error = Some(reason);
+                status
+            }
+            _ => Self {
+                error: Some(reason),
+                ..Self::stopped()
+            },
+        }
+    }
     fn pairing_refused() -> Self {
         Self {
             status: "stopped",
@@ -922,7 +936,10 @@ impl HostApp {
         if let Some(gateway) = &mut self.local_gateway {
             gateway.resume_if_desired_running().await?;
         }
-        if self.observed.borrow().error == Some("gateway_wss_admission_refused") {
+        if matches!(
+            self.observed.borrow().error,
+            Some("gateway_wss_admission_refused" | "gateway_pairing_revoked")
+        ) {
             return Ok(());
         }
         let wanted = self
@@ -938,7 +955,10 @@ impl HostApp {
         self.start_host().await
     }
     async fn connect_host(&mut self) -> Result<(), AppError> {
-        if self.observed.borrow().error == Some("gateway_wss_admission_refused") {
+        if matches!(
+            self.observed.borrow().error,
+            Some("gateway_wss_admission_refused" | "gateway_pairing_revoked")
+        ) {
             return Err(AppError("app_gateway_access_refused"));
         }
         if self.running.is_none() {
@@ -1217,7 +1237,17 @@ impl HostApp {
                 Ok(Ok(outcome)) => {
                     let complete = outcome.is_complete() && events.is_ok();
                     let locally_joined = outcome.local_stop_complete() && events.is_ok();
+                    let stop_reason = outcome.stop_reason;
                     self.cleanup = Some(outcome);
+                    if locally_joined
+                        && !self.unknown
+                        && !self.maintenance_fenced()
+                        && let Some(reason) = stop_reason
+                    {
+                        self.status
+                            .send_replace(ConnectionStatus::stopped_with_reason(reason));
+                        return Ok(());
+                    }
                     if complete || (local_exit && locally_joined) {
                         self.status.send_replace(ConnectionStatus::stopped());
                     } else {
@@ -1247,30 +1277,6 @@ impl HostApp {
                         "{}",
                         json!({"schema":1,"event":"app_role_failed","cause":cause,"events_joined":events.is_ok()})
                     );
-                    if cause == crate::gateway::paired::CAPACITY_ERROR_CODE && events.is_ok() {
-                        // host_run returns this admission error only after its
-                        // owned local executor and input jobs have settled.
-                        self.status.send_replace(ConnectionStatus::hub_full());
-                        return Ok(());
-                    }
-                    if cause == "gateway_wss_admission_refused"
-                        && events.is_ok()
-                        && !self.unknown
-                        && self
-                            .cleanup
-                            .as_ref()
-                            .is_none_or(ForegroundOutcome::is_complete)
-                    {
-                        // This fixed error comes from the initial WSS 403,
-                        // before any transport grants this Host an owner. The
-                        // original host_run returns only after its executor,
-                        // inputs and providers have physically joined. Keep
-                        // the denial visible without inventing a remote drain
-                        // receipt or clearing any prior Unknown outcome.
-                        self.status
-                            .send_replace(ConnectionStatus::pairing_refused());
-                        return Ok(());
-                    }
                     self.unknown = true;
                     self.status.send_replace(ConnectionStatus::unknown());
                     return Err(AppError("app_cleanup_unknown"));

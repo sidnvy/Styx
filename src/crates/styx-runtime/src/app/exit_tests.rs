@@ -24,6 +24,7 @@ impl Drop for Fixture {
 fn outcome() -> ForegroundOutcome {
     ForegroundOutcome {
         schema: 1,
+        stop_reason: None,
         executor_started: true,
         executor_exited: true,
         processes_exited: true,
@@ -179,4 +180,35 @@ async fn local_stop_exception_cannot_start_work_and_pause_receipt_keeps_unknown(
     assert_eq!(receipt["kind"], "app_host_pause");
     assert_eq!(receipt["host_cleanup"]["remote_transport_drain"], "unknown");
     assert!(app.available().is_err());
+}
+
+#[tokio::test]
+async fn runtime_stop_reason_retains_cleanup_and_allows_local_quit() {
+    for reason in [
+        "gateway_pairing_revoked",
+        "gateway_wss_admission_refused",
+        "host_profile_changed",
+    ] {
+        let f = Fixture::new();
+        let mut app = f.app().await;
+        let mut facts = outcome();
+        facts.stop_reason = Some(reason);
+        let cancel = CancellationToken::new();
+        app.running = Some(RunningHost {
+            desktop_intent: None,
+            cancel: cancel.clone(),
+            worker: tokio::spawn(async move { Ok(facts) }),
+            events: tokio::spawn(async {}),
+            _cancel_on_drop: cancel.drop_guard(),
+        });
+        app.settle().await.unwrap();
+        assert!(!app.unknown);
+        assert_eq!(app.observed.borrow().error, Some(reason));
+        assert!(app.cleanup.as_ref().unwrap().local_stop_complete());
+        assert!(!app.cleanup.as_ref().unwrap().is_complete());
+        let reply = app.dispatch(Operation::QuitAdmission, raw()).await.unwrap();
+        assert_eq!(reply["quit"]["status"], "ready_to_quit");
+        assert_eq!(reply["cleanup"]["stop_reason"], reason);
+        assert_eq!(reply["cleanup"]["remote_transport_drain"], "unknown");
+    }
 }

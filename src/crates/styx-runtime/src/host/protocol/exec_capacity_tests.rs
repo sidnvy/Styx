@@ -168,7 +168,16 @@ async fn sixty_four_open_owners_with_settled_execs_do_not_exhaust_sixteen_proces
         );
     }
     assert_eq!(peer.starts.load(Ordering::Relaxed), 64);
-    assert_eq!(protocol.owners.lock().unwrap().owners.len(), 64);
+    assert_eq!(
+        protocol
+            .coordinator
+            .remote_access()
+            .lock()
+            .unwrap()
+            .owners
+            .len(),
+        64
+    );
     // Historical completion remains available, but must not dispatch a second start.
     let previous = owner(1);
     assert!(protocol.owner(&previous).is_ok());
@@ -300,6 +309,8 @@ async fn host_tasks_survive_chat_cleanup_and_gateway_epoch_replacement() {
     ));
     // A different authenticated Gateway process fences old access leases. It
     // must neither fence the local task owner nor recreate the native process.
+    drop(protocol);
+    let protocol = self::protocol(&host, &authority);
     let epoch: GatewayEpoch = "replacement-gateway-epoch".try_into().unwrap();
     protocol.accept_epoch(&epoch).unwrap();
     let second = OwnerRef {

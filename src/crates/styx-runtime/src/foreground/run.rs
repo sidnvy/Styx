@@ -625,6 +625,7 @@ fn facts(device: &DeviceId) -> AdmissionFacts {
 fn empty_outcome() -> ForegroundOutcome {
     ForegroundOutcome {
         schema: 1,
+        stop_reason: None,
         executor_started: false,
         executor_exited: false,
         processes_exited: true,
@@ -1200,6 +1201,13 @@ async fn run_owned(
                             settled_transports = Some(retained);
                             remote_transport_drain = Some(retained);
                         }
+                        if matches!(
+                            &result,
+                            Err(crate::host::protocol::ProtocolError::PairingRevoked)
+                        ) {
+                            failure = Some(ForegroundError("gateway_pairing_revoked"));
+                            cancel.cancel();
+                        }
                         let disconnected = if cancel.is_cancelled() {
                             false
                         } else {
@@ -1259,6 +1267,10 @@ async fn run_owned(
                                     next = Some(v);
                                     break;
                                 }
+                                Err(error) if !retryable_connect_error(error.code()) => {
+                                    failure = Some(error);
+                                    break;
+                                }
                                 Err(error) => event_with_reason(
                                     &events,
                                     &cancel,
@@ -1304,6 +1316,7 @@ async fn run_owned(
     event(&events, &cancel, "stopping", &device, None);
     let mut outcome = ForegroundOutcome {
         schema: 1,
+        stop_reason: failure.as_ref().map(ForegroundError::code),
         executor_started: host.coordinator().exec_configured(),
         executor_exited: false,
         processes_exited: false,
@@ -1363,11 +1376,9 @@ async fn run_owned(
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     drop(computer);
     drop(admitted);
-    if let Some(error) = failure {
-        Err(error)
-    } else {
-        Ok(outcome)
-    }
+    // Preserve the actual local cleanup even when admission or transport ended
+    // the runtime. Callers report stop_reason separately from cleanup evidence.
+    Ok(outcome)
 }
 
 /// A local composition choice, not a wire fallback. Protocol negotiation never
@@ -1387,12 +1398,16 @@ impl ConnectionSession<'_> {
         link: &mut HostWssLink,
         stop: &CancellationToken,
         ready: Option<tokio::sync::oneshot::Sender<()>>,
-    ) -> Result<Option<crate::host::protocol::wire::TransportDrainOutcome>, ()> {
+    ) -> Result<
+        Option<crate::host::protocol::wire::TransportDrainOutcome>,
+        crate::host::protocol::ProtocolError,
+    > {
         match self {
-            Self::Paired(protocol) => protocol
-                .run_connection_with_readiness(link, stop, ready)
-                .await
-                .map_err(|_| ()),
+            Self::Paired(protocol) => {
+                protocol
+                    .run_connection_with_readiness(link, stop, ready)
+                    .await
+            }
         }
     }
 }

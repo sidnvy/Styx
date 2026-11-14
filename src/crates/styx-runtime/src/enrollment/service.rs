@@ -1113,7 +1113,8 @@ impl EnrollmentService {
                 let now = self.time()?;
                 let p = self.ledger.revoke(&self.control.admin(), &id, now)?;
                 self.persist(p, &[])?;
-                let mut result = json!({"device_id":id,"status":"revoked"});
+                let mut result =
+                    json!({"device_id":id,"status":"revoked","remote_tasks":"unconfirmed"});
                 if matches!(r, Route::Recover) {
                     result["recovery"] = json!("fresh_enrollment_required");
                 }
@@ -1180,6 +1181,24 @@ impl EnrollmentService {
                 })
             })
             .collect()
+    }
+    /// Durable revocation of this exact connection's paired device. Missing
+    /// data, changed policy and temporary authorization errors are not revocation.
+    pub(crate) fn profile_is_revoked(
+        &self,
+        id: &DeviceId,
+        generation: &str,
+    ) -> Result<bool, ServiceError> {
+        let active = self.ledger.devices_for_admin(&self.control.admin())?;
+        let retired = self
+            .ledger
+            .historical_revoked_for_admin(&self.control.admin())?;
+        Ok(active
+            .iter()
+            .any(|d| &d.id == id && d.generation == generation && d.revoked)
+            || retired
+                .iter()
+                .any(|d| &d.id == id && d.generation == generation))
     }
     pub(crate) fn profile_is_current(
         &self,

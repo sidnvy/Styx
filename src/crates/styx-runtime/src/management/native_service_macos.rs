@@ -1738,7 +1738,7 @@ pub async fn run(
                     report_failure("host_foreground", error.code());
                     NativeManagementError::new(ErrorKind::Unknown)
                 })?;
-            if !outcome.is_complete() {
+            if outcome.stop_reason.is_some() || !outcome.is_complete() {
                 report_failure("host_settlement", "service_outcome_incomplete");
                 return Err(NativeManagementError::new(ErrorKind::Unknown));
             }

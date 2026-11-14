@@ -115,7 +115,13 @@ async fn actual_host_registry_turnover_compacts_only_complete_and_rejects_old_ac
             Reply::OwnerCleanup { complete: true, .. }
         ));
         assert!(
-            protocol.owners.lock().unwrap().owners.is_empty(),
+            protocol
+                .coordinator
+                .remote_access()
+                .lock()
+                .unwrap()
+                .owners
+                .is_empty(),
             "old 128 lifetime cap must not accumulate"
         );
     }
@@ -309,7 +315,16 @@ async fn unknown_cleanup_retains_profile_record_until_inflight_preparation_and_r
         }
     ));
     assert_eq!(source.released.load(Ordering::Relaxed), 0);
-    assert_eq!(protocol.owners.lock().unwrap().owners.len(), 1);
+    assert_eq!(
+        protocol
+            .coordinator
+            .remote_access()
+            .lock()
+            .unwrap()
+            .owners
+            .len(),
+        1
+    );
     *source.gate.0.lock().unwrap() = true;
     source.gate.1.notify_all();
     prepare.await;
@@ -323,7 +338,15 @@ async fn unknown_cleanup_retains_profile_record_until_inflight_preparation_and_r
         Reply::OwnerCleanup { complete: true, .. }
     ));
     assert_eq!(source.released.load(Ordering::Relaxed), 1);
-    assert!(protocol.owners.lock().unwrap().owners.is_empty());
+    assert!(
+        protocol
+            .coordinator
+            .remote_access()
+            .lock()
+            .unwrap()
+            .owners
+            .is_empty()
+    );
     assert!(protocol.owner(&owner).is_err());
     host.shutdown_owned(Duration::from_secs(5)).await.unwrap();
 }
@@ -352,7 +375,12 @@ async fn local_stop_withdraws_admission_without_revoking_original_pending_receip
         }),
         Some(Reply::OwnerOpened { .. })
     ));
-    protocol.owners.lock().unwrap().stopping = true;
+    protocol
+        .coordinator
+        .remote_access()
+        .lock()
+        .unwrap()
+        .stopping = true;
     assert!(
         protocol.owner(&owner).is_err(),
         "new business is fenced immediately"

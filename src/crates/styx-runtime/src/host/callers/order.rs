@@ -11,7 +11,7 @@ struct Record {
     complete: bool,
 }
 #[derive(Default)]
-pub(super) struct Order {
+pub(crate) struct Order {
     histories: BTreeMap<GatewayEpoch, History>,
     records: BTreeMap<(OwnerId, OwnerEpoch), Record>,
 }
@@ -42,7 +42,7 @@ impl Order {
         }
         Ok(sequence)
     }
-    pub(super) fn admit(
+    pub(crate) fn admit(
         &mut self,
         epoch: &GatewayEpoch,
         owner: &OwnerRef,
@@ -68,7 +68,7 @@ impl Order {
     }
     /// Unknown keys cannot own work. Advancing high refuses a late OwnerOpen
     /// even at full capacity, without allocating a tombstone for a failed open.
-    pub(super) fn fence_unseen(
+    pub(crate) fn fence_unseen(
         &mut self,
         epoch: &GatewayEpoch,
         owner: &OwnerRef,
@@ -78,7 +78,7 @@ impl Order {
         history.high = history.high.max(sequence);
         Ok(())
     }
-    pub(super) fn complete(&mut self, owner: &OwnerRef) -> Vec<(OwnerId, OwnerEpoch)> {
+    pub(crate) fn complete(&mut self, owner: &OwnerRef) -> Vec<(OwnerId, OwnerEpoch)> {
         let key = (owner.owner_id.clone(), owner.owner_epoch.clone());
         let Some(record) = self.records.get_mut(&key) else {
             return vec![];
@@ -108,7 +108,7 @@ impl Order {
         }
         removed
     }
-    pub(super) fn completed(&self, epoch: &GatewayEpoch, owner: &OwnerRef) -> bool {
+    pub(crate) fn completed(&self, epoch: &GatewayEpoch, owner: &OwnerRef) -> bool {
         let key = (owner.owner_id.clone(), owner.owner_epoch.clone());
         if let Some(record) = self.records.get(&key) {
             return record.complete;

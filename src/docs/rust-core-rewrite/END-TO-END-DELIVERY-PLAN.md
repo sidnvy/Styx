@@ -11,6 +11,28 @@
 本轮目标以 [REFACTOR-PLAN.md](REFACTOR-PLAN.md) 为准。下述结果是开发验证，
 不改变已发布 0.4.0 的历史结果，也不代表重构版已经完成原生交付。
 
+### Host 运行期与连接生命周期分离（2026-11-14，开发验证）
+
+任务表、调用方状态和连接互斥归属同一 Host runtime；协议适配器重建只替换通信层。
+Exec 操作端口复用 Core/Codex，移除对 HostProtocol 实例的依赖。调用方清理句柄保持
+单向引用，防止 runtime 自持有导致退出后对象泄漏。显式撤销通过已认证 WebSocket
+关闭原因通知 Host；普通断线不停止任务。Gateway 撤销回复仍报告远端停止未确认。
+
+Host 的停止原因与本地清理结果分别返回，避免已完成本地清理却被 App 标成未知。
+CLI 在 Gateway 离线时也能正常结束本地 Host；远端 transport Unknown 仍保留，
+不作为命令成功或远端任务退出的证据。
+
+本机真实 TLS/MCP/WSS/Codex 撤销旅程通过，任务 PID/出生时间确认原进程退出。
+完整 CLI 进程旅程 `/tmp/sx-l-caf4b1fa/events.jsonl` 通过：关闭聊天仍保留任务；
+Gateway 完整进程重启后原 Host/原任务继续；Gateway 离线时 Host 退出码 0 且旧任务
+消失；Host 重启不恢复任务；在线撤销后 Host 结束，保留明确停止原因和全部本地清理
+结果，配对材料哈希未变。复现脚本 `/tmp/styx-foreground-lifecycle.py`。
+
+App 回归测试验证实际清理证据与停止原因独立、正常退出保留远端 Unknown。
+标准集成质量门 20 项 PASS：`/tmp/styx-lifecycle-20261114/quality/receipt.json`。
+本节尚不代表本轮源码已安装到原生客户端；Browser 转交仍等待对话结束时保留规则确认。
+重构版 Stable 仍 NO-GO。
+
 ### Exec 任务归属迁移（2026-11-14，本次最新源码检查点）
 
 Gateway 不再保存 Exec 任务表、输出游标或对话归属；Host 本次运行持有这些状态，

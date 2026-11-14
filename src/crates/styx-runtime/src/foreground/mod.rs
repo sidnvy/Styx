@@ -32,6 +32,9 @@ pub struct ForegroundEvent {
 #[derive(Serialize)]
 pub struct ForegroundOutcome {
     pub schema: u32,
+    /// Why the runtime stopped, independent of its observed cleanup results.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<&'static str>,
     /// False means no executor was configured/started, never an inferred wait.
     pub executor_started: bool,
     pub executor_exited: bool,

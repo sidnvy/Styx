@@ -2,32 +2,23 @@
 //! complete public protocol: v2 uses bootstrap owners; v3 accepts owner control
 //! only from the fixed authenticated paired Gateway. Reads are not resumable. Every mutation uses separate Host prepare/dispatch.
 //! Connection loss never shuts down the coordinator/executor or replays reads.
+use super::replies::{coordinator_error, invalid, rejection};
 use super::{
-    coordinator::{
-        ActionSubmission, CoordinatorError, HostAuthority, HostCoordinator, OwnerCleanupHandle,
-        StartSubmission,
-    },
+    coordinator::{HostAuthority, HostCoordinator},
     link::{HostWssLink, LinkEndpoint},
-};
-use crate::providers::codex::{
-    ActionAcknowledgment, ActionEvidence, ActionReceipt, DispatchEvidence, ExecError,
-    ProcessAction, StartProcess,
 };
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub(crate) mod browser;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) mod computer;
-mod owner_order;
-mod tasks;
+use super::callers::{OWNER_LIMIT, OwnerRecord, order as owner_order};
+use super::exec_tasks::{self as tasks, operations::ExecPort};
 pub mod wire;
+#[cfg(test)]
+use super::coordinator::CoordinatorError;
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 pub(crate) use owner_order::epoch_key as paired_owner_epoch;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    io::Write,
-    sync::Mutex,
-    time::Duration,
-};
+use std::{collections::BTreeMap, io::Write, time::Duration};
 use styx_contracts::{
     capability::CapabilityId,
     error::{ErrorCategory, ExecutionCertainty},
@@ -41,7 +32,6 @@ use wire::*;
 const FRAME_LIMIT: usize = 256 * 1024;
 const SPEC_LIMIT: usize = 128 * 1024;
 const RESPONSE_LIMIT: usize = 128 * 1024;
-const OWNER_LIMIT: usize = 128;
 
 /// All fields come from protected bootstrap configuration, never wire hello.
 /// Epoch is scoped to this fixed Gateway namespace and Host generation.
@@ -97,21 +87,10 @@ impl Drop for BrowserLinkReferences<'_> {
         self.0.invalidate_browser_link_references();
     }
 }
-struct OwnerRecord {
-    lease: Option<OwnerLease>,
-    revision: u64,
-    cleanup: Option<OwnerCleanupHandle>,
-}
-#[derive(Default)]
-struct OwnerRegistry {
-    order: owner_order::Order,
-    owners: BTreeMap<(OwnerId, OwnerEpoch), OwnerRecord>,
-    active_epoch: Option<GatewayEpoch>,
-    retired_epochs: BTreeSet<GatewayEpoch>,
-    stopping: bool,
-}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ProtocolError {
+    #[error("paired Gateway explicitly revoked this device")]
+    PairingRevoked,
     #[error("trusted bootstrap binding does not match Host or link")]
     BootstrapMismatch,
     #[error("invalid bounded Host protocol frame")]
@@ -137,49 +116,14 @@ impl From<OperationSnapshot> for Snapshot {
         }
     }
 }
-fn action_reply(
-    snapshot: OperationSnapshot,
-    receipt: Option<ActionReceipt>,
-    existing: bool,
-) -> Reply {
-    let dispatch = if existing {
-        "existing_no_replay"
-    } else {
-        match receipt.as_ref().map(|r| r.evidence) {
-            Some(ActionEvidence::Acknowledged) => "acknowledged",
-            Some(ActionEvidence::NotDispatched) => "not_dispatched",
-            Some(ActionEvidence::Unknown) | None => "unknown",
-        }
-    };
-    let acknowledgment = receipt
-        .as_ref()
-        .and_then(|r| r.acknowledgment.as_ref())
-        .map(|ack| match ack {
-            ActionAcknowledgment::WriteAccepted => ActionAcknowledgmentDto::WriteAccepted,
-            ActionAcknowledgment::TerminateRequested { was_running } => {
-                ActionAcknowledgmentDto::TerminateRequested {
-                    was_running: *was_running,
-                }
-            }
-        });
-    Reply::Action {
-        snapshot: snapshot.into(),
-        dispatch: dispatch.into(),
-        acknowledgment,
-        write_id: receipt.and_then(|r| r.write_id),
-    }
-}
 /// v2 authority comes only from bootstrap; v3 owner-control DTOs are admitted
 /// only after fixed-endpoint TLS and explicit Gateway namespace negotiation.
 pub struct HostProtocol<'a> {
-    tasks: tasks::State,
     settings: Option<std::sync::Arc<crate::host::settings::HostSettings>>,
     profile: ProfileBinding,
     coordinator: HostCoordinator,
     authority: &'a HostAuthority,
-    owners: Mutex<OwnerRegistry>,
     paired: bool,
-    connection_slot: tokio::sync::Semaphore,
     command_environment: BTreeMap<String, String>,
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     browser: Option<browser::BrowserInputs>,
@@ -187,6 +131,16 @@ pub struct HostProtocol<'a> {
     computer: Option<computer::ComputerInputs>,
 }
 impl<'a> HostProtocol<'a> {
+    fn exec_port(&self) -> ExecPort<'_> {
+        ExecPort {
+            coordinator: &self.coordinator,
+            authority: self.authority,
+            command_environment: &self.command_environment,
+        }
+    }
+    fn context(&self, revision: u64, timeout_ms: u32) -> Result<PreparedContext, ErrorCategory> {
+        self.exec_port().context(revision, timeout_ms)
+    }
     pub fn new(
         profile: TrustedProfile,
         coordinator: HostCoordinator,
@@ -225,14 +179,11 @@ impl<'a> HostProtocol<'a> {
             return Err(ProtocolError::BootstrapMismatch);
         }
         Ok(Self {
-            tasks: tasks::State::default(),
             settings: None,
             profile,
             coordinator,
             authority,
-            owners: Mutex::new(OwnerRegistry::default()),
             paired,
-            connection_slot: tokio::sync::Semaphore::new(1),
             command_environment: BTreeMap::new(),
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             browser: None,
@@ -250,49 +201,6 @@ impl<'a> HostProtocol<'a> {
         self.command_environment = environment;
         self
     }
-    fn command_spec(&self, mut spec: StartProcess) -> Result<StartProcess, ProtocolError> {
-        // Windows variable names are case-insensitive; Unix names are exact.
-        let fold = |key: &str| {
-            if cfg!(target_os = "windows") {
-                key.to_ascii_uppercase()
-            } else {
-                key.to_owned()
-            }
-        };
-        let mut names = BTreeSet::new();
-        if spec.environment.len() > 64
-            || spec.environment.keys().any(|key| {
-                key.is_empty()
-                    || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                    || !names.insert(fold(key))
-            })
-        {
-            return Err(ProtocolError::InvalidFrame);
-        }
-        for (key, value) in &self.command_environment {
-            if let Some(alias) = spec
-                .environment
-                .keys()
-                .find(|name| fold(name) == fold(key))
-                .cloned()
-            {
-                if spec.environment.get(&alias) != Some(value) {
-                    return Err(ProtocolError::InvalidFrame);
-                }
-                spec.environment.remove(&alias);
-            }
-            spec.environment.insert(key.clone(), value.clone());
-        }
-        if spec
-            .to_operation_payload()
-            .map_err(|_| ProtocolError::InvalidFrame)?
-            .len()
-            > SPEC_LIMIT
-        {
-            return Err(ProtocolError::InvalidFrame);
-        }
-        Ok(spec)
-    }
     pub fn register_bootstrap_verified_owner(
         &mut self,
         owner: OwnerId,
@@ -301,7 +209,11 @@ impl<'a> HostProtocol<'a> {
         if self.paired {
             return Err(ProtocolError::OwnerRegistrationRejected);
         }
-        let mut registry = self.owners.lock().expect("owner registry");
+        let mut registry = self
+            .coordinator
+            .remote_access()
+            .lock()
+            .expect("owner registry");
         let key = (owner.clone(), epoch.clone());
         if registry.owners.contains_key(&key) {
             return Ok(());
@@ -324,7 +236,11 @@ impl<'a> HostProtocol<'a> {
         Ok(())
     }
     fn owner(&self, reference: &OwnerRef) -> Result<OwnerLease, ErrorCategory> {
-        let registry = self.owners.lock().expect("owner registry");
+        let registry = self
+            .coordinator
+            .remote_access()
+            .lock()
+            .expect("owner registry");
         if registry.stopping {
             return Err(ErrorCategory::Unauthorized);
         }
@@ -337,7 +253,11 @@ impl<'a> HostProtocol<'a> {
     /// Existing pending handlers only. Withdrawing new admission is not owner
     /// revocation: their original result may still leave this same connection.
     fn receipt_owner(&self, reference: &OwnerRef) -> Result<OwnerLease, ErrorCategory> {
-        let registry = self.owners.lock().expect("owner registry");
+        let registry = self
+            .coordinator
+            .remote_access()
+            .lock()
+            .expect("owner registry");
         registry
             .owners
             .get(&(reference.owner_id.clone(), reference.owner_epoch.clone()))
@@ -345,7 +265,11 @@ impl<'a> HostProtocol<'a> {
             .ok_or(ErrorCategory::Unauthorized)
     }
     fn fence_transport_stop(&self) -> Result<(), ProtocolError> {
-        let mut registry = self.owners.lock().expect("owner registry");
+        let mut registry = self
+            .coordinator
+            .remote_access()
+            .lock()
+            .expect("owner registry");
         registry.stopping = true;
         for entry in registry.owners.values_mut() {
             if let Some(lease) = &entry.lease {
@@ -367,7 +291,11 @@ impl<'a> HostProtocol<'a> {
                 Err(ProtocolError::NegotiationRejected)
             };
         }
-        let mut registry = self.owners.lock().expect("owner registry");
+        let mut registry = self
+            .coordinator
+            .remote_access()
+            .lock()
+            .expect("owner registry");
         if registry.active_epoch.as_ref() == Some(epoch) {
             return Ok(());
         }
@@ -392,31 +320,6 @@ impl<'a> HostProtocol<'a> {
         }
         Ok(())
     }
-    async fn read_exec(
-        &self,
-        owner: &OwnerLease,
-        id: &OperationId,
-        digest: Sha256Digest,
-        context: &PreparedContext,
-        max_bytes: usize,
-        wait: Duration,
-    ) -> Result<crate::providers::codex::ProcessOutput, CoordinatorError> {
-        let output = self
-            .coordinator
-            .read(owner, id, digest, context, max_bytes, wait)
-            .await?;
-        if output.liveness == ExecutionLiveness::Exited && output.drain == OutputDrain::Drained {
-            // Release provider storage before reporting terminal success. This
-            // uses the existing fair quiescence gate and Core release proofs;
-            // it neither fences the still-open owner nor cancels live work.
-            let remaining =
-                Duration::from_millis(context.deadline.0.saturating_sub(self.coordinator.now().0));
-            self.authority.collect_provider_retention(remaining).await?;
-            self.coordinator
-                .validate_settled_exec_delivery(owner, id, digest, context)?;
-        }
-        Ok(output)
-    }
     fn control(&self, call: &Call) -> Option<Reply> {
         let (owner, revision) = match call {
             Call::OwnerOpen {
@@ -431,7 +334,11 @@ impl<'a> HostProtocol<'a> {
                 feature: "gateway_owner_control".into(),
             });
         }
-        let mut registry = self.owners.lock().expect("owner registry");
+        let mut registry = self
+            .coordinator
+            .remote_access()
+            .lock()
+            .expect("owner registry");
         let key = (owner.owner_id.clone(), owner.owner_epoch.clone());
         let Some(epoch) = registry.active_epoch.clone() else {
             return Some(rejection(ErrorCategory::Unauthorized));
@@ -500,25 +407,6 @@ impl<'a> HostProtocol<'a> {
                 cleanup: "unknown".into(),
             })
         }
-    }
-    fn context(&self, revision: u64, timeout_ms: u32) -> Result<PreparedContext, ErrorCategory> {
-        if timeout_ms == 0 || timeout_ms > 10_000 {
-            return Err(ErrorCategory::InvalidRequest);
-        }
-        Ok(PreparedContext {
-            device_id: self.profile.device_id.clone(),
-            grant_revision: revision,
-            session: None,
-            observation: None,
-            capability: CapabilityId::ExecRun,
-            deadline: MonotonicMillis(
-                self.coordinator
-                    .now()
-                    .0
-                    .saturating_add(u64::from(timeout_ms)),
-            ),
-            disconnect_policy: DisconnectPolicy::RetainForOwner,
-        })
     }
     pub fn with_settings(
         mut self,
@@ -620,14 +508,19 @@ impl<'a> HostProtocol<'a> {
                     return invalid();
                 }
                 let cleanup = self
-                    .owners
+                    .coordinator
+                    .remote_access()
                     .lock()
                     .expect("owner registry")
                     .owners
                     .get(&(owner.owner_id.clone(), owner.owner_epoch.clone()))
                     .and_then(|entry| entry.cleanup.clone());
                 let Some(cleanup) = cleanup else {
-                    let registry = self.owners.lock().expect("owner registry");
+                    let registry = self
+                        .coordinator
+                        .remote_access()
+                        .lock()
+                        .expect("owner registry");
                     return if registry
                         .active_epoch
                         .as_ref()
@@ -666,7 +559,11 @@ impl<'a> HostProtocol<'a> {
                     }
                 }
                 if complete {
-                    let mut registry = self.owners.lock().expect("owner registry");
+                    let mut registry = self
+                        .coordinator
+                        .remote_access()
+                        .lock()
+                        .expect("owner registry");
                     if let Some(record) = registry
                         .owners
                         .get_mut(&(owner.owner_id.clone(), owner.owner_epoch.clone()))
@@ -690,7 +587,7 @@ impl<'a> HostProtocol<'a> {
                     Ok(owner) => owner,
                     Err(error) => return rejection(error),
                 };
-                self.exec_operation(&owner, call).await
+                self.exec_port().exec_operation(&owner, call).await
             }
             Call::ExecTask {
                 owner,
@@ -703,7 +600,11 @@ impl<'a> HostProtocol<'a> {
                     return rejection(ErrorCategory::Unauthorized);
                 }
                 Reply::ExecTask {
-                    result: tasks::Engine { protocol: self }.handle(command).await,
+                    result: tasks::Engine {
+                        port: self.exec_port(),
+                    }
+                    .handle(command)
+                    .await,
                 }
             }
             Call::Write {} => Reply::Unsupported {
@@ -719,190 +620,6 @@ impl<'a> HostProtocol<'a> {
             | Call::OwnerRevoke { .. }
             | Call::EnableTransportDrain
             | Call::TransportDrainResult { .. } => invalid(),
-        }
-    }
-    async fn exec_operation(&self, owner: &OwnerLease, call: Call) -> Reply {
-        match call {
-            Call::PrepareStart {
-                owner: _,
-                grant_revision,
-                timeout_ms,
-                spec,
-            } => {
-                if spec.get().len() > SPEC_LIMIT {
-                    return invalid();
-                }
-                let context = match self.context(grant_revision, timeout_ms) {
-                    Ok(v) => v,
-                    Err(e) => return rejection(e),
-                };
-                let spec: StartProcess = match serde_json::from_str(spec.get()) {
-                    Ok(v) => v,
-                    Err(_) => return invalid(),
-                };
-                let spec = match self.command_spec(spec) {
-                    Ok(spec) => spec,
-                    Err(_) => return invalid(),
-                };
-                match self.coordinator.prepare_start(owner, context, &spec) {
-                    Ok(v) => Reply::Prepared { snapshot: v.into() },
-                    Err(e) => coordinator_error(e, false),
-                }
-            }
-            Call::DispatchStart { owner: _, target } => {
-                match self.coordinator.dispatch_start(
-                    owner,
-                    &target.operation_id,
-                    target.payload_digest,
-                ) {
-                    Ok(StartSubmission::Existing(v)) => Reply::Start {
-                        snapshot: v.into(),
-                        dispatch: "existing_no_replay".into(),
-                    },
-                    Ok(StartSubmission::Submitted(ticket)) => match ticket.wait().await {
-                        Ok(v) if v.dispatch == DispatchEvidence::NotDispatched => {
-                            // This typed completion proves the adapter sent no
-                            // action bytes. Do not erase it into a generic Start.
-                            rejection(match v.cause {
-                                Some(ExecError::Capacity) => ErrorCategory::Busy,
-                                Some(ExecError::InvalidRequest) => ErrorCategory::InvalidRequest,
-                                _ => ErrorCategory::StateConflict,
-                            })
-                        }
-                        Ok(v) => Reply::Start {
-                            snapshot: v.snapshot.into(),
-                            dispatch: match v.dispatch {
-                                DispatchEvidence::NotDispatched => "not_dispatched",
-                                DispatchEvidence::Started => "started",
-                                DispatchEvidence::Unknown => "unknown",
-                            }
-                            .into(),
-                        },
-                        Err(e) => coordinator_error(e, false),
-                    },
-                    Err(e) => coordinator_error(e, false),
-                }
-            }
-            Call::InspectStart { owner: _, target } => {
-                match self.coordinator.inspect_start(
-                    owner,
-                    &target.operation_id,
-                    target.payload_digest,
-                ) {
-                    Ok(v) => Reply::Inspected { snapshot: v.into() },
-                    Err(e) => coordinator_error(e, false),
-                }
-            }
-            Call::Read {
-                owner: _,
-                target,
-                grant_revision,
-                timeout_ms,
-                max_bytes,
-                wait_ms,
-            } => {
-                if max_bytes == 0 || max_bytes > 16384 || wait_ms > 100 {
-                    return invalid();
-                }
-                let context = match self.context(grant_revision, timeout_ms) {
-                    Ok(v) => v,
-                    Err(e) => return rejection(e),
-                };
-                match self
-                    .read_exec(
-                        owner,
-                        &target.operation_id,
-                        target.payload_digest,
-                        &context,
-                        max_bytes as usize,
-                        Duration::from_millis(u64::from(wait_ms)),
-                    )
-                    .await
-                {
-                    Ok(v) => Reply::Read {
-                        chunks: v
-                            .chunks
-                            .into_iter()
-                            .map(|c| Chunk {
-                                stream: c.stream,
-                                text: c.text,
-                            })
-                            .collect(),
-                        liveness: v.liveness,
-                        output_drain: v.drain,
-                        exit_code: v.exit_code,
-                        read_resume: false,
-                    },
-                    Err(e) => coordinator_error(e, true),
-                }
-            }
-            Call::PrepareAction {
-                owner: _,
-                target,
-                grant_revision,
-                timeout_ms,
-                action,
-            } => {
-                if action.get().len() > SPEC_LIMIT {
-                    return invalid();
-                }
-                let context = match self.context(grant_revision, timeout_ms) {
-                    Ok(v) => v,
-                    Err(e) => return rejection(e),
-                };
-                let action: ProcessAction = match serde_json::from_str(action.get()) {
-                    Ok(v) => v,
-                    Err(_) => return invalid(),
-                };
-                match self
-                    .coordinator
-                    .prepare_action(owner, target, context, &action)
-                {
-                    Ok(v) => Reply::Prepared { snapshot: v.into() },
-                    Err(e) => coordinator_error(e, false),
-                }
-            }
-            Call::DispatchAction { owner: _, action } => {
-                match self.coordinator.dispatch_action(
-                    owner,
-                    &action.operation_id,
-                    action.payload_digest,
-                ) {
-                    Ok(ActionSubmission::Existing(snapshot)) => {
-                        match self.coordinator.lookup_action(
-                            owner,
-                            &action.operation_id,
-                            action.payload_digest,
-                        ) {
-                            Ok(receipt) => action_reply(snapshot, receipt, true),
-                            Err(e) => coordinator_error(e, false),
-                        }
-                    }
-                    Ok(ActionSubmission::Submitted(ticket)) => match ticket.wait().await {
-                        Ok(v) => action_reply(v.snapshot, Some(v.receipt), false),
-                        Err(e) => coordinator_error(e, false),
-                    },
-                    Err(e) => coordinator_error(e, false),
-                }
-            }
-            Call::InspectAction { owner: _, action } => {
-                match self.coordinator.inspect_action(
-                    owner,
-                    &action.operation_id,
-                    action.payload_digest,
-                ) {
-                    Ok(snapshot) => match self.coordinator.lookup_action(
-                        owner,
-                        &action.operation_id,
-                        action.payload_digest,
-                    ) {
-                        Ok(receipt) => action_reply(snapshot, receipt, true),
-                        Err(e) => coordinator_error(e, false),
-                    },
-                    Err(e) => coordinator_error(e, false),
-                }
-            }
-            _ => invalid(),
         }
     }
     fn features(&self) -> Vec<String> {
@@ -975,7 +692,8 @@ impl<'a> HostProtocol<'a> {
         mut ready: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<Option<TransportDrainOutcome>, ProtocolError> {
         let _slot = self
-            .connection_slot
+            .coordinator
+            .connection_slot()
             .try_acquire()
             .map_err(|_| ProtocolError::Busy)?;
         if link.endpoint() != self.profile.endpoint {
@@ -1040,7 +758,7 @@ impl<'a> HostProtocol<'a> {
                         self.fence_transport_stop()?;
                         return Ok(Some(TransportDrainOutcome::Unsupported));
                     }
-                    self.owners.lock().expect("owner registry").stopping = true;
+                    self.coordinator.remote_access().lock().expect("owner registry").stopping = true;
                     result_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(5));
                     continue;
                 }
@@ -1060,6 +778,10 @@ impl<'a> HostProtocol<'a> {
                     (id, reply)
                 }
                 frame = link.recv() => {
+                    if self.paired && negotiated && link.close_frame().is_some_and(|f| u16::from(f.code) == PAIRING_REVOKED_CLOSE_CODE && f.reason == PAIRING_REVOKED_CLOSE_REASON) {
+                        self.fence_transport_stop()?;
+                        return Err(ProtocolError::PairingRevoked);
+                    }
                     let Some(frame) = frame else {
                         if !pending.is_empty() { return Err(ProtocolError::ResponseLost); }
                         break;
@@ -1180,62 +902,6 @@ fn call_owner(call: &Call) -> Option<&OwnerRef> {
     }
 }
 
-fn invalid() -> Reply {
-    rejection(ErrorCategory::InvalidRequest)
-}
-fn rejection(category: ErrorCategory) -> Reply {
-    Reply::Error {
-        category,
-        certainty: ExecutionCertainty::NotDispatched,
-        cursor_may_be_consumed: false,
-    }
-}
-fn coordinator_error(error: CoordinatorError, read: bool) -> Reply {
-    let (category, certainty) = match error {
-        CoordinatorError::Admission(category) => (category, ExecutionCertainty::NotDispatched),
-        CoordinatorError::Busy => (ErrorCategory::Busy, ExecutionCertainty::NotDispatched),
-        CoordinatorError::OutputDeliveryDenied(category) => (category, ExecutionCertainty::Unknown),
-        CoordinatorError::ReadDeadline => {
-            (ErrorCategory::OperationTimeout, ExecutionCertainty::Unknown)
-        }
-        CoordinatorError::Executor(crate::providers::codex::ExecError::Capacity) if read => {
-            // A decoded read buffer is reserved before any native request or
-            // cursor advance. A saturated caller may wait without poisoning it.
-            (ErrorCategory::Busy, ExecutionCertainty::NotDispatched)
-        }
-        CoordinatorError::ResponseLost | CoordinatorError::Executor(_) => {
-            (ErrorCategory::ResultUnknown, ExecutionCertainty::Unknown)
-        }
-        // An executor error crossing the shared boundary carries no proof that a
-        // native dispatch did not happen; preserve uncertainty.
-        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-        CoordinatorError::Browser(_) => (ErrorCategory::ResultUnknown, ExecutionCertainty::Unknown),
-        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-        CoordinatorError::Desktop(error) => match error {
-            crate::providers::cua::CuaError::Busy => {
-                (ErrorCategory::Busy, ExecutionCertainty::NotDispatched)
-            }
-            crate::providers::cua::CuaError::InvalidRequest => (
-                ErrorCategory::InvalidRequest,
-                ExecutionCertainty::NotDispatched,
-            ),
-            crate::providers::cua::CuaError::PermissionDenied => (
-                ErrorCategory::PermissionDenied,
-                ExecutionCertainty::NotDispatched,
-            ),
-            crate::providers::cua::CuaError::Unsupported => (
-                ErrorCategory::CapabilityUnsupported,
-                ExecutionCertainty::NotDispatched,
-            ),
-            _ => (ErrorCategory::ResultUnknown, ExecutionCertainty::Unknown),
-        },
-    };
-    Reply::Error {
-        category,
-        certainty,
-        cursor_may_be_consumed: read && certainty != ExecutionCertainty::NotDispatched,
-    }
-}
 struct BoundedJson(Vec<u8>, usize);
 impl Write for BoundedJson {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {

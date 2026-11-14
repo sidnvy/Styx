@@ -1,15 +1,23 @@
 //! Host-runtime Exec tasks. Conversations authorize calls; they never own tasks.
 //! Task IDs, cursor/unknown state and terminal results survive Gateway reconnects.
-use super::wire::{ExecTaskCommand, ExecTaskResult};
-use super::*;
+pub(crate) mod operations;
+use crate::host::coordinator::{HostAuthority, HostCoordinator};
+use crate::host::protocol::wire::*;
+use crate::providers::codex::ProcessAction;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
-use std::sync::Arc;
-use std::time::Instant;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+use styx_contracts::{capability::CapabilityId, error::ErrorCategory, identity::*, operation::*};
+use styx_core::operations::OwnerLease;
 use tokio::sync::Mutex as AsyncMutex;
+const SPEC_LIMIT: usize = 128 * 1024;
 
 #[derive(Default)]
-pub(super) struct State {
+pub(crate) struct State {
     sessions: Mutex<BTreeMap<u64, Arc<AsyncMutex<Resource>>>>,
     binding: Mutex<Option<Binding>>,
 }
@@ -50,8 +58,8 @@ struct PollArgs {
     max_output_tokens: Option<usize>,
     yield_time_ms: Option<u32>,
 }
-pub(super) struct Engine<'p, 'a> {
-    pub(super) protocol: &'p HostProtocol<'a>,
+pub(crate) struct Engine<'a> {
+    pub(crate) port: operations::ExecPort<'a>,
 }
 fn error(value: Value) -> ExecTaskResult {
     ExecTaskResult {
@@ -138,8 +146,8 @@ fn success(value: Value) -> ExecTaskResult {
     }
 }
 
-impl Engine<'_, '_> {
-    pub(super) async fn handle(&self, command: ExecTaskCommand) -> ExecTaskResult {
+impl Engine<'_> {
+    pub(crate) async fn handle(&self, command: ExecTaskCommand) -> ExecTaskResult {
         match command {
             ExecTaskCommand::Run {
                 spec,
@@ -179,11 +187,12 @@ impl Engine<'_, '_> {
         }
     }
     async fn exchange(&self, binding: &Binding, call: Call) -> Result<Reply, ()> {
-        Ok(self.protocol.exec_operation(&binding.lease, call).await)
+        Ok(self.port.exec_operation(&binding.lease, call).await)
     }
     fn lookup(&self, id: u64) -> Result<Arc<AsyncMutex<Resource>>, &'static str> {
-        self.protocol
-            .tasks
+        self.port
+            .coordinator
+            .exec_tasks()
             .sessions
             .lock()
             .expect("Host tasks")
@@ -192,7 +201,13 @@ impl Engine<'_, '_> {
             .ok_or("unknown_session")
     }
     fn reserve(&self) -> Result<(u64, Arc<AsyncMutex<Resource>>), &'static str> {
-        let mut binding = self.protocol.tasks.binding.lock().expect("Host task owner");
+        let mut binding = self
+            .port
+            .coordinator
+            .exec_tasks()
+            .binding
+            .lock()
+            .expect("Host task owner");
         if binding.is_none() {
             let reference = OwnerRef {
                 owner_id: format!("host-exec-{}", uuid::Uuid::new_v4().simple())
@@ -204,18 +219,24 @@ impl Engine<'_, '_> {
                     .expect("UUID epoch"),
             };
             let lease = self
-                .protocol
+                .port
                 .authority
                 .register_verified_owner(reference.owner_id.clone(), reference.owner_epoch.clone())
                 .map_err(|_| "capacity")?;
             *binding = Some(Binding {
                 lease,
                 reference,
-                revision: self.protocol.coordinator.grant_revision(),
-                generation: self.protocol.profile.host_generation.clone(),
+                revision: self.port.coordinator.grant_revision(),
+                generation: self.port.coordinator.bootstrap_identity().1.clone(),
             });
         }
-        let mut sessions = self.protocol.tasks.sessions.lock().expect("Host tasks");
+        let mut sessions = self
+            .port
+            .coordinator
+            .exec_tasks()
+            .sessions
+            .lock()
+            .expect("Host tasks");
         let id = loop {
             let id = (uuid::Uuid::new_v4().as_u128() & ((1u128 << 48) - 1)) as u64;
             if id != 0 && !sessions.contains_key(&id) {
@@ -240,8 +261,9 @@ impl Engine<'_, '_> {
     }
     async fn list(&self) -> ExecTaskResult {
         let sessions: Vec<_> = self
-            .protocol
-            .tasks
+            .port
+            .coordinator
+            .exec_tasks()
             .sessions
             .lock()
             .expect("Host tasks")
@@ -409,8 +431,9 @@ impl Engine<'_, '_> {
                     r.start_refusal = Some(error);
                 }
                 if certainty == styx_contracts::error::ExecutionCertainty::NotDispatched {
-                    self.protocol
-                        .tasks
+                    self.port
+                        .coordinator
+                        .exec_tasks()
                         .sessions
                         .lock()
                         .expect("Host tasks")
@@ -464,8 +487,9 @@ impl Engine<'_, '_> {
                     r.start_refusal = Some(error);
                 }
                 if certainty == styx_contracts::error::ExecutionCertainty::NotDispatched {
-                    self.protocol
-                        .tasks
+                    self.port
+                        .coordinator
+                        .exec_tasks()
                         .sessions
                         .lock()
                         .expect("Host tasks")
@@ -751,5 +775,5 @@ impl Engine<'_, '_> {
 }
 
 #[cfg(test)]
-#[path = "task_tests.rs"]
+#[path = "tests.rs"]
 mod tests;

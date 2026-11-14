@@ -1,4 +1,6 @@
 //! Private Host wire DTOs; parsing these values alone grants no authority.
+pub(crate) const PAIRING_REVOKED_CLOSE_CODE: u16 = 4001;
+pub(crate) const PAIRING_REVOKED_CLOSE_REASON: &str = "styx_pairing_revoked";
 use serde::{Deserialize, Serialize};
 use styx_contracts::{
     error::{ErrorCategory, ExecutionCertainty},

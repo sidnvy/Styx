@@ -213,9 +213,17 @@ impl Inner {
         MonotonicMillis(u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX))
     }
 }
-/// Request plane. Cloning this handle never creates/restarts an executor.
+// Kept outside Inner: caller cleanup handles retain Inner, so putting the
+// access registry inside it would create a self-owning cycle on shutdown.
+struct RuntimeState {
+    exec_tasks: super::exec_tasks::State,
+    remote_access: Mutex<super::callers::OwnerRegistry>,
+    connection_slot: tokio::sync::Semaphore,
+}
+/// Request plane. Clones share one Host runtime and never create an executor.
 #[derive(Clone)]
 pub struct HostCoordinator {
+    runtime: Arc<RuntimeState>,
     inner: Arc<Inner>,
 }
 /// Bootstrap-only control plane. No Deserialize, Clone or public field constructor.
@@ -372,11 +380,25 @@ impl HostCoordinator {
         Ok((
             Self {
                 inner: inner.clone(),
+                runtime: Arc::new(RuntimeState {
+                    exec_tasks: super::exec_tasks::State::default(),
+                    remote_access: Mutex::new(super::callers::OwnerRegistry::default()),
+                    connection_slot: tokio::sync::Semaphore::new(1),
+                }),
             },
             HostAuthority { inner },
         ))
     }
     /// Configuration/presence only; never infer liveness from cached initialize.
+    pub(crate) fn remote_access(&self) -> &Mutex<super::callers::OwnerRegistry> {
+        &self.runtime.remote_access
+    }
+    pub(crate) fn connection_slot(&self) -> &tokio::sync::Semaphore {
+        &self.runtime.connection_slot
+    }
+    pub(crate) fn exec_tasks(&self) -> &super::exec_tasks::State {
+        &self.runtime.exec_tasks
+    }
     pub fn exec_configured(&self) -> bool {
         self.inner
             .adapter

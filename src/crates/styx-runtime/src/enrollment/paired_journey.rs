@@ -296,7 +296,7 @@ async fn tunnel_continuation(
         format!("{nonce}\n")
     );
     second.cancel().await.unwrap();
-    json!({"native_nonce":nonce,"start_effect_count":1,"host_wss_reconnect":"original task rediscovered without restart","native_pid":pid,"native_starttime":birth,"first_transport_deleted":"original native process survived","different_chat_subject_organization":"stdin refused with no file effect","second_transport_stdin":"independent exact file readback","exit_code":0,"original_shell":"exited","scope":"owned strict-TLS paired Linux/Codex reference, not installed/account acceptance"})
+    json!({"native_nonce":nonce,"start_effect_count":1,"host_wss_reconnect":"original task rediscovered without restart","native_pid":pid,"native_starttime":birth,"first_transport_deleted":"original native process survived","different_chat":"same Host task discovered and continued","second_transport_stdin":"independent exact file readback","exit_code":0,"original_shell":"exited","scope":"owned strict-TLS paired Linux/Codex reference, not installed/account acceptance"})
 }
 async fn file_within(path: &Path, expected: &str) {
     let until = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -559,16 +559,20 @@ async fn paired_journey(capacity: bool, computers: usize) {
     let host_root = root.clone();
     let (reconnect_tx, mut reconnect_rx) =
         tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<()>>(1);
+    let (revoked_sent, revoked_received) = tokio::sync::oneshot::channel();
     let protocol_job = tokio::spawn(async move {
-        let protocol = host_task
-            .paired_protocol(PairedTrustedProfile {
-                endpoint: endpoint_text,
-                gateway_namespace: gateway_id,
-                device_id: proto_device,
-                host_generation: generation,
-            })
-            .unwrap();
-        let protocol = if capacity {
+        let make_protocol = || {
+            host_task
+                .paired_protocol(PairedTrustedProfile {
+                    endpoint: endpoint_text.clone(),
+                    gateway_namespace: gateway_id.clone(),
+                    device_id: proto_device.clone(),
+                    host_generation: generation.clone(),
+                })
+                .unwrap()
+        };
+        let protocol = make_protocol();
+        let mut protocol = if capacity {
             protocol
                 .with_browser_profiles(Arc::new(CapacityBrowser { root: host_root }))
                 .unwrap()
@@ -599,7 +603,26 @@ async fn paired_journey(capacity: bool, computers: usize) {
             };
             let shutdown = link.shutdown(Duration::from_secs(5)).await;
             if let Some(result) = result {
-                break (result, shutdown);
+                let cleanup = if matches!(
+                    &result,
+                    Err(crate::host::protocol::ProtocolError::PairingRevoked)
+                ) {
+                    // The Host supervisor uses the same normal shutdown entry
+                    // after an explicit permanent revocation, never after EOF.
+                    let facts = host_task
+                        .shutdown_owned(Duration::from_secs(10))
+                        .await
+                        .unwrap();
+                    let _ = revoked_sent.send(());
+                    Some(facts)
+                } else {
+                    None
+                };
+                break (result, shutdown, cleanup);
+            }
+            if !capacity {
+                drop(protocol);
+                protocol = make_protocol();
             }
         }
     });
@@ -861,6 +884,17 @@ async fn paired_journey(capacity: bool, computers: usize) {
             .unwrap();
         assert_ne!(continued.is_error, Some(true));
         file_within(&root_work.join("survivor.txt"), "still-owned").await;
+        let waiting = data(owner_b.call_tool(call("exec_command",json!({"cmd":"printf '%s' $$ > revoke-task.pid; IFS= read -r value; printf forbidden > revoke-task-escaped.txt","login":false,"environment_id":device,"yield_time_ms":100}))).await.unwrap());
+        assert!(waiting["session_id"].is_number());
+        let pid_file = root_work.join("revoke-task.pid");
+        let until = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !pid_file.exists() {
+            assert!(tokio::time::Instant::now() < until);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let revoke_pid: u32 = std::fs::read_to_string(pid_file).unwrap().parse().unwrap();
+        let revoke_stat = PathBuf::from(format!("/proc/{revoke_pid}/stat"));
+        let revoke_birth = read_process_birth(&revoke_stat).unwrap();
         let revoked = client
             .request(
                 Method::POST,
@@ -870,11 +904,25 @@ async fn paired_journey(capacity: bool, computers: usize) {
             )
             .await;
         assert_eq!(revoked.status, 200);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&revoked.body).unwrap()["remote_tasks"],
+            "unconfirmed"
+        );
+        tokio::time::timeout(Duration::from_secs(20), revoked_received)
+            .await
+            .expect("explicit revoke notification and Host cleanup")
+            .unwrap();
+        assert_ne!(
+            read_process_birth(&revoke_stat).ok(),
+            Some(revoke_birth),
+            "revocation ends the original task"
+        );
+        assert!(!root_work.join("revoke-task-escaped.txt").exists());
         let after = owner_b.call_tool(call("exec_command", json!({"cmd":"printf forbidden > revoked.txt","login":false,"environment_id":device.as_str()}))).await.unwrap();
         assert_eq!(after.is_error, Some(true));
         assert!(!root_work.join("revoked.txt").exists());
         owner_b.cancel().await.unwrap();
-        json!({"native_nonce":nonce,"start_effect_count":1,"tunnel_continuation":tunnel,"wrong_device_legacy_route_wrong_credential_upgrades":"all rejected","cross_conversation_task_access":"listed_and_continued","host_policy_denial":"PERMISSION_DENIED/not_dispatched with no file effect","authorized_stdin":"observed_by_independent_file_read","closed_owner_shell":"survived_chat_close_then_explicit_stop_confirmed", "closed_owner_pid":pid,"closed_owner_starttime":process_birth,"host_physical_cleanup_complete":backend.observed_physical_cleanups()>=1, "other_owner_after_delete":"survived","revoked_device":"new_exec_rejected_without_effect","scope":"synthetic owned Linux loopback, not native package/account acceptance"})
+        json!({"native_nonce":nonce,"start_effect_count":1,"tunnel_continuation":tunnel,"wrong_device_legacy_route_wrong_credential_upgrades":"all rejected","cross_conversation_task_access":"listed_and_continued","host_policy_denial":"PERMISSION_DENIED/not_dispatched with no file effect","authorized_stdin":"observed_by_independent_file_read","closed_owner_shell":"survived_chat_close_then_explicit_stop_confirmed", "closed_owner_pid":pid,"closed_owner_starttime":process_birth,"host_physical_cleanup_complete":backend.observed_physical_cleanups()>=1, "other_owner_after_delete":"survived","revoked_device":"new_exec_rejected_and_original_task_stopped_by_Host","scope":"synthetic owned Linux loopback, not native package/account acceptance"})
     });
     let result = tokio::time::timeout(
         Duration::from_secs(if capacity { 900 } else { 90 }),
@@ -888,15 +936,21 @@ async fn paired_journey(capacity: bool, computers: usize) {
     stop.cancel();
     let transport = tokio::time::timeout(Duration::from_secs(20), server).await;
     let protocol = tokio::time::timeout(Duration::from_secs(10), protocol_job).await;
-    let cleanup = host.shutdown_owned(Duration::from_secs(10)).await;
     node.lock().await.stop().await;
     let report = result.unwrap().unwrap();
     let transport = transport.unwrap().unwrap().unwrap();
     assert_joined(&transport);
-    let _protocol_result = protocol
+    let (protocol_result, _, cleanup) = protocol
         .expect("owned Host protocol task joined before deadline")
         .expect("owned Host protocol task did not panic");
-    let cleanup = cleanup.unwrap();
+    assert!(matches!(
+        protocol_result,
+        Err(crate::host::protocol::ProtocolError::PairingRevoked)
+    ));
+    let cleanup = match cleanup {
+        Some(facts) => facts,
+        None => host.shutdown_owned(Duration::from_secs(10)).await.unwrap(),
+    };
     assert!(cleanup.supervised_jobs_joined);
     assert!(
         cleanup

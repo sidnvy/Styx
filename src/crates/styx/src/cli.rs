@@ -2315,7 +2315,9 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                     if write_json(&outcome).is_err() {
                         return error("output_unavailable");
                     }
-                    if outcome.is_complete() {
+                    if let Some(reason) = outcome.stop_reason {
+                        error(reason)
+                    } else if outcome.local_stop_complete() {
                         ExitCode::SUCCESS
                     } else {
                         error("host_shutdown_unknown")

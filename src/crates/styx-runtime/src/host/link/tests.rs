@@ -274,6 +274,7 @@ async fn failed_io_task_refuses_cleanup_success_and_still_joins_sibling() {
     let joined = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observed = joined.clone();
     let link = HostWssLink {
+        close_frame: Arc::new(Mutex::new(None)),
         endpoint: "wss://fixture.invalid/host-link".into(),
         generation: "failed-io-generation".try_into().unwrap(),
         outgoing,

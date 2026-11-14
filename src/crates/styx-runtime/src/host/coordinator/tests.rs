@@ -1383,3 +1383,34 @@ async fn optional_executor_refuses_exec_without_fabricating_cleanup() {
     assert!(cleanup.supervised_jobs_joined);
     assert!(cleanup.ancillary_providers_settled());
 }
+
+#[test]
+fn runtime_access_cleanup_handles_do_not_keep_the_host_alive() {
+    let (host, authority) = HostCoordinator::new_without_executor(
+        OperationLedger::new("host-release-test".try_into().unwrap()),
+        facts(),
+        4,
+    )
+    .unwrap();
+    let observer = Arc::downgrade(&host.inner);
+    let owner: OwnerId = "caller-release-test".try_into().unwrap();
+    let epoch: OwnerEpoch = "caller-release-epoch".try_into().unwrap();
+    let lease = authority
+        .register_verified_owner(owner.clone(), epoch.clone())
+        .unwrap();
+    let cleanup = authority.fence_owner_for_cleanup(&lease).unwrap();
+    host.remote_access().lock().unwrap().owners.insert(
+        (owner, epoch),
+        crate::host::callers::OwnerRecord {
+            lease: None,
+            revision: 1,
+            cleanup: Some(cleanup),
+        },
+    );
+    drop(authority);
+    drop(host);
+    assert!(
+        observer.upgrade().is_none(),
+        "retained caller cleanup must not form a Host ownership cycle"
+    );
+}

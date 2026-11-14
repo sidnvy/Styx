@@ -763,7 +763,9 @@ impl Foreground {
             )
             .await
             .map_err(|e| Failure::new(e.code()))?;
-            if outcome.is_complete() {
+            if let Some(reason) = outcome.stop_reason {
+                Err(Failure::new(reason))
+            } else if outcome.local_stop_complete() {
                 Ok(())
             } else {
                 Err(Failure::unknown("setup_host_cleanup_unconfirmed"))

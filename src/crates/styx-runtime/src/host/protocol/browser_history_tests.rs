@@ -54,14 +54,20 @@ pub(crate) async fn verify_original_dispatch_history(
         owner_id: owner.owner_id().clone(),
         owner_epoch: action.id.owner_epoch.clone(),
     };
-    protocol.owners.lock().unwrap().owners.insert(
-        (reference.owner_id.clone(), reference.owner_epoch.clone()),
-        OwnerRecord {
-            lease: Some(owner.clone()),
-            revision: host.grant_revision(),
-            cleanup: None,
-        },
-    );
+    protocol
+        .coordinator
+        .remote_access()
+        .lock()
+        .unwrap()
+        .owners
+        .insert(
+            (reference.owner_id.clone(), reference.owner_epoch.clone()),
+            OwnerRecord {
+                lease: Some(owner.clone()),
+                revision: host.grant_revision(),
+                cleanup: None,
+            },
+        );
     let reply = protocol
         .handle_browser(
             reference.clone(),

@@ -26,7 +26,7 @@ use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{
         Message,
-        protocol::{Role, WebSocketConfig},
+        protocol::{CloseFrame, Role, WebSocketConfig, frame::coding::CloseCode},
     },
 };
 use tokio_util::sync::CancellationToken;
@@ -285,7 +285,16 @@ impl RelayHandle {
                                         let now = tokio::time::Instant::now();
                                         if pending.values().any(|p| p.deadline <= now) { return Err(RelayError::Unknown); }
                                         if heartbeat.tick(now)? {
-                                            relay.control_lane(&e).await?;
+                                            if let Err(error) = relay.control_lane(&e).await {
+                                                let revoked = relay.inner.shared.with(|s|s.profile_is_revoked(&e.device,&e.profile.capability_generation)).await;
+                                                if matches!(revoked,Ok(Ok(true))) {
+                                                    let frame = CloseFrame { code:CloseCode::from(crate::host::protocol::wire::PAIRING_REVOKED_CLOSE_CODE), reason:crate::host::protocol::wire::PAIRING_REVOKED_CLOSE_REASON.into() };
+                                                    // Delivery is best effort. Revocation is already durable;
+                                                    // no transport acknowledgment proves remote task exit.
+                                                    let _ = tokio::time::timeout(Duration::from_secs(5),sink.send(Message::Close(Some(frame)))).await;
+                                                }
+                                                return Err(error);
+                                            }
                                             tokio::time::timeout(Duration::from_secs(5), sink.send(Message::Ping(Bytes::new())))
                                                 .await.map_err(|_| RelayError::Unknown)?.map_err(|_| RelayError::Unknown)?;
                                         }

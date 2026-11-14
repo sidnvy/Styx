@@ -307,7 +307,10 @@ fn main_owned(argc: u32, argv: *mut *mut u16) -> Result<()> {
             )
             .await
             {
-                Ok(outcome) if ForegroundOutcome::is_complete(&outcome) => {
+                Ok(outcome)
+                    if outcome.stop_reason.is_none()
+                        && ForegroundOutcome::is_complete(&outcome) =>
+                {
                     serde_json::to_value(outcome).map_err(|_| ServiceError::Unknown)
                 }
                 _ => Err(ServiceError::Unknown),
