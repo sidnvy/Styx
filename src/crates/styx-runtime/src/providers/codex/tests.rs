@@ -1850,11 +1850,22 @@ async fn revoked_cleanup_uses_complete_events_after_native_read_retention_expire
             }
         });
         tokio::time::timeout(Duration::from_secs(1), async {
-            while adapter.rpc.observation(&handle.process_id).unwrap().closed.is_none() {
+            while adapter
+                .rpc
+                .observation(&handle.process_id)
+                .unwrap()
+                .closed
+                .is_none()
+            {
                 tokio::task::yield_now().await;
             }
-        }).await.unwrap();
-        let cleanup = auth.ledger.fence_owner_for_cleanup(&owner, MonotonicMillis(2)).unwrap();
+        })
+        .await
+        .unwrap();
+        let cleanup = auth
+            .ledger
+            .fence_owner_for_cleanup(&owner, MonotonicMillis(2))
+            .unwrap();
         let result = adapter.discard_for_cleanup(&cleanup, &handle).await;
         done_tx.send(()).unwrap();
         let reads = worker.await.unwrap();
@@ -1864,7 +1875,10 @@ async fn revoked_cleanup_uses_complete_events_after_native_read_retention_expire
             assert!(facts.drained);
             assert_eq!(reads, 0, "cleanup must not query an expired native record");
         } else {
-            assert!(result.is_err(), "exit/close without the output prefix is not a drain proof");
+            assert!(
+                result.is_err(),
+                "exit/close without the output prefix is not a drain proof"
+            );
             assert_eq!(reads, 1);
         }
     }

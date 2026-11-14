@@ -52,7 +52,8 @@ impl CodexStdio {
         record: &mut Record,
         handle: &ProcessHandle,
     ) -> Result<(), ExecError> {
-        if !record.drained && record.pending_output.is_none()
+        if !record.drained
+            && record.pending_output.is_none()
             && let Some(events) = self
                 .rpc
                 .take_completed_events(&handle.process_id, record.cursor)

@@ -59,12 +59,19 @@ Capture the first failing stage and the original process identity, actual exit s
 closed error code and relevant durable state. Keep diagnostics local and free of credentials.
 Separate GUI/Core bootstrap, role restoration, transport, account authorization and worker readiness.
 
+Keep one authority for each fact: a capability setting governs task admission;
+it does not independently redefine the lifetime of an already owned platform
+component. Normal reads and cleanup must reuse the executor's same completion
+evidence, including retained final events after upstream records expire.
+
 Choose regressions matching the change rather than running every combination:
 
 - Reopen the same persisted profile in a new process and preserve identity, grants and desired state.
 - For role/update changes, exercise valid old history, completed retirement and partial/unknown state.
 - For interrupted pairing, check certificate/identity continuity and the supported terminal/recovery path.
 - For target/session changes, prove the old target has no effect and a fresh target works.
+- For capability changes, disable and re-enable in the same Host process; verify both refusal while disabled and a fresh effect after re-enable.
+- For task cleanup, include a completed task whose final result was not read until after the executor retention window.
 
 Use disposable local fixtures for repeated regression runs. Preserve live test profiles and
 historical UNKNOWN outcomes. Diagnose unknown writes with read-only evidence; do not replay them,
