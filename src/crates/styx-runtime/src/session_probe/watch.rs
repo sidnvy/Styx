@@ -14,12 +14,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use styx_contracts::identity::AgentInstanceId;
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, LinesCodec};
-// A long-lived watch must not occupy the short probe partition: the desktop
-// supervisor intentionally owns one watch AND one fresh association probe.
-// Dedicated single slots bound each kind, without allowing two watchers to
-// starve discovery/association or allowing unbounded worker fan-out.
-static WATCH_SLOT: std::sync::LazyLock<Arc<Semaphore>> =
-    std::sync::LazyLock::new(|| Arc::new(Semaphore::new(1)));
 const QUEUE: usize = 8;
 const IDLE: Duration = Duration::from_secs(35);
 const END_GRACE: Duration = Duration::from_secs(2);
@@ -40,7 +34,6 @@ pub enum Wire {
 #[serde(rename_all = "snake_case")]
 pub enum ParentStop {
     Cancelled,
-    Busy,
     Spawn,
     Entropy,
     InvalidFrame,
@@ -254,20 +247,11 @@ async fn run(
     cancel: CancellationToken,
     instance: AgentInstanceId,
 ) -> WatchReport {
-    let permit = match WATCH_SLOT.clone().try_acquire_owned() {
-        Ok(p) => p,
-        Err(_) => {
-            let mut value = report(ParentStop::Busy, false, None, false, None);
-            value.stream_instance = Some(instance);
-            return value;
-        }
-    };
     let dropped = CancellationToken::new();
     let guard = dropped.clone().drop_guard();
     let (tx, rx) = oneshot::channel();
     let waiter_instance = instance.clone();
     tokio::spawn(async move {
-        let _permit = permit;
         let _pin = &image;
         let mut reply = Reply {
             tx: Some(tx),

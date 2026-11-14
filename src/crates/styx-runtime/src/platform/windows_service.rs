@@ -19,7 +19,6 @@ use styx_contracts::{
         NativeState,
     },
 };
-use tokio::sync::Semaphore;
 #[path = "windows_service/runner.rs"]
 mod runner;
 #[path = "windows_service/scm.rs"]
@@ -54,8 +53,6 @@ pub(crate) enum ServiceError {
     Conflict,
     #[error("Windows service unavailable or registration requires OS authorization")]
     Unavailable,
-    #[error("Windows service reader capacity reached")]
-    Busy,
     #[error("Windows service outcome unknown; inspect original operation")]
     Unknown,
 }
@@ -69,19 +66,12 @@ fn unknown<T>(_: T) -> ServiceError {
 fn unavailable<T>(_: T) -> ServiceError {
     ServiceError::Unavailable
 }
-static READERS: Semaphore = Semaphore::const_new(2);
-/// The permit and captured pins remain with the original blocking call after
+/// Captured pins remain with the original blocking call after
 /// waiter loss; none of these native calls are canceled or retried.
 pub(crate) async fn blocking_read<T: Send + 'static>(
     work: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    let permit = READERS.try_acquire().map_err(|_| ServiceError::Busy)?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        work()
-    })
-    .await
-    .map_err(unknown)?
+    tokio::task::spawn_blocking(work).await.map_err(unknown)?
 }
 fn owner(root: &RootIdentity) -> Result<&str> {
     let RootIdentity::Windows { owner_sid, .. } = root else {

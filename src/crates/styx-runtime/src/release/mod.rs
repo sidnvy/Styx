@@ -381,18 +381,9 @@ fn reobserve(root: &ReleaseRoot, original: &RawFile, limit: usize) -> Result<()>
     }
     Ok(())
 }
-#[cfg(any(
-    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
-    all(
-        target_os = "macos",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    )
-))]
-static INSPECTORS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
-/// Async read-only client port. The actual blocking worker owns its permit;
-/// dropping its waiter never admits an extra concurrent verifier.
+/// Async read-only client port. The blocking worker owns its original inputs
+/// until verification completes, including after its caller stops waiting.
 pub async fn inspect(
     payload: &Path,
     publisher_file: &Path,
@@ -409,11 +400,9 @@ pub async fn inspect(
     {
         let expected =
             PublisherFingerprint::parse(expected_pin).map_err(|_| ReleaseError::Invalid)?;
-        let permit = INSPECTORS.try_acquire().map_err(|_| ReleaseError::Busy)?;
         let payload = payload.to_owned();
         let publisher_file = publisher_file.to_owned();
         tokio::task::spawn_blocking(move || {
-            let _permit = permit;
             let verified = verify(&payload, &publisher_file, &expected)?;
             verified.revalidate()?;
             Ok(verified.report())
@@ -471,11 +460,9 @@ async fn selection(
     {
         let expected =
             PublisherFingerprint::parse(expected_pin).map_err(|_| ReleaseError::Invalid)?;
-        let permit = INSPECTORS.try_acquire().map_err(|_| ReleaseError::Busy)?;
         let payload = payload.to_owned();
         let publisher_file = publisher_file.to_owned();
         tokio::task::spawn_blocking(move || {
-            let _permit = permit;
             let verified = open_release(&payload, &publisher_file, &expected, verify_payload)?;
             verified.revalidate()?;
             verified.runtime_selection()

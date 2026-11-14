@@ -227,12 +227,6 @@ impl fmt::Display for NativeManagementError {
 }
 impl std::error::Error for NativeManagementError {}
 type Result<T> = std::result::Result<T, NativeManagementError>;
-#[cfg(any(
-    all(target_os = "linux", target_env = "gnu"),
-    target_os = "windows",
-    target_os = "macos"
-))]
-static WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 async fn blocking<T: Send + 'static>(
     job: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
@@ -242,15 +236,9 @@ async fn blocking<T: Send + 'static>(
         target_os = "macos"
     ))]
     {
-        let permit = WORKERS
-            .try_acquire()
-            .map_err(|_| NativeManagementError::new(ErrorKind::Busy))?;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            job()
-        })
-        .await
-        .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?
+        tokio::task::spawn_blocking(job)
+            .await
+            .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?
     }
     #[cfg(not(any(
         all(target_os = "linux", target_env = "gnu"),

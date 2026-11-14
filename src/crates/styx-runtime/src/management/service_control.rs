@@ -125,21 +125,15 @@ pub(crate) type Handler =
 fn error() -> ServiceControlError {
     ServiceControlError::new("service_control_unknown_inspect_transaction")
 }
-// macOS service observations include complete signed-payload validation.
-// Retain the original scope/peer and a bounded permit until the blocking job
-// finishes, including when the async caller stops waiting.
+// The original scope/peer remains owned by the blocking job until it finishes,
+// including when the async caller stops waiting.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 async fn checked_io<T: Send + 'static>(
     work: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    static READERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
-    let permit = READERS.try_acquire().map_err(|_| error())?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        work()
-    })
-    .await
-    .map_err(|_| error())?
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| error())?
 }
 async fn validate_scope(scope: Arc<ServiceScope>) -> Result<()> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]

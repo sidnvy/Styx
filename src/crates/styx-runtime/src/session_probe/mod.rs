@@ -1,18 +1,19 @@
 //! Linux discovery runs in a bounded, caller-owned process, never in Core's
 //! address space. Its result remains unverified desktop candidates.
 use crate::platform::linux::{self, Association, DiscoveryError, LinuxDiscoverySnapshot};
+#[cfg(test)]
+use std::sync::Arc;
 use std::{
     fs::File,
     os::{fd::AsRawFd, unix::fs::MetadataExt},
     path::PathBuf,
     process::Stdio,
-    sync::{Arc, LazyLock},
     time::Duration,
 };
 use tokio::{
     io::AsyncReadExt,
     process::{Child, Command},
-    sync::{Semaphore, oneshot},
+    sync::oneshot,
     time::{Instant, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
@@ -20,12 +21,9 @@ use tokio_util::sync::CancellationToken;
 const MAX_OUTPUT: usize = 64 * 1024;
 const WORK_TIME: Duration = Duration::from_millis(1500);
 const CLEANUP_TIME: Duration = Duration::from_millis(500);
-static SLOT: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ProbeError {
-    #[error("session_probe_busy")]
-    Busy,
     #[error("session_probe_spawn_failed")]
     Spawn,
     #[error("session_probe_deadline")]
@@ -48,7 +46,6 @@ pub enum ProbeError {
 impl ProbeError {
     pub fn code(self) -> &'static str {
         match self {
-            Self::Busy => "session_probe_busy",
             Self::Spawn => "session_probe_spawn_failed",
             Self::Deadline => "session_probe_deadline",
             Self::OutputTooLarge => "session_probe_output_too_large",
@@ -180,7 +177,7 @@ async fn run(image: PinnedWorker, uid: u32) -> Result<LinuxDiscoverySnapshot, Pr
     .await
 }
 /// Raw output can only be minted after this exact owned child was waited.
-/// Private completion keeps the original image pin and shared slot until any
+/// Private completion keeps the original image pin until any
 /// bounded native revalidation is joined; it is not a network decoder port.
 struct WorkerOutput {
     bytes: Vec<u8>,
@@ -192,15 +189,10 @@ where
     F: FnOnce(WorkerOutput, Instant) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<T, ProbeError>> + Send + 'static,
 {
-    let permit = SLOT
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| ProbeError::Busy)?;
     let stop = CancellationToken::new();
     let guard = stop.clone().drop_guard();
     let (tx, rx) = oneshot::channel();
     tokio::spawn(async move {
-        let _permit = permit;
         let _image_pin = &image;
         let mut reply = Some(tx);
         if stop.is_cancelled() {

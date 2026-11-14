@@ -18,21 +18,19 @@ use std::{
     os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf},
     process::Stdio,
-    sync::{Arc, LazyLock},
+    sync::Arc,
     time::Duration,
 };
 use styx_contracts::identity::Sha256Digest;
 use tokio::{
     io::AsyncReadExt,
     process::Command,
-    sync::{Semaphore, oneshot},
+    sync::oneshot,
     time::{Instant, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
 
 const OUTPUT_LIMIT: usize = 64 * 1024;
-static ACTIONS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(2)));
-static READERS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(2)));
 type Result<T> = std::result::Result<T, ManagerError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ManagerError {
@@ -163,16 +161,9 @@ fn identity(file: &File) -> Result<FileIdentity> {
     })
 }
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
-    let permit = READERS
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| ManagerError::Busy)?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        f()
-    })
-    .await
-    .map_err(|_| ManagerError::Unknown)?
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|_| ManagerError::Unknown)?
 }
 async fn open(path: &Path) -> Result<Arc<Profile>> {
     let path = path.to_path_buf();
@@ -302,10 +293,6 @@ async fn tool_owned(
     if Instant::now() >= end {
         return Err(ManagerError::Unknown);
     }
-    let permit = ACTIONS
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| ManagerError::Busy)?;
     let (send, receive) = oneshot::channel();
     tokio::spawn(async move {
         let mut unreaped = None;
@@ -350,9 +337,8 @@ async fn tool_owned(
         .await;
         if let Some(mut child) = unreaped {
             // Return Unknown within the cleanup budget, while the original
-            // owned child and capacity remain retained until actual wait.
+            // owned child remains retained until actual wait.
             tokio::spawn(async move {
-                let _permit = permit;
                 while child.wait().await.is_err() {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -360,11 +346,8 @@ async fn tool_owned(
                     let _ = waited.send(());
                 }
             });
-        } else {
-            drop(permit);
-            if let Some(waited) = waited {
-                let _ = waited.send(());
-            }
+        } else if let Some(waited) = waited {
+            let _ = waited.send(());
         }
         let _ = send.send(result);
     });

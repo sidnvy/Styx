@@ -58,7 +58,6 @@ fn os(error: crate::platform::windows_service::ServiceError) -> NativeManagement
     NativeManagementError::new(match error {
         ManagerError::Invalid => ErrorKind::Invalid,
         ManagerError::Conflict => ErrorKind::Conflict,
-        ManagerError::Busy => ErrorKind::Busy,
         ManagerError::Unavailable => ErrorKind::Unavailable,
         ManagerError::Unknown => ErrorKind::Unknown,
     })

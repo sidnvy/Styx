@@ -47,13 +47,11 @@ use styx_core::management::{
     deployment::*,
     plan::{self, Component, PlanAction},
 };
-use tokio::sync::Semaphore;
 
 const FILE_LIMIT: usize = 1024 * 1024;
 const MAX_STEPS: usize = 64;
 // A cancelled read waiter cannot release this permit while its blocking reader
 // is still executing. No unbounded blocking work or request queue is admitted.
-static READERS: Semaphore = Semaphore::const_new(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ManagementError {
@@ -619,14 +617,10 @@ impl Loaded {
     }
 }
 pub async fn inspect_deployment(state_dir: &Path) -> Result<ManagementInspection> {
-    let permit = READERS.try_acquire().map_err(|_| ManagementError::Busy)?;
     let path = state_dir.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        load(&path)?.finish()
-    })
-    .await
-    .map_err(|_| ManagementError::ReaderFailed)?
+    tokio::task::spawn_blocking(move || load(&path)?.finish())
+        .await
+        .map_err(|_| ManagementError::ReaderFailed)?
 }
 
 #[cfg(test)]

@@ -33,11 +33,7 @@ use styx_contracts::{
         NativeComponentDesired, NativeManager, NativeRunDesired, NativeRuntimeSelection,
     },
 };
-use tokio::{
-    io::AsyncReadExt,
-    process::Command,
-    sync::{Semaphore, oneshot},
-};
+use tokio::{io::AsyncReadExt, process::Command, sync::oneshot};
 
 const LIMIT: usize = 64 * 1024;
 const LAUNCHCTL: &str = "/bin/launchctl";
@@ -45,23 +41,13 @@ const PLIST_PARENT: &str = "/Library/LaunchDaemons";
 // Darwin sockaddr_un is shorter than Linux's. Keep the endpoint in the same
 // original private state root, with unchanged peer and protocol authentication.
 pub(crate) const CONTROL_SOCKET_NAME: &str = ".styx.sock";
-static TOOLS: Semaphore = Semaphore::const_new(2);
-// Separate from TOOLS: a utility may retain its tool permit while waiting for a
-// checked read, so sharing that semaphore would permit a self-deadlock.
-static READERS: Semaphore = Semaphore::const_new(2);
 /// Bounded synchronous observation only. A dropped async waiter never aborts
-/// the original blocking job: its captured Arc(s) and permit survive until the
+/// the original blocking job: its captured Arc(s) survive until the
 /// closure actually completes. Callers cannot return borrowed material.
 pub(crate) async fn blocking_read<T: Send + 'static>(
     read: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    let permit = READERS.try_acquire().map_err(|_| ServiceError::Busy)?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        read()
-    })
-    .await
-    .map_err(unknown)?
+    tokio::task::spawn_blocking(read).await.map_err(unknown)?
 }
 async fn process_is_current(birth: ProcessIdentity) -> Result<bool> {
     blocking_read(move || birth.still_current().map_err(unknown)).await
@@ -2012,10 +1998,8 @@ async fn tool_observation(
     if definition.install_preparation {
         return Err(ServiceError::Invalid);
     }
-    let permit = TOOLS.try_acquire().map_err(|_| ServiceError::Busy)?;
     let (send, receive) = oneshot::channel();
     tokio::spawn(async move {
-        let _permit = permit;
         let result = async {
             let checked = definition.clone();
             blocking_read(move || checked.validate_identity()).await?;

@@ -7,11 +7,8 @@
 //! same-image memory-limited worker, never in the Host address space.
 //! https://docs.rs/zbus/5.14.0/zbus/struct.MessageStream.html
 use super::*;
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, LazyLock},
-};
-use tokio::sync::{Semaphore, mpsc};
+use std::collections::BTreeMap;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zbus::{MatchRule, Message, MessageStream, message::Type};
 const QUEUE: usize = 8;
@@ -19,7 +16,6 @@ const RECONCILE: Duration = Duration::from_secs(30);
 const DEBOUNCE: Duration = Duration::from_millis(100);
 const WORK: Duration = Duration::from_millis(1800);
 const CLOSE: Duration = Duration::from_millis(200);
-static SLOT: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
 
 /// Full known login instance, not a Desktop binding. Backend/seat are not
 /// evidence for a compositor association, and PID alone is never this key.
@@ -93,7 +89,6 @@ pub enum WatchStop {
     ConsumerGone,
     SequenceExhausted,
     NotIsolated,
-    Busy,
     SourceChanged,
     SourceEnded,
     Discovery(DiscoveryError),
@@ -400,9 +395,6 @@ pub(crate) async fn watch_current_user(
     if events.max_capacity() != QUEUE || !isolated() {
         return stop(WatchStop::NotIsolated, false, false);
     }
-    let Ok(_slot) = SLOT.clone().try_acquire_owned() else {
-        return stop(WatchStop::Busy, false, false);
-    };
     let uid = nix::unistd::geteuid().as_raw();
     let end = Instant::now() + Duration::from_secs(2);
     let stream = match timeout_at(end, UnixStream::connect(SYSTEM_BUS)).await {

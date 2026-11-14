@@ -558,19 +558,8 @@ async fn recover_app_transaction(
         target_os = "windows"
     ))]
     {
-        // Acquire before moving a retained error into a cancellable waiter. A
-        // Busy response must not drop its original coordinator with the closure.
-        let permit = match WORKERS.try_acquire() {
-            Ok(permit) => permit,
-            Err(_) => {
-                return Err(retained.unwrap_or_else(|| {
-                    NativeManagementError::new(ErrorKind::Busy).with_app_scope(scope.clone())
-                }));
-            }
-        };
         let output_scope = scope.clone();
         tokio::task::spawn_blocking(move || {
-            let _permit = permit;
             if let Some(mut error) = retained {
                 if error
                     ._app_scope

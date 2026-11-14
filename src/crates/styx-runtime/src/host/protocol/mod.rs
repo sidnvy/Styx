@@ -685,7 +685,7 @@ impl<'a> HostProtocol<'a> {
         features
     }
     /// Scoped business waiters never own the native executor. Control admission
-    /// remains live while at most two business handlers await upstream work.
+    /// remains live while business handlers await upstream work.
     pub async fn run_connection(&self, link: &mut HostWssLink) -> Result<(), ProtocolError> {
         self.run_connection_with_stop(link, &CancellationToken::new())
             .await

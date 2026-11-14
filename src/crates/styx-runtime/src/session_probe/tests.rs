@@ -77,15 +77,20 @@ fn assert_original_gone((pid, birth): (u32, u64)) {
     }
     println!("owned_fixture_gone pid={pid} start_ticks={birth}");
 }
-async fn available() {
+async fn wait_original_gone(identity: (u32, u64)) {
     let end = Instant::now() + Duration::from_secs(2);
-    while SLOT.available_permits() != 1 {
+    while let Ok(ProcessIdentity::Linux { start_ticks, .. }) = ProcessIdentity::observe(identity.0)
+    {
+        if start_ticks != identity.1 {
+            break;
+        }
         assert!(
             Instant::now() < end,
-            "actual process cleanup did not return its permit"
+            "original probe did not finish cleanup"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    assert_original_gone(identity);
 }
 #[tokio::test]
 async fn owned_worker_bounds_cancel_and_reap_batch() {
@@ -96,7 +101,6 @@ async fn owned_worker_bounds_cancel_and_reap_batch() {
     let (image, pid) = fixtures.image("valid", "valid", payload);
     assert!(run(image, uid).await.unwrap().candidates.is_empty());
     assert_original_gone(pid_fact(&pid).await);
-    available().await;
 
     let (image, pid) = fixtures.image("oversize", "large", "");
     assert_eq!(
@@ -104,30 +108,27 @@ async fn owned_worker_bounds_cancel_and_reap_batch() {
         Some(ProbeError::OutputTooLarge)
     );
     assert_original_gone(pid_fact(&pid).await);
-    available().await;
 
     let (image, pid) = fixtures.image("hang", "hang", "");
     let hung = tokio::spawn(run(image, uid));
     let identity = pid_fact(&pid).await;
-    assert_eq!(SLOT.available_permits(), 0);
-    assert_eq!(probe_current_user().await.err(), Some(ProbeError::Busy));
+    // A slow probe does not reserve discovery for the whole Host.
+    let (parallel, parallel_pid) = fixtures.image("parallel", "valid", payload);
+    assert!(run(parallel, uid).await.unwrap().candidates.is_empty());
+    assert_original_gone(pid_fact(&parallel_pid).await);
     assert_eq!(hung.await.unwrap().err(), Some(ProbeError::Deadline));
     assert_original_gone(identity);
-    available().await;
 
     let (image, pid) = fixtures.image("caller-drop", "hang", "");
     let waiter = tokio::spawn(run(image, uid));
     let identity = pid_fact(&pid).await;
-    assert_eq!(SLOT.available_permits(), 0);
     waiter.abort();
     assert!(waiter.await.unwrap_err().is_cancelled());
-    available().await;
-    assert_original_gone(identity);
+    wait_original_gone(identity).await;
 
     let (image, pid) = fixtures.image("invalid", "valid", "{}");
     assert_eq!(run(image, uid).await.err(), Some(ProbeError::InvalidFacts));
     assert_original_gone(pid_fact(&pid).await);
-    available().await;
     let refusal =
         serde_json::to_string(&WorkerRefusal::from_error(DiscoveryError::OwnerChanged)).unwrap();
     let (image, pid) = fixtures.image("typed-refusal", "refusal", &refusal);
@@ -135,7 +136,6 @@ async fn owned_worker_bounds_cancel_and_reap_batch() {
     assert_eq!(error, ProbeError::Discovery(DiscoveryError::OwnerChanged));
     assert_eq!(error.code(), "login_owner_changed");
     assert_original_gone(pid_fact(&pid).await);
-    available().await;
     // Unknown/extra fields cannot manufacture a recognized native cause.
     assert!(
         serde_json::from_str::<WorkerRefusal>(r#"{"schema":1,"error":"arbitrary_private_text"}"#)
@@ -193,13 +193,11 @@ async fn owned_worker_bounds_cancel_and_reap_batch() {
         "must observe allocator failure, not malformed output or timeout"
     );
     assert_original_gone(pid_fact(&memory_pid).await);
-    available().await;
     let (image, pid) = fixtures.image("after-memory", "valid", payload);
     assert!(run(image, uid).await.unwrap().candidates.is_empty());
     assert_original_gone(pid_fact(&pid).await);
-    available().await;
     println!(
-        "owned-process probe batch PASS: valid typed fixture, oversize>64KiB, timeout, caller future drop, Busy/no second worker, malformed facts; memory allocation SIGABRT isolated; recovery success; typed refusal preserved; all8 exact PID/birth identities gone after actualwait; slot returned after each; private fixture root removed on test completion; not logind/Desktop acceptance"
+        "owned-process probe batch PASS: valid typed fixture, oversize>64KiB, timeout, caller future drop, independent concurrent probe, malformed facts; memory allocation SIGABRT isolated; recovery success; typed refusal preserved; exact PID/birth identities gone after actual wait; private fixture root removed on test completion; not logind/Desktop acceptance"
     );
 }
 
