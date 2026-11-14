@@ -13,7 +13,7 @@ mod maintenance;
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod maintenance_integration_tests;
 mod network_interfaces;
-pub(crate) mod pairing_link;
+use crate::enrollment::pairing_link;
 mod plugin;
 mod role_retire;
 mod runtime_bootstrap;
@@ -675,6 +675,29 @@ impl HostApp {
             app.unknown = true;
         }
         Ok(app)
+    }
+    async fn record_join(&mut self, report: native_join::JoinReport) -> Result<Value, AppError> {
+        self.read_configuration().await?;
+        self.native_computer_requested = Some(report.computer_requested);
+        self.native_runtime = Some(report.verified_runtime.clone());
+        let value = serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))?;
+        self.enrollment = Some(value.clone());
+        Ok(value)
+    }
+    async fn finish_join(&mut self) -> Result<Value, AppError> {
+        if self.running.is_some() {
+            return Err(AppError("app_role_busy"));
+        }
+        self.read_configuration().await?;
+        let report = native_join::claim_for_app(self.scope.clone(), self.native_runtime.clone())
+            .await
+            .map_err(|e| self.join_error(e))?;
+        let value = self.record_join(report).await?;
+        // A connection failure is reported in status. Enrollment already completed.
+        if value["status"] == "ready_to_connect" {
+            let _ = self.connect_host().await;
+        }
+        Ok(value)
     }
     fn prepare_join_input(&mut self, choice: JoinInput) -> Result<(), AppError> {
         self.available()?;
@@ -1605,7 +1628,8 @@ impl HostApp {
                 // Clear the previous secret even when replacement input is invalid.
                 self.inspected_join = None;
                 let input: InspectJoinInput = decode_input(&input)?;
-                let inspected = pairing_link::inspect(&input.link, now_ms()?)
+                let inspected = pairing_link::resolve(&input.link, now_ms()?)
+                    .await
                     .map_err(|e| AppError(e.code()))?;
                 let preview = inspected.preview();
                 self.inspected_join = Some(inspected);
@@ -1617,6 +1641,11 @@ impl HostApp {
                 {
                     return Err(AppError("app_join_inspection_required"));
                 }
+                let preapproved = matches!(operation, Operation::Join)
+                    && self
+                        .inspected_join
+                        .as_ref()
+                        .is_some_and(|link| link.preapproved);
                 if matches!(operation, Operation::Join) {
                     let choice: JoinInput = decode_input(&input)?;
                     validate_choice(&choice)?;
@@ -1630,37 +1659,14 @@ impl HostApp {
                     native_join::request_for_app(self.scope.clone(), &self.deployment_file)
                         .await
                         .map_err(|e| self.join_error(e))?;
-                self.read_configuration().await?;
-                self.native_computer_requested = Some(report.computer_requested);
                 self.native_runtime = Some(report.verified_runtime.clone());
-                let value =
-                    serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))?;
-                self.enrollment = Some(value.clone());
-                Ok(value)
-            }
-            Operation::ClaimJoin => {
-                if self.running.is_some() {
-                    return Err(AppError("app_role_busy"));
+                if preapproved {
+                    self.finish_join().await
+                } else {
+                    self.record_join(report).await
                 }
-                // Enrollment must not bypass an unresolved C07 operation.
-                self.read_configuration().await?;
-                let report =
-                    native_join::claim_for_app(self.scope.clone(), self.native_runtime.clone())
-                        .await
-                        .map_err(|e| self.join_error(e))?;
-                self.read_configuration().await?;
-                self.native_computer_requested = Some(report.computer_requested);
-                self.native_runtime = Some(report.verified_runtime.clone());
-                let value =
-                    serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))?;
-                self.enrollment = Some(value.clone());
-                // A confirmed join connects at once; the claim itself already
-                // succeeded, so a connect failure shows in status, not here.
-                if value["status"] == "ready_to_connect" {
-                    let _ = self.connect_host().await;
-                }
-                Ok(value)
             }
+            Operation::ClaimJoin => self.finish_join().await,
             Operation::InspectHost => {
                 if self.running.is_some() {
                     return Err(AppError("app_role_busy"));

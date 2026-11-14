@@ -45,7 +45,7 @@ Browser 与 Computer Use 优先沿用**固定版本**的 Playwright、Cua 工具
 
 | 当前入口 | 改造决定 |
 | --- | --- |
-| [Gateway 配对管理](../../crates/styx-runtime/src/app/gateway_ui.rs)、[现有邀请编码](../../crates/styx-runtime/src/app/pairing_link.rs)、[设备加入](../../crates/styx-runtime/src/management/native_join.rs) | 保留设备身份、信任校验、一次消费和撤销。新入口采用地址加短码。新配对流程移除创建邀请后的第二次管理员批准，以及批准时为设备分配 Browser/Computer 权限的步骤；现有设备的能力设置显式承接，避免升级时静默开启。 |
+| [Gateway 配对管理](../../crates/styx-runtime/src/app/gateway_ui.rs)、[现有邀请编码](../../crates/styx-runtime/src/enrollment/pairing_link.rs)、[设备加入](../../crates/styx-runtime/src/management/native_join.rs) | 保留设备身份、信任校验、一次消费和撤销。新入口采用地址加短码。新配对流程移除创建邀请后的第二次管理员批准，以及批准时为设备分配 Browser/Computer 权限的步骤；现有设备的能力设置显式承接，避免升级时静默开启。 |
 | [Tunnel](../../crates/styx-runtime/src/foreground/tunnel.rs)、[Gateway 路由](../../crates/styx-runtime/src/gateway/paired)、[对话关联](ADR-036-TUNNEL-CONVERSATION-OWNER.md) | 保留单入口、设备选择与原请求关联。管理操作可从 ChatGPT 到达对应角色。将“哪段对话拥有资源”按上述三种能力分别处理；关闭 A 的传输或聊天后，B 仍可访问同一 Host 上的原 Exec 任务。 |
 | [Host 协调与清理](../../crates/styx-runtime/src/host/coordinator)、[操作记录](../../crates/styx-core/src/operations.rs)、[执行器适配](../../crates/styx-runtime/src/providers) | 保留原操作身份、已派发结果未知时的保护，以及实际进程清理。Exec 的任务寿命与对话解绑；Browser 明确转交现有会话；保留 Cua 实际需要的资源保护。 |
 | [Rust App 入口](../../crates/styx-runtime/src/app.rs)、[Mac](../../host/macos/product-ui/ProductViews.swift)、[Windows](../../host/windows/Styx.cs)、[CLI 设置](../../crates/styx/src/setup.rs) | 按安装模式组成向导。移除桌面独立「暂停连接」操作和旧的二次批准界面；底层断连、退出清理和撤销仍各有调用方。Host-only 隐去 Tunnel 设置，桌面建中心的流程必须完成 Tunnel 配置。 |

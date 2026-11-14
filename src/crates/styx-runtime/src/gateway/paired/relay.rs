@@ -17,9 +17,9 @@ use std::{
 };
 use styx_contracts::{identity::*, operation::OperationId};
 use styx_core::enrollment::{ConnectionLease, Lane};
-use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
 #[cfg(any(not(target_os = "macos"), test))]
 use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum RelayError {

@@ -153,8 +153,16 @@ impl Clock {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Invite {
+    short_code: Option<ShortInvite>,
+
     #[serde(default = "default_ttl")]
     ttl_seconds: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShortInvite {
+    origin: String,
+    ca_pem: String,
 }
 fn default_ttl() -> u64 {
     600
@@ -366,6 +374,7 @@ fn capabilities(g: Grant, exec: bool) -> Value {
 /// accessor. Existing native journal required; legacy/fresh activation is a
 /// separate migration/bootstrap transaction and cannot default to empty here.
 pub struct EnrollmentService {
+    offers: super::short_code::Offers,
     store: OwnedEnrollmentJournal,
     ledger: EnrollmentLedger,
     control: EnrollmentControl,
@@ -416,6 +425,7 @@ impl EnrollmentService {
             .with_journal(|j| Ok(recovery::recover_journal(j, epoch, limits, now)))?
             .map_err(|_| ServiceError::new(503, "enrollment_recovery_required"))?;
         let mut service = Self {
+            offers: Default::default(),
             store,
             ledger: recovered.ledger,
             control: recovered.control,
@@ -736,6 +746,73 @@ impl EnrollmentService {
             Err(error) => Err(error.into()),
         }
     }
+    fn approve_join(
+        &mut self,
+        request: RequestId,
+        selection: Option<(Sha256Digest, Grant)>,
+        now: u64,
+    ) -> Result<(u16, Value), ServiceError> {
+        validate_request(&request)?;
+        let admin = self.control.admin();
+        let target = self.ledger.approval_target(&admin, &request)?;
+        let pending = self
+            .ledger
+            .pending_for_admin(&admin, now)?
+            .into_iter()
+            .find(|p| p.facts.request == request)
+            .ok_or(ServiceError::new(409, "request_not_pending"))?;
+        let profile = self.load_profile(&target.profile, &target.device, target.fingerprint)?;
+        let token = secret(48)?;
+        let sealed = profile
+            .public_key()
+            .wrap_credential(token.as_bytes())
+            .map_err(|_| ServiceError::new(503, "credential_wrap_failed"))?;
+        let digest = Sha256Digest::of_bytes(token.as_bytes());
+        let prepared = self.control.attest_prepared_credential(
+            target.clone(),
+            CredentialRef(digest),
+            digest,
+            SealedCredentialRef(Sha256Digest::of_bytes(&sealed)),
+        )?;
+        let (fingerprint, grant) =
+            selection.unwrap_or((pending.facts.fingerprint, pending.facts.requested));
+        // Legacy admin approval carries explicit fingerprint but no code
+        // field. Bind to this authoritative pending code without claiming
+        // a wire proof that the human compared the displayed code.
+        let intent = self.ledger.approve(
+            &admin,
+            styx_core::enrollment::ApprovalRequest {
+                request,
+                fingerprint,
+                comparison: pending.facts.comparison,
+                grant,
+            },
+            prepared,
+            now,
+        )?;
+        self.persist(
+            intent,
+            &[
+                (MaterialKind::Token, token.as_bytes()),
+                (MaterialKind::Sealed, &sealed),
+            ],
+        )?;
+        Ok((
+            200,
+            json!({"device_id":target.device,"status":"approved","fingerprint":target.fingerprint,"approved_capabilities":capabilities(grant,true)}),
+        ))
+    }
+    pub(super) fn short_reply(
+        &mut self,
+        id: &str,
+        peer: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
+        if self.uncertain {
+            return Err("enrollment_recovery_required");
+        }
+        let now = self.clock.observe().map_err(|e| e.code())?;
+        self.offers.reply(id, peer, now)
+    }
     pub(super) fn request(
         &mut self,
         method: &Method,
@@ -752,36 +829,55 @@ impl EnrollmentService {
         match r {
             Route::Invite => {
                 let req: Invite = decode(body)?;
-                let code = secret(32)?;
+                let mut code = secret(32)?;
+                if req.short_code.is_some() {
+                    code.insert_str(0, super::short_code::INVITE_PREFIX);
+                }
                 let now = self.time()?;
-                let intent = self.ledger.invite(
-                    &self.control.admin(),
-                    Sha256Digest::of_bytes(code.as_bytes()),
-                    req.ttl_seconds,
-                    None,
-                    now,
-                )?;
-                let Mutation::Invite { invitation } = &intent.body().mutation else {
+                if !(60..=600).contains(&req.ttl_seconds) {
                     return Err(invalid());
-                };
-                let expires = invitation.expires;
+                }
+                let expires = now
+                    .checked_add(req.ttl_seconds * 1000)
+                    .ok_or_else(invalid)?;
+                let hash = Sha256Digest::of_bytes(code.as_bytes());
+                let offer = req
+                    .short_code
+                    .map(|short| {
+                        self.offers
+                            .prepare(&short.origin, &short.ca_pem, &code, expires, now)
+                            .map_err(|reason| ServiceError::new(409, reason))
+                    })
+                    .transpose()?;
+                let intent =
+                    self.ledger
+                        .invite(&self.control.admin(), hash, req.ttl_seconds, None, now)?;
                 self.persist(intent, &[])?;
-                Ok((
-                    200,
-                    json!({"invitation":&**code,"expires_at":expires,"one_use":true}),
-                ))
+                let mut reply = json!({"expires_at":expires,"one_use":true});
+                if let Some((pairing_code, offer)) = offer {
+                    self.offers.publish(&pairing_code, offer);
+                    reply["pairing_code"] = json!(pairing_code);
+                } else {
+                    reply["invitation"] = json!(code.as_str());
+                }
+                Ok((200, reply))
             }
             Route::Close => {
                 let _: Empty = decode(body)?;
                 let now = self.time()?;
                 let p = self.ledger.close_window(&self.control.admin(), None, now)?;
                 self.persist(p, &[])?;
+                self.offers.clear();
                 Ok((200, json!({"schema":1,"pairing":{"status":"closed"}})))
             }
             Route::Join => {
                 let (payload, signature) = decode::<Join>(body)?.split();
                 let verified = profile::verify_join(&payload, &signature).map_err(join_failure)?;
-                let code = secret(32)?;
+                let preapproved = super::short_code::is_invitation(&payload.invitation);
+                let mut code = secret(32)?;
+                if preapproved {
+                    code.insert_str(0, super::short_code::CLAIM_PREFIX);
+                }
                 let request_id = RequestId::try_from(uuid::Uuid::new_v4().simple().to_string())
                     .map_err(|_| invalid())?;
                 let profile_ref =
@@ -800,12 +896,14 @@ impl EnrollmentService {
                 let Mutation::Join { pending } = &intent.body().mutation else {
                     return Err(invalid());
                 };
+                let invitation_hash = pending.facts.invitation_hash;
                 let result = json!({"request_id":request_id,"claim_secret":&**code,"fingerprint":verified.fingerprint(),"status":"pending","expires_at":pending.expires,
                     "comparison_code":pending.facts.comparison,"ingress":{"origin":pairing.origin,"certificate_sha256":pairing.leaf,"generation":pairing.ingress_generation}});
                 self.persist(
                     intent,
                     &[(MaterialKind::Profile, verified.raw_profile_bytes())],
                 )?;
+                self.offers.consume(invitation_hash);
                 Ok((202, result))
             }
             Route::Pending => {
@@ -857,59 +955,18 @@ impl EnrollmentService {
             }
             Route::Approve => {
                 let req: Approve = decode(body)?;
-                validate_request(&req.request_id)?;
                 let now = self.time()?;
-                let admin = self.control.admin();
-                let target = self.ledger.approval_target(&admin, &req.request_id)?;
-                let pending = self
-                    .ledger
-                    .pending_for_admin(&admin, now)?
-                    .into_iter()
-                    .find(|p| p.facts.request == req.request_id)
-                    .ok_or(ServiceError::new(409, "request_not_pending"))?;
-                let profile =
-                    self.load_profile(&target.profile, &target.device, target.fingerprint)?;
-                let token = secret(48)?;
-                let sealed = profile
-                    .public_key()
-                    .wrap_credential(token.as_bytes())
-                    .map_err(|_| ServiceError::new(503, "credential_wrap_failed"))?;
-                let digest = Sha256Digest::of_bytes(token.as_bytes());
-                let prepared = self.control.attest_prepared_credential(
-                    target.clone(),
-                    CredentialRef(digest),
-                    digest,
-                    SealedCredentialRef(Sha256Digest::of_bytes(&sealed)),
-                )?;
-                let grant = Grant {
-                    computer: req.enable_computer,
-                    browser: req.enable_browser,
-                };
-                // Legacy admin approval carries explicit fingerprint but no code
-                // field. Bind to this authoritative pending code without claiming
-                // a wire proof that the human compared the displayed code.
-                let intent = self.ledger.approve(
-                    &admin,
-                    styx_core::enrollment::ApprovalRequest {
-                        request: req.request_id,
-                        fingerprint: req.fingerprint,
-                        comparison: pending.facts.comparison,
-                        grant,
-                    },
-                    prepared,
+                self.approve_join(
+                    req.request_id,
+                    Some((
+                        req.fingerprint,
+                        Grant {
+                            computer: req.enable_computer,
+                            browser: req.enable_browser,
+                        },
+                    )),
                     now,
-                )?;
-                self.persist(
-                    intent,
-                    &[
-                        (MaterialKind::Token, token.as_bytes()),
-                        (MaterialKind::Sealed, &sealed),
-                    ],
-                )?;
-                Ok((
-                    200,
-                    json!({"device_id":target.device,"status":"approved","fingerprint":target.fingerprint,"approved_capabilities":capabilities(grant,true)}),
-                ))
+                )
             }
             Route::Claim => {
                 let req: Claim = decode(body)?;
@@ -919,7 +976,18 @@ impl EnrollmentService {
                     req.request_id.clone(),
                     Sha256Digest::of_bytes(req.claim_secret.as_bytes()),
                 );
-                match self.ledger.claim(&proof, now)? {
+                // The claim hash in the original signed join's durable record binds
+                // the server-issued claim secret, including its grant mode. An old
+                // claim cannot be upgraded by adding this prefix. After a restart
+                // the same unclaimed request can still finish without an admin.
+                let mut view = self.ledger.claim(&proof, now)?;
+                if super::short_code::is_claim(&req.claim_secret)
+                    && matches!(view, styx_core::enrollment::ClaimView::Pending)
+                {
+                    self.approve_join(req.request_id.clone(), None, now)?;
+                    view = self.ledger.claim(&proof, now)?;
+                }
+                match view {
                     styx_core::enrollment::ClaimView::Pending => {
                         Ok((202, json!({"status":"pending"})))
                     }

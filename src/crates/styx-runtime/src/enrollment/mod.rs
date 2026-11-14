@@ -2,11 +2,13 @@
 //! administrator factory. Recovery of file/Core facts does not prove profile
 //! crypto semantics, original transport quiescence or OS/native readiness.
 pub mod http;
+pub(crate) mod pairing_link;
 mod profile;
 mod recovery;
 pub(crate) mod retirement;
 pub mod service;
 pub mod shared;
+pub(crate) mod short_code;
 
 use crate::store::{
     ConfigurationWriterGuard, PrivateRoot,

@@ -100,33 +100,29 @@ impl HostApp {
                     .as_mut()
                     .ok_or(AppError("managed_on_hub"))?;
                 let origin = gateway.invitation_origin()?;
-                let dispatched_wall_ms = now_ms()?;
+
+                let issued = now_ms()?;
                 self.unknown = true;
                 let reply = gateway
                     .admin_once(
                         false,
-                        &json!({"ttl_seconds":pairing_link::MAX_LIFETIME_MS / 1000}),
+                        &json!({"ttl_seconds":600,"short_code":{"origin":origin,"ca_pem":gateway.ca}}),
                     )
                     .await?;
-                let secret = reply["invitation"]
-                    .as_str()
-                    .ok_or(AppError("app_local_pairing_result_unknown"))?;
-                let gateway_expires = reply["expires_at"]
-                    .as_u64()
-                    .ok_or(AppError("app_local_pairing_result_unknown"))?;
-                if reply["one_use"] != true {
+                let invite: crate::enrollment::short_code::Issued =
+                    serde_json::from_value(reply)
+                        .map_err(|_| AppError("app_local_pairing_result_unknown"))?;
+                if !invite.valid(issued) {
                     return Err(AppError("app_local_pairing_result_unknown"));
                 }
-                // The original Gateway confirmed the mutation. A local
-                // expiry or link-rendering error does not make it uncertain.
                 self.unknown = false;
-                let now = now_ms()?;
                 let expires =
-                    pairing_link::local_export_expiry(gateway_expires, dispatched_wall_ms, now)
+                    pairing_link::local_export_expiry(invite.expires_at, issued, now_ms()?)
                         .map_err(|e| AppError(e.code()))?;
-                let link = pairing_link::build(&origin, secret, expires, &gateway.ca, now)
-                    .map_err(|e| AppError(e.code()))?;
-                Ok(json!({"link":link.as_str(),"expiresAt":expires,"origin":origin}))
+                let code = invite.pairing_code;
+                Ok(
+                    json!({"link":format!("{origin} {code}"),"code":code,"expiresAt":expires,"origin":origin}),
+                )
             }
             Operation::ApproveComputer => {
                 let choice: Approval = decode_input(&input)?;

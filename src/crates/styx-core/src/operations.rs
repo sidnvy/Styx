@@ -204,7 +204,10 @@ impl OperationLedger {
             styx_contracts::TERMINAL_OPERATION_RETENTION_MS,
         );
         #[cfg(target_os = "macos")]
-        let ledger = Self { enforce_budget: false, ..ledger };
+        let ledger = Self {
+            enforce_budget: false,
+            ..ledger
+        };
         ledger
     }
     pub fn with_budget(host: HostGeneration, budget: usize, retention_ms: u64) -> Self {

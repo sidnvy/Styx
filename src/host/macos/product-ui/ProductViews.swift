@@ -273,14 +273,14 @@ struct ProductView: View {
     }
     private var invitation: some View {
         VStack(alignment: .leading, spacing: 20) {
-            heading(productText("加入已有 Styx", "Join an existing Styx"), productText("在已经设置好 Styx 的电脑上打开“设置 → 电脑 → 添加电脑”，复制邀请链接。", "On the computer where Styx is already set up, open Settings → Computers → Add computer and copy the invitation link."))
-            SecureField(productText("粘贴邀请", "Paste invitation"), text: $model.invite)
+            heading(productText("加入已有 Styx", "Join an existing Styx"), productText("在已经设置好 Styx 的电脑上打开“设置 → 电脑 → 添加电脑”，获取地址和配对码。", "On the computer where Styx is already set up, open Settings → Computers → Add computer to get the address and pairing code."))
+            SecureField(productText("网关地址和配对码（也可粘贴邀请）", "Gateway address and code (or paste invitation)"), text: $model.invite)
             Button(productText("检查邀请", "Inspect invitation")) { model.inspectInvitation() }.disabled(model.invite.isEmpty)
             if let origin = model.inspection["preview"]["origin"].string {
                 ProductPanel(title: productText("核对管理电脑身份", "Verify the main computer")) {
                     Text(origin).textSelection(.enabled)
                     if let fingerprint = model.inspection["preview"]["caSha256"].string { Text(fingerprint).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
-                    Text(productText("请通过可信渠道与管理电脑核对。下一步仍须验证连接并等待管理电脑独立批准。", "Compare these details with the main computer through a trusted channel. Connection verification and independent approval are still required.")).font(.callout).foregroundStyle(.secondary)
+                    Text(productText("确认这是你要加入的网关。", "Confirm that this is the Gateway you want to join.")).font(.callout).foregroundStyle(.secondary)
                     Button(productText("已核对，继续", "Details match — continue")) { model.acceptInvitation() }.buttonStyle(.borderedProminent)
                 }
             }

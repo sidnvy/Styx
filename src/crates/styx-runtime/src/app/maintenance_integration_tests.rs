@@ -55,26 +55,15 @@ async fn revoked_guest_startup_refusal_allows_fresh_role_without_replay() {
         .dispatch(Operation::InspectJoin, raw(json!({"link":invite["link"]})))
         .await
         .unwrap();
-    guest.dispatch(Operation::Join, raw(json!({"label":"Revoked recovery guest","computer":false,"browser":false,"persistLogin":false,
+    let joined = guest.dispatch(Operation::Join, raw(json!({"label":"Revoked recovery guest","computer":false,"browser":false,"persistLogin":false,
         "approvedGatewayOrigin":inspected["preview"]["origin"],"approvedCaSha256":inspected["preview"]["caSha256"]}))).await.unwrap();
-    let pending = hub
-        .dispatch(Operation::PendingComputers, raw(json!({})))
-        .await
-        .unwrap();
-    let row = &pending["pending"][0];
-    hub.dispatch(Operation::ApproveComputer, raw(json!({"authorize":true,"requestId":row["request_id"],"deviceId":row["device_id"],"fingerprint":row["fingerprint"],
-        "comparisonCode":row["comparison_code"],"enableComputer":false,"enableBrowser":false}))).await.unwrap();
-    native_join::claim_for_app(guest.scope.clone(), None)
-        .await
-        .unwrap();
-    // Persist the same Running intent a real App resumes. No executor has
-    // started yet; the next original App must actually encounter revoked TLS
-    // admission, rather than receiving an injected worker result.
+    assert_eq!(joined["status"], "ready_to_connect");
+    guest.settle_all().await.unwrap();
     guest.set_desired(NativeRunDesired::Running).await.unwrap();
     drop(guest);
     hub.dispatch(
         Operation::RevokeComputer,
-        raw(json!({"authorize":true,"deviceId":row["device_id"]})),
+        raw(json!({"authorize":true,"deviceId":joined["device_id"]})),
     )
     .await
     .unwrap();
@@ -582,38 +571,12 @@ async fn native_gui_computer_management_keeps_binding_and_local_identity() {
         .unwrap();
     let request = guest.dispatch(Operation::Join, raw(json!({"label":"GUI guest","computer":false,"browser":false,"persistLogin":false,
         "approvedGatewayOrigin":inspected["preview"]["origin"],"approvedCaSha256":inspected["preview"]["caSha256"]}))).await.unwrap();
-    assert_eq!(request["status"], "awaiting_approval");
+    assert_eq!(request["status"], "ready_to_connect");
     let pending = hub
         .dispatch(Operation::PendingComputers, raw(json!({})))
         .await
         .unwrap();
-    let row = &pending["pending"][0];
-    let mut approval = json!({"authorize":true,"requestId":row["request_id"],"deviceId":row["device_id"],"fingerprint":row["fingerprint"],
-        "comparisonCode":"FFFF-FFFF-FFFF-FFFF","enableComputer":false,"enableBrowser":false});
-    assert_eq!(
-        hub.dispatch(Operation::ApproveComputer, raw(approval.clone()))
-            .await
-            .unwrap_err()
-            .code(),
-        "native_gateway_approval_binding_mismatch"
-    );
-    assert_eq!(
-        hub.dispatch(Operation::Computers, raw(json!({})))
-            .await
-            .unwrap()["devices"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    approval["comparisonCode"] = row["comparison_code"].clone();
-    hub.dispatch(Operation::ApproveComputer, raw(approval))
-        .await
-        .unwrap();
-    let claimed = native_join::claim_for_app(guest.scope.clone(), None)
-        .await
-        .unwrap();
-    assert_eq!(claimed.status, "ready_to_connect");
+    assert!(pending["pending"].as_array().unwrap().is_empty());
     let listed = hub
         .dispatch(Operation::Computers, raw(json!({})))
         .await
@@ -621,7 +584,7 @@ async fn native_gui_computer_management_keeps_binding_and_local_identity() {
     assert_eq!(listed["devices"].as_array().unwrap().len(), 2);
     hub.dispatch(
         Operation::RevokeComputer,
-        raw(json!({"authorize":true,"deviceId":row["device_id"]})),
+        raw(json!({"authorize":true,"deviceId":request["device_id"]})),
     )
     .await
     .unwrap();

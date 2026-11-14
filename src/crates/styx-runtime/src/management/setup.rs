@@ -78,10 +78,16 @@ pub fn read_private(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
 }
 
 /// Reuse the App's exact link parser, certificate checks and confirmation.
-pub struct JoinLink(crate::app::pairing_link::InspectedLink);
+pub struct JoinLink(crate::enrollment::pairing_link::InspectedLink);
 impl JoinLink {
     pub fn inspect(link: &str, now_ms: u64) -> Result<Self, &'static str> {
-        crate::app::pairing_link::inspect(link, now_ms)
+        crate::enrollment::pairing_link::inspect(link, now_ms)
+            .map(Self)
+            .map_err(|e| e.code())
+    }
+    pub async fn resolve(input: &str, now: u64) -> Result<Self, &'static str> {
+        crate::enrollment::pairing_link::resolve(input, now)
+            .await
             .map(Self)
             .map_err(|e| e.code())
     }

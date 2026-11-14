@@ -221,15 +221,18 @@ async fn unsent_cli_and_app_join_retry_but_dispatched_join_stays_fenced_requires
             .unwrap();
         OwnedEnrollmentJournal::open_existing(private, writer, JournalBudget::default()).unwrap()
     };
-    let service = EnrollmentService::recover_existing(
-        journal,
-        "a".repeat(43).as_bytes(),
-        Sha256Digest::of_bytes(b"model"),
-        vec![address.to_string()],
-        styx_core::enrollment::Limits::default(),
-    )
-    .unwrap();
-    let http = EnrollmentHttp::new(server_tls.clone(), service, vec![address.to_string()]).unwrap();
+    let serve = |journal| {
+        let service = EnrollmentService::recover_existing(
+            journal,
+            "a".repeat(43).as_bytes(),
+            Sha256Digest::of_bytes(b"model"),
+            vec![address.to_string()],
+            styx_core::enrollment::Limits::default(),
+        )
+        .unwrap();
+        EnrollmentHttp::new(server_tls.clone(), service, vec![address.to_string()]).unwrap()
+    };
+    let http = serve(journal);
     let stop = CancellationToken::new();
     let server = tokio::spawn(http.run(listener, stop.clone()));
     let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -490,6 +493,126 @@ async fn unsent_cli_and_app_join_retry_but_dispatched_join_stays_fenced_requires
         }
     }
     drop(app);
+
+    let origin_text = origin.origin().ascii_serialization();
+    let body =
+        serde_json::to_vec(&json!({"short_code":{"origin":origin_text,"ca_pem":ca_pem}})).unwrap();
+    let response = native_join_http::exchange_local_admin(
+        &origin,
+        &client,
+        false,
+        &body,
+        "a".repeat(43).as_bytes(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status, 200);
+    let issued: Value = serde_json::from_slice(&response.body).unwrap();
+    let code = issued["pairing_code"].as_str().unwrap();
+    assert_eq!(code.len(), 14);
+    let address_code = format!("{} {code}", address);
+    let fresh = root.join("code-app");
+    directory(&fresh);
+    let mut app = HostApp::open_native(&fresh.join("profile"), &selection)
+        .await
+        .unwrap();
+    let bad_password = format!(
+        "{}{}",
+        &address_code[..address_code.len() - 1],
+        if code.ends_with('2') { "3" } else { "2" }
+    );
+    assert!(
+        app.dispatch(Operation::InspectJoin, raw(json!({"link":bad_password})))
+            .await
+            .is_err()
+    );
+    let preview = app
+        .dispatch(Operation::InspectJoin, raw(json!({"link":address_code})))
+        .await
+        .unwrap();
+    assert_eq!(preview["preview"]["caSha256"], pin.as_str());
+    let result=app.dispatch(Operation::Join,raw(json!({"label":"Code App","computer":false,"browser":false,"persistLogin":false,"approvedGatewayOrigin":origin_text,"approvedCaSha256":pin}))).await.unwrap();
+    assert_eq!(result["status"], "ready_to_connect");
+    assert!(
+        pairing_link::resolve(&address_code, now_ms().unwrap())
+            .await
+            .is_err()
+    );
+    app.settle_for_quit().await.unwrap();
+    drop(app);
+    let reopened = HostApp::open_native(&fresh.join("profile"), &selection)
+        .await
+        .unwrap();
+    let saved = native_join::inspect_for_app(reopened.scope.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        saved.device_id.as_str(),
+        result["device_id"].as_str().unwrap()
+    );
+    assert_eq!(saved.status, "ready_to_connect");
+    drop(reopened);
+
+    // Stop between the signed Join and the first Claim, then reopen the same
+    // journal. The authenticated claim must preserve the original invite mode.
+    let response = native_join_http::exchange_local_admin(
+        &origin,
+        &client,
+        false,
+        &body,
+        "a".repeat(43).as_bytes(),
+    )
+    .await
+    .unwrap();
+    let issued: Value = serde_json::from_slice(&response.body).unwrap();
+    let address_code = format!("{origin_text} {}", issued["pairing_code"].as_str().unwrap());
+    let inspected = pairing_link::resolve(&address_code, now_ms().unwrap())
+        .await
+        .unwrap();
+    let (_, restart_token, _, _) = inspected
+        .approve(&origin_text, Some(pin), now_ms().unwrap())
+        .unwrap()
+        .into_parts();
+    let cli2 = root.join("restart-cli");
+    directory(&cli2);
+    let input = deployment(&cli2, &selection, &origin_text, ca_pem, pin, &restart_token);
+    let pending = native_join::request(&cli2, std::ffi::OsStr::new("host"), &input)
+        .await
+        .unwrap();
+    assert_eq!(pending.status, "awaiting_approval");
+    // A second Host can have inspected the same offer before the first submits.
+    // Give it the resolved token, so this checks the durable one-use decision.
+    let second = root.join("second-host");
+    directory(&second);
+    let duplicate = deployment(
+        &second,
+        &selection,
+        &origin_text,
+        ca_pem,
+        pin,
+        &restart_token,
+    );
+    let rejected = native_join::request(&second, std::ffi::OsStr::new("host"), &duplicate)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(rejected.code(), "native_join_response_rejected");
+    drop(rejected);
+    stop.cancel();
+    let shutdown = server.await.unwrap().unwrap();
+    assert!(shutdown.connections_joined && shutdown.blocking_jobs_joined);
+    let private = PrivateRoot::open(&store_path).unwrap();
+    let writer = private.try_configuration_writer().unwrap();
+    let http = serve(
+        OwnedEnrollmentJournal::open_existing(private, writer, JournalBudget::default()).unwrap(),
+    );
+    let stop = CancellationToken::new();
+    let server = tokio::spawn(http.run(TcpListener::bind(address).await.unwrap(), stop.clone()));
+    let claimed = native_join::claim(&cli2.join("host")).await.unwrap();
+    assert_eq!(claimed.device_id, pending.device_id);
+    assert_eq!(claimed.status, "ready_to_connect");
+    let old = native_join::claim(&cli.join("host")).await.unwrap();
+    assert_eq!(old.status, "awaiting_approval");
 
     // Negative control: peer observes the WHOLE request, then closes without a
     // reply. Its remote effect cannot be inferred, so never archive or retry.

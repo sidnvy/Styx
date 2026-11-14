@@ -17,6 +17,7 @@ serde_json = { version = "=1.0.150", features = ["raw_value"] }
 ryu-js = "=1.0.3"
 thiserror = "=2.0.18"
 sha2 = "=0.10.9"
+spake2 = "=0.4.0"
 url = "=2.5.8"
 libc = "=0.2.186"
 if-addrs = "=0.15.0"

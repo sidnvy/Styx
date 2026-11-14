@@ -206,13 +206,17 @@ enum Action {
         PathBuf,
         u64,
         Option<InvitationOrigin>,
-        Option<PathBuf>,
+        InviteExport,
     ),
     Pending(PathBuf),
     Computers(PathBuf),
     Revoke(PathBuf, DeviceId),
     Approve(PathBuf, ApprovalSelection),
     Reject(PathBuf, RejectionSelection),
+}
+enum InviteExport {
+    Legacy(Option<PathBuf>),
+    ShortCode,
 }
 #[derive(Clone, Copy)]
 pub enum InvitationOrigin {
@@ -248,7 +252,22 @@ pub async fn invite_with_options(
         invitation_file.into(),
         ttl_seconds,
         origin,
-        app_link_file.map(Path::to_path_buf),
+        InviteExport::Legacy(app_link_file.map(Path::to_path_buf)),
+    ))
+    .await
+}
+/// Issue an address and single-use pairing code through the authenticated Gateway.
+pub async fn invite_short(
+    state_dir: &Path,
+    origin: InvitationOrigin,
+    code_file: &Path,
+) -> Result<AdminReport> {
+    owned(Action::Invite(
+        state_dir.into(),
+        code_file.into(),
+        600,
+        Some(origin),
+        InviteExport::ShortCode,
     ))
     .await
 }
@@ -1171,7 +1190,7 @@ fn invitation_app_link(
     now: u64,
 ) -> Result<Zeroizing<String>> {
     let ca = std::str::from_utf8(ca).map_err(|_| unknown())?;
-    crate::app::pairing_link::build(origin, &invite.invitation, invite.expires_at, ca, now)
+    crate::enrollment::pairing_link::build(origin, &invite.invitation, invite.expires_at, ca, now)
         .map_err(|_| unknown())
 }
 async fn perform(action: Action, scope: Option<Arc<crate::app::HostScope>>) -> Result<AdminReport> {
@@ -1245,7 +1264,12 @@ async fn perform(action: Action, scope: Option<Arc<crate::app::HostScope>>) -> R
             report.pending = Some(rows);
             Ok(report)
         }
-        Action::Invite(path, output, ttl, selection, app_output) => {
+        Action::Invite(path, output, ttl, selection, export) => {
+            let short = matches!(export, InviteExport::ShortCode);
+            let app_output = match export {
+                InviteExport::Legacy(path) => path,
+                InviteExport::ShortCode => None,
+            };
             if !(60..=600).contains(&ttl) {
                 return Err(refused("native_gateway_invitation_ttl"));
             }
@@ -1265,8 +1289,12 @@ async fn perform(action: Action, scope: Option<Arc<crate::app::HostScope>>) -> R
                 Ok((material, output, app_output))
             })
             .await?;
-            let body = serde_json::to_vec(&serde_json::json!({"ttl_seconds":ttl}))
-                .map_err(|_| refused("native_gateway_admin_input"))?;
+            let mut request = serde_json::json!({"ttl_seconds":ttl});
+            if short {
+                request["short_code"] = serde_json::json!({"origin":origin,"ca_pem":std::str::from_utf8(material.files[4].bytes()).map_err(|_|refused("invalid_gateway_ca"))?});
+            }
+            let body =
+                serde_json::to_vec(&request).map_err(|_| refused("native_gateway_admin_input"))?;
             let response = http::exchange_local_admin(
                 &material.origin,
                 &material.tls,
@@ -1277,28 +1305,36 @@ async fn perform(action: Action, scope: Option<Arc<crate::app::HostScope>>) -> R
             .await
             .map_err(http_error)?;
             accepted_status(response.status)?;
-            let invite: Invitation =
-                serde_json::from_slice(&response.body).map_err(|_| unknown())?;
-            if !token(invite.invitation.as_bytes())
-                || !invite.one_use
-                || invite.expires_at <= clock_ms().map_err(|_| unknown())?
-            {
-                return Err(unknown());
-            }
             let material = checked(material).await.map_err(|_| unknown())?;
-            let expires = invite.expires_at;
-            let link = if app_output.is_some() {
-                Some(invitation_app_link(
-                    &invite,
-                    &origin,
-                    material.files[4].bytes(),
-                    clock_ms().map_err(|_| unknown())?,
-                )?)
+            let now = clock_ms().map_err(|_| unknown())?;
+            let (primary, link, expires) = if short {
+                let response: crate::enrollment::short_code::Issued =
+                    serde_json::from_slice(&response.body).map_err(|_| unknown())?;
+                if !response.valid(now) {
+                    return Err(unknown());
+                }
+                (
+                    Zeroizing::new(format!("{origin} {}", response.pairing_code)),
+                    None,
+                    response.expires_at,
+                )
             } else {
-                None
+                let invite: Invitation =
+                    serde_json::from_slice(&response.body).map_err(|_| unknown())?;
+                if !token(invite.invitation.as_bytes())
+                    || !invite.one_use
+                    || invite.expires_at <= now
+                {
+                    return Err(unknown());
+                }
+                let link = app_output
+                    .as_ref()
+                    .map(|_| invitation_app_link(&invite, &origin, material.files[4].bytes(), now))
+                    .transpose()?;
+                (invite.invitation, link, invite.expires_at)
             };
             let (destination, app_destination) = blocking(move || {
-                let destination = output.publish(invite.invitation.as_bytes())?;
+                let destination = output.publish(primary.as_bytes())?;
                 let app_destination = match (app_output, link) {
                     (Some(output), Some(link)) => Some(output.publish(link.as_bytes())?),
                     (None, None) => None,

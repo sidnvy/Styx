@@ -240,7 +240,7 @@ fn gateway_invite_app_link_round_trips_origin_ca_and_expiry() {
         };
         // This helper is the production invite export path, including caPem.
         let link = invitation_app_link(&invite, origin, &ca.certificate_pem, now).unwrap();
-        let inspected = crate::app::pairing_link::inspect(&link, now).unwrap();
+        let inspected = crate::enrollment::pairing_link::inspect(&link, now).unwrap();
         let preview = inspected.preview();
         assert_eq!(preview.origin, origin);
         assert_eq!(preview.expires_at, invite.expires_at);
@@ -257,7 +257,7 @@ fn gateway_invite_app_link_round_trips_origin_ca_and_expiry() {
         assert_eq!(invitation.as_str(), invite.invitation.as_str());
         assert_eq!(pem.unwrap().as_bytes(), ca.certificate_pem);
         assert_eq!(expiry, invite.expires_at);
-        assert!(crate::app::pairing_link::inspect(&link, expiry).is_err());
+        assert!(crate::enrollment::pairing_link::inspect(&link, expiry).is_err());
     }
     let mut invite = Invitation {
         invitation: Zeroizing::new(URL_SAFE_NO_PAD.encode([7u8; 32])),

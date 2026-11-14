@@ -1,5 +1,9 @@
 # Fresh native foreground CLI pairing
 
+For guided pairing on this development branch, run `styx invite` on the Gateway or choose **Add computer** in the desktop app. Enter the displayed Gateway address and 12-character code on the Host or paste both together. Confirm the Gateway and select features on the Host. The invitation admits one device for ten minutes. Restarting the Gateway discards unused codes. A Host that has already submitted its signed join can finish with its saved identity after a restart.
+
+The low-level commands below document the existing token-file and administrative approval workflow.
+
 This path uses a verified native C08 payload, a fresh Gateway-only root and a fresh Host root. It does not install services, change App management or migrate an old identity. ChatGPT reaches the loopback Gateway only through OpenAI’s Secure MCP Tunnel. Fresh Gateway bootstrap keeps its local HTTPS origin on loopback; explicit private-network listeners can also admit remote Hosts. Keep the payload at its stable verified private location; do not move it after creating selection data.
 
 1. Verify the signed native payload with the original externally trusted publisher pin: `styx release verify --payload-dir ABS_PAYLOAD --publisher-file ABS_PUBLIC_PEM --expected-publisher ORIGINAL_PIN --runtime-selection`. Save this public selection to a protected private input file. Use a payload with codex_exec; headless pairing/Exec does not require Node or Browser.

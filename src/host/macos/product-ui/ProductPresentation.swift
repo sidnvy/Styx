@@ -477,7 +477,8 @@ struct ProductInvitationView: View {
                         Button(productText("生成新邀请", "Create new invitation")) { model.beginDeviceInvitation() }
                     } else {
                         Text(productText("在另一台电脑的 Styx 中选择“加入已有”，粘贴此邀请。", "In Styx on the other computer, choose Join an existing Styx and paste this invitation.")).font(.caption)
-                        Button { model.copy(value, secret: true); model.invitationCopied = true } label: { Label(model.invitationCopied ? productText("邀请已复制", "Invitation copied") : productText("复制邀请链接", "Copy invitation link"), systemImage: "doc.on.doc").frame(maxWidth: .infinity) }
+                        if model.createdInvitation["code"].string != nil { Text(value).font(.body.monospaced()).textSelection(.enabled) }
+                        Button { model.copy(value, secret: true); model.invitationCopied = true } label: { Label(model.invitationCopied ? productText("邀请已复制", "Invitation copied") : productText("复制邀请", "Copy invitation"), systemImage: "doc.on.doc").frame(maxWidth: .infinity) }
                         Text(productText("邀请有效期为 10 分钟", "Invitations expire after 10 minutes")).font(.caption2).foregroundStyle(.secondary)
                         Text(productText("等待另一台电脑加入", "Waiting for the other computer")).font(.caption).foregroundStyle(.secondary)
                         DisclosureGroup(productText("另一台电脑连不上？", "Can't connect from the other computer?")) {

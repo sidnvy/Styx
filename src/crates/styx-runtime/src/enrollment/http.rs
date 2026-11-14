@@ -479,6 +479,23 @@ impl EnrollmentHttp {
             let stop = cancel.clone();
             connections.spawn(async move {
                 let slot = Arc::new(slot);
+                // TLS starts with a handshake record (0x16). Only the SPAKE2 bootstrap
+                // uses the S prefix, and can return only a password-authenticated invitation.
+                let mut prefix = [0; 1];
+                let first = tokio::select! {
+                    _ = stop.cancelled() => return,
+                    read = tokio::time::timeout(IO_TIMEOUT, tcp.peek(&mut prefix)) => read,
+                };
+                if !matches!(first, Ok(Ok(1))) {
+                    return;
+                }
+                if prefix[0] == b'S' {
+                    tokio::select! {
+                        _ = stop.cancelled() => (),
+                        _ = tokio::time::timeout(IO_TIMEOUT, super::short_code::serve(tcp, &app.service)) => (),
+                    }
+                    return;
+                }
                 let (tls, leaf) = tokio::select! { _ = stop.cancelled() => return, result = app.tls.accept_with_leaf(tcp, IO_TIMEOUT) => match result { Ok(tls) => tls, Err(_) => return } };
                 let service = hyper::service::service_fn(move |mut request: Request<hyper::body::Incoming>| {
                     request.extensions_mut().insert(leaf.clone());

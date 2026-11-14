@@ -509,9 +509,13 @@ fn interactive(root: &Path) -> Result<(Answers, Option<String>)> {
         }
     } else {
         println!(
-            "Paste the one-use styx://join link from your hub (Styx Gateway). You will check its address and security fingerprint before connecting."
+            "Enter the Gateway address and pairing code, separated by a space, or paste the invitation."
         );
-        let link = prompt::line("Join link", None)?;
+        let mut link = prompt::line("Gateway address or invitation", None)?;
+        if !link.starts_with("styx://") && link.split_whitespace().count() == 1 {
+            link.push(' ');
+            link.push_str(&prompt::line("Pairing code", None)?);
+        }
         // Keep the link only in memory until the numbered plan is approved.
         let file = root.join(format!("inputs/pasted-join-link-{}", now_ms()?));
         pasted_link = Some(link);
@@ -951,7 +955,9 @@ fn plan_steps(answers: &Answers, foreground: bool, root: &Path) -> Vec<String> {
                 .push("Pair this computer with its own hub using its exact local identity.".into());
         }
     } else {
-        steps.push("Save your join link privately, check the other hub's security fingerprint and comparison code with you, then pair this computer after approval.".into());
+        steps.push(
+            "Review the Gateway address and pair this computer using your invitation.".into(),
+        );
     }
     if answers.role != Role::Gateway {
         steps.push(format!(
@@ -1063,12 +1069,13 @@ async fn pair(session: &Session, gateway: Option<&Path>) -> Result<Option<String
             };
             let bytes = inputs::read_private(&link_path, 32768)
                 .map_err(|_| Failure::new("setup_private_join_link_required"))?;
-            let inspected = inputs::JoinLink::inspect(
+            let inspected = inputs::JoinLink::resolve(
                 std::str::from_utf8(&bytes)
                     .map_err(|_| Failure::new("setup_join_link_invalid"))?
                     .trim(),
                 now_ms()?,
-            )?;
+            )
+            .await?;
             let preview = inspected.preview();
             if gateway.is_none() {
                 println!(
@@ -1076,7 +1083,12 @@ async fn pair(session: &Session, gateway: Option<&Path>) -> Result<Option<String
                     preview["origin"].as_str().unwrap_or("unavailable"),
                     preview["caSha256"].as_str().unwrap_or("unavailable")
                 );
-                session.decision("trust", "Check this address and security fingerprint on your trusted hub. Trust this hub and save its connection details?")?;
+                let question = if preview["preapproved"] == true {
+                    "Join this Gateway using the pairing code?"
+                } else {
+                    "Check this address and security fingerprint on your trusted hub. Trust this hub and save its connection details?"
+                };
+                session.decision("trust", question)?;
             } else {
                 // Local trust is covered by the plan. Automation still requires
                 // its explicit trust approval; link validation is identical.
@@ -1164,10 +1176,11 @@ async fn pair(session: &Session, gateway: Option<&Path>) -> Result<Option<String
             session.skip("Local computer approval");
         }
     } else {
-        println!(
-            "On the hub, run styx invite and compare this code before approving. Waiting for that approval; Ctrl-C stops waiting."
-        );
-        session.decision("claim", "Check that this comparison code matches the one on your hub before it approves this computer. Continue pairing?")?;
+        println!("Completing enrollment. Older invitations may require approval on the Gateway.");
+        session.consent(
+            "claim",
+            "Finish pairing this computer with the selected Gateway?",
+        )?;
     }
     if gateway.is_some() {
         session.consent("claim", "Finish pairing this computer after the hub approves it. If a request has an uncertain result, setup stops so it cannot pair twice.")?;
@@ -1981,12 +1994,11 @@ pub(super) async fn invite(root: Option<PathBuf>) -> Result<()> {
             ));
         }
     }
-    session.consent("invite", "Create a secret one-use invitation, valid for ten minutes, and print its join link in this terminal. Transfer it only through a trusted private channel.")?;
+    session.consent("invite", "Create a secret one-use invitation, valid for ten minutes, and print its Gateway address and pairing code in this terminal. Transfer it only through a trusted private channel.")?;
     let step = format!("invite-export-{}", now_ms()?);
-    let invitation = session.input(&format!("{step}.token"));
     let link = session.input(&format!("{step}.link"));
     session.begin(&step)?;
-    admin::invite_with_options(&gateway, &invitation, 600, Some(selection), Some(&link))
+    admin::invite_short(&gateway, selection, &link)
         .await
         .map_err(Failure::admin)?;
     session.done(&step)?;
@@ -1998,77 +2010,9 @@ pub(super) async fn invite(root: Option<PathBuf>) -> Result<()> {
             .map_err(|_| Failure::unknown("invite_link_publication_unknown"))?
     );
     println!(
-        "On the other computer:\nApp: choose Join an existing Styx and paste this link.\nCLI: run styx setup, choose Join an existing hub and paste this link.\nCompare the code shown there with this hub before approving."
+        "On the other computer, choose Join an existing Gateway and enter the address and code. This invitation authorizes one computer and expires in ten minutes."
     );
-    if !prompt::confirm("Wait for a pending request and review approval? Ctrl-C stops waiting")? {
-        return Ok(());
-    }
-    let until = tokio::time::Instant::now() + Duration::from_secs(600);
-    loop {
-        let pending = admin::pending(&gateway)
-            .await
-            .map_err(Failure::admin)?
-            .pending
-            .unwrap_or_default();
-        if !pending.is_empty() {
-            for (i, p) in pending.iter().enumerate() {
-                println!(
-                    "{}. Computer {}\n   Request {}\n   Fingerprint {}\n   Comparison code {}\n   Requested: Browser {}, Computer Use {}",
-                    i + 1,
-                    p.device_id.as_str(),
-                    p.request_id,
-                    p.fingerprint.to_hex(),
-                    p.comparison_code,
-                    p.browser_requested,
-                    p.computer_requested
-                );
-            }
-            let index = prompt::line("Request number to review", None)?
-                .parse::<usize>()
-                .map_err(|_| Failure::new("invite_pending_selection_invalid"))?;
-            let p = pending
-                .into_iter()
-                .nth(
-                    index
-                        .checked_sub(1)
-                        .ok_or_else(|| Failure::new("invite_pending_selection_invalid"))?,
-                )
-                .ok_or_else(|| Failure::new("invite_pending_selection_invalid"))?;
-            if !prompt::confirm(
-                "Does this exact computer's comparison code match the other computer?",
-            )? {
-                return Err("invite_comparison_not_confirmed".into());
-            }
-            let browser = p.browser_requested && prompt::confirm("Approve Browser Automation?")?;
-            let computer = p.computer_requested && prompt::confirm("Approve Computer Use?")?;
-            session.consent(
-                "approve",
-                "Approve only this computer with the capabilities just selected.",
-            )?;
-            let step = format!("invite-export-approve-{}", p.request_id);
-            session.begin(&step)?;
-            admin::approve(
-                &gateway,
-                admin::ApprovalSelection {
-                    request_id: p.request_id,
-                    device_id: p.device_id,
-                    fingerprint: p.fingerprint,
-                    comparison_code: p.comparison_code,
-                    enable_browser: browser,
-                    enable_computer: computer,
-                },
-            )
-            .await
-            .map_err(Failure::admin)?;
-            session.done(&step)?;
-            println!("Approved. The other computer can now finish pairing and connect.");
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= until {
-            return Err("invite_expired_without_request".into());
-        }
-        tokio::select! { signal=tokio::signal::ctrl_c()=>{signal.map_err(|_| Failure::new("setup_signal_failed"))?; println!("Stopped waiting. The original invitation files are retained."); return Ok(());}, _=tokio::time::sleep(Duration::from_secs(1))=>() }
-    }
+    Ok(())
 }
 
 /// Shared stop/disable/uninstall ordering and process-exit observation. The

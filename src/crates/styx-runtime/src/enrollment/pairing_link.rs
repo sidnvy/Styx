@@ -1,4 +1,4 @@
-//! The existing schema-1 owner-local pairing link, without persistence/network.
+//! Gateway invitation encoding, resolution and Host-side confirmation.
 //! Inspection is not approval; secrets have no public Debug/Serialize surface.
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{
@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 const MAX_LINK: usize = 32_768;
 const MAX_CA: usize = 12_000;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
-pub(super) const MAX_LIFETIME_MS: u64 = 600_000;
+const MAX_LIFETIME_MS: u64 = 600_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PairingLinkError(&'static str);
@@ -34,6 +34,7 @@ fn error(code: &'static str) -> PairingLinkError {
 }
 
 pub(crate) struct InspectedLink {
+    pub(crate) preapproved: bool,
     origin: String,
     invitation: Zeroizing<String>,
     expires_ms: u64,
@@ -49,10 +50,12 @@ pub(crate) struct LinkPreview {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) ca_sha256: Option<String>,
     pub(crate) requires_certificate_approval: bool,
+    pub(crate) preapproved: bool,
 }
 impl InspectedLink {
     pub(crate) fn preview(&self) -> LinkPreview {
         LinkPreview {
+            preapproved: self.preapproved,
             origin: self.origin.clone(),
             expires_at: self.expires_ms,
             ca_sha256: self.ca_sha256.clone(),
@@ -91,7 +94,7 @@ impl AcceptedLink {
         )
     }
 }
-fn normalize_origin(value: &str) -> Result<String> {
+pub(super) fn normalize_origin(value: &str) -> Result<String> {
     let u = url::Url::parse(value).map_err(|_| error("pairing_gateway_origin_invalid"))?;
     if u.scheme() != "https"
         || u.host_str().is_none()
@@ -122,7 +125,7 @@ fn validate_expiry(expires: u64, now_ms: u64) -> Result<()> {
 /// The local Gateway can advance its enrollment clock beyond wall time.
 /// Export a deadline that neither exceeds its committed expiry nor starts
 /// a fresh validity window when the reply arrives.
-pub(super) fn local_export_expiry(
+pub(crate) fn local_export_expiry(
     gateway_expires_ms: u64,
     dispatched_wall_ms: u64,
     now_ms: u64,
@@ -331,6 +334,22 @@ pub(crate) fn build(
     Ok(link)
 }
 
+pub(crate) async fn resolve(input: &str, now: u64) -> Result<InspectedLink> {
+    if input.starts_with("styx://join#") {
+        return inspect(input, now);
+    }
+    let (origin, bundle) = super::short_code::resolve(input).await.map_err(error)?;
+    let mut inspected = inspect(&bundle, now)?;
+    if inspected.origin != origin
+        || !super::short_code::is_invitation(&inspected.invitation)
+        || inspected.ca_pem.is_none()
+    {
+        return Err(error("pairing_gateway_confirmation_mismatch"));
+    }
+    inspected.preapproved = true;
+    Ok(inspected)
+}
+
 pub(crate) fn inspect(link: &str, now_ms: u64) -> Result<InspectedLink> {
     if link.len() > MAX_LINK {
         return Err(error("pairing_link_size_invalid"));
@@ -392,7 +411,7 @@ pub(crate) fn inspect(link: &str, now_ms: u64) -> Result<InspectedLink> {
     let invitation = fields
         .string("invitation")
         .ok_or_else(|| error("pairing_invitation_invalid"))?;
-    if invitation.len() != 43
+    if (invitation.len() != 43 && !super::short_code::is_invitation(&invitation))
         || !invitation
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
@@ -424,6 +443,7 @@ pub(crate) fn inspect(link: &str, now_ms: u64) -> Result<InspectedLink> {
         .map(|pem| certificate(pem, now_ms))
         .transpose()?;
     Ok(InspectedLink {
+        preapproved: false,
         origin: normalized,
         invitation,
         expires_ms,
