@@ -204,12 +204,11 @@ fn live_unknown_is_not_evicted_and_ended_unknown_can_expire_without_replay() {
     l.dispatch(&a, &r.id, r.payload_digest, &facts(), MonotonicMillis(1))
         .unwrap();
     l.mark_result_unknown(&r.id).unwrap();
-    loop {
-        match l.prepare(&a, context(), vec![2; 1024], MonotonicMillis(2)) {
-            Ok(_) => {}
-            Err(ErrorCategory::Busy) => break,
-            other => panic!("unexpected {other:?}"),
-        }
+    // Admission has no retained-record quota. Exercise retention with many
+    // later operations without waiting for a capacity refusal that cannot occur.
+    for _ in 0..1024 {
+        l.prepare(&a, context(), vec![2; 1024], MonotonicMillis(2))
+            .unwrap();
     }
     let before = l.retained_bytes();
     assert_eq!(l.reap(MonotonicMillis(50)), 0);
