@@ -2,6 +2,7 @@
 
 `styx setup` is the Rust first-run entry point. Linux defaults to systemd user
 services; macOS and Windows run the selected roles in the setup process for now.
+For fresh interactive setup, Linux sessions with neither DISPLAY nor WAYLAND_DISPLAY start in Gateway-only mode. Desktop sessions offer joining an existing Gateway or creating a Gateway with a local Host. Existing saved intents and explicit answers retain their selected role.
 Use `--foreground` on Linux for the same process lifetime without systemd.
 No command uses sudo, enables linger, installs a browser, changes an overlay, or
 moves the installed signed payload. Keep the setup terminal open in foreground

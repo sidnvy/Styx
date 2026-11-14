@@ -339,17 +339,26 @@ enum ProductRestorationPolicy {
         && status["enrollment"]["can_resume_local"] == .bool(true)
         && status["supportedOperations"].array.contains { $0.string == "resumeLocal" }
     }
+    var setupTunnelInput: ProductJSON? {
+        guard ProductTunnelInputPolicy.tunnelError(setupTunnelID) == nil,
+              ProductTunnelInputPolicy.keyError(setupTunnelKey, saved: false) == nil else { return nil }
+        return .object(["tunnelId": .string(setupTunnelID.trimmingCharacters(in: .whitespacesAndNewlines)),
+                        "apiKey": .string(setupTunnelKey)])
+    }
+    @Published var setupTunnelID = ""
+    @Published var setupTunnelKey = ""
     func resumeLocalSetup() {
         guard nativeCanResumeLocal, !busy else { return }
         let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, let origin = status["gateway"]["origin"].string,
               let port = URLComponents(string: origin)?.port else { return }
         perform { [self] in
-            guard nativeCanResumeLocal else { throw ProductCoreError.rejected }
+            guard nativeCanResumeLocal, let tunnel = setupTunnelInput else { throw ProductCoreError.rejected }
             nativeLocalSetupSubmitted = true
             // Explicit confirmation only; a failed or lost response is never replayed.
             var choice: [String: ProductJSON] = ["label": .string(name), "computer": .bool(computer), "persistLogin": .bool(false), "port": .number(Double(port))]
             choice.merge(nativeBrowserChoice) { _, chosen in chosen }
+            choice["tunnel"] = tunnel; setupTunnelKey = ""
             do {
                 try applyNative(try await client.native("resumeLocal", choice))
                 page = afterSetupPage
@@ -827,7 +836,8 @@ enum ProductRestorationPolicy {
                     _ = try await client.native("join", choice)
                     joinAcceptance = .null; inspection = .null; page = afterSetupPage
                 } else {
-                    guard nativeCanCreateLocal else { throw ProductCoreError.rejected }
+                    guard nativeCanCreateLocal, let tunnel = setupTunnelInput else { throw ProductCoreError.rejected }
+                    choice["tunnel"] = tunnel; setupTunnelKey = ""
                     choice["allowRemoteHosts"] = .bool(allowRemoteHosts)
                     if allowRemoteHosts && !lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { choice["lanAddress"] = .string(lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)) }
                     nativeLocalSetupSubmitted = true
@@ -837,9 +847,13 @@ enum ProductRestorationPolicy {
                     do { try applyNative(try await client.native("createLocal", choice)) }
                     catch {
                         if let failure = error as? ProductOwnedCoreRejection,
-                           ["app_lan_address_invalid", "app_network_interface_changed", "app_network_interface_required", "app_network_interfaces_unavailable"].contains(failure.response["error"].string ?? "") {
+                           ["app_lan_address_invalid", "app_network_interface_changed", "app_network_interface_required", "app_network_interfaces_unavailable", "tunnel_client_unavailable"].contains(failure.response["error"].string ?? "") {
                             // Core refused before publishing any setup input.
                             nativeLocalSetupSubmitted = false
+                            if failure.response["error"].string == "tunnel_client_unavailable" {
+                                self.error = productText("请使用包含 Tunnel 客户端的 Gateway 安装包。", "Use a Gateway package that includes the Tunnel client.")
+                                return
+                            }
                             self.error = productText("请选择可用的局域网或 VPN 网络。若网络已变化，请重新检测；设置尚未提交。", "Select an available LAN or VPN network. If the network changed, detect networks again. Setup was not submitted.")
                             return
                         }

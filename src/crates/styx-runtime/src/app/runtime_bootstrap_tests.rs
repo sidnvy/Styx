@@ -33,6 +33,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_tunnel(false)
+    }
+    fn with_tunnel(worker: bool) -> Self {
         let top = std::env::temp_dir().join(format!("styx-bootstrap-{}", uuid::Uuid::new_v4()));
         directory(&top);
         let bundle = top.join("Styx.app");
@@ -40,7 +43,7 @@ impl Fixture {
         let payload = bundle.join("native");
         directory(&payload);
         directory(&payload.join("bin"));
-        let files: Vec<_> = [
+        let mut files: Vec<_> = [
             ("LICENSE", b"bootstrap fixture".as_slice(), false),
             (
                 "bin/styx",
@@ -68,11 +71,36 @@ impl Fixture {
             .unwrap()
             .fingerprint()
             .unwrap();
-        let manifest = serde_json::to_vec(&json!({"schema":2,"runtime_format":"native_rust_v1",
+        let mut manifest = json!({"schema":2,"runtime_format":"native_rust_v1",
             "component":"styx","scope":"runtime_candidate","minimum_reader":"native_pairing_lifecycle_v1",
             "target":"x86_64-unknown-linux-gnu","version":"0.4.0-test.1","entrypoint":"bin/styx",
             "source":{"revision":"1".repeat(40),"inputs_sha256":Sha256Digest::of_bytes(b"{}")},
-            "contracts":{"control":1,"management_state":7},"files":files,"external_workers":[]})).unwrap();
+            "contracts":{"control":1,"management_state":7},"files":files,"external_workers":[]});
+        if worker {
+            directory(&payload.join("workers"));
+            directory(&payload.join("workers/tunnel-client"));
+            let mut members = Vec::new();
+            for (name, bytes, executable) in [
+                (
+                    "tunnel-client-runtime",
+                    fs::read("/usr/bin/true").unwrap(),
+                    true,
+                ),
+                ("LICENSE", b"fixture license".to_vec(), false),
+                ("NOTICE", b"fixture notice".to_vec(), false),
+            ] {
+                let member = format!("workers/tunnel-client/{name}");
+                write(&payload.join(&member), &bytes, executable);
+                members.push(member.clone());
+                files.push(json!({"path":member,"size":bytes.len(),"sha256":Sha256Digest::of_bytes(&bytes),"executable":executable}));
+            }
+            manifest["files"] = json!(files);
+            manifest["external_workers"] = json!(["tunnel_client"]);
+            manifest["worker_closures"] = json!([{"kind":"tunnel_client","version":"0.0.17",
+                "source_manifest_sha256":Sha256Digest::of_bytes(b"fixture source"),"source_publisher_spki_sha256":pin.as_hex(),
+                "entrypoint":"workers/tunnel-client/tunnel-client-runtime","members":members}]);
+        }
+        let manifest = serde_json::to_vec(&manifest).unwrap();
         write(&payload.join("manifest.json"), &manifest, false);
         write(
             &payload.join("manifest.sig"),
@@ -134,11 +162,75 @@ fn inventory(root: &Path) -> BTreeMap<PathBuf, (u64, u64, u64, String)> {
     out
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires loopback sockets; disposable signed Tunnel worker fixture"]
+async fn desktop_gateway_setup_requires_tunnel_before_pairing_local_host() {
+    let fixture = Fixture::with_tunnel(true);
+    let mut app = fixture.open().await;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let mut input = json!({"port":port,"label":"Desktop setup","computer":false,"browser":false,"persistLogin":false});
+    for (tunnel, code) in [
+        (Value::Null, "app_setup_tunnel_required"),
+        (
+            json!({"tunnelId":"tunnel_abcdefgh","apiKey":"invalid"}),
+            "invalid_tunnel_runtime_key",
+        ),
+    ] {
+        input["tunnel"] = tunnel;
+        let failure = app
+            .dispatch(
+                Operation::CreateLocal,
+                serde_json::value::to_raw_value(&input).unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code(), code);
+        assert!(!fixture.container.join("gateway").exists());
+        assert!(!fixture.container.join("runtime-versions").exists());
+    }
+    input["tunnel"] = json!({"tunnelId":"tunnel_abcdefgh","apiKey":"sk-testtesttesttest"});
+    let no_worker = Fixture::new();
+    let mut other = no_worker.open().await;
+    let failure = other
+        .dispatch(
+            Operation::CreateLocal,
+            serde_json::value::to_raw_value(&input).unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code(), "tunnel_client_unavailable");
+    assert!(!no_worker.container.join("runtime-versions").exists());
+    let response = app
+        .dispatch(
+            Operation::CreateLocal,
+            serde_json::value::to_raw_value(&input).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response["enrollment"]["status"], "ready_to_connect");
+    assert_eq!(
+        app.enrollment.as_ref().unwrap()["status"],
+        "ready_to_connect"
+    );
+    let state = fixture.container.join("gateway");
+    let tunnel = foreground::tunnel::status(&state).await.unwrap();
+    assert_eq!(tunnel.tunnel_id.as_deref(), Some("tunnel_abcdefgh"));
+    assert!(tunnel.available);
+    assert!(
+        !fs::read_to_string(fixture.container.join("app-local-gateway-input-v1.json"))
+            .unwrap()
+            .contains("sk-test")
+    );
+    app.settle_for_quit().await.unwrap();
+}
+
 #[tokio::test]
 async fn completed_bootstrap_is_observed_without_copying_after_bundle_replacement() {
     let fixture = Fixture::new();
     let mut app = fixture.open().await;
-    app.bootstrap_runtime_selection().await.unwrap();
+    app.bootstrap_runtime_selection(false).await.unwrap();
     let input = app.runtime_selection_file.clone().unwrap();
     let selected: NativeRuntimeSelection =
         serde_json::from_slice(&fs::read(&input).unwrap()).unwrap();
@@ -154,7 +246,7 @@ async fn completed_bootstrap_is_observed_without_copying_after_bundle_replacemen
     fs::rename(&fixture.bundle, fixture.top.join("retained-old-app")).unwrap();
     directory(&fixture.bundle);
     release::verify_selected(&selected).unwrap();
-    app.bootstrap_runtime_selection().await.unwrap();
+    app.bootstrap_runtime_selection(false).await.unwrap();
     assert_eq!(app.runtime_selection_file.as_ref(), Some(&input));
     assert_eq!(
         inventory(&fixture.container.join("runtime-versions")),
@@ -176,7 +268,10 @@ async fn partial_bootstrap_is_never_adopted_or_replayed_by_a_new_app() {
     for _ in 0..2 {
         let mut app = fixture.open().await;
         assert_eq!(
-            app.bootstrap_runtime_selection().await.unwrap_err().code(),
+            app.bootstrap_runtime_selection(false)
+                .await
+                .unwrap_err()
+                .code(),
             "app_runtime_bootstrap_unknown"
         );
         assert!(app.unknown);
@@ -191,7 +286,7 @@ async fn invalid_source_is_refused_before_any_version_or_setup_write() {
     let fixture = Fixture::new();
     fs::write(fixture.bundle.join("native/bin/styx"), b"tampered").unwrap();
     let mut app = fixture.open().await;
-    assert!(app.bootstrap_runtime_selection().await.is_err());
+    assert!(app.bootstrap_runtime_selection(false).await.is_err());
     assert!(
         !app.unknown,
         "known pre-copy refusal is not an unknown write"
@@ -240,6 +335,7 @@ async fn fresh_profile_reopens_from_external_runtime_after_bundle_replacement() 
     // This calls the actual first-setup entry, including default external
     // staging. The original signed Gateway performs real strict-TLS pairing.
     app.create_local(LocalInput {
+        tunnel: None,
         label: "Runtime bootstrap reference".into(),
         computer: false,
         browser: false,

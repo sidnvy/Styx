@@ -90,6 +90,13 @@ struct ProductView: View {
             if !subtitle.isEmpty { Text(subtitle).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
         }
     }
+    private var setupTunnelFields: some View {
+        Group {
+            Text(productText("连接 ChatGPT", "Connect ChatGPT")).font(.headline)
+            TextField("Tunnel ID", text: $model.setupTunnelID)
+            SecureField(productText("Tunnel 运行密钥", "Tunnel runtime API key"), text: $model.setupTunnelKey)
+        }.onDisappear { model.setupTunnelKey = "" }
+    }
     private var resumeLocalSetup: some View {
         VStack(alignment: .leading, spacing: 20) {
             heading(productText("继续本机设置", "Continue local setup"), productText("原管理端已准备完成，配对尚未开始。继续将保留原身份、证书和运行组件。", "The original Gateway is prepared and pairing has not started. Continuing preserves its identity, certificates and runtime."))
@@ -98,9 +105,10 @@ struct ProductView: View {
             Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }
             Toggle(isOn: $model.browser) { ProductCapabilityLabel(kind: .browser) }
             Text(productText("将启用命令执行，以及你选择的 Computer Use 和 Browser。确认后仅提交一次配对。", "This enables command execution and, if selected, Computer Use and Browser. Confirming submits pairing once.")).font(.callout).foregroundStyle(.secondary)
+            setupTunnelFields
             Button(productText("确认并继续设置", "Confirm and continue setup")) { model.resumeLocalSetup() }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.busy || model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(model.busy || model.setupTunnelInput == nil || model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
     }
     private var welcome: some View {
@@ -126,6 +134,7 @@ struct ProductView: View {
             }
             TextField(productText("电脑名称", "Computer name"), text: $model.label)
             if model.nativeHost && !model.joining {
+                setupTunnelFields
                 Toggle(productText("允许网络上的其他电脑加入此网关", "Let other computers on my network join this Gateway"), isOn: $model.allowRemoteHosts)
                 if model.allowRemoteHosts {
                     if model.networkDiscoveryLoading { ProgressView(productText("正在检测网络…", "Detecting networks…")) }
@@ -152,7 +161,7 @@ struct ProductView: View {
                 Button(productText("返回", "Back")) { model.page = model.joining ? .invitation : .welcome }
                 Spacer()
                 Button(productText("继续", "Continue")) { model.createAndPrepare() }.buttonStyle(.borderedProminent)
-                    .disabled(model.busy || (model.nativeHost && !model.joining && model.allowRemoteHosts && model.networkDiscoveryLoading) || model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (model.nativeHost && !model.joining && !model.nativeCanCreateLocal) || (!model.nativeHost && model.session["defaults"]["bundle"].string == nil))
+                    .disabled(model.busy || (model.nativeHost && !model.joining && model.allowRemoteHosts && model.networkDiscoveryLoading) || model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (model.nativeHost && !model.joining && (!model.nativeCanCreateLocal || model.setupTunnelInput == nil)) || (!model.nativeHost && model.session["defaults"]["bundle"].string == nil))
             }
         }.task(id: model.allowRemoteHosts) {
             if model.nativeHost && !model.joining && model.allowRemoteHosts { model.discoverNetworkInterfaces() }

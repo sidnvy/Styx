@@ -296,6 +296,7 @@ struct JoinInput {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct LocalInput {
+    tunnel: Option<SetupTunnel>,
     label: String,
     computer: bool,
     browser: bool,
@@ -307,6 +308,25 @@ struct LocalInput {
     lan_address: Option<String>,
     #[serde(default)]
     allow_remote_hosts: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SetupTunnel {
+    tunnel_id: String,
+    #[serde(deserialize_with = "secret_string")]
+    api_key: zeroize::Zeroizing<String>,
+}
+impl LocalInput {
+    fn desktop(input: &serde_json::value::RawValue) -> Result<Self, AppError> {
+        let value: Self = decode_input(input)?;
+        let tunnel = value
+            .tunnel
+            .as_ref()
+            .ok_or(AppError("app_setup_tunnel_required"))?;
+        foreground::tunnel::validate_configuration(&tunnel.tunnel_id, Some(&tunnel.api_key))
+            .map_err(|error| AppError(error.code()))?;
+        Ok(value)
+    }
 }
 fn local_port() -> u16 {
     22022
@@ -1561,7 +1581,7 @@ impl HostApp {
             return Ok(self.snapshot().await);
         }
         if matches!(operation, Operation::ResumeLocal) {
-            self.resume_local(decode_input(&input)?).await?;
+            self.resume_local(LocalInput::desktop(&input)?).await?;
             self.connect_host().await?;
             return Ok(self.snapshot().await);
         }
@@ -1573,7 +1593,7 @@ impl HostApp {
         match operation {
             Operation::ResumeLocal => Err(AppError("app_local_checkpoint_refused")),
             Operation::CreateLocal => {
-                let choice: LocalInput = decode_input(&input)?;
+                let choice = LocalInput::desktop(&input)?;
                 self.create_local(choice).await?;
                 self.connect_host().await?;
                 Ok(self.snapshot().await)
@@ -1600,7 +1620,7 @@ impl HostApp {
                 if matches!(operation, Operation::Join) {
                     let choice: JoinInput = decode_input(&input)?;
                     validate_choice(&choice)?;
-                    self.bootstrap_runtime_selection().await?;
+                    self.bootstrap_runtime_selection(false).await?;
                     self.prepare_join_input(choice)?;
                 }
                 if self.running.is_some() || self.scope.root.get().is_some() {

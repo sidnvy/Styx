@@ -110,7 +110,9 @@ namespace StyxNative {
     Check(HasText(settings,"single Styx plugin")&&HasText(settings,"Authentication: No authentication")&&HasText(settings,"runtime API key in Styx only"),"chatgpt_gateway_fields_or_key_boundary_missing");
     Set(context,"snapshot",fresh);settings.ShowPage("chat");Check(!HasText(settings,"4. Fill in the connection fields"),"host_offered_gateway_tunnel_configuration");
     foreach(string page in new[]{"create","join"}){
-     settings.ShowPage(page);var computer=(CheckBox)Get(settings,"computer");Check(computer.Enabled&&!computer.Checked,"fresh_desktop_not_explicit_opt_in");computer.Checked=true;
+     settings.ShowPage(page);
+     Check(HasText(settings,"Tunnel runtime API key")== (page=="create"),"tunnel_field_wrong_role");
+     var computer=(CheckBox)Get(settings,"computer");Check(computer.Enabled&&!computer.Checked,"fresh_desktop_not_explicit_opt_in");computer.Checked=true;
      var choice=(System.Collections.Generic.Dictionary<string,object>)typeof(Settings).GetMethod("Choice",Fields).Invoke(settings,null);Check(Equals(choice["computer"],true),"desktop_choice_not_sent_to_core");
      settings.ShowPage("overview");settings.ShowPage(page);Check(((CheckBox)Get(settings,"computer")).Enabled&&((CheckBox)Get(settings,"computer")).Checked,"desktop_draft_reset_on_navigation");
     }

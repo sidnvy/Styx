@@ -61,6 +61,7 @@ async fn completed_stopped_host_control_binding_preserves_execution_refusal_and_
         drop(listener);
         let mut app = HostApp::open_native(&profile, &selection).await.unwrap();
         app.create_local(LocalInput {
+            tunnel: None,
             label: "Stopped binding fixture".into(),
             computer: false,
             browser: false,
@@ -160,6 +161,7 @@ async fn reopen_resumes_gateway_intent_without_resuming_stopped_host() {
         drop(listener);
         let mut app = HostApp::open_native(&profile, &selection).await.unwrap();
         app.create_local(LocalInput {
+            tunnel: None,
             label: "Gateway resume fixture".into(),
             computer: false,
             browser: false,

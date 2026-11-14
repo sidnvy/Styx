@@ -515,7 +515,7 @@ impl HostApp {
                 .map_err(|_| AppError("app_input_writer_busy"))?,
         );
         self.unknown = true;
-        self.finish_local_pairing(choice).await
+        self.finish_local_pairing(choice, input.tunnel).await
     }
     pub(super) async fn create_local(&mut self, mut input: LocalInput) -> Result<(), AppError> {
         self.startup_diagnostic = startup_diagnostic::StartupDiagnostic::from_env();
@@ -548,7 +548,8 @@ impl HostApp {
             persist_login: input.persist_login,
         };
         validate_choice(&choice)?;
-        self.bootstrap_runtime_selection().await?;
+        self.bootstrap_runtime_selection(input.tunnel.is_some())
+            .await?;
         let selection = self
             .runtime_selection_file
             .clone()
@@ -609,9 +610,13 @@ impl HostApp {
         }
         gateway.startup_candidate = Some(startup_candidate);
         self.local_gateway = Some(gateway);
-        self.finish_local_pairing(choice).await
+        self.finish_local_pairing(choice, input.tunnel).await
     }
-    async fn finish_local_pairing(&mut self, choice: JoinInput) -> Result<(), AppError> {
+    async fn finish_local_pairing(
+        &mut self,
+        choice: JoinInput,
+        tunnel: Option<SetupTunnel>,
+    ) -> Result<(), AppError> {
         let diagnostic = self.startup_diagnostic.clone();
         if let Some(diagnostic) = &diagnostic {
             diagnostic.report("app_start_gateway");
@@ -620,6 +625,30 @@ impl HostApp {
             .local_gateway
             .as_mut()
             .ok_or(AppError("app_gateway_not_configured"))?;
+        if let Some(tunnel) = tunnel {
+            if !foreground::tunnel::status(&gateway.scope.state_dir)
+                .await
+                .map_err(|error| AppError(error.code()))?
+                .available
+            {
+                return Err(AppError("tunnel_client_unavailable"));
+            }
+            let scope = gateway.scope.clone();
+            tokio::task::spawn_blocking(move || {
+                scope.validate()?;
+                foreground::tunnel::configure_secret(
+                    &scope.state_dir,
+                    &tunnel.tunnel_id,
+                    Some(&tunnel.api_key),
+                    true,
+                    true,
+                )
+                .map_err(|error| AppError(error.code()))?;
+                scope.validate()
+            })
+            .await
+            .map_err(|_| AppError("tunnel_configuration_worker_failed"))??;
+        }
         gateway.start().await?;
         if let Some(diagnostic) = &diagnostic {
             diagnostic.report("app_start_gateway_done");

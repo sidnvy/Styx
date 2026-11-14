@@ -212,6 +212,7 @@ async fn enroll_on(
     // Direct existing enrollment entry avoids the UI dispatch's later Connect.
     // Only the original local Gateway executes, over strict pinned TLS.
     app.create_local(LocalInput {
+        tunnel: None,
         label: "App maintenance fixture".into(),
         computer: false,
         browser: false,

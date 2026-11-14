@@ -412,19 +412,26 @@ fn interactive(root: &Path) -> Result<(Answers, Option<String>)> {
     prompt::section("Styx setup");
     prompt::info("Connect only the computers and capabilities you approve.");
     prompt::section("This computer's role");
-    let role = match prompt::select(
-        "Role",
-        &[
-            "Hub (Gateway and this computer)",
-            "Join an existing Gateway",
-            "Gateway only (headless VM; pair other computers later)",
-        ],
-        0,
-    )? {
-        0 => Role::Hub,
-        1 => Role::Join,
-        2 => Role::Gateway,
-        _ => return Err("setup_role_invalid".into()),
+    let headless = cfg!(target_os = "linux")
+        && ["WAYLAND_DISPLAY", "DISPLAY"]
+            .iter()
+            .all(|key| std::env::var_os(key).is_none_or(|v| v.is_empty()));
+    let role = if headless {
+        prompt::info("Set up the Gateway server. Other computers connect as Hosts.");
+        Role::Gateway
+    } else {
+        match prompt::select(
+            "Role",
+            &[
+                "Join an existing Gateway",
+                "Create a Gateway and share this computer",
+            ],
+            0,
+        )? {
+            0 => Role::Join,
+            1 => Role::Hub,
+            _ => return Err("setup_role_invalid".into()),
+        }
     };
     prompt::section("Trusted release");
     println!(

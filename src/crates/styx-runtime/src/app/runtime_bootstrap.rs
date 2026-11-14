@@ -62,7 +62,7 @@ impl Bootstrap {
         self.validate()
     }
 
-    async fn run(self) -> Result<PathBuf, Failure> {
+    async fn run(self, require_tunnel: bool) -> Result<PathBuf, Failure> {
         self.validate().map_err(Failure::Refused)?;
         let source = release::load_selected(&self.source.selection)
             .map_err(|e| Failure::Refused(AppError(e.code())))?;
@@ -71,6 +71,11 @@ impl Bootstrap {
             .map_err(|e| Failure::Refused(AppError(e.code())))?
         {
             return Err(Failure::Refused(AppError("app_runtime_reader_unsupported")));
+        }
+        if require_tunnel {
+            source
+                .worker_image(styx_contracts::native_release::NativeExternalWorker::TunnelClient)
+                .map_err(|_| Failure::Refused(AppError("tunnel_client_unavailable")))?;
         }
         self.publish(source).await.map_err(Failure::Incomplete)
     }
@@ -131,7 +136,10 @@ impl Bootstrap {
 impl HostApp {
     /// Called only for a user-selected fresh CreateLocal/Join, before publishing
     /// either role's input. Existing configured profiles keep their C07 choice.
-    pub(super) async fn bootstrap_runtime_selection(&mut self) -> Result<(), AppError> {
+    pub(super) async fn bootstrap_runtime_selection(
+        &mut self,
+        require_tunnel: bool,
+    ) -> Result<(), AppError> {
         self.available()?;
         if self.scope.root.get().is_some()
             || self.local_gateway.is_some()
@@ -167,7 +175,7 @@ impl HostApp {
                 writer,
                 source,
             }
-            .run()
+            .run(require_tunnel)
             .await
         });
         let result = match job.await {

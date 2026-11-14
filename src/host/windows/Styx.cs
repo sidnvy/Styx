@@ -437,7 +437,7 @@ namespace StyxNative {
   internal async Task Run(Func<Task> action,string pending="Working…",string failure="The operation could not be confirmed. Refresh to review current state. Completed steps are retained; an interrupted operation is not automatically repeated."){
    if(busy||starting||core==null)return;string previousMessage=message.Text;busy=true;mutationDone=new TaskCompletionSource<bool>();mutationRevision++;settings.Startup(pending,true,false);message.Text=pending;settings.Feedback(pending);
    try{var reading=observation;if(reading!=null){try{await reading;}catch{}if(observation==reading)observation=null;}await action();if(settings.HasFeedback(pending))settings.Feedback("Operation completed. Review the current connection and test evidence below.");}
-   catch(Exception error){string text=failure;var native=error as NativeOperationException;if(native!=null&&native.JoinNotSent)text="The pairing request was not sent. Check network access and allow styx incoming connections in the hub computer’s system prompt. Then paste a new invitation, review it and submit again. Styx will not retry automatically.";else if(native!=null&&native.Code=="pairing_link_expired_or_invalid")text="This invitation is invalid or has expired. Get a new invitation from your Gateway and review it before submitting again. Styx will not retry automatically.";else if(native!=null&&native.Code=="app_system_trust_not_supported")text="This native join currently requires an explicit Gateway CA in the invitation. System-trust-only joining is not supported; no CA or approval was fabricated.";else if(native!=null&&Array.IndexOf(new[]{"app_lan_address_invalid","app_network_interface_changed","app_network_interface_required","app_network_interfaces_unavailable"},native.Code)>=0)text="Select an available LAN or VPN network. If the network changed, detect networks again. Setup was not submitted.";else if(native!=null&&native.Code=="app_operation_not_supported")text="This operation is unavailable in the native Host slice. Existing settings were retained.";else if(native!=null&&native.Code=="host_payload_insufficient_space")text=SpaceFeedback(native.Budget,native.Preflight);else if(native!=null&&native.Code=="windows_native_app_binding_required")text="The desktop test could not start. This package could not verify the current native Styx app. Your settings are retained.";else if(native!=null&&native.Code=="desktop_acceptance_native_app_changed")text="The native Styx app changed during this desktop test. Create a new test in this app before continuing.";else if(native!=null&&native.Code=="app_login_result_unknown_no_replay")text="The login startup change is unconfirmed and will not be repeated. Check Windows startup settings. Quit and reopen Styx to read the system state.";else if(native!=null&&native.Code=="app_login_observation_changed")text="The Startup entry changed before the operation could finish. Styx preserved the current entry. Check its current state before making another explicit change.";else if(native!=null&&native.Code=="work_in_progress")text="A task is still running. Wait for it to finish before quitting or updating Styx.";else if(native!=null&&native.Code=="work_state_unknown")text="Styx could not confirm whether tasks are running. Keep it open and try again after checking the connection.";if(native!=null){string diagnostic=NativeFailureCode(native.Code);if(diagnostic.Length>0)text+="\nNative result: "+diagnostic;}message.Text="Connection needs attention. Open Settings to review the last result.";settings.Feedback(text);}
+   catch(Exception error){string text=failure;var native=error as NativeOperationException;if(native!=null&&native.JoinNotSent)text="The pairing request was not sent. Check network access and allow styx incoming connections in the hub computer’s system prompt. Then paste a new invitation, review it and submit again. Styx will not retry automatically.";else if(native!=null&&native.Code=="pairing_link_expired_or_invalid")text="This invitation is invalid or has expired. Get a new invitation from your Gateway and review it before submitting again. Styx will not retry automatically.";else if(native!=null&&native.Code=="app_system_trust_not_supported")text="This native join currently requires an explicit Gateway CA in the invitation. System-trust-only joining is not supported; no CA or approval was fabricated.";else if(native!=null&&Array.IndexOf(new[]{"app_lan_address_invalid","app_network_interface_changed","app_network_interface_required","app_network_interfaces_unavailable","tunnel_client_unavailable"},native.Code)>=0)text="Select an available LAN or VPN network. If the network changed, detect networks again. Setup was not submitted.";else if(native!=null&&native.Code=="tunnel_client_unavailable")text="Use a Gateway package that includes the Tunnel client.";else if(native!=null&&native.Code=="app_operation_not_supported")text="This operation is unavailable in the native Host slice. Existing settings were retained.";else if(native!=null&&native.Code=="host_payload_insufficient_space")text=SpaceFeedback(native.Budget,native.Preflight);else if(native!=null&&native.Code=="windows_native_app_binding_required")text="The desktop test could not start. This package could not verify the current native Styx app. Your settings are retained.";else if(native!=null&&native.Code=="desktop_acceptance_native_app_changed")text="The native Styx app changed during this desktop test. Create a new test in this app before continuing.";else if(native!=null&&native.Code=="app_login_result_unknown_no_replay")text="The login startup change is unconfirmed and will not be repeated. Check Windows startup settings. Quit and reopen Styx to read the system state.";else if(native!=null&&native.Code=="app_login_observation_changed")text="The Startup entry changed before the operation could finish. Styx preserved the current entry. Check its current state before making another explicit change.";else if(native!=null&&native.Code=="work_in_progress")text="A task is still running. Wait for it to finish before quitting or updating Styx.";else if(native!=null&&native.Code=="work_state_unknown")text="Styx could not confirm whether tasks are running. Keep it open and try again after checking the connection.";if(native!=null){string diagnostic=NativeFailureCode(native.Code);if(diagnostic.Length>0)text+="\nNative result: "+diagnostic;}message.Text="Connection needs attention. Open Settings to review the last result.";settings.Feedback(text);}
    finally{if(message.Text==pending)message.Text=previousMessage;settings.Startup("",false,false);busy=false;mutationDone.TrySetResult(true);}
    // A mutation invalidates an in-flight startup observation. Resume only that
    // read after settling; never replay the mutation or block the ready controls.
@@ -649,8 +649,9 @@ namespace StyxNative {
   async Task ReadLogin(){ApplyLogin(await owner.Call("appLifecycle"));}
   void ApplyLogin(object response){string state=Json.Str(response,"lifecycle","status"),operation=Json.Str(response,"login","status");Feedback(!owner.LoginChangeAllowed||operation=="unknown"?"The last login startup change is unconfirmed and will not be repeated. Check Windows startup settings. Quit and reopen Styx to read the system state.":operation=="pending"?"A login startup change is awaiting its result. Styx will not repeat it.":state=="not_registered"?"Login startup is off.":state=="registered_unverified"?"Login startup is registered. Windows can disable it independently; check Windows startup settings.":state=="foreign"?"The existing Startup entry belongs to another app or installation. Styx preserved it.":"Login startup could not be observed. Check Windows startup settings; no startup entry was changed.");}
   bool NativeSetupEmpty(object data){return Json.Str(data,"mode")=="rust_host"&&!Json.Yes(data,"admission_fenced")&&Json.Get(data,"gateway")==null&&Json.Get(data,"configuration")==null&&Json.Get(data,"enrollment")==null;}
+  bool CanResumeLocal(){return !localCreationSubmitted&&owner.Supports("resumeLocal")&&Json.Str(owner.CurrentStatus,"enrollment","status")=="local_setup_pre_invite"&&Json.Yes(owner.CurrentStatus,"enrollment","can_resume_local");}
   bool NeedsNativeSetup(object data){return !localCreationSubmitted&&NativeSetupEmpty(data);}
-  internal void ShowPage(string name){if(owner.RustHost&&name=="overview"&&NeedsNativeSetup(owner.CurrentStatus))name="welcome";if(Json.Yes(owner.CurrentStatus,"status","joinRecovery","rollbackRequired"))name="join-interrupted";if(owner.ManagementOnly&&name!="update-recovery"){if(name!="component-start")requestedPage=name;name="component-start";}if(InvitationPage(page)&&!InvitationPage(name))owner.FinishInviting();page=name;updateRuntime=null;desktopInput=null;desktopInputLabel=null;challengePrompt=null;confirmChat=null;var previous=new Control[content.Controls.Count];content.Controls.CopyTo(previous,0);foreach(var item in previous)if(item!=feedback&&item!=statusReadout&&item!=observationError){var picture=item as PictureBox;if(picture!=null&&picture.Image!=null)picture.Image.Dispose();item.Dispose();}content.Controls.Clear();Status("");if(!owner.RustHost||name=="welcome"||name=="create"||name=="join")owner.Logo(content,48);StyxContext.Heading(content,name=="general"?"General":name=="runtime-settings"?"Runtime components":name=="login-startup"?"Startup":name=="chat"?"ChatGPT":(name=="overview"||name=="component-start"||name=="update-recovery")?"Computers":"Get started with Styx");
+  internal void ShowPage(string name){if(owner.RustHost&&CanResumeLocal()&&(name=="overview"||name=="welcome"))name="create";if(owner.RustHost&&name=="overview"&&NeedsNativeSetup(owner.CurrentStatus))name="welcome";if(Json.Yes(owner.CurrentStatus,"status","joinRecovery","rollbackRequired"))name="join-interrupted";if(owner.ManagementOnly&&name!="update-recovery"){if(name!="component-start")requestedPage=name;name="component-start";}if(InvitationPage(page)&&!InvitationPage(name))owner.FinishInviting();page=name;updateRuntime=null;desktopInput=null;desktopInputLabel=null;challengePrompt=null;confirmChat=null;var previous=new Control[content.Controls.Count];content.Controls.CopyTo(previous,0);foreach(var item in previous)if(item!=feedback&&item!=statusReadout&&item!=observationError){var picture=item as PictureBox;if(picture!=null&&picture.Image!=null)picture.Image.Dispose();item.Dispose();}content.Controls.Clear();Status("");if(!owner.RustHost||name=="welcome"||name=="create"||name=="join")owner.Logo(content,48);StyxContext.Heading(content,name=="general"?"General":name=="runtime-settings"?"Runtime components":name=="login-startup"?"Startup":name=="chat"?"ChatGPT":(name=="overview"||name=="component-start"||name=="update-recovery")?"Computers":"Get started with Styx");
    renderedRustMode=owner.RustHost;if(renderedRustMode){ShowRustPage(name);return;}
    if(name=="welcome"){
     if(Json.Get(owner.CurrentStatus,"status","deployment")!=null){
@@ -717,7 +718,7 @@ namespace StyxNative {
    // A closed input refusal AND a successful post-failure Rust observation
    // must show no retained/published setup. Never infer this from a stale
    // snapshot, an error string alone or a lost transport response.
-   if(native!=null&&NativeSetupEmpty(observed)&&Array.IndexOf(new[]{"app_input_invalid","app_lan_address_invalid","app_network_interface_changed","app_network_interface_required","app_network_interfaces_unavailable"},native.Code)>=0)localCreationSubmitted=false;
+   if(native!=null&&NativeSetupEmpty(observed)&&Array.IndexOf(new[]{"app_input_invalid","app_lan_address_invalid","app_network_interface_changed","app_network_interface_required","app_network_interfaces_unavailable","tunnel_client_unavailable"},native.Code)>=0)localCreationSubmitted=false;
   }
   async Task ChangeRoleAndShow(string destination){
    if(MessageBox.Show(this,"This computer will disconnect, back up its current settings, and be paired again.","Change this computer's role…",MessageBoxButtons.OKCancel,MessageBoxIcon.Question)!=DialogResult.OK)return;
@@ -903,51 +904,69 @@ namespace StyxNative {
     Capabilities();persist.Checked=false;persist.Enabled=false;
     channel.Items[0]="Choose Microsoft Edge or Google Chrome";channel.Enabled=browser.Checked;browser.CheckedChanged+=(s,e)=>channel.Enabled=browser.Checked;
     Explain("Styx sets up a local gateway and connects this computer. Computer Use is optional and controls only your signed-in desktop when it is available.",85);
-    var localDraft=capabilityDrafts[page];
-    var allowLan=new CheckBox {Text="Let other computers on my network join this Gateway",Checked=localDraft.AllowRemoteHosts,Width=490,Height=48};content.Controls.Add(allowLan);
-    var lanLabel=StyxContext.Text(content,"Network for other computers",22);
-    var networks=new ComboBox {DropDownStyle=ComboBoxStyle.DropDownList,Width=490,AccessibleName="Network for other computers"};content.Controls.Add(networks);
-    networks.Items.Add(new NetworkChoice {Name="Automatic",Address=""});networks.SelectedIndex=0;
-    var lanHint=StyxContext.Text(content,"Available LAN and VPN addresses are detected automatically. Other computers need access to the selected network.",65);
-    var manual=new CheckBox {Text="Advanced: manual interface address",Width=490,Height=32};content.Controls.Add(manual);
-    var lanAddress=new TextBox {Text=localDraft.LanAddress,Width=490,AccessibleName="Manual interface IPv4 address",Margin=new Padding(0,0,0,12)};content.Controls.Add(lanAddress);
-    bool detecting=false;
-    Func<Task> discover=async()=>{
-     if(detecting||networks.IsDisposed||page!="create")return;detecting=true;networks.Enabled=false;
-     try{
-      var result=await owner.Call("networkInterfaces");if(networks.IsDisposed||page!="create")return;
-      var rows=Json.Get(result,"interfaces") as object[]??new object[0];string preferred=String.IsNullOrEmpty(localDraft.LanAddress)?Json.Str(result,"recommendedAddress"):localDraft.LanAddress;
-      networks.Items.Clear();networks.Items.Add(new NetworkChoice {Name="Automatic",Address=""});int selected=0;
-      foreach(var row in rows){string address=Json.Str(row,"address");if(String.IsNullOrEmpty(address))continue;networks.Items.Add(new NetworkChoice {Name=Json.Str(row,"name"),Address=address});if(address==preferred)selected=networks.Items.Count-1;}
-      networks.SelectedIndex=selected;if(!manual.Checked)lanAddress.Text=((NetworkChoice)networks.SelectedItem).Address;
-      lanHint.Text=rows.Length==0?"No available LAN or VPN network was found. Connect a network and detect again, or turn off joining for now.":"Available LAN and VPN addresses are detected automatically. Other computers need access to the selected network.";
-     }catch{if(!lanHint.IsDisposed)lanHint.Text="This computer's network interfaces could not be read. Detect again.";}
-     finally{detecting=false;if(!networks.IsDisposed)networks.Enabled=!manual.Checked;}
-    };
-    var detect=StyxContext.Button(content,"Detect networks again",()=>owner.Read(discover));
-    Action showNetworks=()=>{lanLabel.Visible=networks.Visible=lanHint.Visible=manual.Visible=detect.Visible=allowLan.Checked;lanAddress.Visible=allowLan.Checked&&manual.Checked;networks.Enabled=!detecting&&!manual.Checked;};
-    showNetworks();
-    allowLan.CheckedChanged+=async(s,e)=>{localDraft.AllowRemoteHosts=allowLan.Checked;showNetworks();if(allowLan.Checked)await owner.Read(discover);};
-    manual.CheckedChanged+=(s,e)=>{showNetworks();if(!manual.Checked&&networks.SelectedItem!=null)lanAddress.Text=((NetworkChoice)networks.SelectedItem).Address;};
-    networks.SelectedIndexChanged+=(s,e)=>{if(!manual.Checked&&networks.SelectedItem!=null)lanAddress.Text=((NetworkChoice)networks.SelectedItem).Address;};
-    lanAddress.TextChanged+=(s,e)=>localDraft.LanAddress=lanAddress.Text;
-    if(allowLan.Checked)BeginInvoke(new Action(async()=>await owner.Read(discover)));
-    NativeAction("Prepare this computer","createLocal",async()=>{
+    bool resuming=CanResumeLocal();
+    var setupTunnel=Input("Tunnel ID");
+    var setupKey=Input("Tunnel runtime API key",true);
+    bool detecting=false; CheckBox allowLan=null; TextBox lanAddress=null;
+    if(!resuming){
+     var localDraft=capabilityDrafts[page];
+     allowLan=new CheckBox {Text="Let other computers on my network join this Gateway",Checked=localDraft.AllowRemoteHosts,Width=490,Height=48};content.Controls.Add(allowLan);
+     var lanLabel=StyxContext.Text(content,"Network for other computers",22);
+     var networks=new ComboBox {DropDownStyle=ComboBoxStyle.DropDownList,Width=490,AccessibleName="Network for other computers"};content.Controls.Add(networks);
+     networks.Items.Add(new NetworkChoice {Name="Automatic",Address=""});networks.SelectedIndex=0;
+     var lanHint=StyxContext.Text(content,"Available LAN and VPN addresses are detected automatically. Other computers need access to the selected network.",65);
+     var manual=new CheckBox {Text="Advanced: manual interface address",Width=490,Height=32};content.Controls.Add(manual);
+     lanAddress=new TextBox {Text=localDraft.LanAddress,Width=490,AccessibleName="Manual interface IPv4 address",Margin=new Padding(0,0,0,12)};content.Controls.Add(lanAddress);
+     Func<Task> discover=async()=>{
+      if(detecting||networks.IsDisposed||page!="create")return;detecting=true;networks.Enabled=false;
+      try{
+       var result=await owner.Call("networkInterfaces");if(networks.IsDisposed||page!="create")return;
+       var rows=Json.Get(result,"interfaces") as object[]??new object[0];string preferred=String.IsNullOrEmpty(localDraft.LanAddress)?Json.Str(result,"recommendedAddress"):localDraft.LanAddress;
+       networks.Items.Clear();networks.Items.Add(new NetworkChoice {Name="Automatic",Address=""});int selected=0;
+       foreach(var row in rows){string address=Json.Str(row,"address");if(String.IsNullOrEmpty(address))continue;networks.Items.Add(new NetworkChoice {Name=Json.Str(row,"name"),Address=address});if(address==preferred)selected=networks.Items.Count-1;}
+       networks.SelectedIndex=selected;if(!manual.Checked)lanAddress.Text=((NetworkChoice)networks.SelectedItem).Address;
+       lanHint.Text=rows.Length==0?"No available LAN or VPN network was found. Connect a network and detect again, or turn off joining for now.":"Available LAN and VPN addresses are detected automatically. Other computers need access to the selected network.";
+      }catch{if(!lanHint.IsDisposed)lanHint.Text="This computer's network interfaces could not be read. Detect again.";}
+      finally{detecting=false;if(!networks.IsDisposed)networks.Enabled=!manual.Checked;}
+     };
+     var detect=StyxContext.Button(content,"Detect networks again",()=>owner.Read(discover));
+     Action showNetworks=()=>{lanLabel.Visible=networks.Visible=lanHint.Visible=manual.Visible=detect.Visible=allowLan.Checked;lanAddress.Visible=allowLan.Checked&&manual.Checked;networks.Enabled=!detecting&&!manual.Checked;};
+     showNetworks();
+     allowLan.CheckedChanged+=async(s,e)=>{localDraft.AllowRemoteHosts=allowLan.Checked;showNetworks();if(allowLan.Checked)await owner.Read(discover);};
+     manual.CheckedChanged+=(s,e)=>{showNetworks();if(!manual.Checked&&networks.SelectedItem!=null)lanAddress.Text=((NetworkChoice)networks.SelectedItem).Address;};
+     networks.SelectedIndexChanged+=(s,e)=>{if(!manual.Checked&&networks.SelectedItem!=null)lanAddress.Text=((NetworkChoice)networks.SelectedItem).Address;};
+     lanAddress.TextChanged+=(s,e)=>localDraft.LanAddress=lanAddress.Text;
+     if(allowLan.Checked)BeginInvoke(new Action(async()=>await owner.Read(discover)));
+    }
+    string operation=resuming?"resumeLocal":"createLocal";
+    NativeAction(resuming?"Continue setup":"Prepare this computer",operation,async()=>{
+     if(resuming&&!CanResumeLocal())throw new IOException("app_local_checkpoint_refused");
      if(detecting){Feedback("Wait for network detection to finish before continuing.");return;}
-     if(localCreationSubmitted||Json.Yes(owner.CurrentStatus,"admission_fenced")||Json.Get(owner.CurrentStatus,"gateway")!=null||Json.Get(owner.CurrentStatus,"configuration")!=null||Json.Get(owner.CurrentStatus,"enrollment")!=null)throw new IOException("app_setup_requires_review");
+     if(!resuming&&!NeedsNativeSetup(owner.CurrentStatus))throw new IOException("app_setup_requires_review");
      if(browser.Checked&&channel.SelectedIndex==0){Feedback("Choose Microsoft Edge or Google Chrome before requesting Browser Automation.");return;}
+     string tunnelId=setupTunnel.Text.Trim();
+     if(!System.Text.RegularExpressions.Regex.IsMatch(tunnelId,@"\Atunnel_[A-Za-z0-9_-]{8,128}\z")||
+        !System.Text.RegularExpressions.Regex.IsMatch(setupKey.Text,@"\Ask-[A-Za-z0-9_-]{16,512}\z")){
+      Feedback("Enter the Tunnel ID and runtime API key from OpenAI Platform to create your Gateway.");return;
+     }
      var choice=Choice();if(!browser.Checked)choice["browserChannel"]=null;
-     choice["allowRemoteHosts"]=allowLan.Checked;if(allowLan.Checked&&!String.IsNullOrWhiteSpace(lanAddress.Text))choice["lanAddress"]=lanAddress.Text.Trim();
+     if(resuming){
+      var origin=new Uri(Json.Str(owner.CurrentStatus,"gateway","origin"));
+      choice["port"]=origin.Port;
+     }else{
+      choice["allowRemoteHosts"]=allowLan.Checked;
+      if(allowLan.Checked&&!String.IsNullOrWhiteSpace(lanAddress.Text))choice["lanAddress"]=lanAddress.Text.Trim();
+     }
      // Duplicate-submit guard only; Core owns all durable setup state. One
      // request, with Core's default port 22022. Failure only reads status.
+     choice["tunnel"]=Json.Obj("tunnelId",tunnelId,"apiKey",setupKey.Text);setupKey.Clear();
      localCreationSubmitted=true;
      // The installed Framework compiler is C# 5: keep awaits outside
      // catch/finally while preserving the original mutation failure and stack.
      Exception setupFailure=null;
-     try{await owner.Call("createLocal",choice);}catch(Exception failure){setupFailure=failure;}
-     var nativeFailure=setupFailure as NativeOperationException;bool invalidLan=nativeFailure!=null&&Array.IndexOf(new[]{"app_lan_address_invalid","app_network_interface_changed","app_network_interface_required","app_network_interfaces_unavailable"},nativeFailure.Code)>=0;
+     try{await owner.Call(operation,choice);}catch(Exception failure){setupFailure=failure;}finally{choice.Remove("tunnel");}
      object observed=null;try{await owner.RefreshAfterMutation();observed=owner.CurrentStatus;}catch{}
-     ApplySetupFailure(setupFailure,observed);ShowPage(invalidLan&&!localCreationSubmitted?"create":"overview");
+     ApplySetupFailure(setupFailure,observed);ShowPage(setupFailure!=null&&!localCreationSubmitted?"create":"overview");
      if(setupFailure!=null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(setupFailure).Throw();
     });
     Action("Return",()=>{ShowPage("welcome");return Task.FromResult(0);},false);

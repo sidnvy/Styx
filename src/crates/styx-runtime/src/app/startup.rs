@@ -572,6 +572,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         app.create_local(LocalInput {
+            tunnel: None,
             label: "Disposable history".into(),
             computer: false,
             browser: false,
