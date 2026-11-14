@@ -49,7 +49,7 @@
   记录 `/tmp/styx-host-capabilities-native-20261114/receipt.json`。MCP instructions 与
   onboarding skill 同步说明 Host 设置归属、关闭影响及未知结果处理。
 
-尚未将这批源码安装到现有原生 App/Runtime。**原生 GUI 点击开关、Computer Use 活跃任务
+该迁移检查点结束时尚未安装原生 App/Runtime；后续安装结果见下方原生运行检查点。**原生 GUI 点击开关、Computer Use 活跃任务
 停止与其他能力共存、原 profile 重启恢复仍需真实运行验收**；编译和 Linux 场景不替代它们。
 首次设置的 Exec 选择已由下述检查点补齐。完成原生运行验收后，再迁移 Exec 跨对话任务、
 Browser 显式转交以及正常退出/撤销旅程。重构版 Stable 仍为 NO-GO；已发布 0.4.0 的历史
@@ -65,6 +65,27 @@ Mac/Windows 首次加入、本机 Gateway+Host 设置以及继续未完成设置
 Mac 安装前接线检查发现 Swift 还维护第二份操作准入名单，新增 `hostCapabilities` 会被客户端先行拒绝。已移除该重复准入，支持状态和输入验证交给 Rust；固定名称集合仅用于可选诊断日志。
 
 设备核对：PilotMac 正常配置目录只有签名材料，原 App build 2001 已安装但未配置配对、未运行；完整连接与恢复验收等待指定 Gateway。Windows 源码存在其他未提交修改，保留未覆盖，原生编译在已使用的 pairing-dev 输入目录进行。
+
+### Mac 实际安装与未配对生命周期（2026-11-14）
+
+`520cba6` 已整合到 develop，并同步至 PilotMac 原 source 工程。build 2002 完整 App/Runtime
+使用原有缓存、平台证书和发布者身份生产，并安装到 `/Applications/Styx.app`。旧 App 保留于
+原项目 `artifacts/pairing-dev/installed-before-capabilities.app`；安装器未修改配置。
+
+实际正常启动 App/Core 成功，经框架 Quit 原 App/Core 均退出，Core 诊断为 exit 0；同一正常
+入口重新打开成功，当前保持运行。已读回重开 Core 的实际启动参数，所用候选 manifest
+`b13b53de…`、Core SHA `2d75ccff…` 与已安装 Runtime 一致。
+
+收据为 `/tmp/styx-host-capabilities-native-20261114/capability-{install,launch,quit,reopen,selection}.json`，
+原始记录保留在 Mac 的 `artifacts/pairing-dev`。原机构建的 Keychain 拒绝保留原记录；只读确认
+失败签名未改变输出后，用既有函数在本机构建会话解锁并完成签名。App 准备曾在写入产物前
+被本次解包目录模式拒绝，只修正本次专属构建目录，没有改共享父目录或运行配置的权限。
+
+**这是一台尚未配对的 App/Core 生命周期验证。** 正常配置中尚无已配对 Host；当前等待所有者
+指定 PilotMac 的目标 Gateway。未执行 Gateway/Tunnel 变更、系统权限授予或重新配对。
+Host 运行中 GUI 能力切换、Cua 活跃会话停止、其他能力不中断以及已配置 Host 重启恢复，
+仍是下一验收出口。Windows 仅完成本批原生控件/编译回归，原 source 的其他未提交修改保留。
+重构版 Stable 仍为 NO-GO。
 
 ## 当前开发检查点（2026-11-12）
 
