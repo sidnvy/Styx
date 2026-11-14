@@ -266,24 +266,23 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
         std::fs::create_dir(&p).unwrap();
         std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let adapter = crate::providers::codex::CodexStdio::spawn_owned(
-        crate::providers::codex::OwnedExecutorConfig {
-            binary: std::env::var_os("STYX_TEST_CODEX").unwrap().into(),
-            cwd: root.clone(),
-            environment: BTreeMap::from([
-                ("PATH".into(), "/usr/bin:/bin".into()),
-                ("HOME".into(), root.display().to_string()),
-                (
-                    "CODEX_HOME".into(),
-                    root.join("codex-home").display().to_string(),
-                ),
-            ]),
-            rpc_timeout: Duration::from_secs(3),
-            retained_process_limit: 8,
-        },
-    )
-    .await
-    .unwrap();
+    let executor_config = || crate::providers::codex::OwnedExecutorConfig {
+        binary: std::env::var_os("STYX_TEST_CODEX").unwrap().into(),
+        cwd: root.clone(),
+        environment: BTreeMap::from([
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("HOME".into(), root.display().to_string()),
+            (
+                "CODEX_HOME".into(),
+                root.join("codex-home").display().to_string(),
+            ),
+        ]),
+        rpc_timeout: Duration::from_secs(3),
+        retained_process_limit: 8,
+    };
+    let adapter = crate::providers::codex::CodexStdio::spawn_owned(executor_config())
+        .await
+        .unwrap();
     let (host, authority) = HostCoordinator::new_owned(
         adapter,
         OperationLedger::new(HostGeneration::try_from("browser-host-owned-generation").unwrap()),
@@ -474,6 +473,55 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
         assert_eq!(history.state,OperationState::Unknown);
         observations["unknown_history_after_physical_release"]=serde_json::json!(history.state);
         assert_eq!(*effects.lock().unwrap(),vec![nonce.clone(),unknown_nonce.clone()]);
+        stage = "capabilities_do_not_stop_other_lanes";
+        let independent = opened(&host, &owner).await;
+        let mut exec_context = browser_context(&host);
+        exec_context.capability = CapabilityId::ExecRun;
+        let process = StartProcess {
+            argv: vec!["/bin/sh".into(), "-c".into(),
+                "printf ready > exec-ready; while [ ! -f exec-go ]; do sleep 0.02; done; printf survived > exec-survived".into()],
+            cwd_file_uri: url::Url::from_directory_path(&root).unwrap().to_string(),
+            environment: BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
+            tty: false,
+        };
+        let process = host.prepare_start(&owner, exec_context, &process).unwrap();
+        match host.dispatch_start(&owner, &process.id, process.payload_digest).unwrap() {
+            StartSubmission::Submitted(ticket) => { ticket.wait().await.unwrap(); },
+            _ => panic!("fresh process required"),
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !root.join("exec-ready").exists() { tokio::time::sleep(Duration::from_millis(20)).await; }
+        }).await.unwrap();
+        authority.stop_disabled_capabilities(crate::host::settings::Capabilities {
+            exec: true, browser: false, computer: true,
+        }).await.unwrap();
+        let closed = host.inner.state.lock().unwrap().ledger.inspect(&owner, &independent.id, independent.payload_digest).unwrap();
+        assert_eq!(closed.liveness, ExecutionLiveness::Exited);
+        std::fs::write(root.join("exec-go"), b"go").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if std::fs::read(root.join("exec-survived")).ok().as_deref() == Some(b"survived") { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap();
+        let surviving_browser = opened(&host, &owner).await;
+        acted(&host, &owner, &surviving_browser, BrowserAction::Evaluate {
+            function: "() => { document.title = 'browser-survives-exec-disable'; return document.title; }".into(),
+        }).await;
+        authority.stop_disabled_capabilities(crate::host::settings::Capabilities {
+            exec: false, browser: true, computer: true,
+        }).await.unwrap();
+        let result = acted(&host, &owner, &surviving_browser, BrowserAction::Evaluate {
+            function: "() => { if (document.title !== 'browser-survives-exec-disable') throw new Error('context replaced'); return document.title; }".into(),
+        }).await;
+        assert!(serde_json::to_string(&result.receipt.result).unwrap().contains("browser-survives-exec-disable"));
+        assert!(host.inner.adapter.lock().unwrap().is_some());
+        observations["capability_isolation"] = serde_json::json!({
+            "browser_disable_physically_closed_context": true,
+            "same_host_exec_completed_after_browser_disable": true,
+            "same_browser_context_survived_exec_disable": true,
+            "host_retained_executor_for_reenable": true,
+        });
         stage = "owner_cleanup_and_profile_metadata_release";
         for current in [&owner,&other] {
             let cleanup=authority.fence_owner_for_cleanup(current).unwrap();

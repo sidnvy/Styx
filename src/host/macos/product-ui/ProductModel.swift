@@ -1176,6 +1176,12 @@ enum ProductRestorationPolicy {
             pending = try await client.write("pending/list", ["authorize": .bool(true)])["pending"].array
         }
     }
+    func setHostCapability(_ name: String, enabled: Bool) {
+        perform { [self] in
+            let result = try await client.native("hostCapabilities", [name: .bool(enabled)])
+            guard result["applied"].bool else { throw ProductCoreError.rejected }
+        }
+    }
     func updateCapabilities() {
         perform { [self] in
             guard !joined else { throw ProductCoreError.rejected }

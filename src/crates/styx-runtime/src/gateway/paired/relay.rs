@@ -54,6 +54,7 @@ impl RelayError {
 }
 #[derive(Clone, Debug)]
 pub struct DeviceStatus {
+    pub host_settings: bool,
     pub device_id: DeviceId,
     pub label: String,
     pub platform: String,
@@ -70,6 +71,7 @@ pub(crate) struct Command {
     pub gate: Option<Arc<Mutex<bool>>>,
 }
 pub(crate) struct Entry {
+    pub host_settings: bool,
     pub device: DeviceId,
     pub transport_generation: ConnectionGeneration,
     pub host_connection: ConnectionGeneration,
@@ -364,6 +366,9 @@ impl RelayHandle {
         {
             return Err(RelayError::Unsupported);
         }
+        if e.host_settings {
+            return self.control_lane(e).await.map(|_| ());
+        }
         let held = e.lease_for(lane).await;
         let lease = held.as_ref().ok_or(if lane == Lane::Exec {
             RelayError::Offline
@@ -390,7 +395,9 @@ impl RelayHandle {
         }
         if matches!(
             call,
-            Call::OwnerOpen { .. }
+            Call::GetCapabilities
+                | Call::SetCapabilities { .. }
+                | Call::OwnerOpen { .. }
                 | Call::OwnerRevoke { .. }
                 | Call::OwnerCleanup { .. }
                 | Call::EnableTransportDrain
@@ -406,7 +413,11 @@ impl RelayHandle {
                 Lane::Exec
             };
             self.authorize_for(e, lane).await?;
-            Ok(lane)
+            if e.host_settings {
+                self.control_lane(e).await
+            } else {
+                Ok(lane)
+            }
         }
     }
     pub(crate) async fn control_lane(&self, e: &Entry) -> Result<Lane, RelayError> {
@@ -456,16 +467,19 @@ impl RelayHandle {
                 None => false,
             };
             let browser_online = match e {
-                Some(e) if p.browser_approved => self.authorize_for(e, Lane::Browser).await.is_ok(),
+                Some(e) if e.host_settings || p.browser_approved => {
+                    self.authorize_for(e, Lane::Browser).await.is_ok()
+                }
                 _ => false,
             };
             let computer_online = match e {
-                Some(e) if p.computer_approved => {
+                Some(e) if e.host_settings || p.computer_approved => {
                     self.authorize_for(e, Lane::Computer).await.is_ok()
                 }
                 _ => false,
             };
             devices.push(DeviceStatus {
+                host_settings: e.is_some_and(|e| e.host_settings),
                 device_id: p.device_id,
                 label: p.label,
                 platform: p.platform,
@@ -478,6 +492,39 @@ impl RelayHandle {
             });
         }
         Ok(devices)
+    }
+    pub async fn host_capabilities(
+        &self,
+        device: &DeviceId,
+        patch: Option<crate::host::settings::CapabilityPatch>,
+    ) -> Result<crate::host::settings::SettingsReport, RelayError> {
+        let entry = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| RelayError::Unknown)?
+            .entries
+            .get(device)
+            .cloned()
+            .ok_or(RelayError::Offline)?;
+        if !entry.host_settings {
+            return Err(RelayError::Unsupported);
+        }
+        let call = patch.map_or(Call::GetCapabilities, |patch| Call::SetCapabilities {
+            patch,
+        });
+        match self.exchange(&entry, call, None).await? {
+            Reply::Capabilities { report } => Ok(report),
+            Reply::Error {
+                certainty: styx_contracts::error::ExecutionCertainty::Unknown,
+                ..
+            } => Err(RelayError::Unknown),
+            Reply::Error {
+                category: styx_contracts::error::ErrorCategory::Busy,
+                ..
+            } => Err(RelayError::Busy),
+            _ => Err(RelayError::Unsupported),
+        }
     }
     async fn exchange(
         &self,

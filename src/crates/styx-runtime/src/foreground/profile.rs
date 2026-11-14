@@ -280,6 +280,7 @@ fn computer_selected(
     Ok(true)
 }
 pub struct LoadedLegacyProfile {
+    settings: Option<Arc<crate::host::settings::HostSettings>>,
     host_base_dir: PathBuf,
     device: DeviceId,
     endpoint: LinkEndpoint,
@@ -320,6 +321,12 @@ impl std::fmt::Debug for LoadedLegacyProfile {
     }
 }
 impl LoadedLegacyProfile {
+    pub(crate) fn settings(&self) -> Option<Arc<crate::host::settings::HostSettings>> {
+        self.settings.clone()
+    }
+    pub(crate) fn exec_selected(&self) -> bool {
+        self.settings.as_ref().is_none_or(|s| s.current().exec) && self.executor_enabled()
+    }
     pub fn host_base_dir(&self) -> &Path {
         &self.host_base_dir
     }
@@ -1117,6 +1124,7 @@ fn load_source_inner(
         BTreeMap::new()
     };
     let loaded = LoadedLegacyProfile {
+        settings: None,
         host_base_dir: base.clone(),
         device: identity.device_id.clone(),
         endpoint,

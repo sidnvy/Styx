@@ -67,11 +67,19 @@ struct AppContainer {
     instance: ExecutionLeaseGuard,
 }
 pub(crate) struct HostScope {
+    settings: std::sync::Mutex<std::sync::Weak<crate::host::settings::HostSettings>>,
     container: Arc<AppContainer>,
     state_dir: PathBuf,
     root: OnceLock<PrivateRoot>,
 }
 impl HostScope {
+    pub(crate) fn publish_settings(&self, settings: &Arc<crate::host::settings::HostSettings>) {
+        *self.settings.lock().expect("Host settings publication") = Arc::downgrade(settings);
+    }
+    fn host_settings(&self) -> Option<Arc<crate::host::settings::HostSettings>> {
+        self.settings.lock().ok()?.upgrade()
+    }
+
     #[cfg(test)]
     pub(crate) fn open_for_test(state_dir: &Path) -> Result<Self, AppError> {
         Self::open(state_dir)
@@ -129,6 +137,7 @@ impl HostScope {
                 .map_err(|_| AppError("app_scope_changed"))?;
         }
         let result = Self {
+            settings: std::sync::Mutex::new(std::sync::Weak::new()),
             container,
             state_dir,
             root,
@@ -223,6 +232,7 @@ struct EmptyInput {}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum Operation {
+    HostCapabilities,
     Computers,
     InviteComputer,
     PendingComputers,
@@ -1297,6 +1307,9 @@ impl HostApp {
         if role.cancel.is_cancelled() || role.worker.is_finished() {
             return false;
         }
+        if let Some(settings) = self.scope.host_settings() {
+            return settings.current().computer;
+        }
         let Some(original) = role.desktop_intent.clone() else {
             return false;
         };
@@ -1393,6 +1406,9 @@ impl HostApp {
                 supported.push("rejectComputer");
             }
         }
+        if self.running.is_some() && self.scope.host_settings().is_some() {
+            supported.push("hostCapabilities");
+        }
         let foreground = serde_json::to_value(&*self.observed.borrow())
             .expect("closed foreground status serializes");
         #[cfg(target_os = "macos")]
@@ -1409,7 +1425,7 @@ impl HostApp {
             }
             value
         };
-        json!({"schema":1,"maintenance":self.maintenance_status()["maintenance"],"runtimeUpdate":self.runtime_update,"service":self.service,"configuration":configuration,"foreground":foreground,"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
+        json!({"schema":1,"capabilities":self.scope.host_settings().map(|s| s.report()),"maintenance":self.maintenance_status()["maintenance"],"runtimeUpdate":self.runtime_update,"service":self.service,"configuration":configuration,"foreground":foreground,"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
     }
     async fn dispatch(
         &mut self,
@@ -1478,7 +1494,8 @@ impl HostApp {
         }
         if !matches!(
             operation,
-            Operation::InviteComputer
+            Operation::HostCapabilities
+                | Operation::InviteComputer
                 | Operation::ApproveComputer
                 | Operation::RejectComputer
                 | Operation::RevokeComputer
@@ -1527,6 +1544,19 @@ impl HostApp {
         }
         self.reap().await?;
         match operation {
+            Operation::HostCapabilities => {
+                let patch: crate::host::settings::CapabilityPatch = decode_input(&input)?;
+                let settings = self
+                    .scope
+                    .host_settings()
+                    .ok_or(AppError("host_not_running"))?;
+                let report = settings
+                    .update(patch)
+                    .await
+                    .map_err(|_| AppError("host_settings_not_applied"))?;
+                return serde_json::to_value(report)
+                    .map_err(|_| AppError("host_settings_not_applied"));
+            }
             Operation::Computers
             | Operation::InviteComputer
             | Operation::PendingComputers
@@ -1693,6 +1723,7 @@ impl HostApp {
                 Ok(self.snapshot().await)
             }
             Operation::QuitAdmission
+            | Operation::HostCapabilities
             | Operation::Computers
             | Operation::InviteComputer
             | Operation::PendingComputers

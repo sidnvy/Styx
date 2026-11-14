@@ -874,6 +874,7 @@ namespace StyxNative {
   void ShowRustPage(string name){
    if(name=="general"){
     StyxContext.Heading(content,"Gateway");JoinGatewayAction();
+    NativeAction("This computer's capabilities…","hostCapabilities",()=>{ShowPage("host-capabilities");return Task.FromResult(0);});
     StyxContext.Heading(content,"Startup");
     Explain("Closing the window keeps Styx running in the system tray. Choose Quit Styx to stop this session.");
     StyxContext.Button(content,"Quit Styx",owner.RequestQuit);
@@ -881,6 +882,16 @@ namespace StyxNative {
     StyxContext.Heading(content,"About Styx");Explain("Styx for Windows");
     NativeAction("Change this computer's role…","retireRole",ChangeRole);
     var advanced=StyxContext.Button(content,"Advanced: runtime components",()=>{ShowPage("runtime-settings");return Task.FromResult(0);});advanced.MinimumSize=new Size(260,36);
+   }else if(name=="host-capabilities"){
+    Explain("Turning off a capability stops its existing tasks. Other capabilities and the Gateway connection keep running.",80);
+    foreach(string capability in new[]{"exec","browser","computer"}){
+     string selectedCapability=capability;
+     var toggle=new CheckBox {Text=capability=="computer"?"Computer Use":capability=="browser"?"Browser":"Exec",Checked=Json.Yes(owner.CurrentStatus,"capabilities","configured",capability),Width=490,Height=32};
+     content.Controls.Add(toggle);
+     toggle.CheckedChanged+=async(sender,args)=>{toggle.Enabled=false;try{var result=await owner.Call("hostCapabilities",Json.Obj(selectedCapability,toggle.Checked));await owner.RefreshAfterMutation();if(!Json.Yes(result,"applied"))Feedback("Settings have not fully applied. Refresh to check their status.");}catch(Exception){Feedback("The setting result is unconfirmed. Refresh the status before trying again.");}finally{if(!toggle.IsDisposed)toggle.Enabled=true;}};
+    }
+    Action("Refresh",async()=>{await owner.RefreshAfterMutation();ShowPage("host-capabilities");},false);
+    Action("Back to General",()=>{ShowPage("general");return Task.FromResult(0);},false);
    }else if(name=="runtime-settings"){
     Explain("Runtime updates preserve your identity, pairing and settings. Both App roles are stopped first and stay stopped until you reconnect. The two configuration updates are separate transactions.",95);
     NativeAction("Prepare runtime update","stageRuntime",async()=>{await owner.Call("stageRuntime",new Dictionary<string,object>{{"authorize",true}});await owner.RefreshAfterMutation();ShowPage("runtime-settings");});
@@ -994,7 +1005,7 @@ namespace StyxNative {
     }
     var selected=Json.Get(owner.CurrentStatus,"enrollment","selected_features");
     if(selected!=null)Explain("Selected during setup: Exec; Computer Use "+(Json.Yes(selected,"computer")?"on":"off")+"; Browser Automation "+(Json.Yes(selected,"browser")?"on":"off")+". Selection does not confirm Gateway approval or system permissions.",65);
-    Explain("To change features in this version, use Change this computer’s role, set up again and re-pair.",55);
+    NativeAction("This computer's capabilities…","hostCapabilities",()=>{ShowPage("host-capabilities");return Task.FromResult(0);});
    }else if(name=="chat"){
     if(owner.Supports("tunnelSave")){NativeAction("Configure Tunnel…","tunnelSave",EditNativeTunnel);NativeAction("Check Tunnel status","tunnelStatus",async()=>{var value=await owner.Call("tunnelStatus");Feedback(Json.Str(value,"tunnelId")+"\n"+Json.Str(value,"status")+" / "+Json.Str(value,"transport"));});}
     if(owner.Supports("tunnelSave")){CustomMcpGuide();RefreshAction();}

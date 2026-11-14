@@ -12,6 +12,7 @@ struct FreshDeployment {
 }
 #[derive(Deserialize)]
 struct FreshHost {
+    exec: Option<Value>,
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     computer: Option<Value>,
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -185,34 +186,55 @@ fn load_snapshot(
     if deployment.schema != 1 || deployment.mode != "join-existing" {
         return Err(ProfileError::Invalid);
     }
-    // Each selected capability uses its native factory and independent lifecycle.
-    // Remote approvals never replace local selection or OS desktop authorization.
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    let computer = seed.computer_requested && deployment.host.computer == Some(Value::Bool(true));
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    let deployment_computer = Some(Value::Bool(computer));
-    #[cfg(target_os = "linux")]
-    let host_computer = Some(serde_json::json!({
-        "enabled":computer,"connections":1,"env":{"CUA_DRIVER_RS_ENABLE_WAYLAND":"1"}
-    }));
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    let host_computer = Some(serde_json::json!({"enabled":computer,"connections":1}));
-    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-    let deployment_browser = if seed.browser_requested {
-        deployment.host.browser
-    } else {
-        None
+    let initial = crate::host::settings::Capabilities {
+        exec: deployment
+            .host
+            .exec
+            .as_ref()
+            .and_then(|v| v.get("enabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        browser: seed.browser_requested
+            && ready.browser_approved
+            && deployment
+                .host
+                .browser
+                .as_ref()
+                .and_then(|v| v.get("enabled"))
+                .and_then(Value::as_bool)
+                == Some(true),
+        computer: seed.computer_requested
+            && ready.computer_approved
+            && deployment.host.computer == Some(Value::Bool(true)),
     };
-    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-    let host_browser = deployment_browser.clone().map(|mut value| {
-        if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "profileRoot".into(),
-                Value::String(state_dir.join("browser").to_string_lossy().into_owned()),
-            );
-        }
-        value
-    });
+    let settings = crate::host::settings::HostSettings::open(state_dir, initial)
+        .map_err(|_| ProfileError::Invalid)?;
+    // Provider construction inputs are independent of mutable admission. The
+    // Host controller gates calls; disabled Cua is not initialized until enabled.
+    let deployment_computer = Some(Value::Bool(true));
+    #[cfg(target_os = "linux")]
+    let host_computer = Some(
+        serde_json::json!({"enabled":true,"connections":1,"env":{"CUA_DRIVER_RS_ENABLE_WAYLAND":"1"}}),
+    );
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let host_computer = Some(serde_json::json!({"enabled":true,"connections":1}));
+    let mut browser_options = deployment
+        .host
+        .browser
+        .unwrap_or_else(|| serde_json::json!({"headless":true,"persistLogin":false}));
+    browser_options
+        .as_object_mut()
+        .ok_or(ProfileError::Invalid)?
+        .insert("enabled".into(), Value::Bool(true));
+    let deployment_browser = Some(browser_options.clone());
+    browser_options
+        .as_object_mut()
+        .ok_or(ProfileError::Invalid)?
+        .insert(
+            "profileRoot".into(),
+            Value::String(state_dir.join("browser").to_string_lossy().into_owned()),
+        );
+    let host_browser = Some(browser_options);
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     let release_root = inventory.browser_release_root();
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -225,6 +247,7 @@ fn load_snapshot(
     let environment = unix_executor_environment(&seed.shell)?;
     let signed_version = inventory.version().to_owned();
     let loaded = LoadedLegacyProfile {
+        settings: Some(settings),
         host_base_dir: state_dir.to_path_buf(),
         device: seed.device_id.clone(),
         endpoint,

@@ -1121,6 +1121,49 @@ impl crate::host::protocol::browser::BrowserBootstrap for CapacityBrowser {
     }
 }
 
+struct FixtureCapabilityRuntime {
+    host: Arc<OwnedExecHost>,
+    work: PathBuf,
+    device: DeviceId,
+}
+impl crate::host::settings::CapabilityRuntime for FixtureCapabilityRuntime {
+    fn apply(
+        &self,
+        _before: crate::host::settings::Capabilities,
+        after: crate::host::settings::Capabilities,
+    ) -> futures_util::future::BoxFuture<'_, Result<(), styx_contracts::error::ErrorCategory>> {
+        Box::pin(async move {
+            self.host
+                .authority()
+                .stop_disabled_capabilities(after)
+                .await?;
+            if after.exec && !self.host.coordinator().exec_configured() {
+                self.host
+                    .enable_executor(
+                        OwnedExecutorConfig {
+                            binary: PathBuf::from(std::env::var("STYX_TEST_CODEX_BIN").unwrap()),
+                            cwd: self.work.clone(),
+                            environment: BTreeMap::from([
+                                ("PATH".into(), "/usr/bin:/bin".into()),
+                                ("HOME".into(), self.work.display().to_string()),
+                                (
+                                    "CODEX_HOME".into(),
+                                    self.work.join("codex-home").display().to_string(),
+                                ),
+                            ]),
+                            rpc_timeout: Duration::from_secs(3),
+                            retained_process_limit: 16,
+                        },
+                        facts(self.device.clone()),
+                    )
+                    .await
+                    .map_err(|_| styx_contracts::error::ErrorCategory::CapabilityUnsupported)?;
+            }
+            Ok(())
+        })
+    }
+}
+
 // Real enrollment, production TLS/WSS, independent native Codex processes and
 // MCP calls. These roots are disposable and never touch an installed profile.
 #[allow(clippy::too_many_arguments)]
@@ -1136,6 +1179,7 @@ async fn many_connected_computers(
     computers: usize,
 ) {
     let mut hosts = Vec::new();
+    let mut settings_controllers = Vec::new();
     let mut jobs = Vec::new();
     let mut devices = Vec::new();
     let mut nonces = Vec::new();
@@ -1150,7 +1194,12 @@ async fn many_connected_computers(
         node.lock().await.stop().await;
         let generation =
             HostGeneration::try_from(format!("computer-{n}-{}", uuid::Uuid::new_v4())).unwrap();
-        let host = Arc::new(
+        let host = Arc::new(if n + 1 == computers {
+            OwnedExecHost::reserve(generation.clone(), facts(device.clone()), 4)
+                .unwrap()
+                .without_executor()
+                .unwrap()
+        } else {
             OwnedExecHost::spawn(
                 OwnedExecutorConfig {
                     binary: PathBuf::from(std::env::var("STYX_TEST_CODEX_BIN").unwrap()),
@@ -1171,8 +1220,25 @@ async fn many_connected_computers(
                 4,
             )
             .await
-            .unwrap(),
-        );
+            .unwrap()
+        });
+        let settings = crate::host::settings::HostSettings::open(
+            &work,
+            crate::host::settings::Capabilities {
+                exec: n + 1 != computers,
+                browser: false,
+                computer: false,
+            },
+        )
+        .unwrap();
+        settings
+            .attach(Arc::new(FixtureCapabilityRuntime {
+                host: host.clone(),
+                work: work.clone(),
+                device: device.clone(),
+            }))
+            .unwrap();
+        settings_controllers.push(settings.clone());
         let endpoint = format!(
             "wss://{}/styx/host/v3/{}/exec",
             client.host,
@@ -1201,7 +1267,10 @@ async fn many_connected_computers(
         let run_stop = stop.clone();
         let run_host = host.clone();
         let job = tokio::spawn(async move {
-            let protocol = run_host.paired_protocol(trusted).unwrap();
+            let protocol = run_host
+                .paired_protocol(trusted)
+                .unwrap()
+                .with_settings(settings);
             let result = protocol
                 .run_connection_with_stop(&mut link, &run_stop)
                 .await;
@@ -1249,6 +1318,31 @@ async fn many_connected_computers(
     )
     .await
     .unwrap();
+    // A Host that starts with every capability disabled remains connected and
+    // manageable. Enabling Exec starts its first executor within the same Host.
+    let initially_disabled = computers - 1;
+    assert!(!hosts[initially_disabled].coordinator().exec_configured());
+    let status = data(
+        owner
+            .call_tool(call(
+                "get_execution_environment_status",
+                json!({"environment_id":devices[initially_disabled].as_str()}),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(status["exec"]["configured"], false);
+    assert_eq!(status["exec"]["connection"], "connected");
+    data(
+        owner
+            .call_tool(call(
+                "set_execution_environment_capabilities",
+                json!({"environment_id":devices[initially_disabled].as_str(),"exec":true}),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert!(hosts[initially_disabled].coordinator().exec_configured());
     // One MCP conversation targets every Host. Missing targets must remain
     // ambiguous even when one device was used most recently.
     for (name, arguments) in [
@@ -1291,6 +1385,66 @@ async fn many_connected_computers(
         computers.to_string()
     );
     assert_eq!(status.headers()["x-styx-computers-capacity"], "32");
+    // A running task is stopped by a remote capability change. A second Host's
+    // task stays alive and accepts its original stdin; control remains usable
+    // with all capabilities disabled, then a local change re-enables Exec.
+    let first = data(owner.call_tool(call("exec_command", json!({"cmd":"printf '%s' $$ > settings-task.pid; IFS= read -r value; printf forbidden > settings-old-effect.txt","login":false,"environment_id":devices[0].as_str(),"yield_time_ms":100}))).await.unwrap());
+    assert!(first["session_id"].as_u64().is_some());
+    let other = data(owner.call_tool(call("exec_command", json!({"cmd":"IFS= read -r value; printf '%s' \"$value\" > unaffected-effect.txt","login":false,"environment_id":devices[1].as_str(),"yield_time_ms":100}))).await.unwrap());
+    let disabled = data(owner.call_tool(call("set_execution_environment_capabilities", json!({"environment_id":devices[0].as_str(),"exec":false,"browser":false,"computer":false}))).await.unwrap());
+    assert_eq!(disabled["capabilities"]["applied"], true);
+    assert!(hosts[0].coordinator().exec_configured());
+    let status = data(
+        owner
+            .call_tool(call(
+                "get_execution_environment_status",
+                json!({"environment_id":devices[0].as_str()}),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(status["exec"]["configured"], false);
+    assert_eq!(relay.connection_counts(), (computers, 32));
+    let refused = owner.call_tool(call("exec_command", json!({"cmd":"printf forbidden > disabled-effect.txt","login":false,"environment_id":devices[0].as_str()}))).await.unwrap();
+    assert_eq!(refused.is_error, Some(true));
+    data(owner.call_tool(call("write_stdin", json!({"session_id":other["session_id"],"chars":"still-running\n","yield_time_ms":100}))).await.unwrap());
+    file_within(
+        &root.join("computer-1/unaffected-effect.txt"),
+        "still-running",
+    )
+    .await;
+    let enabled = settings_controllers[0]
+        .update(crate::host::settings::CapabilityPatch {
+            exec: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(enabled.applied);
+    let status = data(
+        owner
+            .call_tool(call(
+                "get_execution_environment_status",
+                json!({"environment_id":devices[0].as_str()}),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(status["exec"]["configured"], true);
+    data(owner.call_tool(call("exec_command", json!({"cmd":"printf fresh > reenabled-effect.txt","login":false,"environment_id":devices[0].as_str(),"yield_time_ms":100}))).await.unwrap());
+    file_within(&root.join("computer-0/reenabled-effect.txt"), "fresh").await;
+    assert!(!root.join("computer-0/disabled-effect.txt").exists());
+    assert!(!root.join("computer-0/settings-old-effect.txt").exists());
+    let reopened = crate::host::settings::HostSettings::open(
+        &root.join("computer-0"),
+        crate::host::settings::Capabilities {
+            exec: false,
+            browser: true,
+            computer: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(reopened.current(), enabled.configured);
     // Keep the other Hosts online while the explicit target disconnects.
     // Neither an explicit offline target nor an omitted target may fall back.
     let (stop, job) = jobs.remove(0);
@@ -1353,6 +1507,9 @@ async fn many_connected_computers(
         result.unwrap();
         shutdown.unwrap();
     }
+    for settings in settings_controllers {
+        settings.close().await;
+    }
     for host in hosts {
         let cleanup = host.shutdown_owned(Duration::from_secs(10)).await.unwrap();
         assert!(
@@ -1372,6 +1529,7 @@ async fn many_connected_computers(
     }
     std::fs::write(root.join("many-computers-observation.json"), serde_json::to_vec_pretty(&json!({
         "connected_computers":computers,"capacity":32,"devices":devices,"independent_effect_nonces":nonces,
+        "capability_settings":"remote disable stops owned Exec; other Host session survives; same local controller re-enables; persisted settings reopen",
         "mcp_conversations":1,"ambiguous_target":"not dispatched for Exec, Browser and Computer Use","offline_target":"not dispatched; no effect on any other Host",
         "effects":"computer-N/independent-effect.txt; exact unique nonce bytes read independently",
         "slots_after_disconnect":0,"scope":"owned loopback TLS/WSS and real native Exec; not installed-platform acceptance"

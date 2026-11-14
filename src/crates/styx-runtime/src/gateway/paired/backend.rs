@@ -415,6 +415,7 @@ struct OwnerState {
     closing: bool,
 }
 struct State {
+    capability_generations: BTreeMap<DeviceId, [u64; 3]>,
     next_session: u64,
     owners: BTreeMap<OwnerId, OwnerState>,
     sessions: BTreeMap<u64, Entry>,
@@ -451,6 +452,7 @@ impl PairedGatewayBackend {
             physical_cleanups_completed: std::sync::atomic::AtomicUsize::new(0),
             relay,
             state: Mutex::new(State {
+                capability_generations: BTreeMap::new(),
                 next_session: 1,
                 owners: BTreeMap::new(),
                 sessions: BTreeMap::new(),
@@ -479,6 +481,26 @@ impl PairedGatewayBackend {
             [] => Err("environment_unavailable"),
             _ => Err("environment_required"),
         }
+    }
+    async fn refresh_host_capabilities(&self, device: &DeviceId) -> Result<(), &'static str> {
+        let report = match self.relay.host_capabilities(device, None).await {
+            Ok(report) => report,
+            Err(super::RelayError::Unsupported) => return Ok(()),
+            Err(error) => return Err(error.code()),
+        };
+        let mut state = self.state.lock().map_err(|_| "state_unavailable")?;
+        let previous = state
+            .capability_generations
+            .insert(device.clone(), report.generations)
+            .unwrap_or([0; 3]);
+        if previous[1] != report.generations[1] {
+            state.browsers.clear_device(device);
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        if previous[2] != report.generations[2] {
+            state.computers.clear_device(device);
+        }
+        Ok(())
     }
     async fn exchange(&self, binding: &BoundOwner, call: Call) -> Result<Reply, super::RelayError> {
         tokio::time::timeout(Duration::from_secs(5), self.relay.call(binding, call))
@@ -1038,6 +1060,28 @@ impl GatewayToolBackend for PairedGatewayBackend {
                 Ok(a) => self.write(owner, a).await,
                 Err(e) => failure(e, None, false),
             },
+            "set_execution_environment_capabilities" => {
+                let mut args = request.arguments.unwrap_or_default();
+                let target = match args.remove("environment_id") {
+                    None => None,
+                    Some(Value::String(id)) if !id.is_empty() => Some(id),
+                    _ => return Ok(failure("invalid_arguments", None, false)),
+                };
+                let patch: crate::host::settings::CapabilityPatch =
+                    match decode::<crate::host::settings::CapabilityPatch>(Some(args)) {
+                        Ok(patch) if !patch.is_empty() => patch,
+                        _ => return Ok(failure("invalid_arguments", None, false)),
+                    };
+                let device = match self.resolve_device(target.as_deref()).await {
+                    Ok(device) => device,
+                    Err(e) => return Ok(failure(e, None, false)),
+                };
+                match self.relay.host_capabilities(&device, Some(patch)).await {
+                    Ok(report) if report.applied => success(json!({"environment_id":device,"capabilities":report})),
+                    Ok(report) => CallToolResult::error(vec![ContentBlock::text(json!({"error":"host_settings_incomplete","environment_id":device,"capabilities":report,"uncertain":true}).to_string())]),
+                    Err(e) => failure(e.code(), None, matches!(e, super::RelayError::Unknown)),
+                }
+            }
             "list_execution_environments" => {
                 if request.arguments.as_ref().is_some_and(|a| !a.is_empty()) {
                     return Ok(failure("invalid_arguments", None, false));
@@ -1062,9 +1106,30 @@ impl GatewayToolBackend for PairedGatewayBackend {
                         .iter()
                         .find(|d| d.device_id.as_str() == a.environment_id)
                     {
-                        Some(d) => success(
-                            json!({"environment_id":a.environment_id,"label":display_label(&d.label),"platform":display_platform(&d.platform),"kind":"paired","access":"allowed","exec":{"configured":true,"connection":if d.online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"browser":{"configured":"unknown","connection":if d.browser_online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"computer":{"configured":"unknown","connection":if d.computer_online {"connected"} else {"disconnected"},"permission":"unknown","readiness":"unknown","version":"unknown"}}),
-                        ),
+                        Some(d) => {
+                            let mut status = json!({"environment_id":a.environment_id,"label":display_label(&d.label),"platform":display_platform(&d.platform),"kind":"paired","access":"allowed","exec":{"configured":"unknown","connection":if d.online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"browser":{"configured":"unknown","connection":if d.browser_online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"computer":{"configured":"unknown","connection":if d.computer_online {"connected"} else {"disconnected"},"permission":"unknown","readiness":"unknown","version":"unknown"}});
+                            if d.host_settings {
+                                match self.relay.host_capabilities(&d.device_id, None).await {
+                                    Ok(report) => {
+                                        for (name, enabled) in [
+                                            ("exec", report.configured.exec),
+                                            ("browser", report.configured.browser),
+                                            ("computer", report.configured.computer),
+                                        ] {
+                                            status[name]["configured"] = json!(enabled);
+                                            if !enabled {
+                                                status[name]["readiness"] = json!("disabled");
+                                            }
+                                        }
+                                        status["capabilities"] = json!(report);
+                                    }
+                                    Err(e) => {
+                                        status["capabilities_error"] = json!(e.code());
+                                    }
+                                }
+                            }
+                            success(status)
+                        }
                         None => failure("environment_unavailable", None, false),
                     },
                     Err(e) => failure(e.code(), None, false),

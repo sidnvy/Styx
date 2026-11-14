@@ -2612,6 +2612,7 @@ dependencies = [
  "spake2",
  "styx-contracts",
  "styx-core",
+ "tempfile",
  "thiserror 2.0.18",
  "time",
  "tokio",

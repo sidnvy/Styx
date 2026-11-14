@@ -171,6 +171,7 @@ fn action_reply(
 /// v2 authority comes only from bootstrap; v3 owner-control DTOs are admitted
 /// only after fixed-endpoint TLS and explicit Gateway namespace negotiation.
 pub struct HostProtocol<'a> {
+    settings: Option<std::sync::Arc<crate::host::settings::HostSettings>>,
     profile: ProfileBinding,
     coordinator: HostCoordinator,
     authority: &'a HostAuthority,
@@ -222,6 +223,7 @@ impl<'a> HostProtocol<'a> {
             return Err(ProtocolError::BootstrapMismatch);
         }
         Ok(Self {
+            settings: None,
             profile,
             coordinator,
             authority,
@@ -515,7 +517,62 @@ impl<'a> HostProtocol<'a> {
             disconnect_policy: DisconnectPolicy::RetainForOwner,
         })
     }
+    pub fn with_settings(
+        mut self,
+        settings: std::sync::Arc<crate::host::settings::HostSettings>,
+    ) -> Self {
+        self.settings = Some(settings);
+        self
+    }
     async fn handle(&self, call: Call) -> Reply {
+        match &call {
+            Call::GetCapabilities => {
+                return self.settings.as_ref().map_or_else(
+                    || rejection(ErrorCategory::CapabilityUnsupported),
+                    |s| Reply::Capabilities { report: s.report() },
+                );
+            }
+            Call::SetCapabilities { patch } => {
+                return match &self.settings {
+                    Some(settings) => match settings.update(*patch).await {
+                        Ok(report) => Reply::Capabilities { report },
+                        Err(error) => Reply::Error {
+                            category: error,
+                            certainty: if error == ErrorCategory::ResultUnknown {
+                                ExecutionCertainty::Unknown
+                            } else {
+                                ExecutionCertainty::NotDispatched
+                            },
+                            cursor_may_be_consumed: false,
+                        },
+                    },
+                    None => rejection(ErrorCategory::CapabilityUnsupported),
+                };
+            }
+            _ => (),
+        }
+        let _admission = if call_owner(&call).is_some() {
+            match &self.settings {
+                Some(settings) => match settings
+                    .admit(|caps| {
+                        if call.is_browser() {
+                            caps.browser
+                        } else if call.is_computer() {
+                            caps.computer
+                        } else {
+                            caps.exec
+                        }
+                    })
+                    .await
+                {
+                    Ok(guard) => Some(guard),
+                    Err(error) => return rejection(error),
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
         match call {
             Call::Browser {
                 owner,
@@ -832,7 +889,9 @@ impl<'a> HostProtocol<'a> {
             Call::Terminate {} => Reply::Unsupported {
                 feature: "terminate".into(),
             },
-            Call::Negotiate { .. }
+            Call::GetCapabilities
+            | Call::SetCapabilities { .. }
+            | Call::Negotiate { .. }
             | Call::OwnerOpen { .. }
             | Call::OwnerRevoke { .. }
             | Call::EnableTransportDrain
@@ -840,22 +899,23 @@ impl<'a> HostProtocol<'a> {
         }
     }
     fn features(&self) -> Vec<String> {
-        let mut features: Vec<String> = if self.coordinator.exec_configured() {
-            [
-                "prepare_start",
-                "dispatch_start",
-                "inspect_start",
-                "read",
-                "prepare_action",
-                "dispatch_action",
-                "inspect_action",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-        } else {
-            Vec::new()
-        };
+        let mut features: Vec<String> =
+            if self.coordinator.exec_configured() || self.settings.is_some() {
+                [
+                    "prepare_start",
+                    "dispatch_start",
+                    "inspect_start",
+                    "read",
+                    "prepare_action",
+                    "dispatch_action",
+                    "inspect_action",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+            } else {
+                Vec::new()
+            };
         if self.paired {
             features.extend(
                 [
@@ -875,6 +935,9 @@ impl<'a> HostProtocol<'a> {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         if self.paired && self.computer.is_some() {
             features.push(COMPUTER_V1.into());
+        }
+        if self.settings.is_some() {
+            features.push(crate::host::settings::FEATURE.into());
         }
         features
     }
@@ -1013,7 +1076,7 @@ impl<'a> HostProtocol<'a> {
                                     version, challenge, device_id: self.profile.device_id.clone(),
                                     host_generation: self.profile.host_generation.clone(), connection_generation: generation.clone(),
                                     features: self.features(),
-                                    write: self.coordinator.exec_configured(), terminate: self.coordinator.exec_configured(), read_resume: false,
+                                    write: self.coordinator.exec_configured() || self.settings.is_some(), terminate: self.coordinator.exec_configured() || self.settings.is_some(), read_resume: false,
                                     owner_issuance: if self.paired { "gateway_authenticated" } else { "bootstrap_preverified_only" }.into(),
                                     grant_revision: self.paired.then(|| self.coordinator.grant_revision()),
                                 }

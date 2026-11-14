@@ -99,6 +99,29 @@ impl OwnedExecHost {
             max_jobs,
         })
     }
+    pub(crate) async fn enable_executor(
+        &self,
+        config: OwnedExecutorConfig,
+        facts: AdmissionFacts,
+        #[cfg(any(target_os = "macos", target_os = "windows"))] image: Arc<
+            crate::store::PinnedExecutable,
+        >,
+    ) -> Result<(), BootstrapError> {
+        if self.coordinator.exec_configured() {
+            return Ok(());
+        }
+        let budget = self
+            .budget
+            .clone()
+            .try_acquire_many_owned(RPC_BYTES as u32)
+            .map_err(|_| BootstrapError::Capacity)?;
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let adapter = CodexStdio::spawn_pinned_with_reserved_budget(config, budget, image).await?;
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let adapter = CodexStdio::spawn_owned_with_reserved_budget(config, budget).await?;
+        self.authority.attach_executor(adapter, facts)?;
+        Ok(())
+    }
     pub fn coordinator(&self) -> &HostCoordinator {
         &self.coordinator
     }

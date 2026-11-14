@@ -848,8 +848,12 @@ impl CodexStdio {
     }
     /// Stops only resources/executor created by this instance; unknown process
     /// termination is returned explicitly even if the owned executor then exits.
-    pub async fn shutdown_owned(&self, budget: Duration) -> CleanupReceipt {
-        let until = tokio::time::Instant::now() + budget.min(Duration::from_secs(30));
+    /// Stop owned tasks without ending the Host's executor connection. Capability
+    /// settings use the same cancellation path as shutdown and retain receipts.
+    pub(crate) async fn stop_owned_tasks(
+        &self,
+        until: tokio::time::Instant,
+    ) -> Vec<(ProcessHandle, TerminationEvidence)> {
         let records = self
             .records
             .lock()
@@ -873,6 +877,11 @@ impl CodexStdio {
             };
             processes.push((record.handle.clone(), result));
         }
+        processes
+    }
+    pub async fn shutdown_owned(&self, budget: Duration) -> CleanupReceipt {
+        let until = tokio::time::Instant::now() + budget.min(Duration::from_secs(30));
+        let processes = self.stop_owned_tasks(until).await;
         let _ = tokio::time::timeout_at(until, self.rpc.close()).await;
         self.rpc.fail(ExecError::TransportLost);
         let mut executor_exited = false;

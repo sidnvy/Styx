@@ -112,6 +112,9 @@ pub(super) struct BrowserContexts {
     entries: BTreeMap<(OwnerId, DeviceId), BrowserEntry>,
 }
 impl BrowserContexts {
+    pub(super) fn clear_device(&mut self, device: &DeviceId) {
+        self.entries.retain(|(_, id), _| id != device);
+    }
     pub(super) fn collect_settled(&mut self) {
         self.entries.retain(|_, entry| {
             !entry.resource.try_lock().is_ok_and(|resource| {
@@ -340,6 +343,9 @@ impl PairedGatewayBackend {
             Ok(device) => device,
             Err(error) => return failure(error, None, false),
         };
+        if let Err(error) = self.refresh_host_capabilities(&device).await {
+            return failure(error, None, false);
+        }
         let close = request.action.is_close();
         let cell = match self.browser_context(owner, &device, !close) {
             Ok(Some(c)) => c,

@@ -36,6 +36,48 @@ const HEALTH_OWNERS: &[&str] = &[
     "install/.health-operation-lock",
     "install/.health-recovery-guard",
 ];
+struct LocalCapabilityRuntime {
+    admitted: Arc<Admitted>,
+    host: Arc<OwnedExecHost>,
+}
+impl crate::host::settings::CapabilityRuntime for LocalCapabilityRuntime {
+    fn apply(
+        &self,
+        _before: crate::host::settings::Capabilities,
+        after: crate::host::settings::Capabilities,
+    ) -> futures_util::future::BoxFuture<'_, Result<(), styx_contracts::error::ErrorCategory>> {
+        Box::pin(async move {
+            use styx_contracts::error::ErrorCategory;
+            self.admitted
+                .validate_ownership()
+                .map_err(|_| ErrorCategory::IntegrityFailure)?;
+            self.host
+                .authority()
+                .stop_disabled_capabilities(after)
+                .await?;
+            if after.exec && !self.host.coordinator().exec_configured() {
+                let profile = self.admitted.profile.clone();
+                let config = tokio::task::spawn_blocking(move || profile.executor_config())
+                    .await
+                    .map_err(|_| ErrorCategory::IntegrityFailure)?
+                    .map_err(|_| ErrorCategory::CapabilityUnsupported)?;
+                self.host
+                    .enable_executor(
+                        config,
+                        facts(self.admitted.profile.device_id()),
+                        #[cfg(any(target_os = "macos", target_os = "windows"))]
+                        self.admitted
+                            .profile
+                            .executor_image()
+                            .ok_or(ErrorCategory::CapabilityUnsupported)?,
+                    )
+                    .await
+                    .map_err(|_| ErrorCategory::CapabilityUnsupported)?;
+            }
+            Ok(())
+        })
+    }
+}
 enum RunOwner {
     Cli,
     App(
@@ -705,6 +747,10 @@ async fn run_owned(
 ) -> Result<ForegroundOutcome, ForegroundError> {
     // Independent foreground-run clock. Opt-in closed labels carry no profile,
     // path or credential data and never participate in admission decisions.
+    let settings_scope = match &owner {
+        RunOwner::App(scope, _) => Some(scope.clone()),
+        _ => None,
+    };
     let diagnostic = crate::app::startup_diagnostic::StartupDiagnostic::from_env();
     if let Some(d) = &diagnostic {
         d.report("host_run_begin");
@@ -791,7 +837,7 @@ async fn run_owned(
     }
     let prepared = tokio::task::spawn_blocking(move || {
         retained.validate_ownership()?;
-        if retained.profile.executor_enabled() {
+        if retained.profile.exec_selected() {
             retained
                 .profile
                 .executor_config()
@@ -828,7 +874,13 @@ async fn run_owned(
     // partially started child. The bounded provider owns its startup cleanup.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     let started = reservation
-        .spawn_optional_pinned(config, admitted.profile.executor_image())
+        .spawn_optional_pinned(
+            config,
+            admitted
+                .profile
+                .executor_image()
+                .filter(|_| admitted.profile.exec_selected()),
+        )
         .await;
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let started = reservation.spawn_optional(config).await;
@@ -839,6 +891,18 @@ async fn run_owned(
         Ok(v) => Arc::new(v),
         Err(_) => return Err(ForegroundError("executor_start_failed")),
     };
+    let settings = admitted.profile.settings();
+    if let Some(settings) = &settings {
+        settings
+            .attach(Arc::new(LocalCapabilityRuntime {
+                admitted: admitted.clone(),
+                host: host.clone(),
+            }))
+            .map_err(|_| ForegroundError("host_settings_configuration_failed"))?;
+        if let Some(scope) = &settings_scope {
+            scope.publish_settings(settings);
+        }
+    }
     // Install before exposing any paired connection. A failed installation
     // follows the same owned Host cleanup below; never early-drop the executor.
     #[cfg(any(
@@ -968,7 +1032,13 @@ async fn run_owned(
                     host_generation: generation,
                 });
                 let protocol = protocol.map(|protocol| {
-                    protocol.with_command_environment(admitted.profile.command_environment())
+                    let protocol =
+                        protocol.with_command_environment(admitted.profile.command_environment());
+                    if let Some(settings) = &settings {
+                        protocol.with_settings(settings.clone())
+                    } else {
+                        protocol
+                    }
                 });
                 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
                 let protocol = protocol.and_then(|protocol| {
@@ -1227,6 +1297,9 @@ async fn run_owned(
             session.drain_browser_inputs().await;
         }
         Err(error) => failure = Some(error),
+    }
+    if let Some(settings) = &settings {
+        settings.close().await;
     }
     event(&events, &cancel, "stopping", &device, None);
     let mut outcome = ForegroundOutcome {

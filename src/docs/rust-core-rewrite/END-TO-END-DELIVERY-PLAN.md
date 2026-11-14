@@ -25,13 +25,35 @@
   授权本地监听后通过；首轮质量门的测试迭代写法 Clippy 失败已修正，失败收据保留。
   此处没有跨设备原生 GUI、真实 ChatGPT 账号或新版发布验收结论。
 
-下一完整迁移单元是 **Host 能力设置的唯一归属**。当前 Gateway enrollment grant 和 Host
-本机 profile 仍共同限制 Browser/Computer；Gateway status 还把 Exec 配置写为固定 true。
-需要让本机与 MCP 调用同一个 Host 设置操作，由 Host 保存并应用 Exec/Browser/Computer
-开关、报告实际状态；Gateway 保留配对/撤销并转发设置请求。已有配对迁移时保留当前实际
-开关，不静默开启。即使三个开关全部关闭，设备仍须能通过原有认证连接接收设置请求。
-这项需要连同 Host 运行管理、协议、状态展示和本机入口一起迁移，不能只删除 Gateway 的
-检查或另加一套设置状态。随后再处理 Exec 跨对话任务、Browser 转交和正常退出/撤销旅程。
+### Host 能力设置归属迁移（2026-11-14）
+
+- Host 持有可变 Exec/Browser/Computer 设置。本机 Mac/Windows 设置和 MCP
+  `set_execution_environment_capabilities` 使用同一个运行中的 Host controller；Gateway
+  只转发与读取报告。新协议不再叠加 Gateway Browser/Computer grant；旧协议仍保留其
+  原有约束。首次迁移承接旧配置与历史批准的交集，不静默开启能力。
+- 关闭能力先拒绝新调用，再停止该能力现有任务；其他能力、配对及连接继续。
+  Exec 开关保留 Host 持有的执行器及原任务记录，避免为开关替换执行器。首次启动
+  Exec 关闭时无需执行器；后来开启才启动。Browser/Cua 清理自己的会话。
+  设置持久化与应用完成分别报告；未知结果不自动重发，读取状态不会触发清理重试。
+- 一个 MCP 对话连接五台真实 TLS/WSS Host、使用真实 Codex 的场景通过：
+  全关且没有执行器的 Host 仍在线，随后由 MCP 首次开启 Exec；远程关闭停止旧任务并
+  拒绝新执行，另一台 Host 的原任务继续；本机同一 controller 重新开启后新执行成功，
+  设置文件重开保留选择。根目录 `/tmp/styx-multihost-20261114`。
+- 同一 Host 的真实 Linux headless Browser/Codex 场景通过：关闭 Browser 后原 Exec
+  任务独立写出文件；关闭 Exec 后原 Browser 页面状态仍可操作；原 owner 清理完成。
+  `/tmp/styx-capability-browser` 保留失败与修正后收据。首轮发现替换执行器遗留原任务
+  清理记录，已改为能力只停止任务、执行器随 Host 退出，没有增加另一套清理协议。
+- 标准质量门 20 项 PASS：`/tmp/styx-host-capabilities-quality-20261114/receipt.json`。
+  随后只扩展了五 Host 测试的“初始全关”场景，真实测试及受影响 crate 的 Clippy 通过；
+  其余证据复用。Mac/Windows 原生 Rust check、生产 Swift/C# 编译及已有原生自检通过，
+  记录 `/tmp/styx-host-capabilities-native-20261114/receipt.json`。MCP instructions 与
+  onboarding skill 同步说明 Host 设置归属、关闭影响及未知结果处理。
+
+尚未将这批源码安装到现有原生 App/Runtime。**原生 GUI 点击开关、Computer Use 活跃任务
+停止与其他能力共存、原 profile 重启恢复仍需真实运行验收**；编译和 Linux 场景不替代它们。
+首次设置的 Exec 默认勾选且可取消还需接入原生向导。完成这些后，再迁移 Exec 跨对话任务、
+Browser 显式转交以及正常退出/撤销旅程。重构版 Stable 仍为 NO-GO；已发布 0.4.0 的历史
+验收结论不变。
 
 ## 当前开发检查点（2026-11-12）
 

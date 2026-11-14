@@ -256,6 +256,18 @@ impl ComputerStartup {
         let retained_host = host.clone();
         let retained_admitted = admitted.clone();
         let initialization = InitializationJob::spawn(move |retained| async move {
+            if let Some(settings) = retained_admitted.profile.settings() {
+                let mut changes = settings.subscribe();
+                loop {
+                    if changes.borrow().computer {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = cancel.cancelled() => return None,
+                        changed = changes.changed() => if changed.is_err() { return None; },
+                    }
+                }
+            }
             match prepare_computer(
                 &retained_admitted,
                 &retained_host,

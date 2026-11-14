@@ -3,3 +3,4 @@ pub mod bootstrap;
 pub mod coordinator;
 pub mod link;
 pub mod protocol;
+pub mod settings;

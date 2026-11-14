@@ -279,6 +279,7 @@ impl HostApp {
         // handle must not prevent the original Windows no-replace rename.
         self.startup_profile = None;
         self.scope = Arc::new(HostScope {
+            settings: std::sync::Mutex::new(std::sync::Weak::new()),
             container: container.clone(),
             state_dir: state_dir.clone(),
             root: OnceLock::new(),

@@ -16,6 +16,10 @@ pub struct Request {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
+    GetCapabilities,
+    SetCapabilities {
+        patch: crate::host::settings::CapabilityPatch,
+    },
     Negotiate {
         version: u16,
         challenge: String,
@@ -126,6 +130,7 @@ pub(crate) const BROWSER_WAIT_RESPONSE_SECS: u64 = 40;
 impl Call {
     pub(crate) fn response_budget(&self) -> std::time::Duration {
         match self {
+            Self::SetCapabilities { .. } => std::time::Duration::from_secs(75),
             Self::Browser { timeout_ms, .. } if *timeout_ms > 10_000 => {
                 std::time::Duration::from_millis(
                     u64::from((*timeout_ms).min(BROWSER_WAIT_PREPARE_TIMEOUT_MS)) + 10_000,
@@ -214,6 +219,9 @@ pub struct Chunk {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Reply {
+    Capabilities {
+        report: crate::host::settings::SettingsReport,
+    },
     Negotiated {
         version: u16,
         challenge: String,

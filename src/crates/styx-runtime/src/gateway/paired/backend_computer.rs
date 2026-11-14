@@ -89,6 +89,9 @@ pub(super) struct ComputerContexts {
     entries: BTreeMap<(OwnerId, DeviceId), ComputerEntry>,
 }
 impl ComputerContexts {
+    pub(super) fn clear_device(&mut self, device: &DeviceId) {
+        self.entries.retain(|(_, id), _| id != device);
+    }
     pub(super) fn collect_settled(&mut self) {
         self.entries.retain(|_, entry| {
             !entry.resource.try_lock().is_ok_and(|resource| {
@@ -302,6 +305,9 @@ impl PairedGatewayBackend {
             Ok(device) => device,
             Err(error) => return failure(error, None, false),
         };
+        if let Err(error) = self.refresh_host_capabilities(&device).await {
+            return failure(error, None, false);
+        }
         let cell = match self.computer_context(owner, &device, true) {
             Ok(Some(c)) => c,
             Ok(None) => return failure("computer_not_open", None, false),

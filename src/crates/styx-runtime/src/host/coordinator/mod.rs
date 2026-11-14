@@ -198,7 +198,7 @@ struct Inner {
     exec_admission: Mutex<Option<Arc<dyn ExecAdmission>>>,
     bootstrap_device: DeviceId,
     host_generation: HostGeneration,
-    adapter: Option<Arc<CodexStdio>>,
+    adapter: Mutex<Option<Arc<CodexStdio>>>,
     state: Mutex<State>,
     jobs: Mutex<JoinSet<()>>,
     slots: Arc<Semaphore>,
@@ -310,6 +310,8 @@ impl Inner {
     }
     fn exec_adapter(&self) -> Result<Arc<CodexStdio>, CoordinatorError> {
         self.adapter
+            .lock()
+            .expect("Exec adapter mutex")
             .clone()
             .ok_or_else(|| ErrorCategory::CapabilityUnsupported.into())
     }
@@ -357,7 +359,7 @@ impl HostCoordinator {
             exec_admission: Mutex::new(None),
             bootstrap_device: trusted_facts.device_id.clone(),
             host_generation: ledger.host_generation().clone(),
-            adapter: adapter.map(Arc::new),
+            adapter: Mutex::new(adapter.map(Arc::new)),
             state: Mutex::new(State::new(ledger, trusted_facts, origin)),
             jobs: Mutex::new(JoinSet::new()),
             slots: Arc::new(Semaphore::new(max_jobs)),
@@ -376,7 +378,11 @@ impl HostCoordinator {
     }
     /// Configuration/presence only; never infer liveness from cached initialize.
     pub fn exec_configured(&self) -> bool {
-        self.inner.adapter.is_some()
+        self.inner
+            .adapter
+            .lock()
+            .expect("Exec adapter mutex")
+            .is_some()
     }
     /// Immutable, non-secret bootstrap identity; policy refresh cannot rebind it.
     pub fn bootstrap_identity(&self) -> (&DeviceId, &HostGeneration) {
@@ -948,6 +954,91 @@ impl HostAuthority {
             .ledger
             .register_verified_owner(owner, epoch)?)
     }
+    pub(crate) fn attach_executor(
+        &self,
+        adapter: CodexStdio,
+        facts: AdmissionFacts,
+    ) -> Result<(), CoordinatorError> {
+        let mut current = self.inner.adapter.lock().expect("Exec adapter mutex");
+        let mut state = self.inner.state.lock().expect("Host state mutex");
+        if current.is_some() || state.shutting_down {
+            return Err(CoordinatorError::Busy);
+        }
+        *current = Some(Arc::new(adapter));
+        state.facts = facts;
+        Ok(())
+    }
+    /// Host-local settings close only disabled providers. Pairing, owner identity
+    /// and resources belonging to enabled providers remain in the same ledger.
+    pub(crate) async fn stop_disabled_capabilities(
+        &self,
+        enabled: crate::host::settings::Capabilities,
+    ) -> Result<(), ErrorCategory> {
+        let until = tokio::time::Instant::now() + Duration::from_secs(30);
+        let _cleanup = tokio::time::timeout_at(until, self.inner.cleanup_lock.lock())
+            .await
+            .map_err(|_| ErrorCategory::Busy)?;
+        let _quiescent =
+            tokio::time::timeout_at(until, self.inner.execution_gate.clone().write_owned())
+                .await
+                .map_err(|_| ErrorCategory::Busy)?;
+        let remaining = || until.saturating_duration_since(tokio::time::Instant::now());
+        let mut complete = true;
+        if !enabled.exec {
+            let adapter = self
+                .inner
+                .adapter
+                .lock()
+                .expect("Exec adapter mutex")
+                .clone();
+            if let Some(adapter) = adapter {
+                let processes = adapter.stop_owned_tasks(until).await;
+                for (handle, evidence) in &processes {
+                    if let TerminationEvidence::ProcessExited(code) = evidence {
+                        let _ = self
+                            .inner
+                            .state
+                            .lock()
+                            .expect("Host state mutex")
+                            .ledger
+                            .record_executor_fact(
+                                handle.operation(),
+                                ExecutorFact::Exited {
+                                    successful: *code == 0,
+                                },
+                                self.inner.now(),
+                            );
+                    }
+                }
+                complete &= processes
+                    .iter()
+                    .all(|(_, evidence)| matches!(evidence, TerminationEvidence::ProcessExited(_)));
+                // The Host retains this executor and its original task records.
+                // Turning a capability back on never swaps provider ownership.
+            }
+        }
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+        {
+            if !enabled.browser {
+                complete &= browser::cleanup_browser_lane(self.inner.clone(), remaining())
+                    .await
+                    .is_none_or(|r| r.complete);
+            }
+            if !enabled.computer {
+                // Retain the platform observation source; only its Cua sessions
+                // end. Re-enabling uses the same normal platform lifecycle.
+                complete &=
+                    desktop_cleanup::cleanup_selected(self.inner.clone(), None, remaining())
+                        .await
+                        .is_none_or(|r| r.complete);
+            }
+        }
+        if complete {
+            Ok(())
+        } else {
+            Err(ErrorCategory::ResultUnknown)
+        }
+    }
     pub fn replace_trusted_facts(&self, facts: AdmissionFacts) {
         self.inner.state.lock().expect("Host state mutex").facts = facts;
     }
@@ -997,7 +1088,13 @@ impl HostAuthority {
         // A JoinSet aborts on drop; preserve unfinished jobs rather than implicitly
         // canceling a possible native start while forgetting its result.
         *self.inner.jobs.lock().expect("Host jobs mutex") = jobs;
-        let native = match self.inner.adapter.as_ref() {
+        let adapter = self
+            .inner
+            .adapter
+            .lock()
+            .expect("Exec adapter mutex")
+            .clone();
+        let native = match adapter.as_ref() {
             Some(adapter) => Some(
                 adapter
                     .shutdown_owned(until.saturating_duration_since(tokio::time::Instant::now()))

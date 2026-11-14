@@ -80,6 +80,14 @@ the target is ambiguous. Never invent identifiers or reuse session handles from
 another conversation. A Host-only CLI may require the hub owner to check its
 Gateway connection status; do not infer connected Browser from local startup.
 
+For an authorized capability change, call `set_execution_environment_capabilities`
+on that Host with only the requested fields. The Host owns and persists these
+settings; an invitation only allows the device to join. Disabling stops that
+capability's existing tasks and rejects new calls, while the other capabilities
+and pairing remain active. If the update is incomplete or unknown, read
+`get_execution_environment_status`; do not automatically resend. A saved setting
+does not prove OS permission or native readiness.
+
 Use the packaged CLI skill for commands, files, Git and builds. Use Browser
 Automation for supported web tasks and Computer Use for native GUI tasks, with
 fresh target-bound observations. Do not open a GUI terminal or use OS scripting

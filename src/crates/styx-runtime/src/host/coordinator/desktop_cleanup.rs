@@ -120,7 +120,7 @@ pub(super) async fn cleanup_desktop_owner(
 ) -> Option<DesktopLaneCleanup> {
     cleanup_selected(inner, Some(owner), budget).await
 }
-async fn cleanup_selected(
+pub(super) async fn cleanup_selected(
     inner: Arc<Inner>,
     owner: Option<&OwnerLease>,
     budget: Duration,
