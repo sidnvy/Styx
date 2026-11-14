@@ -11,7 +11,50 @@
 本轮目标以 [REFACTOR-PLAN.md](REFACTOR-PLAN.md) 为准。下述结果是开发验证，
 不改变已发布 0.4.0 的历史结果，也不代表重构版已经完成原生交付。
 
-### Windows 原生验证与更新后改配缺口（2026-11-14，最新检查点）
+### 更新完成后的所有权释放与 Windows 实机闭环（2026-11-14，最新检查点）
+
+源码 `6835d82` 修复了两个可复现边界：已完成的 Runtime 更新仍持有工作对象，
+使同一 App 的角色退役返回 `role_retire_runtime_owner_retained`；已取得本地退出结果
+后再次请求退出，返回 `app_quit_admitted`。现在仅在更新提交、刷新并解除阻断后释放
+工作对象，归还原配置写入所有权；界面仍保留完成结果。重复本地退出请求复用原结果，
+不再重复停止或写证据。进行中的更新和未确认状态继续阻止退役。没有增加进程、
+协议或持久状态，原生框架及执行器的生命周期分工不变。
+
+受影响 crate 检查通过；App 回归 31 项通过，另有 11 项按声明忽略。显式执行的签名
+Runtime 场景通过：准备中拒绝退役、完成后允许退役、再次准备/更新，以及恢复同一已完成
+事务不产生新文件变化。集成质量门 20 项通过，绑定源码 `6835d82`。
+
+Windows 复用原工程和缓存完成原生 release 编译、封装和正常安装，开发版本
+`0.4.0.2009`，安装器退出 0。App 包 SHA
+`2dafcde965a32787b2d921fde4a59e4c6508447b69b505c1dc6eb13ca90b858c`，
+Core SHA `73a31eddb5be839b70863fc6b9d9019217f6db1b629c5997ab83325877eb5666`，
+Runtime manifest `a76d7eafa1d997fc95fe73bc599e29e55a6f247910ec05f8ea25e32b8184444d`。
+安装及 Runtime 更新前后的原身份、凭据、CA 与能力配置哈希一致。
+
+**原失败场景实机通过**：App PID 984、Core PID 14848 内，正常界面更新显示
+committed，规范状态选中上述 manifest；未重开 App，直接「加入另一个 Gateway」
+成功进入加入页面。正常流程生成 `profile.retired-20261114T110701Z`，原配对与能力
+四项文件哈希一致，备份保留更新后的 Runtime 选择。随后「退出 Styx」，原 App、
+Core 和本次控制台进程均实际退出 0。没有强杀、重装绕过或手工重置配置。
+
+重开后通过正常短码流程自动加入本机测试 Gateway `https://10.0.38.2:38443`；
+新设备 `styx-4a5bb86fa5e81ac4daad3f1a`，三项能力开启，Chrome 临时独立配置。
+实际 Codex 路径属于新 manifest 的 bootstrap Runtime。独立 MCP Exec 写入测试文件并
+退出 0，SSH 独立读取内容匹配；新 Browser 快照成功，随后明确关闭，列表为空。
+Windows 与本机 Gateway 保持运行。最初的 piermini 配对备份仍保留，未操作该设备。
+
+本轮证据：`/tmp/styx-browser-handoff-20261114/update-role/final.json`，Windows 副本
+`D:\Developer\Styx\artifacts\native-development\update-role-final.json`；质量门位于
+同一临时根目录的 `update-role-quality/receipt.json`。下节旧版 Windows 的会话接手、
+Gateway 重启及能力撤销结果仅作为未受影响场景的证据；不声称 Mac 已安装本次修复。
+这关闭的是 Windows「更新完成→改配→退出」缺口。下一出口回到独立 ChatGPT 账号路线
+与最终发布绑定；尚非最终签名发布或三平台统一版本验收，重构版 Stable 仍为 NO-GO。
+
+辅助结果汇总命令未返回，其目标 `update-role-rejoined.json` 尚未生成，未强制终止或
+重复提交该写入，也未采用它作为通过依据。实际配置和文件效果改由直接只读下载核对，
+运行路径由独立进程查询确认，最终记录在本机汇集后复制到 Windows。
+
+### Windows 原生验证与更新后改配缺口（2026-11-14，修复前检查点）
 
 Windows 复用原工程、缓存、发布者与安装路径，完成源码 `384d521` 的原生 release
 构建、Runtime/App 包装及正常安装；版本 `0.4.0.2008`。安装器退出 0，安装后原配对
