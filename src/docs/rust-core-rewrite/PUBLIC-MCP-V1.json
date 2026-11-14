@@ -6,7 +6,7 @@
     "name": "styx-vnext",
     "version": "0.1.0"
   },
-  "instructions": "Exec tasks belong to the selected Host runtime, not a conversation. Closing a conversation or reconnecting Gateway leaves them running. Use list_execution_tasks on that Host to recover a task ID, write_stdin with the same environment_id to read or continue it, and stop_execution_task to stop an authorized task. Quitting Host stops its tasks; they are not resumed on relaunch. Unknown action outcomes must be inspected, never automatically replayed. One conversation may use multiple Hosts. Use list_execution_environments to resolve a named device, then send its environment_id with each action. If multiple Hosts are paired and the target is unclear, ask which Host to use. Only a single paired Host is selected by default. An offline selected Host never falls back to another device. Use browser_* for webpage and tab automation, Exec for CLI/process work, and computer tools for native desktop applications or browser chrome. The agent chooses the tool; failed calls never trigger local automatic fallback. Browser element targets belong to this chat and current observation: use browser_snapshot without filename to get fresh targets after navigation, tab changes or reconnection. Default to exec_command for Git/GitHub clone, downloads (curl/wget), file operations, builds, tests and other CLI/development work. Interactive foreground or TTY sessions managed by exec_command/write_stdin are Exec sessions. Do not open Terminal or another desktop terminal through Spotlight, launchers or computer tools to paste these commands. If Exec fails, is disconnected, or reports authentication, permission or sandbox errors, check get_execution_environment_status, resolve the specific Exec issue or report the blocker; never use a desktop terminal to bypass it. Styx v1 window observations use two separate reads with the observed pid and window_id: get_window_state(include_screenshot:false) for the complete element tree and fresh element_token values, and get_window_state(include_accessibility_tree:false) for a screenshot. Omit full_output, capture_mode, since, query and file-output options. For set_value, also send the observed pid and window_id with the fresh element_token and value; the v1 exact-target write requires all four fields. A screenshot alone does not authorize input; use a fresh element_token for the supported element action. Combined tree-and-screenshot acquisition is not supported in this release; its refusal is not evidence that the user needs another OS permission. For native desktop tasks, discover apps/windows and observe with the advertised read tools, then use a fresh element_token for click or exact set_value. Keyboard typing, key presses, scrolling and pixel input have no admitted Host target route in this release and are not advertised. Do not infer complete upstream SDK support from the installed worker. Use the app bundle identifier or observed PID when localized app names do not match. An explicitly requested GUI workflow may use computer tools; this does not authorize bypassing an Exec restriction. Do not replace desktop tools with osascript, AppleScript/System Events, JXA or shell-driven input automation, including when a computer tool fails. Those paths have separate macOS permissions and can expose a node authorization prompt. For computer_snapshot_required or stale element references, observe again and use the new references; never reuse another conversation's references. For a permission or connection error, check get_execution_environment_status and report the specific missing permission or connection. Do not reset permissions or request additional Node/System Events access as a desktop fallback. Only use application scripting when the user explicitly requests that scripting workflow, explain its separate Automation permission before the first invocation, and let the user grant it through macOS. Styx desktop permission does not authorize that separate path. Host capability settings belong to the selected Host. For an authorized request to change them, use set_execution_environment_capabilities with only the requested fields. Disabling stops existing tasks of that capability; other capabilities and device pairing remain active. Read get_execution_environment_status after an incomplete or unknown update; do not automatically resend. Configured is not proof of native OS permission or executor readiness.",
+  "instructions": "Exec tasks belong to the selected Host runtime, not a conversation. Closing a conversation or reconnecting Gateway leaves them running. Use list_execution_tasks on that Host to recover a task ID, write_stdin with the same environment_id to read or continue it, and stop_execution_task to stop an authorized task. Quitting Host stops its tasks; they are not resumed on relaunch. Unknown action outcomes must be inspected, never automatically replayed. One conversation may use multiple Hosts. Use list_execution_environments to resolve a named device, then send its environment_id with each action. If multiple Hosts are paired and the target is unclear, ask which Host to use. Only a single paired Host is selected by default. An offline selected Host never falls back to another device. Use browser_* for webpage and tab automation, Exec for CLI/process work, and computer tools for native desktop applications or browser chrome. The agent chooses the tool; failed calls never trigger local automatic fallback. Browser element targets belong to this chat and current observation: use browser_snapshot without filename to get fresh targets after navigation, tab changes or reconnection. Default to exec_command for Git/GitHub clone, downloads (curl/wget), file operations, builds, tests and other CLI/development work. Interactive foreground or TTY sessions managed by exec_command/write_stdin are Exec sessions. Do not open Terminal or another desktop terminal through Spotlight, launchers or computer tools to paste these commands. If Exec fails, is disconnected, or reports authentication, permission or sandbox errors, check get_execution_environment_status, resolve the specific Exec issue or report the blocker; never use a desktop terminal to bypass it. Styx v1 window observations use two separate reads with the observed pid and window_id: get_window_state(include_screenshot:false) for the complete element tree and fresh element_token values, and get_window_state(include_accessibility_tree:false) for a screenshot. Omit full_output, capture_mode, since, query and file-output options. For set_value, also send the observed pid and window_id with the fresh element_token and value; the v1 exact-target write requires all four fields. A screenshot alone does not authorize input; use a fresh element_token for the supported element action. Combined tree-and-screenshot acquisition is not supported in this release; its refusal is not evidence that the user needs another OS permission. For native desktop tasks, discover apps/windows and observe with the advertised read tools, then use a fresh element_token for click or exact set_value. Keyboard typing, key presses, scrolling and pixel input have no admitted Host target route in this release and are not advertised. Do not infer complete upstream SDK support from the installed worker. Use the app bundle identifier or observed PID when localized app names do not match. An explicitly requested GUI workflow may use computer tools; this does not authorize bypassing an Exec restriction. Do not replace desktop tools with osascript, AppleScript/System Events, JXA or shell-driven input automation, including when a computer tool fails. Those paths have separate macOS permissions and can expose a node authorization prompt. For computer_snapshot_required or stale element references, observe again and use the new references; never reuse another conversation's references. For a permission or connection error, check get_execution_environment_status and report the specific missing permission or connection. Do not reset permissions or request additional Node/System Events access as a desktop fallback. Only use application scripting when the user explicitly requests that scripting workflow, explain its separate Automation permission before the first invocation, and let the user grant it through macOS. Styx desktop permission does not authorize that separate path. Host capability settings belong to the selected Host. For an authorized request to change them, use set_execution_environment_capabilities with only the requested fields. Disabling stops existing tasks of that capability; other capabilities and device pairing remain active. Read get_execution_environment_status after an incomplete or unknown update; do not automatically resend. Configured is not proof of native OS permission or executor readiness. Browser sessions belong to the selected Host and survive conversation closure and Gateway reconnection. Each conversation defaults to its own session. Use list_browser_sessions to discover retained sessions; only call take_over_browser_session when the user explicitly asks to take over. Transfer preserves tabs and page state, changes the current operator, and requires a fresh snapshot. An old operator must not silently take the session back. Keep browser_session_id and environment_id with subsequent calls. Explicit browser_close, disabling Browser, device revocation received by Host, or Host exit ends sessions; Host restart does not restore them. Unknown operations must not be automatically replayed.",
   "tools": [
     {
       "name": "exec_command",
@@ -182,6 +182,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -212,6 +216,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -257,6 +265,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -290,6 +302,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -390,6 +406,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -428,6 +448,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -460,6 +484,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -507,6 +535,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -544,6 +576,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -609,6 +645,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -638,6 +678,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -683,6 +727,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -713,6 +761,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -738,6 +790,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -773,6 +829,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -818,6 +878,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -877,6 +941,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -918,6 +986,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -975,6 +1047,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -1016,6 +1092,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -1050,6 +1130,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -1090,6 +1174,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -1134,6 +1222,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "required": [
@@ -1171,6 +1263,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "Host Browser session ID returned by a previous call. Omit for this conversation's default session; using an ID does not transfer control."
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1902,6 +1998,53 @@
         "readOnlyHint": true,
         "destructiveHint": false,
         "idempotentHint": true
+      }
+    },
+    {
+      "name": "list_browser_sessions",
+      "description": "List retained Browser sessions on the selected Host, including whether this conversation is the current operator.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "environment_id": {
+            "type": "string",
+            "description": "Target Host device ID; required when multiple paired devices exist."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "take_over_browser_session",
+      "description": "Explicitly take over an existing Host Browser session after the user asks. Keeps its tabs and page state; previous operator loses access. Refresh the snapshot after transfer.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "environment_id": {
+            "type": "string",
+            "description": "Target Host device ID; required when multiple paired devices exist."
+          },
+          "browser_session_id": {
+            "type": "string",
+            "description": "The exact retained session to take over."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "browser_session_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {

@@ -149,13 +149,7 @@ impl OwnedExecHost {
     pub fn reserve_browser_io(
         &self,
     ) -> Result<Arc<crate::providers::browser::BrowserIoBudget>, BootstrapError> {
-        let partition = self
-            .budget
-            .clone()
-            .try_acquire_many_owned((16 * 1024 * 1024) as u32)
-            .map_err(|_| BootstrapError::Capacity)?;
-        crate::providers::browser::BrowserIoBudget::from_reserved(partition)
-            .map_err(|_| BootstrapError::InvalidConfiguration)
+        Ok(crate::providers::browser::BrowserIoBudget::platform_managed())
     }
     /// Final8MiB native Desktop partition from the same64MiB Host allocator.
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]

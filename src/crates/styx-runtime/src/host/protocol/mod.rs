@@ -126,7 +126,7 @@ pub struct HostProtocol<'a> {
     paired: bool,
     command_environment: BTreeMap<String, String>,
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-    browser: Option<browser::BrowserInputs>,
+    browser: Option<std::sync::Arc<browser::BrowserInputs>>,
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     computer: Option<computer::ComputerInputs>,
 }
@@ -465,6 +465,26 @@ impl<'a> HostProtocol<'a> {
             None
         };
         match call {
+            Call::BrowserSession {
+                owner,
+                grant_revision,
+                command,
+            } => {
+                if !self.paired || self.owner(&owner).is_err() {
+                    return rejection(ErrorCategory::Unauthorized);
+                }
+                if grant_revision != self.coordinator.grant_revision() {
+                    return rejection(ErrorCategory::StateConflict);
+                }
+                match self.browser_port() {
+                    Some(port) => Reply::BrowserSession {
+                        result: crate::host::browser_sessions::Engine { port }
+                            .handle(owner, command)
+                            .await,
+                    },
+                    None => rejection(ErrorCategory::CapabilityUnsupported),
+                }
+            }
             Call::Browser {
                 owner,
                 grant_revision,
@@ -559,6 +579,7 @@ impl<'a> HostProtocol<'a> {
                     }
                 }
                 if complete {
+                    self.coordinator.browser_sessions().forget_caller(&owner);
                     let mut registry = self
                         .coordinator
                         .remote_access()
@@ -656,6 +677,7 @@ impl<'a> HostProtocol<'a> {
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         if self.paired && self.browser.is_some() {
             features.push(BROWSER_HEADLESS_V1.into());
+            features.push(HOST_BROWSER_SESSIONS_V1.into());
         }
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         if self.paired && self.computer.is_some() {
@@ -889,6 +911,7 @@ impl<'a> HostProtocol<'a> {
 fn call_owner(call: &Call) -> Option<&OwnerRef> {
     match call {
         Call::ExecTask { owner, .. }
+        | Call::BrowserSession { owner, .. }
         | Call::PrepareStart { owner, .. }
         | Call::DispatchStart { owner, .. }
         | Call::InspectStart { owner, .. }

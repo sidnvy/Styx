@@ -17,6 +17,22 @@ it does not inherit Safari or another browser's login. If the user requires an
 existing Safari session, use the Computer Use workflow or explain the limitation.
 Never copy browser profiles, cookies or tokens to simulate a signed-in session.
 
+A Browser session belongs to its Host and stays open after the conversation ends
+or the Gateway reconnects. Each conversation starts with its own default session.
+Keep the returned browser_session_id with the selected environment_id. To resume
+another conversation's pages, first list_browser_sessions, then use
+take_over_browser_session only when the user explicitly asks to take over that
+session. Transfer keeps the original tabs and page state. Refresh the snapshot;
+the previous operator can no longer act on that session and must not silently
+take it back. A busy session cannot transfer during an admitted action. If a
+transfer reply is lost, inspect list_browser_sessions for current_operator before
+doing anything else; do not replay an uncertain action.
+
+Conversation closure does not close a Browser session. Explicit browser_close,
+disabling Browser, received device revocation or Host exit stops it. Host restart
+does not restore sessions. Closing one session does not close other sessions.
+
+
 Observe the page before acting. Use fresh snapshot references for clicks and
 inputs; refresh after navigation and state-changing actions. Do not reuse stale
 references, guess selectors or hidden endpoints, or run arbitrary page scripts to

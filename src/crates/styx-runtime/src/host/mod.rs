@@ -1,5 +1,6 @@
 //! Host supervision is independent of remote transport lifetime.
 pub mod bootstrap;
+pub(crate) mod browser_sessions;
 pub(crate) mod callers;
 pub mod coordinator;
 pub(crate) mod exec_tasks;

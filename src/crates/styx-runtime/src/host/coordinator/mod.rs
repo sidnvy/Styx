@@ -216,6 +216,7 @@ impl Inner {
 // Kept outside Inner: caller cleanup handles retain Inner, so putting the
 // access registry inside it would create a self-owning cycle on shutdown.
 struct RuntimeState {
+    browser_sessions: super::browser_sessions::State,
     exec_tasks: super::exec_tasks::State,
     remote_access: Mutex<super::callers::OwnerRegistry>,
     connection_slot: tokio::sync::Semaphore,
@@ -381,6 +382,7 @@ impl HostCoordinator {
             Self {
                 inner: inner.clone(),
                 runtime: Arc::new(RuntimeState {
+                    browser_sessions: super::browser_sessions::State::default(),
                     exec_tasks: super::exec_tasks::State::default(),
                     remote_access: Mutex::new(super::callers::OwnerRegistry::default()),
                     connection_slot: tokio::sync::Semaphore::new(1),
@@ -390,6 +392,9 @@ impl HostCoordinator {
         ))
     }
     /// Configuration/presence only; never infer liveness from cached initialize.
+    pub(crate) fn browser_sessions(&self) -> &super::browser_sessions::State {
+        &self.runtime.browser_sessions
+    }
     pub(crate) fn remote_access(&self) -> &Mutex<super::callers::OwnerRegistry> {
         &self.runtime.remote_access
     }

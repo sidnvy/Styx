@@ -18,6 +18,11 @@ pub struct Request {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
+    BrowserSession {
+        owner: OwnerRef,
+        grant_revision: u64,
+        command: BrowserSessionCommand,
+    },
     ExecTask {
         owner: OwnerRef,
         grant_revision: u64,
@@ -105,6 +110,20 @@ pub enum Call {
     Write {},
     Terminate {},
 }
+pub const HOST_BROWSER_SESSIONS_V1: &str = "host_browser_sessions_v1";
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum BrowserSessionCommand {
+    List,
+    TakeOver {
+        session_id: String,
+    },
+    Action {
+        session_id: Option<String>,
+        name: String,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    },
+}
 pub const BROWSER_HEADLESS_V1: &str = "browser_headless_v1";
 pub const HOST_EXEC_TASKS_V1: &str = "host_exec_tasks_v1";
 
@@ -160,10 +179,10 @@ pub enum TransportDrainOutcome {
 /// Existing wait_for permits thirty seconds. Keep an explicit bounded margin
 /// for provider settlement; ordinary operations and owner cleanup are unchanged.
 pub(crate) const BROWSER_WAIT_PREPARE_TIMEOUT_MS: u32 = 35_000;
-pub(crate) const BROWSER_WAIT_RESPONSE_SECS: u64 = 40;
 impl Call {
     pub(crate) fn response_budget(&self) -> std::time::Duration {
         match self {
+            Self::BrowserSession { .. } => std::time::Duration::from_secs(85),
             Self::SetCapabilities { .. } => std::time::Duration::from_secs(75),
             Self::Browser { timeout_ms, .. } if *timeout_ms > 10_000 => {
                 std::time::Duration::from_millis(
@@ -174,7 +193,7 @@ impl Call {
         }
     }
     pub(crate) fn is_browser(&self) -> bool {
-        matches!(self, Self::Browser { .. })
+        matches!(self, Self::Browser { .. } | Self::BrowserSession { .. })
     }
     pub(crate) fn is_computer(&self) -> bool {
         matches!(self, Self::Computer { .. })
@@ -253,6 +272,9 @@ pub struct Chunk {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Reply {
+    BrowserSession {
+        result: rmcp::model::CallToolResult,
+    },
     ExecTask {
         result: ExecTaskResult,
     },

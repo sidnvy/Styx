@@ -27,7 +27,7 @@
 | 能力 | 用户可依赖的行为 |
 | --- | --- |
 | Exec | 任务归执行它的 Host。关闭对话或临时断线，已开始的任务继续；在同一次 Host 运行期间，另一段对话可以查询结果、进度或停止原任务。 |
-| Browser | 每段对话默认有独立浏览器会话。明确要求接手时保留原标签页与页面状态，随后由新对话操作；同一会话只接受当前操作者。 |
+| Browser | 每段对话默认有独立浏览器会话，原对话结束后仍保留。明确要求接手时保留原标签页与页面状态，随后由新对话操作；同一会话只接受当前操作者。明确关闭、关闭 Browser 能力、收到设备撤销或退出 Host 才结束会话；Host 重启不恢复。 |
 | Computer Use | 多段对话可以使用同一 Host。并发交由该平台的 Cua 处理，Host 如实报告忙碌、目标失效与操作结果。沿用上游目标观察和输入语义，无需新增对话级整桌面锁。 |
 
 Browser 与 Computer Use 优先沿用**固定版本**的 Playwright、Cua 工具与参数。Host 报告本机实际可用的工具，Gateway 根据目标公开或路由受支持的调用。上游升级时核对有实际差异的适配和行为。
@@ -59,6 +59,25 @@ Host 运行时的 `exec_tasks` 保存本次运行的任务目录、输入与输�
 Gateway 的公开适配只选择设备并转发 `host_exec_tasks_v1` 调用，不保存 Exec 任务表、输出游标或任务归属。旧 Host 未声明此能力时不启用新的 Exec 路由，避免静默使用会在聊天关闭时杀进程的旧行为。低层 prepare/dispatch 接口保留给现有私有协议消费者，公开 Exec 入口只走 Host 任务控制。
 
 `list_execution_tasks` 查询所选 Host；`write_stdin` 和 `stop_execution_task` 使用同一设备和任务 ID。完成结果在本次 Host 运行期间可重复读取，内容是最后一段输出，并非完整日志；运行中输出由调用者共用一个读取位置。`pending` 表示尚未观察到完成，不能据此断言进程仍在运行。结果未知时检查原任务，不能自动重新执行命令、输入或停止操作。Host 重启不会恢复任务表。
+
+## Browser 边界的实现落点
+
+Host runtime 的 `browser_sessions` 持有会话目录、当前操作者和 Core 资源句柄。
+Browser 资源使用 Host 本地租约，对话只授权本次访问；聊天清理和 Gateway 连接替换
+不结束浏览器。Gateway 不保存会话、操作阶段或页面引用，也不承担转交判断。
+
+`list_browser_sessions` 查询当前 Host 的保留会话；`take_over_browser_session`
+是明确的接手动作。常规 Browser 工具可带 `browser_session_id`，省略时使用当前对话
+默认会话；指定 ID 本身不能接手。原操作者继续操作会被拒绝，不静默创建替代浏览器。
+转交与操作使用同一会话互斥，进行中返回 Busy；转交不换执行器、不复制 profile，
+只变更操作者并失效该会话的旧引用。新操作者重新观察页面。结果未知不自动重放。
+Browser 输入准备任务也归 Host runtime，重建协议对象不能丢失其生命周期。
+Linux/Windows 移除旧的单 Browser worker 门禁，与 macOS 一样按执行器实际分配
+有界通信缓冲；不同会话可以共存，同一个会话仍串行操作。
+
+新 Gateway 仅在 Host 协商 `host_browser_sessions_v1` 后提供 Browser 路由；旧 Host
+不能静默回退到由 Gateway 持有会话的语义。私有 v3 底层 Browser 操作保留给现有协议
+消费者与回归测试，公共 MCP 统一走 Host 会话端口。升级安装与跨平台实际运行另行验收。
 
 ## 实施顺序与验证
 

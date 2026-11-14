@@ -11,6 +11,39 @@
 本轮目标以 [REFACTOR-PLAN.md](REFACTOR-PLAN.md) 为准。下述结果是开发验证，
 不改变已发布 0.4.0 的历史结果，也不代表重构版已经完成原生交付。
 
+### Browser 会话归属与显式转交（2026-11-14，最新开发检查点）
+
+所有者已确认对话结束后保留 Browser。Host runtime 现在持有会话目录、当前操作者、
+Core 资源与输入准备任务；协议对象重建不会替换它们。Gateway 移除原 Browser 目录、
+打开/执行阶段及清理判断，只选择设备并转发。底层仍使用原 Core/Playwright 路径，
+未增加执行器、磁盘会话数据库或恢复协议。
+
+新增 `list_browser_sessions` 和 `take_over_browser_session`，原 Browser 工具可带
+`browser_session_id`。默认每段对话独立；指定别人的会话 ID 不构成接手。明确接手
+保留原 worker、profile、标签页与页面状态，旧操作者及旧页面引用失效；正在执行时
+返回 Busy。关闭聊天只撤销调用方访问；关闭会话、关闭 Browser、收到设备撤销或退出
+Host 仍走原清理路径。Host 重启不恢复。新 Gateway 要求 Host 声明新的会话协议，
+不静默退回旧生命周期。Linux/Windows 移除旧单 worker 门禁，不同会话可以共存。
+
+本机真实 TLS/MCP/WSS/Chrome/Codex 旅程通过：两段对话各自打开浏览器；显式接手后
+独立 HTTP 服务读到原页面中的唯一值；旧操作者无额外效果，旧引用拒绝；原操作进行中
+另一个对话接手返回 Busy。聊天关闭后保留，实际连接替换并重建 HostProtocol 后仍可
+发现和接手。关闭 Browser 后拒绝调用，重新开启时旧会话清空，新会话可用且可明确关闭。
+收据：`/tmp/styx-browser-handoff-20261114/7bcb75ae-e44e-4ef5-b5ce-063b917b7a84/browser-handoff.json`。
+
+Host/Core 真实浏览器回归也通过：同时打开独立 profile、单独关闭、能力隔离与重新开启、
+未知操作不重放、最终进程和输出清理均有独立效果/执行器证据。
+收据：`/tmp/styx-browser-handoff-20261114/core/7b28583d-b8c7-4c4d-b74d-41a5050a9acd/receipt.json`。
+首轮旅程在能力响应断言中读错字段，修正测试后通过；失败未当作成功证据。
+
+AGENTS、Browser agent 指导、公共 MCP 合同和架构方案已同步。完整工作区质量门结果
+见 `/tmp/styx-browser-handoff-20261114/quality-complete/receipt.json`。首轮检查发现工具数量
+断言仍固定为新增工具前的 38；已更新为 40，并保留原有工具相对顺序。随后补齐新真实浏览器
+测试的显式输入登记；标准门不会自动启动它，实际执行证据见上述收据。正式启动包装层
+已补转发 profile 记录释放；接口不再提供静默空实现，防止关闭后继续占用本地记录。本轮没有安装新 Mac/Windows
+客户端或改动生产 Tunnel，没有 ChatGPT 账号验收结论。下一交付出口是现有桌面客户端
+使用新会话协议后的真实接手、能力关闭与正常退出；重构版 Stable 保持 NO-GO。
+
 ### Host 运行期与连接生命周期分离（2026-11-14，开发验证）
 
 任务表、调用方状态和连接互斥归属同一 Host runtime；协议适配器重建只替换通信层。
@@ -46,7 +79,7 @@ Core exit 0；同一配对重开、Gateway 恢复后自动连接，旧任务目�
 不宣称完整 Runtime 选择升级、Windows 真机或 ChatGPT 账号验收。初次封装输入目录
 权限错误保留失败；只修正新建构建输入后通过。初条 Mac 测试任务引用了不存在的
 scratch 目录，已按其明确任务编号停止；后续使用现有产物目录独立验证，没有重放未知操作。
-Browser 转交仍等待对话结束时保留规则确认。重构版 Stable 仍 NO-GO。
+Browser 保留规则已于后续检查点确认，转交实现与证据见本文顶部。重构版 Stable 仍 NO-GO。
 
 ### Exec 任务归属迁移（2026-11-14，本次最新源码检查点）
 

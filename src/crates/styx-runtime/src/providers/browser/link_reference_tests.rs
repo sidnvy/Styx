@@ -42,7 +42,6 @@ async fn trusted_link_boundary_blocks_reserved_and_late_snapshot_remint() {
         reference_revision: 0,
         workspace: PathBuf::new(),
         output: PathBuf::new(),
-        slot: None,
         pins: vec![],
         uncertain: false,
         context_closed: false,

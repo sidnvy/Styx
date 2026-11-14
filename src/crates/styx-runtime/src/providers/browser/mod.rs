@@ -64,10 +64,6 @@ const FRAME_BYTES: usize = 8 * 1024 * 1024;
 // This is not an I/O pool or a second Host byte allocator. No live eviction.
 const MAX_RECORDS: usize = 128;
 #[cfg(not(target_os = "macos"))]
-type WorkerSlot = OwnedSemaphorePermit;
-#[cfg(target_os = "macos")]
-type WorkerSlot = ();
-#[cfg(not(target_os = "macos"))]
 type MetadataRecord = OwnedSemaphorePermit;
 #[cfg(target_os = "macos")]
 type MetadataRecord = ();
@@ -142,17 +138,10 @@ pub struct BrowserCleanup {
     pub context_closed: bool,
     pub descendants: BrowserDescendants,
 }
-/// Non-macOS retains its original Host byte partition and single-worker gate.
-/// macOS allocates each executor's codec buffers on demand, without an aggregate
-/// worker-count or retained-metadata quota. Individual resources remain locked.
-pub struct BrowserIoBudget {
-    #[cfg(not(target_os = "macos"))]
-    _partition: Arc<OwnedSemaphorePermit>,
-    #[cfg(not(target_os = "macos"))]
-    active: Arc<Semaphore>,
-}
+/// Each executor allocates its bounded codec buffers on demand. Independent
+/// Browser contexts do not share a one-worker gate; each resource stays locked.
+pub struct BrowserIoBudget {}
 impl BrowserIoBudget {
-    #[cfg(target_os = "macos")]
     pub(crate) fn platform_managed() -> Arc<Self> {
         Arc::new(Self {})
     }
@@ -160,18 +149,8 @@ impl BrowserIoBudget {
         if partition.num_permits() != IO_BYTES {
             return Err(BrowserError::InvalidRequest);
         }
-        #[cfg(target_os = "macos")]
-        {
-            // Compatibility callers must not retain a one-worker reservation
-            // and misrepresent it as covering multiple live executors.
-            drop(partition);
-            Ok(Self::platform_managed())
-        }
-        #[cfg(not(target_os = "macos"))]
-        Ok(Arc::new(Self {
-            _partition: Arc::new(partition),
-            active: Arc::new(Semaphore::new(1)),
-        }))
+        drop(partition);
+        Ok(Self::platform_managed())
     }
 }
 #[derive(Clone)]
@@ -238,7 +217,6 @@ struct Live {
     reference_revision: u64,
     workspace: PathBuf,
     output: PathBuf,
-    slot: Option<WorkerSlot>,
     pins: Vec<File>,
     uncertain: bool,
     context_closed: bool,
@@ -270,6 +248,16 @@ impl std::fmt::Debug for BrowserHandle {
     }
 }
 impl BrowserHandle {
+    pub(crate) fn invalidate_operator_references(&self) -> Result<()> {
+        let mut live = self
+            .resource
+            .state
+            .try_lock()
+            .map_err(|_| BrowserError::Busy)?;
+        live.references.invalidate();
+        Ok(())
+    }
+
     pub fn operation(&self) -> &OperationId {
         &self.resource.operation
     }
@@ -287,7 +275,6 @@ pub struct BrowserOpenReceipt {
 }
 pub struct BrowserOpenSlot {
     worker: BrowserWorker,
-    slot: WorkerSlot,
     metadata: MetadataRecord,
 }
 pub struct BrowserActionSlot {
@@ -328,14 +315,6 @@ impl BrowserWorker {
             return Err(BrowserError::Busy);
         }
         #[cfg(not(target_os = "macos"))]
-        let slot = self
-            .inner
-            .budget
-            .active
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| BrowserError::Busy)?;
-        #[cfg(not(target_os = "macos"))]
         let metadata = self
             .inner
             .metadata
@@ -343,11 +322,10 @@ impl BrowserWorker {
             .try_acquire_owned()
             .map_err(|_| BrowserError::Busy)?;
         #[cfg(target_os = "macos")]
-        let (slot, metadata) = ((), ());
+        let metadata = ();
         Ok(BrowserOpenSlot {
             metadata,
             worker: self.clone(),
-            slot,
         })
     }
     pub fn try_reserve_action(&self, handle: &BrowserHandle) -> Result<BrowserActionSlot> {
@@ -712,7 +690,6 @@ impl BrowserOpenSlot {
                 reference_revision: 0,
                 workspace: config.workspace_dir.clone(),
                 output: config.output_dir.clone(),
-                slot: Some(self.slot),
                 pins: Vec::new(),
                 uncertain: false,
                 context_closed: false,
@@ -1463,7 +1440,6 @@ async fn cleanup(live: &mut Live, budget: Duration) -> BrowserCleanup {
     if worker_exited && joined && descendants == BrowserDescendants::Confirmed {
         live.child.take();
         live.pins.clear();
-        live.slot.take();
         live.cleanup = Some(facts);
         if !live.config_file.as_os_str().is_empty() {
             let _ = std::fs::remove_file(&live.config_file);

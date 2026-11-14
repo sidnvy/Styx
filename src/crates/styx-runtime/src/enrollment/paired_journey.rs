@@ -328,22 +328,29 @@ fn read_process_birth(path: &Path) -> std::io::Result<u64> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires owned paired root, fixed Codex/Node22 and TLS fixtures; actual enrollment to MCP/WSS/native Exec journey"]
 async fn actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey() {
-    paired_journey(false, 1).await;
+    paired_journey(false, 1, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires sockets and STYX_TEST_PAIRED_ROOT/TLS_FIXTURES/CODEX_BIN plus Node22; >1000 actual Gateway/Host owner cycles"]
 async fn paired_session_capacity_turnover_requires_sockets() {
-    paired_journey(true, 1).await;
+    paired_journey(true, 1, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires sockets and STYX_TEST_PAIRED_ROOT/TLS_FIXTURES/CODEX_BIN/NODE22; five real paired Hosts with independent native effects"]
 async fn five_connected_computers_exec_requires_sockets() {
-    paired_journey(false, 5).await;
+    paired_journey(false, 5, false).await;
 }
 
-async fn paired_journey(capacity: bool, computers: usize) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires real TLS/MCP/WSS, pinned Codex/Node/Browser inputs; retained contexts and explicit handoff"]
+async fn browser_sessions_survive_chat_close_and_transfer_requires_sockets() {
+    paired_journey(false, 1, true).await;
+}
+
+async fn paired_journey(capacity: bool, computers: usize, browser_handoff: bool) {
+    let browser_enabled = capacity || browser_handoff;
     let parent =
         PathBuf::from(std::env::var("STYX_TEST_PAIRED_ROOT").expect("owned root required"));
     std::fs::create_dir_all(&parent).unwrap();
@@ -479,7 +486,7 @@ async fn paired_journey(capacity: bool, computers: usize) {
         return;
     }
     let device = DeviceId::try_from("styx-1123456789abcdef01234567").unwrap();
-    let credential = pair(&client, &node, &admin, &device, &root, capacity).await;
+    let credential = pair(&client, &node, &admin, &device, &root, browser_enabled).await;
     let generation =
         HostGeneration::try_from(format!("owned-host-{}", uuid::Uuid::new_v4())).unwrap();
     let codex = PathBuf::from(std::env::var("STYX_TEST_CODEX_BIN").unwrap());
@@ -506,7 +513,7 @@ async fn paired_journey(capacity: bool, computers: usize) {
         .await
         .unwrap(),
     );
-    if capacity {
+    if browser_enabled {
         let mut browser_facts = facts(device.clone());
         browser_facts.descriptor.capability_id = CapabilityId::BrowserHeadless;
         browser_facts.descriptor.scope = Scope::Browser;
@@ -514,6 +521,27 @@ async fn paired_journey(capacity: bool, computers: usize) {
             .configure_browser(browser_facts, host.reserve_browser_io().unwrap())
             .unwrap();
     }
+    let settings = if browser_handoff {
+        let settings = crate::host::settings::HostSettings::open(
+            &root,
+            crate::host::settings::Capabilities {
+                exec: true,
+                browser: true,
+                computer: false,
+            },
+        )
+        .unwrap();
+        settings
+            .attach(Arc::new(FixtureCapabilityRuntime {
+                host: host.clone(),
+                work: root.clone(),
+                device: device.clone(),
+            }))
+            .unwrap();
+        Some(settings)
+    } else {
+        None
+    };
     let endpoint_text = format!("wss://{host_header}/styx/host/v3/{}/exec", device.as_str());
     // Negative upgrades share the actual listener and use independent random
     // connection generations; a later positive path rules out blanket failure.
@@ -562,23 +590,30 @@ async fn paired_journey(capacity: bool, computers: usize) {
     let (revoked_sent, revoked_received) = tokio::sync::oneshot::channel();
     let protocol_job = tokio::spawn(async move {
         let make_protocol = || {
-            host_task
+            let protocol = host_task
                 .paired_protocol(PairedTrustedProfile {
                     endpoint: endpoint_text.clone(),
                     gateway_namespace: gateway_id.clone(),
                     device_id: proto_device.clone(),
                     host_generation: generation.clone(),
                 })
-                .unwrap()
+                .unwrap();
+            let protocol = if browser_enabled {
+                protocol
+                    .with_browser_profiles(Arc::new(CapacityBrowser {
+                        root: host_root.clone(),
+                    }))
+                    .unwrap()
+            } else {
+                protocol
+            };
+            if let Some(settings) = &settings {
+                protocol.with_settings(settings.clone())
+            } else {
+                protocol
+            }
         };
-        let protocol = make_protocol();
-        let mut protocol = if capacity {
-            protocol
-                .with_browser_profiles(Arc::new(CapacityBrowser { root: host_root }))
-                .unwrap()
-        } else {
-            protocol
-        };
+        let mut protocol = make_protocol();
         let mut reconnected = None;
         loop {
             let tcp = TcpStream::connect(address).await.unwrap();
@@ -620,10 +655,8 @@ async fn paired_journey(capacity: bool, computers: usize) {
                 };
                 break (result, shutdown, cleanup);
             }
-            if !capacity {
-                drop(protocol);
-                protocol = make_protocol();
-            }
+            drop(protocol);
+            protocol = make_protocol();
         }
     });
     let root_work = root.clone();
@@ -680,6 +713,10 @@ async fn paired_journey(capacity: bool, computers: usize) {
                 "paired Host ready deadline"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if browser_handoff {
+            browser_session_journey(&raw, &uri, mcp.as_ref(), &device, &reconnect_tx, &root_work)
+                .await;
         }
         let tunnel = if !capacity {
             tunnel_continuation(&raw, &uri, &forwarding, &device, &root_work).await
@@ -925,7 +962,13 @@ async fn paired_journey(capacity: bool, computers: usize) {
         json!({"native_nonce":nonce,"start_effect_count":1,"tunnel_continuation":tunnel,"wrong_device_legacy_route_wrong_credential_upgrades":"all rejected","cross_conversation_task_access":"listed_and_continued","host_policy_denial":"PERMISSION_DENIED/not_dispatched with no file effect","authorized_stdin":"observed_by_independent_file_read","closed_owner_shell":"survived_chat_close_then_explicit_stop_confirmed", "closed_owner_pid":pid,"closed_owner_starttime":process_birth,"host_physical_cleanup_complete":backend.observed_physical_cleanups()>=1, "other_owner_after_delete":"survived","revoked_device":"new_exec_rejected_and_original_task_stopped_by_Host","scope":"synthetic owned Linux loopback, not native package/account acceptance"})
     });
     let result = tokio::time::timeout(
-        Duration::from_secs(if capacity { 900 } else { 90 }),
+        Duration::from_secs(if capacity {
+            900
+        } else if browser_handoff {
+            180
+        } else {
+            90
+        }),
         &mut worker,
     )
     .await;
@@ -937,16 +980,12 @@ async fn paired_journey(capacity: bool, computers: usize) {
     let transport = tokio::time::timeout(Duration::from_secs(20), server).await;
     let protocol = tokio::time::timeout(Duration::from_secs(10), protocol_job).await;
     node.lock().await.stop().await;
-    let report = result.unwrap().unwrap();
     let transport = transport.unwrap().unwrap().unwrap();
     assert_joined(&transport);
     let (protocol_result, _, cleanup) = protocol
         .expect("owned Host protocol task joined before deadline")
         .expect("owned Host protocol task did not panic");
-    assert!(matches!(
-        protocol_result,
-        Err(crate::host::protocol::ProtocolError::PairingRevoked)
-    ));
+
     let cleanup = match cleanup {
         Some(facts) => facts,
         None => host.shutdown_owned(Duration::from_secs(10)).await.unwrap(),
@@ -970,6 +1009,11 @@ async fn paired_journey(capacity: bool, computers: usize) {
                 .stderr_task_reaped,
         "native executor and IO tasks actually reaped"
     );
+    let report = result.unwrap().unwrap();
+    assert!(matches!(
+        protocol_result,
+        Err(crate::host::protocol::ProtocolError::PairingRevoked)
+    ));
     std::fs::write(
         root.join("paired-observation.json"),
         serde_json::to_vec_pretty(&report).unwrap(),
@@ -1025,6 +1069,24 @@ async fn capacity_cycles(
         assert!(reply.get("error").is_none(), "{reply}");
         assert_ne!(reply["result"]["isError"], true, "{reply}");
         reply["result"]["structuredContent"].clone()
+    }
+    async fn new_session(raw: &reqwest::Client, uri: &str, token: &str) -> String {
+        let r=post(raw,uri,token,None,json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"retained-host-oracle","version":"1"}}})).await;
+        assert_eq!(r.status(), reqwest::StatusCode::OK);
+        let sid = r.headers()["mcp-session-id"].to_str().unwrap().to_owned();
+        r.bytes().await.unwrap();
+        post(
+            raw,
+            uri,
+            token,
+            Some(&sid),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        )
+        .await
+        .bytes()
+        .await
+        .unwrap();
+        sid
     }
     let mut first = None;
     for abandon in [false, true] {
@@ -1119,8 +1181,8 @@ async fn capacity_cycles(
     );
     http.age_idle_sessions_for_test(Duration::from_secs(601));
     http.expire_idle_for_test().await;
-    // Actual native work has no background GET: only backend ownership can
-    // protect this session after advancing the test's idle clock.
+    // Host-owned work survives HTTP session expiry without a background GET.
+    // A fresh caller below must discover/continue the original resources.
     let r=post(raw,uri,token,None,json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"live-native-oracle","version":"1"}}})).await;
     assert_eq!(r.status(), reqwest::StatusCode::OK);
     let live = r.headers()["mcp-session-id"].to_str().unwrap().to_owned();
@@ -1151,8 +1213,9 @@ async fn capacity_cycles(
         Path::new(&format!("/proc/{pid}/stat")).exists(),
         "expiry must preserve the original running exec"
     );
+    let live = new_session(raw, uri, token).await;
     let before = live_allocations();
-    tool(
+    let opened = tool(
         raw,
         uri,
         token,
@@ -1161,6 +1224,7 @@ async fn capacity_cycles(
         json!({"action":"new","environment_id":device.as_str()}),
     )
     .await;
+    let browser_id = opened["browser_session_id"].as_str().unwrap().to_owned();
     let browser_bytes = live_allocations().saturating_sub(before);
     let mut result = tool(
         raw,
@@ -1189,6 +1253,16 @@ async fn capacity_cycles(
     file_within(&root.join("protected.txt"), "still-owned").await;
     http.age_idle_sessions_for_test(Duration::from_secs(601));
     http.expire_idle_for_test().await;
+    let live = new_session(raw, uri, token).await;
+    tool(
+        raw,
+        uri,
+        token,
+        &live,
+        "take_over_browser_session",
+        json!({"environment_id":device,"browser_session_id":browser_id}),
+    )
+    .await;
     tool(
         raw,
         uri,
@@ -1245,6 +1319,9 @@ struct CapacityBrowser {
     root: PathBuf,
 }
 impl crate::host::protocol::browser::BrowserBootstrap for CapacityBrowser {
+    // Fixture directories preserve evidence; there is no retained owner registry.
+    fn release_profile(&self, _: &styx_core::operations::OwnerLease) {}
+
     fn prepare_profile(
         &self,
         owner: &styx_core::operations::OwnerLease,
@@ -1998,4 +2075,281 @@ async fn named_computers_revoke_requires_sockets() {
             .unwrap()
             .unwrap(),
     );
+}
+async fn browser_session_journey(
+    raw: &reqwest::Client,
+    uri: &str,
+    token: &str,
+    device: &DeviceId,
+    reconnect: &tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<()>>,
+    root: &Path,
+) {
+    use http_body_util::{BodyExt, Full, Limited};
+    use hyper::{Request, Response, body::Incoming, service::service_fn};
+    use hyper_util::rt::TokioIo;
+    let effects = Arc::new(Mutex::new(Vec::<String>::new()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = tokio_util::sync::CancellationToken::new();
+    let server_stop = stop.clone();
+    let observed = effects.clone();
+    let server = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            let stream =
+                tokio::select! {_=server_stop.cancelled()=>break,r=listener.accept()=>r.unwrap().0};
+            let observed = observed.clone();
+            connections.spawn(async move {
+                let service=service_fn(move |request:Request<Incoming>|{let observed=observed.clone();async move {
+                    let body=if request.uri().path()=="/effect" {
+                        let body=Limited::new(request.into_body(),4096).collect().await.unwrap().to_bytes();observed.lock().await.push(String::from_utf8(body.to_vec()).unwrap());"recorded".to_owned()
+                    }else{"<!doctype html><title>Browser transfer fixture</title><input id=retained><button>fixture</button>".to_owned()};
+                    Ok::<_,std::convert::Infallible>(Response::builder().header("connection","close").header("content-type","text/html").body(Full::new(Bytes::from(body))).unwrap())
+                }});
+                let _=hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(stream),service).await;
+            });
+        }
+        while connections.join_next().await.is_some() {}
+    });
+    let connect = || {
+        let config = StreamableHttpClientTransportConfig::with_uri(uri.to_owned())
+            .auth_header(token.to_owned())
+            .reinit_on_expired_session(false)
+            .max_concurrent_requests(2);
+        ClientConfig::new(
+            ClientCapabilities::default(),
+            Implementation::new("browser-transfer-oracle", "1"),
+        )
+        .with_protocol_version(ProtocolVersion::V_2025_11_25)
+        .serve_with_lifecycle(
+            StreamableHttpClientTransport::with_client(raw.clone(), config),
+            ClientLifecycleMode::Initialize,
+        )
+    };
+    let a = connect().await.unwrap();
+    let b = connect().await.unwrap();
+    let url = format!("http://{address}/");
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let opened = data(
+        a.call_tool(call(
+            "browser_navigate",
+            json!({"environment_id":device,"url":url}),
+        ))
+        .await
+        .unwrap(),
+    );
+    let id = opened["browser_session_id"].as_str().unwrap().to_owned();
+    data(a.call_tool(call("browser_evaluate",json!({"environment_id":device,"function":format!("() => {{document.querySelector('#retained').value={}; return true}}",serde_json::to_string(&nonce).unwrap())}))).await.unwrap());
+    let original_snapshot = a
+        .call_tool(call("browser_snapshot", json!({"environment_id":device})))
+        .await
+        .unwrap();
+    assert_ne!(original_snapshot.is_error, Some(true));
+    let snapshot_text = original_snapshot
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(root.join("browser-before-transfer.txt"), &snapshot_text).unwrap();
+    let start = snapshot_text
+        .find("styx-")
+        .expect("snapshot exposes Host opaque refs");
+    let old_ref = snapshot_text[start..]
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .next()
+        .unwrap()
+        .to_owned();
+    let other = data(
+        b.call_tool(call(
+            "browser_navigate",
+            json!({"environment_id":device,"url":url}),
+        ))
+        .await
+        .unwrap(),
+    );
+    let other_id = other["browser_session_id"].as_str().unwrap().to_owned();
+    assert_ne!(id, other_id);
+    let isolated=b.call_tool(call("browser_evaluate",json!({"environment_id":device,"function":"() => document.querySelector('#retained').value === ''"}))).await.unwrap();
+    assert_ne!(isolated.is_error, Some(true));
+    assert!(
+        serde_json::to_string(&isolated.content)
+            .unwrap()
+            .contains("true")
+    );
+    data(
+        b.call_tool(call(
+            "take_over_browser_session",
+            json!({"environment_id":device,"browser_session_id":id}),
+        ))
+        .await
+        .unwrap(),
+    );
+    let stale = b
+        .call_tool(call(
+            "browser_click",
+            json!({"environment_id":device,"target":old_ref}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        stale.is_error,
+        Some(true),
+        "old snapshot must be refreshed after transfer"
+    );
+    let denied=a.call_tool(call("browser_evaluate",json!({"environment_id":device,"function":"async () => {await fetch('/effect',{method:'POST',body:'forbidden'}); return true}"}))).await.unwrap();
+    assert_eq!(denied.is_error, Some(true));
+    assert!(effects.lock().await.is_empty());
+    a.cancel().await.unwrap();
+    let (ready, receive) = tokio::sync::oneshot::channel();
+    reconnect.send(ready).await.unwrap();
+    receive.await.unwrap();
+    let until = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let result = b
+            .call_tool(call(
+                "list_browser_sessions",
+                json!({"environment_id":device}),
+            ))
+            .await
+            .unwrap();
+        if result.is_error != Some(true) {
+            assert!(
+                data(result)["sessions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s["browser_session_id"] == id)
+            );
+            break;
+        }
+        assert!(tokio::time::Instant::now() < until);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    b.cancel().await.unwrap();
+    let c = connect().await.unwrap();
+    let listed = data(
+        c.call_tool(call(
+            "list_browser_sessions",
+            json!({"environment_id":device}),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert_eq!(listed["sessions"].as_array().unwrap().len(), 2);
+    data(
+        c.call_tool(call(
+            "take_over_browser_session",
+            json!({"environment_id":device,"browser_session_id":id}),
+        ))
+        .await
+        .unwrap(),
+    );
+    data(
+        c.call_tool(call("browser_snapshot", json!({"environment_id":device})))
+            .await
+            .unwrap(),
+    );
+    let effect=c.call_tool(call("browser_evaluate",json!({"environment_id":device,"function":"async () => {await fetch('/effect',{method:'POST',body:document.querySelector('#retained').value}); return true}"}))).await.unwrap();
+    assert_ne!(effect.is_error, Some(true));
+    assert_eq!(*effects.lock().await, vec![nonce.clone()]);
+    let d = connect().await.unwrap();
+    let original_action=c.call_tool(call("browser_evaluate",json!({"environment_id":device,"function":"async () => {await fetch('/effect',{method:'POST',body:'busy-original'}); await new Promise(r=>setTimeout(r,1000)); return true}"})));
+    let concurrent_transfer = async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while effects.lock().await.len() < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let reply = d
+            .call_tool(call(
+                "take_over_browser_session",
+                json!({"environment_id":device,"browser_session_id":id}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reply.is_error, Some(true));
+        assert!(
+            serde_json::to_string(&reply)
+                .unwrap()
+                .contains("capacity_busy")
+        );
+    };
+    let (action_result, ()) = tokio::join!(original_action, concurrent_transfer);
+    assert_ne!(action_result.unwrap().is_error, Some(true));
+    assert_eq!(
+        *effects.lock().await,
+        vec![nonce.clone(), "busy-original".to_owned()]
+    );
+    d.cancel().await.unwrap();
+    let disabled = data(
+        c.call_tool(call(
+            "set_execution_environment_capabilities",
+            json!({"environment_id":device,"browser":false}),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert_eq!(disabled["capabilities"]["configured"]["browser"], false);
+    assert_eq!(
+        c.call_tool(call("browser_snapshot", json!({"environment_id":device})))
+            .await
+            .unwrap()
+            .is_error,
+        Some(true)
+    );
+    data(
+        c.call_tool(call(
+            "set_execution_environment_capabilities",
+            json!({"environment_id":device,"browser":true}),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert!(
+        data(
+            c.call_tool(call(
+                "list_browser_sessions",
+                json!({"environment_id":device})
+            ))
+            .await
+            .unwrap()
+        )["sessions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let fresh = data(
+        c.call_tool(call(
+            "browser_navigate",
+            json!({"environment_id":device,"url":url}),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert_ne!(fresh["browser_session_id"], id);
+    data(
+        c.call_tool(call("browser_close", json!({"environment_id":device})))
+            .await
+            .unwrap(),
+    );
+    assert!(
+        data(
+            c.call_tool(call(
+                "list_browser_sessions",
+                json!({"environment_id":device})
+            ))
+            .await
+            .unwrap()
+        )["sessions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    c.cancel().await.unwrap();
+    stop.cancel();
+    server.await.unwrap();
+    std::fs::write(root.join("browser-handoff.json"),serde_json::to_vec_pretty(&json!({"status":"PASS","retained_session":id,"independent_session":other_id,"independent_http_effects":*effects.lock().await,"chat_close_retained":true,"protocol_rebuilt":true,"previous_operator_denied":true,"old_snapshot_denied":true,"concurrent_transfer_busy":true,"capability_disabled_stopped_sessions":true,"explicit_close_removed_session":true})).unwrap()).unwrap();
 }

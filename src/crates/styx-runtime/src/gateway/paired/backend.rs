@@ -341,13 +341,11 @@ struct OwnerState {
 struct State {
     capability_generations: BTreeMap<DeviceId, [u64; 3]>,
     owners: BTreeMap<OwnerId, OwnerState>,
-    browsers: browser::BrowserContexts,
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     computers: computer::ComputerContexts,
 }
 impl State {
     fn collect_settled(&mut self) {
-        self.browsers.collect_settled();
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         self.computers.collect_settled();
     }
@@ -368,7 +366,6 @@ impl PairedGatewayBackend {
             state: Mutex::new(State {
                 capability_generations: BTreeMap::new(),
                 owners: BTreeMap::new(),
-                browsers: browser::BrowserContexts::default(),
                 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
                 computers: computer::ComputerContexts::default(),
             }),
@@ -405,9 +402,6 @@ impl PairedGatewayBackend {
             .capability_generations
             .insert(device.clone(), report.generations)
             .unwrap_or([0; 3]);
-        if previous[1] != report.generations[1] {
-            state.browsers.clear_device(device);
-        }
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         if previous[2] != report.generations[2] {
             state.computers.clear_device(device);
@@ -560,7 +554,9 @@ impl GatewayToolBackend for PairedGatewayBackend {
                 self.computer_call(owner, request.name.as_ref(), request.arguments)
                     .await
             }
-            name if browser::is_public_browser_tool(name) => {
+            name if browser::is_public_browser_tool(name)
+                || matches!(name, "list_browser_sessions" | "take_over_browser_session") =>
+            {
                 self.browser_call(owner, request.name.as_ref(), request.arguments)
                     .await
             }
@@ -681,7 +677,7 @@ impl GatewayOwnerLifecycle for PairedGatewayBackend {
         let Ok(state) = self.state.lock() else {
             return true;
         };
-        state.browsers.owner_has_live_work(owner) || {
+        {
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             {
                 state.computers.owner_has_live_work(owner)
@@ -717,7 +713,6 @@ impl GatewayOwnerLifecycle for PairedGatewayBackend {
                     .fetch_add(1, std::sync::atomic::Ordering::Release);
                 let mut state = self.state.lock().expect("paired state");
                 state.owners.remove(owner.owner_id());
-                state.browsers.clear_owner(owner);
                 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
                 state.computers.clear_owner(owner);
                 owner.cleanup_complete();

@@ -214,6 +214,16 @@ impl HostAuthority {
     }
 }
 impl HostCoordinator {
+    pub(crate) fn invalidate_browser_session_references(
+        &self,
+        owner: &OwnerLease,
+        target: &ResourceTarget,
+    ) -> Result<(), CoordinatorError> {
+        let state = self.inner.state.lock().expect("Host state mutex");
+        handle(lane(&state)?, owner, target)?.invalidate_operator_references()?;
+        Ok(())
+    }
+
     /// Local paired transport lifecycle, not a caller-provided generation or
     /// operation cancellation. Contexts/owners/native work remain unchanged.
     pub(crate) fn invalidate_browser_link_references(&self) {

@@ -1,10 +1,14 @@
 //! Direct production adapter regression using an already-owned native Browser.
 //! Owner registry installation is test-only trusted setup, not network auth.
 use super::*;
+use crate::providers::browser::OwnedBrowserConfig;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct FailingBootstrap(AtomicUsize);
 impl BrowserBootstrap for FailingBootstrap {
+    fn release_profile(&self, _: &OwnerLease) {} // This rejecting fixture owns no profiles.
+
     fn prepare_profile(&self, _: &OwnerLease) -> Result<OwnedBrowserConfig, ErrorCategory> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Err(ErrorCategory::IntegrityFailure)

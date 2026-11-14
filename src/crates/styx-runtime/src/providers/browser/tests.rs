@@ -109,7 +109,7 @@ pub(super) fn permit(
     (ledger, owner, permit, facts, context)
 }
 #[tokio::test]
-async fn core_permit_pre_io_and_exclusive_lane_admission_batch() {
+async fn core_permit_pre_io_and_independent_context_admission_batch() {
     let fixture = Fixture::new();
     let source = Arc::new(Semaphore::new(IO_BYTES));
     let budget = BrowserIoBudget::from_reserved(
@@ -122,7 +122,8 @@ async fn core_permit_pre_io_and_exclusive_lane_admission_batch() {
     .unwrap();
     let worker = BrowserWorker::new(budget);
     let slot = worker.try_reserve_open().unwrap();
-    assert!(matches!(worker.try_reserve_open(), Err(BrowserError::Busy)));
+    let independent = worker.try_reserve_open().unwrap();
+    drop(independent);
     drop(slot);
     let config = fixture.config();
     let payload = BrowserOpenSpec::for_config(&config)
@@ -202,7 +203,7 @@ async fn core_permit_pre_io_and_exclusive_lane_admission_batch() {
         "all rejections precede even writing worker config"
     );
     println!(
-        "Core/Browser admission boundary PASS: actual move-only permits; exclusive pre-reservation; wrong capability, mutated immutable config, targeted permit cannot open; all NotDispatched with no handle/config/worker; synthetic Core fact is not native Browser evidence"
+        "Core/Browser admission boundary PASS: actual move-only permits; independent context reservations; wrong capability, mutated immutable config, targeted permit cannot open; all NotDispatched with no handle/config/worker; synthetic Core fact is not native Browser evidence"
     );
 }
 
@@ -292,7 +293,6 @@ async fn missing_unknown_requires_exact_ended_bundle_and_audit() {
                 ),
                 workspace: PathBuf::from("/synthetic-unused-workspace"),
                 output: PathBuf::from("/synthetic-unused-output"),
-                slot: None,
                 pins: vec![],
                 uncertain: true,
                 context_closed: false,
