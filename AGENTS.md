@@ -5,7 +5,7 @@
 - Product source is only src/. Rust owns Gateway, Host, Core, state and policy. Retain mature Codex/Cua/Playwright executors and native Swift/C# bridges; Node is limited to the Browser worker. Use mature, pinned libraries rather than rebuilding standard protocols.
 - Preserve Gateway/Host/Core boundaries and the owner's chosen scope in src/docs/rust-core-rewrite/REDUCED-SCOPE.md. Do not add product features or restore a legacy management runtime during convergence.
 - Keep task lifetime separate from caller access: Exec tasks and continuation state belong to Host; Gateway must not keep a second task directory or stop Exec on chat cleanup. Host runtime owns task/caller state across protocol reconstruction; ordinary disconnect ends the link, while explicit revocation and local quit enter the existing Host shutdown path. Browser handoff and Cua concurrency follow their own confirmed behavior.
-- Start with the platform framework or upstream executor's normal behavior. Add a process, durable state or protocol only for a concrete user-visible requirement. When ownership moves, remove the superseded path and verify the change through its normal entry point.
+- Start with the platform framework or upstream executor's normal behavior. Add a process, durable state or protocol only for a concrete user-visible requirement. When ownership moves, remove the superseded path and verify the change through its normal entry point. Keep the runtime stop reason separate from observed cleanup facts; clients consume the same result instead of inferring cleanup from an error code.
 
 ## Default development loop
 

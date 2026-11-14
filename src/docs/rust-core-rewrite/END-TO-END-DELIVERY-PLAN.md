@@ -30,8 +30,23 @@ Gateway 完整进程重启后原 Host/原任务继续；Gateway 离线时 Host �
 
 App 回归测试验证实际清理证据与停止原因独立、正常退出保留远端 Unknown。
 标准集成质量门 20 项 PASS：`/tmp/styx-lifecycle-20261114/quality/receipt.json`。
-本节尚不代表本轮源码已安装到原生客户端；Browser 转交仍等待对话结束时保留规则确认。
-重构版 Stable 仍 NO-GO。
+源码 `9b6a5aa` 已整合到 develop。Mac 原工程增量构建及原证书签名通过，build 2005
+装回 `/Applications/Styx.app`。真实菜单退出旧 App 后才替换，旧 App 备份保留；
+新版实际 Core SHA `bcb6613b…`，App 内 manifest `44254f4f…`。测试 Gateway 在
+本机原配置正常重启，未变更生产 Tunnel。
+
+Mac 实测原任务跨 Gateway 完整进程重启保留，另一个 MCP 对话继续原任务，独立文件
+确认效果。Gateway 离线时菜单「退出 Styx」后 App/Core/Cua/Codex 与原任务全部退出，
+Core exit 0；同一配对重开、Gateway 恢复后自动连接，旧任务目录为空，新任务效果成功。
+本机能力三项设置与配对材料哈希保持不变。原生收据：
+`/tmp/styx-lifecycle-20261114/host-lifecycle-native-result.json`。
+
+本次是新 App/Core 搭配原已选执行器的开发验证：持久 Runtime 仍为 `b13b53de…`，
+实际 Codex 从该目录运行，其 2462 项 workers 文件与本轮封装输入哈希一致。
+不宣称完整 Runtime 选择升级、Windows 真机或 ChatGPT 账号验收。初次封装输入目录
+权限错误保留失败；只修正新建构建输入后通过。初条 Mac 测试任务引用了不存在的
+scratch 目录，已按其明确任务编号停止；后续使用现有产物目录独立验证，没有重放未知操作。
+Browser 转交仍等待对话结束时保留规则确认。重构版 Stable 仍 NO-GO。
 
 ### Exec 任务归属迁移（2026-11-14，本次最新源码检查点）
 
