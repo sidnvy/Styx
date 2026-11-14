@@ -1,6 +1,28 @@
 import AppKit
 import SwiftUI
 
+struct ProductHostCapabilitySettings: View {
+    @ObservedObject var model: ProductModel
+    var body: some View {
+        if model.status["capabilities"] != .null {
+            ForEach(["exec", "browser", "computer"], id: \.self) { name in
+                Toggle(isOn: Binding(
+                    get: { model.status["capabilities"]["configured"][name].bool },
+                    set: { model.setHostCapability(name, enabled: $0) }
+                )) {
+                    ProductCapabilityLabel(kind: name == "exec" ? .cli : name == "browser" ? .browser : .computer)
+                }.disabled(model.busy).accessibilityIdentifier("styx-capability-" + name)
+            }
+            Text(productText("关闭一项能力会停止它的任务，其他能力保持运行。", "Turning off a capability stops its tasks. Other capabilities keep running.")).font(.caption).foregroundStyle(.secondary)
+            if !model.status["capabilities"]["applied"].bool {
+                Text(productText("设置尚未完全生效，请刷新状态查看。", "The settings have not fully applied. Refresh to check their status.")).foregroundStyle(.secondary)
+            }
+        } else {
+            Text(productText("完成本机设置并连接后，可在这里更改能力。", "Finish setup and connect this computer to change its capabilities here.")).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
 struct ProductPluginCompatibilityNote: View {
     var body: some View {
         DisclosureGroup(productText("上传方式与兼容性", "Upload availability and compatibility")) {
@@ -163,11 +185,10 @@ struct ProductSettingsView: View {
     private var local: some View {
         VStack(alignment: .leading, spacing: 16) {
             Section(productText("允许 ChatGPT 在这台电脑上做什么", "What ChatGPT can do on this computer")) {
-                ProductCapabilityLabel(kind: .cli)
                 if model.nativeHost {
-                    ProductNativeOptionalCapabilities(selected: model.status["enrollment"]["selected_features"], unconfigured: model.nativeCanCreateLocal)
-                    Text(productText("功能在首次设置或加入时选择，不代表已获网关批准或系统权限。此版本更改功能需通过“更改这台电脑的角色”重新设置并配对。", "Features are selected during setup or joining; selection does not confirm Gateway approval or system permissions. To change features in this version, use Change this computer’s role, set up again and re-pair.")).font(.caption).foregroundStyle(.secondary)
+                    ProductHostCapabilitySettings(model: model)
                 } else {
+                    ProductCapabilityLabel(kind: .cli)
                     Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }.disabled(model.joined)
                     Toggle(isOn: $model.browser) { ProductCapabilityLabel(kind: .browser) }.disabled(model.joined)
                     if !model.joined {

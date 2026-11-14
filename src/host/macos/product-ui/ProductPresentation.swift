@@ -57,7 +57,7 @@ enum ProductCapabilityKind {
     }
     var detail: String {
         switch self {
-        case .cli: return productText("运行命令和脚本 · 始终包含", "Run commands and scripts · Always included")
+        case .cli: return productText("运行命令和脚本", "Run commands and scripts")
         case .computer: return productText("查看屏幕、点击和输入", "View the screen, click and type")
         case .browser: return productText("打开网页、点击和填写表单", "Open websites, click and fill in forms")
         }

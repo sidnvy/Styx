@@ -481,15 +481,9 @@ struct ProductView: View {
                     Text(productText("关闭窗口后继续运行；选择“退出 Styx”才结束本次运行。", "Closing the window keeps Styx running. Choose Quit Styx to end this run.")).font(.caption).foregroundStyle(.secondary)
                 }
             }
-            if model.nativeHost && model.status["capabilities"] != .null {
+            if model.nativeHost {
                 ProductPanel(title: productText("这台电脑的能力", "This computer's capabilities")) {
-                    Toggle("Exec", isOn: Binding(get: { model.status["capabilities"]["configured"]["exec"].bool }, set: { model.setHostCapability("exec", enabled: $0) })).disabled(model.busy)
-                    Toggle("Browser", isOn: Binding(get: { model.status["capabilities"]["configured"]["browser"].bool }, set: { model.setHostCapability("browser", enabled: $0) })).disabled(model.busy)
-                    Toggle("Computer Use", isOn: Binding(get: { model.status["capabilities"]["configured"]["computer"].bool }, set: { model.setHostCapability("computer", enabled: $0) })).disabled(model.busy)
-                    Text(productText("关闭一项能力会停止它的任务，其他能力保持运行。", "Turning off a capability stops its tasks. Other capabilities keep running.")).font(.caption).foregroundStyle(.secondary)
-                    if !model.status["capabilities"]["applied"].bool {
-                        Text(productText("设置尚未完全生效，请刷新状态查看。", "The settings have not fully applied. Refresh to check their status.")).foregroundStyle(.secondary)
-                    }
+                    ProductHostCapabilitySettings(model: model)
                 }
             } else if model.deployment != nil {
                 ProductPanel(title: productText("这台电脑的能力", "This computer's capabilities")) {
