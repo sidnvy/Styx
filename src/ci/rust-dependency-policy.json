@@ -130,6 +130,11 @@
       "input": "loopback TCP sockets and a disposable signed Tunnel worker fixture",
       "required_for": "desktop Gateway onboarding validates Tunnel settings and pairs its local Host"
     },
+    "app::runtime_bootstrap::tests::completed_runtime_update_allows_same_app_role_retirement": {
+      "kind": "loopback_socket_fixture",
+      "input": "loopback TCP sockets and disposable signed Runtime/Tunnel fixtures",
+      "required_for": "completed update releases ownership for same-App role retirement; staged work still refuses retirement; not installed native acceptance"
+    },
     "app::runtime_bootstrap::tests::fresh_profile_reopens_from_external_runtime_after_bundle_replacement": {
       "kind": "explicit_signed_native_payload",
       "input": "STYX_TEST_APP_CONTROL_SELECTION protected selection with current writer/reader; disposable strict-TLS enrollment",

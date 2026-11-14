@@ -41,15 +41,23 @@ impl HostApp {
         if self.runtime_update_running() {
             return Err(AppError("app_runtime_update_in_progress"));
         }
+        if let Some(ticket) = &self.quit_ticket {
+            // A role change may be refused after stopping. Reuse the completed
+            // local stop, including its original evidence, without another write.
+            self.scope.validate()?;
+            return Ok(self.local_quit_reply(ticket));
+        }
         self.settle_for_quit().await?;
         self.available_for(!self.maintenance_fenced())?;
         let ticket = uuid::Uuid::new_v4().simple().to_string();
         self.record_exit_uncertainty(&ticket).await?;
         self.quit_ticket = Some(ticket.clone());
-        Ok(
-            json!({"quit":{"status":"ready_to_quit","scope":"local_app","ticketId":ticket},
-            "cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g|g.status())}),
-        )
+        Ok(self.local_quit_reply(&ticket))
+    }
+
+    fn local_quit_reply(&self, ticket: &str) -> Value {
+        json!({"quit":{"status":"ready_to_quit","scope":"local_app","ticketId":ticket},
+            "cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g|g.status())})
     }
 
     pub(super) fn remote_cleanup_unconfirmed(&self) -> bool {

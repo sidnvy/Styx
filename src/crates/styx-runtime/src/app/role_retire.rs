@@ -178,7 +178,7 @@ impl HostApp {
         }
         // A live/staged/retained Work owns its original writer and pins. Do not
         // drop it or acquire a replacement owner during retirement.
-        if self.runtime_update.is_some() {
+        if self.runtime_update_owns_work() {
             return Err(AppError("role_retire_runtime_owner_retained"));
         }
         let name = self

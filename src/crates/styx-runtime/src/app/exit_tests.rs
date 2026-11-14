@@ -95,6 +95,12 @@ async fn local_quit_joins_original_worker_and_events_and_preserves_remote_unknow
         bytes,
         "immutable original receipt"
     );
+    let repeated = app.dispatch(Operation::QuitAdmission, raw()).await.unwrap();
+    assert_eq!(
+        repeated, reply,
+        "completed stop retains its original ticket"
+    );
+    assert_eq!(fs::read(f.0.join(&name)).unwrap(), bytes);
     app.settle_for_quit().await.unwrap();
 }
 

@@ -846,6 +846,11 @@ impl HostApp {
     pub(super) fn runtime_update_running(&self) -> bool {
         self.runtime_update.as_ref().is_some_and(State::running)
     }
+    pub(super) fn runtime_update_owns_work(&self) -> bool {
+        self.runtime_update
+            .as_ref()
+            .is_some_and(|state| state.work.is_some() || state.job.is_some())
+    }
     fn new_runtime_work(&mut self) -> Result<Work, AppError> {
         self.scope.validate()?;
         let writer = match self.input_writer.take() {
@@ -887,7 +892,8 @@ impl HostApp {
             .clone()
             .ok_or(AppError("app_runtime_candidate_unavailable"))?;
         let mut state = match self.runtime_update.take() {
-            Some(state) => state,
+            Some(state) if state.work.is_some() || state.running() => state,
+            Some(_) => State::new(self.new_runtime_work()?),
             None => State::new(self.new_runtime_work()?),
         };
         let Some(mut work) = state.work.take() else {
@@ -957,6 +963,11 @@ impl HostApp {
         {
             self.runtime_update = Some(state);
             return Err(AppError("app_runtime_original_transaction_required"));
+        }
+        if state.status == "committed" && state.work.is_none() {
+            // The original update is already complete; its result owns no writer.
+            self.runtime_update = Some(state);
+            return Ok(());
         }
         let Some(mut work) = state.work.take() else {
             self.runtime_update = Some(state);
@@ -1072,6 +1083,18 @@ impl HostApp {
                 state.status = "unknown";
                 state.error = Some(error.code());
                 state.can_recover = true;
+            }
+        }
+        if completed && !self.runtime_update_fenced() {
+            // Keep the UI result, not the completed operation's file handles and
+            // role roots. The App resumes custody of its existing input writer.
+            if let Some(work) = self
+                .runtime_update
+                .as_mut()
+                .and_then(|state| state.work.take())
+            {
+                debug_assert!(self.input_writer.is_none());
+                self.input_writer = Some(work.writer);
             }
         }
     }

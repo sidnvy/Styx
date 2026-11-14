@@ -255,6 +255,92 @@ async fn completed_bootstrap_is_observed_without_copying_after_bundle_replacemen
     drop(app);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires loopback sockets; disposable signed setup/update/retirement fixture"]
+async fn completed_runtime_update_allows_same_app_role_retirement() {
+    let fixture = Fixture::with_tunnel(true);
+    let mut app = fixture.open().await;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let raw = |value: Value| serde_json::value::to_raw_value(&value).unwrap();
+    app.create_local(LocalInput::desktop(&raw(json!({"port":port,
+        "label":"Update then retire", "computer":false,"browser":false,
+        "persistLogin":false,"tunnel":{"tunnelId":"tunnel_abcdefgh","apiKey":"sk-testtesttesttest"}}))).unwrap())
+        .await.unwrap();
+    app.settle_all().await.unwrap();
+    app.set_desired(NativeRunDesired::Stopped).await.unwrap();
+    app.dispatch(Operation::StageRuntime, raw(json!({"authorize":true})))
+        .await
+        .unwrap();
+    app.reap_runtime_update(true).await;
+    assert_eq!(app.snapshot().await["runtimeUpdate"]["status"], "staged");
+    assert_eq!(
+        app.dispatch(
+            Operation::RetireRole,
+            raw(json!({"allowOtherDevices":false}))
+        )
+        .await
+        .unwrap_err()
+        .code(),
+        "role_retire_runtime_owner_retained"
+    );
+    app.dispatch(
+        Operation::UpdateRuntime,
+        raw(json!({"authorize":true,
+        "transactionId":"update-then-retire"})),
+    )
+    .await
+    .unwrap();
+    app.reap_runtime_update(true).await;
+    assert_eq!(app.snapshot().await["runtimeUpdate"]["status"], "committed");
+    assert!(!app.runtime_update_owns_work());
+    assert!(app.input_writer.is_some());
+    let committed = inventory(&fixture.container);
+    app.dispatch(
+        Operation::RecoverRuntimeUpdate,
+        raw(json!({"authorize":true,
+        "transactionId":"update-then-retire"})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        inventory(&fixture.container),
+        committed,
+        "no completed update replay"
+    );
+    // A later explicit update starts new work; the completed UI result is not
+    // mistaken for an in-progress task or used to replay the old transaction.
+    app.dispatch(Operation::StageRuntime, raw(json!({"authorize":true})))
+        .await
+        .unwrap();
+    app.reap_runtime_update(true).await;
+    assert_eq!(app.snapshot().await["runtimeUpdate"]["status"], "staged");
+    app.dispatch(
+        Operation::UpdateRuntime,
+        raw(json!({"authorize":true,
+        "transactionId":"update-again-then-retire"})),
+    )
+    .await
+    .unwrap();
+    app.reap_runtime_update(true).await;
+    assert_eq!(app.snapshot().await["runtimeUpdate"]["status"], "committed");
+    let stopped = app
+        .dispatch(Operation::QuitAdmission, raw(json!({})))
+        .await
+        .unwrap();
+    assert_eq!(stopped["quit"]["status"], "ready_to_quit");
+    let retired = app
+        .dispatch(
+            Operation::RetireRole,
+            raw(json!({"allowOtherDevices":false})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retired["retirement"]["outcome"], "retired");
+    assert!(app.scope.root.get().is_none());
+}
+
 #[tokio::test]
 async fn partial_bootstrap_is_never_adopted_or_replayed_by_a_new_app() {
     let fixture = Fixture::new();
