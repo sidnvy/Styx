@@ -11,7 +11,7 @@
 本轮目标以 [REFACTOR-PLAN.md](REFACTOR-PLAN.md) 为准。下述结果是开发验证，
 不改变已发布 0.4.0 的历史结果，也不代表重构版已经完成原生交付。
 
-### Computer 单会话门禁删除（2026-11-14，开发检查点）
+### Computer 单会话门禁删除（2026-11-14，Windows 实机检查点）
 
 NAB5 原 App PID 11000、Core PID 11768 和 Cua PID 8668 仍运行时，新的独立 MCP
 窗口读取立即返回 `capacity_busy / uncertain:false`。源码确认 Windows/Linux 的
@@ -24,7 +24,38 @@ NAB5 原 App PID 11000、Core PID 11768 和 Cua PID 8668 仍运行时，新的�
 因 Busy 失败，修改后通过；覆盖两个活跃 owner、一个 owner 清理时另一个继续，以及
 清理写锁超时不派发。Runtime 回归 351 PASS、74 项按声明忽略；首次受限环境运行的
 13 项网络/IPC PermissionDenied 保留，获本地套接字权限后同组通过。AGENTS 补充同 Host
-跨对话及各平台分支的验证要求。此处仅为开发证据，Windows 安装与真实双对话待完成。
+跨对话及各平台分支的验证要求。
+
+源码 `2b75ebd` 已集成到 workstation develop；完整质量门 20 PASS。复用 NAB5
+缓存完成 Windows release 编译、App 及 Inno 安装包，版本 `0.4.0.2010`。
+原 App/Core `11000/11768` 经原登录用户调用正常 `styx quit`，保留句柄观察二者
+退出 0；SSH 登录上下文首次在发送退出前被 peer 检查拒绝，不是未知退出后重放。
+安装仅派发一次；等待脚本超时后读取原安装结果确认退出 0，未重装。原配置重开后
+设备 ID 仍为 `styx-4a5bb86fa5e81ac4daad3f1a`，部署、凭据、CA、身份四项哈希不变。
+
+- 已安装 App 包 SHA `df19ce1b7b5135601d60c1ed605a9eac2957ec53b7e7b96995d9d7a46a13ab9a`；
+  实际 App PID `1568`，Core PID `11216`，Core SHA
+  `f97ebb96c017fa1b19b5db846afdaa878ebbf850d385e3334a83c83302418295`，与构建结果匹配。
+- 两个独立 MCP owner A/B 均能读取同一 Styx 窗口 `918180` / PID `1568`；B
+  保持打开时 A 可继续读取，关闭 A 后 B 继续读取成功，两个客户端均正常结束。
+  Inventor 查询返回空窗口集，不能据此声称 Inventor 已打开或验证了输入操作。
+- 保留首次失败：实际 ChatGPT 对话同时进行原生界面查询时，A/B 首次读取成功，
+  A 后续只读调用返回 `capacity_busy / uncertain:false`。上述完整通过来自其他查询
+  结束后的独立对照。整会话独占已解除；**重叠调用的 Busy 来源尚未定位**，不能宣称
+  所有并发冲突已解决，也不能仅凭对照将它确定为上游 Cua 冲突。
+- **运行组件选择仍待切换**：实际 Core 已更新，但原配置仍选择旧 manifest
+  `a76d7eafa1d997fc95fe73bc599e29e55a6f247910ec05f8ea25e32b8184444d`，待选新 manifest
+  `b860a054092102be75c2e89c9e291aa488fecb7b5657e52c3fcbd571ada4ebdb`。
+  原 ChatGPT 验收对话成功读取新窗口及 13 个可访问性元素，但点击 General 返回
+  `permission_required / not_dispatched`，没有执行 Prepare/Update。已请所有者在本机
+  正常准备、更新并 Reconnect；未绕过权限、修改配置文件或声称组件更新完成。
+
+证据：`/tmp/styx-browser-handoff-20261114/computer-concurrency/` 下
+`two-owners.json` 保留首次失败，`serial-read-control/two-owners.json` 为通过的对照，
+`installed/` 保存原退出/安装结果，`runtime-ui-blocked.jpg` 为账号界面结果。
+完整 Windows 状态只留在原机，未跨机器复制。后续只需核对选中 manifest、重连及受影响
+验证，并定位重叠读取 Busy；不要重跑未受影响的两台 Exec/Browser 矩阵。Mac 原生协议
+故障保持独立缺口。本检查点不是重构版完整交付，Stable 仍为 NO-GO。
 
 ### 独立 ChatGPT 账号路线（2026-11-14）
 
