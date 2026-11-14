@@ -115,6 +115,11 @@
   ],
   "source_guard_limit": "lexical defense in depth; imports/aliases/macros/FFI still need review; not a Rust sandbox or a proof of no IO",
   "known_ignored": {
+    "app::runtime_bootstrap::tests::one_desktop_update_commits_both_roles_and_requests_reconnection": {
+      "kind": "loopback_socket_fixture",
+      "input": "loopback TCP sockets and disposable signed Runtime/Tunnel fixtures; run independently",
+      "required_for": "single desktop update commits both roles, requests reconnection and leaves an up-to-date selection untouched; not installed native acceptance"
+    },
     "app::startup::tests::retained_history_existing_profile_read_only": {
       "kind": "owner_authorized_existing_mac_profile_observation",
       "input": "STYX_TEST_RETAINED_HISTORY_PROFILE existing owner-authorized macOS profile; no setup, recovery or role launch",
