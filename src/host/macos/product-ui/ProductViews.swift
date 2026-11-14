@@ -102,9 +102,10 @@ struct ProductView: View {
             heading(productText("继续本机设置", "Continue local setup"), productText("原管理端已准备完成，配对尚未开始。继续将保留原身份、证书和运行组件。", "The original Gateway is prepared and pairing has not started. Continuing preserves its identity, certificates and runtime."))
             if let notice = model.nativeLanJoinNotice { Text(notice).font(.callout).textSelection(.enabled) }
             TextField(productText("电脑名称", "Computer name"), text: $model.label)
+            Toggle(isOn: $model.exec) { ProductCapabilityLabel(kind: .cli) }
             Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }
             Toggle(isOn: $model.browser) { ProductCapabilityLabel(kind: .browser) }
-            Text(productText("将启用命令执行，以及你选择的 Computer Use 和 Browser。确认后仅提交一次配对。", "This enables command execution and, if selected, Computer Use and Browser. Confirming submits pairing once.")).font(.callout).foregroundStyle(.secondary)
+            Text(productText("将保存你选择的本机能力。确认后仅提交一次配对。", "This saves your chosen capabilities for this computer. Confirming submits pairing once.")).font(.callout).foregroundStyle(.secondary)
             setupTunnelFields
             Button(productText("确认并继续设置", "Confirm and continue setup")) { model.resumeLocalSetup() }
                 .buttonStyle(.borderedProminent)
@@ -124,7 +125,8 @@ struct ProductView: View {
         VStack(alignment: .leading, spacing: 20) {
             heading(productText("允许 ChatGPT 做什么？", "What can ChatGPT do?"), productText("选择 ChatGPT 可以在这台电脑上使用的功能。", "Choose the features ChatGPT can use on this computer."))
             ProductPanel(title: productText("这台电脑的功能", "Features on this computer")) {
-                ProductCapabilityLabel(kind: .cli)
+                if model.nativeHost { Toggle(isOn: $model.exec) { ProductCapabilityLabel(kind: .cli) } }
+                else { ProductCapabilityLabel(kind: .cli) }
                 Divider()
                 Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }
                 Text(productText("需要你在系统设置中授予“辅助功能”和“屏幕录制”权限；下一步会引导你完成。", "Needs Accessibility and Screen Recording permission in System Settings; the next step guides you.")).font(.caption).foregroundStyle(.secondary)

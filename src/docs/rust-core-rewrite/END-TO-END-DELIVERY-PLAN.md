@@ -51,9 +51,18 @@
 
 尚未将这批源码安装到现有原生 App/Runtime。**原生 GUI 点击开关、Computer Use 活跃任务
 停止与其他能力共存、原 profile 重启恢复仍需真实运行验收**；编译和 Linux 场景不替代它们。
-首次设置的 Exec 默认勾选且可取消还需接入原生向导。完成这些后，再迁移 Exec 跨对话任务、
+首次设置的 Exec 选择已由下述检查点补齐。完成原生运行验收后，再迁移 Exec 跨对话任务、
 Browser 显式转交以及正常退出/撤销旅程。重构版 Stable 仍为 NO-GO；已发布 0.4.0 的历史
 验收结论不变。
+
+### 首次能力选择收敛（2026-11-14）
+
+Mac/Windows 首次加入、本机 Gateway+Host 设置以及继续未完成设置均可取消 Exec，默认仍为开启；Browser/Computer Use 默认关闭。选择写入本机 deployment，Host 的同一设置控制器承接。旧调用不带 exec 时保持开启；加入读取器显式支持布尔选择并拒绝错误类型。
+
+质量门 20 项 PASS：`/tmp/styx-capability-onboarding-quality-20261114/receipt.json`。
+验证：Rust 配置兼容性回归、Windows 实际控件默认值/取消/页面返回保持/参数输出，Mac 生产 Swift 编译与原有自检。
+
+设备核对：PilotMac 正常配置目录只有签名材料，原 App build 2001 已安装但未配置配对、未运行；完整连接与恢复验收等待指定 Gateway。Windows 源码存在其他未提交修改，保留未覆盖，原生编译在已使用的 pairing-dev 输入目录进行。
 
 ## 当前开发检查点（2026-11-12）
 

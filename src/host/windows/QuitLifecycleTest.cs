@@ -112,9 +112,10 @@ namespace StyxNative {
     foreach(string page in new[]{"create","join"}){
      settings.ShowPage(page);
      Check(HasText(settings,"Tunnel runtime API key")== (page=="create"),"tunnel_field_wrong_role");
+     var exec=(CheckBox)Get(settings,"exec");Check(exec.Enabled&&exec.Checked,"exec_default_not_editable");exec.Checked=false;
      var computer=(CheckBox)Get(settings,"computer");Check(computer.Enabled&&!computer.Checked,"fresh_desktop_not_explicit_opt_in");computer.Checked=true;
-     var choice=(System.Collections.Generic.Dictionary<string,object>)typeof(Settings).GetMethod("Choice",Fields).Invoke(settings,null);Check(Equals(choice["computer"],true),"desktop_choice_not_sent_to_core");
-     settings.ShowPage("overview");settings.ShowPage(page);Check(((CheckBox)Get(settings,"computer")).Enabled&&((CheckBox)Get(settings,"computer")).Checked,"desktop_draft_reset_on_navigation");
+     var choice=(System.Collections.Generic.Dictionary<string,object>)typeof(Settings).GetMethod("Choice",Fields).Invoke(settings,null);Check(Equals(choice["computer"],true),"desktop_choice_not_sent_to_core");Check(Equals(choice["exec"],false),"disabled_exec_choice_not_sent_to_core");
+     settings.ShowPage("overview");settings.ShowPage(page);Check(((CheckBox)Get(settings,"computer")).Enabled&&((CheckBox)Get(settings,"computer")).Checked,"desktop_draft_reset_on_navigation");Check(!((CheckBox)Get(settings,"exec")).Checked,"exec_draft_reset_on_navigation");
     }
     File.WriteAllText(Path.Combine(dir,"result.json"),Json.Codec.Serialize(Json.Obj("status","PASS","mode",mode,"scope","native_controls_choice_not_setup_or_pairing_acceptance")));context.Quit();return 0;
    }

@@ -335,6 +335,7 @@ async fn fresh_profile_reopens_from_external_runtime_after_bundle_replacement() 
     // This calls the actual first-setup entry, including default external
     // staging. The original signed Gateway performs real strict-TLS pairing.
     app.create_local(LocalInput {
+        exec: true,
         tunnel: None,
         label: "Runtime bootstrap reference".into(),
         computer: false,

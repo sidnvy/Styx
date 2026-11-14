@@ -298,6 +298,8 @@ struct JoinInput {
     approved_gateway_origin: String,
     approved_ca_sha256: Option<String>,
     label: String,
+    #[serde(default = "exec_default")]
+    exec: bool,
     computer: bool,
     browser: bool,
     browser_channel: Option<String>,
@@ -308,6 +310,8 @@ struct JoinInput {
 struct LocalInput {
     tunnel: Option<SetupTunnel>,
     label: String,
+    #[serde(default = "exec_default")]
+    exec: bool,
     computer: bool,
     browser: bool,
     browser_channel: Option<String>,
@@ -325,6 +329,9 @@ struct SetupTunnel {
     tunnel_id: String,
     #[serde(deserialize_with = "secret_string")]
     api_key: zeroize::Zeroizing<String>,
+}
+fn exec_default() -> bool {
+    true
 }
 impl LocalInput {
     fn desktop(input: &serde_json::value::RawValue) -> Result<Self, AppError> {
@@ -783,7 +790,7 @@ impl HostApp {
         let deployment = serde_json::to_vec(&json!({
             "schema":1,"mode":"join-existing",
             "gateway":{"url":origin,"caFile":parent.join("app-join-ca-v1.pem"),"expectedCaSha256":ca_sha},
-            "host":{"label":choice.label,"cwd":home,"shell":shell,"computer":choice.computer,"browser":browser},
+            "host":{"label":choice.label,"cwd":home,"shell":shell,"exec":{"enabled":choice.exec},"computer":choice.computer,"browser":browser},
             "runtimeSelectionFile":selection,"invitationFile":parent.join("app-join-invitation-v1")
         })).map_err(|_| AppError("app_input_invalid"))?;
         self.scope.validate()?;

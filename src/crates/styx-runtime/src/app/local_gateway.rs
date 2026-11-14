@@ -497,6 +497,7 @@ impl HostApp {
             approved_gateway_origin: String::new(),
             approved_ca_sha256: None,
             label: input.label,
+            exec: input.exec,
             computer: input.computer,
             browser: input.browser,
             browser_channel: input.browser_channel,
@@ -542,6 +543,7 @@ impl HostApp {
             approved_gateway_origin: String::new(),
             approved_ca_sha256: None,
             label: input.label,
+            exec: input.exec,
             computer: input.computer,
             browser: input.browser,
             browser_channel: input.browser_channel,
@@ -833,6 +835,9 @@ mod setup_tests {
     fn local_setup_without_lan_preserves_exact_deployment_bytes() {
         let input = input();
         assert!(input.lan_address.is_none());
+        assert!(input.exec);
+        let explicit: LocalInput = serde_json::from_value(json!({"label":"Test computer","exec":false,"computer":false,"browser":false,"persistLogin":false})).unwrap();
+        assert!(!explicit.exec);
         assert_eq!(
             local_deployment(&input).unwrap(),
             br#"{"gateway":{"allowRemoteHosts":false,"listenHost":"127.0.0.1","url":"https://127.0.0.1:22022"},"mode":"create-local","schema":1}"#

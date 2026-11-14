@@ -524,7 +524,15 @@ mod platform {
         shell: PathBuf,
         #[serde(default)]
         computer: bool,
+        #[serde(rename = "exec")]
+        _exec: Option<ExecSelection>,
         browser: Option<Box<RawValue>>,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ExecSelection {
+        #[serde(rename = "enabled")]
+        _enabled: bool,
     }
     // Same closed selection spellings as the existing protected Browser loader;
     // these are requested DATA, never permission or executable authority here.
@@ -1700,6 +1708,11 @@ mod platform {
                 "runtimeSelectionFile": "/p/sel.json", "invitationFile": "/p/inv.txt"
             });
             assert!(deployment(valid.to_string().as_bytes()).is_ok());
+            let mut disabled = valid.clone();
+            disabled["host"]["exec"] = serde_json::json!({"enabled":false});
+            assert!(deployment(disabled.to_string().as_bytes()).is_ok());
+            disabled["host"]["exec"]["enabled"] = "false".into();
+            assert!(deployment(disabled.to_string().as_bytes()).is_err());
             for origin in ["https://192.168.1.2:8443", "https://100.64.1.2:8443"] {
                 let mut remote = valid.clone();
                 remote["gateway"]["url"] = origin.into();
