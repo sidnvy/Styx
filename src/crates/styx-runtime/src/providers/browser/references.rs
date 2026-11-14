@@ -83,9 +83,6 @@ fn markers(text: &str, out: &mut Vec<String>) -> Result<()> {
         };
         let native = &rest[..end];
         if native.len() <= 64 && native_ref(native) && !out.iter().any(|s| s == native) {
-            if out.len() >= styx_core::browser::MAX_NATIVE_REFS {
-                return Err(BrowserError::Busy);
-            }
             out.push(native.to_owned());
         }
         rest = &rest[end + 1..];

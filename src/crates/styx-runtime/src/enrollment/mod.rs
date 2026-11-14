@@ -18,7 +18,7 @@ use recovery::{InventoryFacts, RecoveryBlocked};
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 use styx_contracts::identity::GatewayEpoch;
-use styx_core::enrollment::{EnrollmentControl, EnrollmentLedger, Limits};
+use styx_core::enrollment::{EnrollmentControl, EnrollmentLedger};
 
 #[derive(Debug, thiserror::Error)]
 #[error("protected enrollment bootstrap refused: {category}")]
@@ -88,7 +88,6 @@ impl<'a> EnrollmentBootstrap<'a> {
     pub fn recover_existing(
         root: &'a PrivateRoot,
         writer: &'a mut ConfigurationWriterGuard,
-        limits: Limits,
     ) -> Result<Self, BootstrapError> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -102,7 +101,7 @@ impl<'a> EnrollmentBootstrap<'a> {
                 category: "epoch_unproven",
             })?;
         let mut journal = EnrollmentJournal::open_existing(root, writer, JournalBudget::default())?;
-        let recovered = recovery::recover_journal(&mut journal, epoch, limits, now)?;
+        let recovered = recovery::recover_journal(&mut journal, epoch, now)?;
         Ok(Self {
             journal,
             ledger: recovered.ledger,

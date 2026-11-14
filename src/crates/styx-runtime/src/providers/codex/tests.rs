@@ -164,7 +164,6 @@ async fn real_codex_native_stdio_complete_scenario_batch() {
             ),
         ]),
         rpc_timeout: Duration::from_millis(300),
-        retained_process_limit: 2,
     })
     .await
     .unwrap();
@@ -453,8 +452,7 @@ fn fixture_adapter(
             .try_acquire_many_owned(16 * 1024 * 1024)
             .unwrap(),
     );
-    let rpc =
-        Rpc::new_with_reserved_partition(w, r, Duration::from_millis(200), 4, partition.clone());
+    let rpc = Rpc::new_with_reserved_partition(w, r, Duration::from_millis(200), partition.clone());
     let handle = ProcessHandle {
         process_id: Uuid::new_v4().to_string(),
         operation: operation.clone(),
@@ -485,7 +483,6 @@ fn fixture_adapter(
         records: Mutex::new(HashMap::from([(handle.process_id.clone(), resource)])),
         actions: Mutex::new(BTreeMap::new()),
         operations: Mutex::new(BTreeMap::from([(operation, handle.clone())])),
-        limit: 4,
         session_id: "fixture-session".into(),
         provider_id: "fixture-provider".into(),
     });
@@ -709,7 +706,6 @@ async fn real_codex_raw_page_focused_scenario() {
                 ),
             ]),
             rpc_timeout: Duration::from_secs(2),
-            retained_process_limit: 2,
         })
         .await
         .unwrap(),
@@ -1195,7 +1191,7 @@ async fn continuation_terminate_ack_is_not_process_exit_or_drain() {
     worker.await.unwrap();
 }
 #[tokio::test]
-async fn continuation_local_metadata_is_bounded_and_survives_resource_retirement() {
+async fn continuation_history_has_no_count_quota_and_survives_resource_retirement() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let mut auth = authority();
     let (_, id, digest) = auth.issue(spec(&std::env::temp_dir(), "unused", false));
@@ -1205,7 +1201,7 @@ async fn continuation_local_metadata_is_bounded_and_survives_resource_retirement
         let (r, mut w) = tokio::io::split(server);
         let mut lines = BufReader::new(r).lines();
         let mut seen = std::collections::BTreeSet::new();
-        for _ in 0..256 {
+        for _ in 0..257 {
             let q: Value =
                 serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
             assert_eq!(q["method"], "process/write");
@@ -1231,17 +1227,17 @@ async fn continuation_local_metadata_is_bounded_and_survives_resource_retirement
         );
         last = Some(a.id);
     }
-    let (permit, _) = auth.action(&handle, digest, &write_action(b"MUST_NOT_SEND"));
+    let (permit, _) = auth.action(&handle, digest, &write_action(b"additional-original"));
     let receipt = adapter.write(permit, &handle).await;
-    assert_eq!(receipt.evidence, ActionEvidence::NotDispatched);
-    assert_eq!(receipt.cause, Some(ExecError::Capacity));
+    assert_eq!(receipt.evidence, ActionEvidence::Acknowledged);
+    assert_eq!(receipt.cause, None);
     {
         let mut r = adapter.owned(&auth.owner, &handle).await.unwrap();
         r.last_exit = Some(0);
         r.drained = true;
     }
     adapter.retire(&auth.owner, &handle).await.unwrap();
-    assert_eq!(adapter.actions.lock().unwrap().len(), 256);
+    assert_eq!(adapter.actions.lock().unwrap().len(), 257);
     // Defensive producer-reconstruction control, not a claim that clients can
     // create a Core permit or that a real Host may reuse its generation.
     let mut reconstructed = authority();
@@ -1283,8 +1279,7 @@ async fn externally_reserved_rpc_partition_outlives_helper_and_reader_cleanup() 
             .try_acquire_many_owned(16 * 1024 * 1024)
             .unwrap(),
     );
-    let rpc =
-        Rpc::new_with_reserved_partition(w, r, Duration::from_millis(100), 1, partition.clone());
+    let rpc = Rpc::new_with_reserved_partition(w, r, Duration::from_millis(100), partition.clone());
     drop(partition);
     drop(rpc); // reader still waiting on its owned stdout
     assert_eq!(budget.available_permits(), 0);
@@ -1324,7 +1319,6 @@ async fn real_codex_continuation_permit_focused_scenario() {
                     ),
                 ]),
                 rpc_timeout: Duration::from_millis(300),
-                retained_process_limit: 4,
             },
             partition,
         )
@@ -1770,16 +1764,21 @@ async fn whole_native_chunk_larger_than_hint_is_buffered_and_delivered_once() {
 }
 
 #[tokio::test]
-async fn retained_read_pages_leave_a_control_rpc_slot_and_refuse_before_another_read() {
+async fn retained_read_pages_do_not_limit_other_reads_or_control() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let mut auth = authority();
     let (_, id, _) = auth.issue(spec(&std::env::temp_dir(), "unused", false));
     let owner = auth.owner.clone();
-    let (adapter, handle, server) = fixture_adapter(owner.clone(), id);
+    let (adapter, _handle, server) = fixture_adapter(owner.clone(), id);
     let worker = tokio::spawn(async move {
         let (r, mut w) = tokio::io::split(server);
         let mut lines = BufReader::new(r).lines();
-        for expected in ["process/read", "process/read", "process/terminate"] {
+        for expected in [
+            "process/read",
+            "process/read",
+            "process/read",
+            "process/terminate",
+        ] {
             let q: Value =
                 serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
             assert_eq!(q["method"], expected);
@@ -1788,8 +1787,6 @@ async fn retained_read_pages_leave_a_control_rpc_slot_and_refuse_before_another_
                 .unwrap();
         }
     });
-    let a = adapter.rpc.reserve_read_buffer().unwrap();
-    let b = adapter.rpc.reserve_read_buffer().unwrap();
     let first = adapter
         .rpc
         .request_budgeted("process/read", json!({}))
@@ -1800,17 +1797,17 @@ async fn retained_read_pages_leave_a_control_rpc_slot_and_refuse_before_another_
         .request_budgeted("process/read", json!({}))
         .await
         .unwrap();
-    assert!(matches!(
-        adapter.read(&owner, &handle, 10, Duration::ZERO).await,
-        Err(ExecError::Capacity)
-    ));
-    // The saturated output cache must not prevent an original cleanup control.
+    adapter
+        .rpc
+        .request("process/read", json!({}))
+        .await
+        .unwrap();
     adapter
         .rpc
         .request("process/terminate", json!({}))
         .await
         .unwrap();
-    drop((first, second, a, b));
+    drop((first, second));
     worker.await.unwrap();
 }
 

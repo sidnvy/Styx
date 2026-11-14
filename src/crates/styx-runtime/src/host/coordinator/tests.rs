@@ -123,7 +123,6 @@ async fn real_owned_start_read_and_dropped_response_scenario() {
             ),
         ]),
         rpc_timeout: Duration::from_secs(2),
-        retained_process_limit: 8,
     })
     .await
     .unwrap();
@@ -131,7 +130,6 @@ async fn real_owned_start_read_and_dropped_response_scenario() {
         adapter,
         OperationLedger::new(HostGeneration::try_from("owned-coordinator-generation").unwrap()),
         facts(),
-        2,
     )
     .unwrap();
     let owner = authority
@@ -434,7 +432,6 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
             ),
         ]),
         rpc_timeout: Duration::from_secs(2),
-        retained_process_limit: 4,
     })
     .await
     .unwrap();
@@ -442,7 +439,6 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
         adapter,
         OperationLedger::new(HostGeneration::try_from("host-action-fixture-generation").unwrap()),
         facts(),
-        1,
     )
     .unwrap();
     #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
@@ -924,7 +920,6 @@ async fn real_host_physical_retention_and_unknown_archival_scenario() {
             ),
         ]),
         rpc_timeout: Duration::from_millis(300),
-        retained_process_limit: 1,
     })
     .await
     .unwrap();
@@ -934,7 +929,6 @@ async fn real_host_physical_retention_and_unknown_archival_scenario() {
             HostGeneration::try_from("host-physical-retention-generation").unwrap(),
         ),
         facts(),
-        2,
     )
     .unwrap();
     let authority = Arc::new(authority);
@@ -1339,7 +1333,7 @@ async fn real_host_physical_retention_and_unknown_archival_scenario() {
 #[tokio::test]
 async fn optional_executor_refuses_exec_without_fabricating_cleanup() {
     let ledger = OperationLedger::new("host-no-executor".try_into().unwrap());
-    let (host, authority) = HostCoordinator::new_without_executor(ledger, facts(), 2).unwrap();
+    let (host, authority) = HostCoordinator::new_without_executor(ledger, facts()).unwrap();
     let owner = authority
         .register_verified_owner(
             "owner-no-executor".try_into().unwrap(),
@@ -1389,7 +1383,6 @@ fn runtime_access_cleanup_handles_do_not_keep_the_host_alive() {
     let (host, authority) = HostCoordinator::new_without_executor(
         OperationLedger::new("host-release-test".try_into().unwrap()),
         facts(),
-        4,
     )
     .unwrap();
     let observer = Arc::downgrade(&host.inner);

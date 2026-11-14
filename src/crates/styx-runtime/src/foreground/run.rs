@@ -529,11 +529,6 @@ async fn connect(
         LinkError::Tls(_) => ForegroundError("gateway_tls_handshake_rejected"),
         LinkError::UpgradeStatus(400) => ForegroundError("gateway_wss_request_rejected"),
         LinkError::UpgradeStatus(403) => ForegroundError("gateway_wss_admission_refused"),
-        LinkError::UpgradeStatus(429) => {
-            let code = crate::gateway::paired::CAPACITY_ERROR_CODE;
-            eprintln!("{}", serde_json::json!({"schema":1,"error":code,"hint":crate::gateway::paired::CAPACITY_HINT}));
-            ForegroundError(code)
-        },
         LinkError::UpgradeStatus(503) => ForegroundError("gateway_wss_unavailable"),
         LinkError::UpgradeStatus(_) | LinkError::HandshakeRejected => {
             ForegroundError("gateway_wss_upgrade_rejected")
@@ -597,7 +592,6 @@ fn retryable_connect_error(code: &str) -> bool {
             | "gateway_tls_timeout"
             | "gateway_transport_deadline"
             | "gateway_wss_unavailable"
-            | crate::gateway::paired::CAPACITY_ERROR_CODE
     )
 }
 fn facts(device: &DeviceId) -> AdmissionFacts {
@@ -831,7 +825,7 @@ async fn run_owned(
         .to_string()
         .try_into()
         .expect("UUID identity");
-    let reservation = OwnedExecHost::reserve(generation.clone(), facts(&device), 16)
+    let reservation = OwnedExecHost::reserve(generation.clone(), facts(&device))
         .map_err(|_| ForegroundError("host_reservation_refused"))?;
     // Run blocking filesystem work on the blocking pool. executor_config itself
     // revalidates the entire signed inventory/raw profile at this spawn boundary;

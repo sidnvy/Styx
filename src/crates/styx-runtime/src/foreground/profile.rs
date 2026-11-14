@@ -479,7 +479,6 @@ impl LoadedLegacyProfile {
             cwd: self.cwd.clone(),
             environment: self.environment.clone(),
             rpc_timeout: self.rpc_timeout,
-            retained_process_limit: 128,
         })
     }
     pub(super) fn validate_committed_ownership(

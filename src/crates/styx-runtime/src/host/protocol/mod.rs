@@ -11,7 +11,7 @@ use super::{
 pub(crate) mod browser;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) mod computer;
-use super::callers::{OWNER_LIMIT, OwnerRecord, order as owner_order};
+use super::callers::{OwnerRecord, order as owner_order};
 use super::exec_tasks::{self as tasks, operations::ExecPort};
 pub mod wire;
 #[cfg(test)]
@@ -218,9 +218,7 @@ impl<'a> HostProtocol<'a> {
         if registry.owners.contains_key(&key) {
             return Ok(());
         }
-        if registry.owners.len() >= OWNER_LIMIT {
-            return Err(ProtocolError::Busy);
-        }
+
         let lease = self
             .authority
             .register_verified_owner(owner, epoch)
@@ -360,9 +358,7 @@ impl<'a> HostProtocol<'a> {
                     rejection(ErrorCategory::Unauthorized)
                 });
             }
-            if registry.owners.len() >= OWNER_LIMIT {
-                return Some(rejection(ErrorCategory::Busy));
-            }
+
             if let Err(error) = registry.order.admit(&epoch, owner) {
                 return Some(rejection(error));
             }
@@ -852,7 +848,6 @@ impl<'a> HostProtocol<'a> {
                     else if stop_requested && !matches!(&request.call, Call::OwnerCleanup { .. }) {
                         rejection(ErrorCategory::Unauthorized)
                     }
-                    else if !cfg!(target_os = "macos") && pending.len() >= if matches!(&request.call, Call::OwnerCleanup { .. }) { 3 } else { 2 } { rejection(ErrorCategory::Busy) }
                     else {
                         let owner = call_owner(&request.call).cloned();
                         // Poll once at admission: dispatch/cleanup synchronously

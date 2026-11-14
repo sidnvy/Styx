@@ -410,7 +410,6 @@ async fn paired_journey(capacity: bool, computers: usize, browser_handoff: bool)
         admin.as_bytes(),
         Sha256Digest::of_bytes(mcp.as_bytes()),
         vec![host_header.clone()],
-        Limits::default(),
     )
     .unwrap();
     let gateway_id = GatewayId::try_from("owned-paired-gateway").unwrap();
@@ -504,11 +503,9 @@ async fn paired_journey(capacity: bool, computers: usize, browser_handoff: bool)
                     ),
                 ]),
                 rpc_timeout: Duration::from_secs(3),
-                retained_process_limit: 16,
             },
             generation.clone(),
             facts(device.clone()),
-            4,
         )
         .await
         .unwrap(),
@@ -1395,7 +1392,6 @@ impl crate::host::settings::CapabilityRuntime for FixtureCapabilityRuntime {
                                 ),
                             ]),
                             rpc_timeout: Duration::from_secs(3),
-                            retained_process_limit: 16,
                         },
                         facts(self.device.clone()),
                     )
@@ -1438,7 +1434,7 @@ async fn many_connected_computers(
         let generation =
             HostGeneration::try_from(format!("computer-{n}-{}", uuid::Uuid::new_v4())).unwrap();
         let host = Arc::new(if n + 1 == computers {
-            OwnedExecHost::reserve(generation.clone(), facts(device.clone()), 4)
+            OwnedExecHost::reserve(generation.clone(), facts(device.clone()))
                 .unwrap()
                 .without_executor()
                 .unwrap()
@@ -1456,11 +1452,9 @@ async fn many_connected_computers(
                         ),
                     ]),
                     rpc_timeout: Duration::from_secs(3),
-                    retained_process_limit: 16,
                 },
                 generation.clone(),
                 facts(device.clone()),
-                4,
             )
             .await
             .unwrap()
@@ -1544,7 +1538,7 @@ async fn many_connected_computers(
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(relay.connection_counts(), (computers, 32));
+    assert_eq!(relay.connection_counts(), (computers, 0));
     let config =
         StreamableHttpClientTransportConfig::with_uri(format!("https://{}/mcp", client.host))
             .auth_header(model.to_owned())
@@ -1611,7 +1605,7 @@ async fn many_connected_computers(
         let command = format!("printf '%s' '{}' > independent-effect.txt", nonces[n]);
         data(owner.call_tool(call("exec_command", json!({"cmd":command,"login":false,"environment_id":device.as_str(),"yield_time_ms":100}))).await.unwrap());
         file_within(&effect, &nonces[n]).await;
-        assert_eq!(relay.connection_counts(), (computers, 32));
+        assert_eq!(relay.connection_counts(), (computers, 0));
     }
     // The status probe allocates no owner and observes physical computers once,
     // independently of how many Exec/Browser/Computer lanes each advertises.
@@ -1627,7 +1621,7 @@ async fn many_connected_computers(
         status.headers()["x-styx-computers-connected"],
         computers.to_string()
     );
-    assert_eq!(status.headers()["x-styx-computers-capacity"], "32");
+    assert_eq!(status.headers()["x-styx-computers-capacity"], "0");
     // A running task is stopped by a remote capability change. A second Host's
     // task stays alive and accepts its original stdin; control remains usable
     // with all capabilities disabled, then a local change re-enables Exec.
@@ -1647,7 +1641,7 @@ async fn many_connected_computers(
             .unwrap(),
     );
     assert_eq!(status["exec"]["configured"], false);
-    assert_eq!(relay.connection_counts(), (computers, 32));
+    assert_eq!(relay.connection_counts(), (computers, 0));
     let refused = owner.call_tool(call("exec_command", json!({"cmd":"printf forbidden > disabled-effect.txt","login":false,"environment_id":devices[0].as_str()}))).await.unwrap();
     assert_eq!(refused.is_error, Some(true));
     data(owner.call_tool(call("write_stdin", json!({"environment_id":devices[1],"session_id":other["session_id"],"chars":"still-running\n","yield_time_ms":100}))).await.unwrap());
@@ -1771,7 +1765,7 @@ async fn many_connected_computers(
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     std::fs::write(root.join("many-computers-observation.json"), serde_json::to_vec_pretty(&json!({
-        "connected_computers":computers,"capacity":32,"devices":devices,"independent_effect_nonces":nonces,
+        "connected_computers":computers,"capacity":0,"devices":devices,"independent_effect_nonces":nonces,
         "capability_settings":"remote disable stops owned Exec; other Host session survives; same local controller re-enables; persisted settings reopen",
         "mcp_conversations":1,"ambiguous_target":"not dispatched for Exec, Browser and Computer Use","offline_target":"not dispatched; no effect on any other Host",
         "effects":"computer-N/independent-effect.txt; exact unique nonce bytes read independently",
@@ -1842,7 +1836,6 @@ async fn named_computers_revoke_requires_sockets() {
         admin.as_bytes(),
         Sha256Digest::of_bytes(mcp.as_bytes()),
         vec![host_header.clone()],
-        Limits::default(),
     )
     .unwrap();
     let gateway_id = GatewayId::try_from("owned-paired-gateway").unwrap();

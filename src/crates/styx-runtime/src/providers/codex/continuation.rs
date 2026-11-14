@@ -5,9 +5,6 @@ use styx_contracts::operation::ResourceTarget;
 // Independent provider-local metadata allowance; not the Core retention budget.
 // No payload bytes are retained. Core-attested audit transfer frees known
 // receipts; uncertain receipts remain until ended-resource archival.
-const ACTION_METADATA_BYTES: usize = 1024 * 1024;
-const ACTION_ENTRY_ACCOUNTING_BYTES: usize = 4096;
-const MAX_ACTIONS: usize = ACTION_METADATA_BYTES / ACTION_ENTRY_ACCOUNTING_BYTES;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -181,9 +178,7 @@ impl CodexStdio {
                 }
                 return reject(stored.receipt.clone(), ExecError::AlreadyDispatched);
             }
-            if actions.len() >= MAX_ACTIONS {
-                return reject(receipt, ExecError::Capacity);
-            }
+
             if write {
                 receipt.write_id = Some(Uuid::new_v4().to_string());
             }

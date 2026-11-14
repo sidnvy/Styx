@@ -46,7 +46,7 @@ fn facts() -> AdmissionFacts {
     }
 }
 fn setup() -> (OperationLedger, OwnerLease, OperationSnapshot) {
-    let mut ledger = OperationLedger::with_budget(id("host"), 1000000, 10);
+    let mut ledger = OperationLedger::with_retention(id("host"), 10);
     let owner = ledger
         .register_verified_owner(id("owner"), id("epoch"))
         .unwrap();
@@ -762,7 +762,7 @@ fn ended_resource_release_fences_reserved_actions_and_output_but_keeps_audit_his
 
 #[test]
 fn strict_pre_io_refusal_settles_unknown_child_retention_only_after_full_interval() {
-    let mut l = OperationLedger::with_budget(id("host"), 1_000_000, 10);
+    let mut l = OperationLedger::with_retention(id("host"), 10);
     let o = l.register_verified_owner(id("owner"), id("epoch")).unwrap();
     let r = l
         .prepare(&o, context(), b"never started".to_vec(), MonotonicMillis(0))

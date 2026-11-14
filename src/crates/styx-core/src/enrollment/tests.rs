@@ -27,11 +27,7 @@ fn payload() -> JoinPayload {
     }
 }
 fn setup() -> (EnrollmentLedger, EnrollmentControl) {
-    EnrollmentLedger::new_owned(
-        GatewayEpoch::try_from("owned-gateway-epoch").unwrap(),
-        Limits::default(),
-    )
-    .unwrap()
+    EnrollmentLedger::new_owned(GatewayEpoch::try_from("owned-gateway-epoch").unwrap()).unwrap()
 }
 fn commit(l: &mut EnrollmentLedger, c: &EnrollmentControl, p: &PendingIntent) {
     l.confirm_durable(c.attest_durable(p, hash("owned test-only durable attestation")))
@@ -1089,16 +1085,9 @@ fn security_regression_core_allocates_generation_and_rechecks_lane_grant() {
 }
 
 #[test]
-fn security_regression_retirement_capacity_reserved_before_approval() {
-    let (mut l, c) = EnrollmentLedger::new_owned(
-        GatewayEpoch::try_from("capacity-gateway").unwrap(),
-        Limits {
-            devices: 2,
-            retired: 1,
-            ..Limits::default()
-        },
-    )
-    .unwrap();
+fn approval_and_revocation_have_no_device_count_quota() {
+    let (mut l, c) =
+        EnrollmentLedger::new_owned(GatewayEpoch::try_from("capacity-gateway").unwrap()).unwrap();
     let a = approved(&mut l, &c);
     let mut b = payload();
     b.invitation = "capacity-second-invitation".into();
@@ -1140,25 +1129,16 @@ fn security_regression_retirement_capacity_reserved_before_approval() {
             browser: true,
         },
     };
-    let pending_before = l.pending.get(&bid).unwrap().clone();
-    assert_eq!(
-        l.approve(&c.admin(), request(), prepared(), 6).unwrap_err(),
-        EnrollmentError::Capacity,
-        "B cannot consume the only slot already reserved for A's future revocation"
-    );
-    assert!(l.staged.is_none());
-    assert_eq!(l.devices.len(), 1);
-    assert_eq!(l.pending.get(&bid).unwrap(), &pending_before);
-    let revoke = l.revoke(&c.admin(), &a, 6).unwrap();
+    let second = l.approve(&c.admin(), request(), prepared(), 6).unwrap();
+    commit(&mut l, &c, &second);
+    assert_eq!(l.devices.len(), 2);
+    let revoke = l.revoke(&c.admin(), &a, 7).unwrap();
     commit(&mut l, &c, &revoke);
-    assert_eq!(l.retired, vec![hash("spki")]);
-    assert_eq!(
-        l.approve(&c.admin(), request(), prepared(), 7).unwrap_err(),
-        EnrollmentError::Capacity,
-        "committed tombstone is not evicted to publish B"
-    );
-    assert!(l.staged.is_none());
-    assert_eq!(l.pending.get(&bid).unwrap(), &pending_before);
+    let revoke_b = l.revoke(&c.admin(), &b.device_id, 8).unwrap();
+    commit(&mut l, &c, &revoke_b);
+    assert_eq!(l.retired.len(), 2);
+    assert!(l.retired.contains(&hash("spki")));
+    assert!(l.retired.contains(&hash("capacity-spki-b")));
 }
 
 mod independent_review_cases {
@@ -1391,15 +1371,8 @@ mod independent_review_cases {
 
     #[test]
     fn every_published_key_remains_revocable_at_the_retirement_capacity_boundary() {
-        let (mut ledger, control) = EnrollmentLedger::new_owned(
-            GatewayEpoch::try_from("retire-two").unwrap(),
-            Limits {
-                devices: 2,
-                retired: 2,
-                ..Limits::default()
-            },
-        )
-        .unwrap();
+        let (mut ledger, control) =
+            EnrollmentLedger::new_owned(GatewayEpoch::try_from("retire-two").unwrap()).unwrap();
         let first = approved(&mut ledger, &control);
         let mut payload = payload();
         payload.invitation = "separate bounded invitation".into();

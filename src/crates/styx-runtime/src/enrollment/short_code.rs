@@ -72,9 +72,6 @@ impl Offers {
         now: u64,
     ) -> Result<(String, Offer)> {
         self.0.retain(|_, offer| offer.expires > now);
-        if self.0.len() >= 64 {
-            return Err("pairing_offer_capacity");
-        }
         let bundle = crate::enrollment::pairing_link::build(origin, token, expires, ca, now)
             .map_err(|e| e.code())?;
         let mut random = [0u8; 12];

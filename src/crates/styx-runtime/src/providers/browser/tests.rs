@@ -5,6 +5,8 @@ use styx_core::{
     operations::{DispatchDisposition, ExecutorFact, OperationLedger},
     policy::AdmissionFacts,
 };
+#[cfg(test)]
+use tokio::sync::Semaphore;
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -267,10 +269,6 @@ async fn missing_unknown_requires_exact_ended_bundle_and_audit() {
                 .unwrap();
         let worker = BrowserWorker::new(budget.clone());
         let resource = Arc::new(Resource {
-            metadata_record: Mutex::new(Some(
-                worker.inner.metadata.clone().try_acquire_owned().unwrap(),
-            )),
-            metadata: worker.inner.metadata.clone(),
             reference_link: worker.inner.reference_link.clone(),
             stop: CancellationToken::new(),
             cleanup_job: Mutex::new(None),
@@ -381,7 +379,7 @@ async fn missing_unknown_requires_exact_ended_bundle_and_audit() {
             ledger.record_provider_release(result.unwrap()).unwrap();
             assert!(worker.resources().unwrap().is_empty());
             assert!(resource.state.lock().await.retired);
-            assert_eq!(worker.inner.metadata.available_permits(), MAX_RECORDS);
+
             let handle = BrowserHandle {
                 resource,
                 host: worker.inner.clone(),

@@ -157,21 +157,6 @@ async fn strict_tls_wss_data_heartbeat_limits_close_cleanup_batch() {
         Err(SendFailure::NotSent(LinkError::TooLarge))
     );
     let spare_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let spare_tcp = TcpStream::connect(spare_listener.local_addr().unwrap())
-        .await
-        .unwrap();
-    assert!(matches!(
-        HostWssLink::connect(
-            &endpoint,
-            &tls,
-            spare_tcp,
-            LinkAuthentication::Bearer(&bearer),
-            ConnectionGeneration::try_from("must-not-connect").unwrap(),
-            budget.clone()
-        )
-        .await,
-        Err(LinkError::Capacity)
-    ));
     drop(spare_listener);
     let sender = link.sender();
     assert_eq!(sender.generation(), &generation);
@@ -279,7 +264,6 @@ async fn failed_io_task_refuses_cleanup_success_and_still_joins_sibling() {
         generation: "failed-io-generation".try_into().unwrap(),
         outgoing,
         incoming,
-        out_bytes: Arc::new(Semaphore::new(1)),
         stop: CancellationToken::new(),
         tasks: vec![
             tokio::spawn(async { panic!("injected transport task failure") }),

@@ -265,12 +265,6 @@ impl EnrollmentLedger {
                 if !(60000..=600000).contains(&ttl)
                     || ttl % 1000 != 0
                     || self.invitations.iter().any(|old| old.hash == i.hash)
-                    || self
-                        .invitations
-                        .iter()
-                        .filter(|old| old.expires > now)
-                        .count()
-                        >= self.limits.invitations
                 {
                     return Err(invalid());
                 }
@@ -311,7 +305,6 @@ impl EnrollmentLedger {
                     || f.comparison != comparison
                     || i.scope.as_ref().is_some_and(|s| s != &f.pairing)
                     || self.retired.contains(&f.fingerprint)
-                    || self.pending.len() >= self.limits.pending
                     || self.pending.contains_key(&f.request)
                     || self.pending.values().any(|p| {
                         p.status != PendingStatus::Rejected
@@ -342,7 +335,6 @@ impl EnrollmentLedger {
                 ..
             } => {
                 let p = self.pending.get(request).ok_or(EnrollmentError::NotFound)?;
-                let active = self.devices.values().filter(|d| !d.revoked).count();
                 if p.status != PendingStatus::Pending
                     || p.expires <= now
                     || *target != Self::target(p)?
@@ -355,9 +347,6 @@ impl EnrollmentLedger {
                     || d.generation != Self::historical_generation(body, &d.id)?
                     || *claim_expires != now.checked_add(1200000).ok_or_else(invalid)?
                     || self.registered_identity_conflict(&d.id, d.fingerprint)
-                    || self.retained_device_count() >= self.limits.devices
-                    || self.retired.len().checked_add(active).ok_or_else(invalid)?
-                        >= self.limits.retired
                 {
                     return Err(invalid());
                 }
@@ -402,11 +391,7 @@ impl EnrollmentLedger {
                 fingerprint,
             } => {
                 let d = self.devices.get(device).ok_or(EnrollmentError::NotFound)?;
-                if d.revoked
-                    || d.fingerprint != *fingerprint
-                    || (self.retired.len() >= self.limits.retired
-                        && !self.retired.contains(fingerprint))
-                {
+                if d.revoked || d.fingerprint != *fingerprint {
                     return Err(invalid());
                 }
             }

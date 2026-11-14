@@ -87,7 +87,7 @@ impl BrowserWorker {
         {
             return Err(BrowserError::PermissionDenied);
         }
-        if let Some((digest, evidence, cause, _)) = live.actions.get(&s.id) {
+        if let Some((digest, evidence, cause)) = live.actions.get(&s.id) {
             if *digest != s.payload_digest
                 || !matches!(
                     (s.state, *evidence),
@@ -142,7 +142,7 @@ impl BrowserWorker {
             return Err(BrowserError::PermissionDenied);
         }
         let live = resource.state.lock().await;
-        let Some((digest, evidence, cause, _)) = live.actions.get(&s.id) else {
+        let Some((digest, evidence, cause)) = live.actions.get(&s.id) else {
             if !live.retired && s.state == OperationState::Unknown {
                 return Ok(BrowserActionReceipt {
                     operation: s.id.clone(),
@@ -251,11 +251,6 @@ impl BrowserWorker {
         live.retired = true;
         live.references.clear();
         live.actions.clear();
-        resource
-            .metadata_record
-            .lock()
-            .map_err(|_| BrowserError::Unknown)?
-            .take();
         self.inner
             .resources
             .lock()

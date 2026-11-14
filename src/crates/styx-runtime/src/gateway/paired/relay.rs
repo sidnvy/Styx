@@ -1,4 +1,6 @@
-use super::{GATEWAY_RELAY_BYTES, GatewayExecProfile, PAIRED_LINK_BYTES};
+use super::GatewayExecProfile;
+#[cfg(test)]
+use super::{GATEWAY_RELAY_BYTES, PAIRED_LINK_BYTES};
 #[path = "drain.rs"]
 mod drain;
 use crate::{
@@ -17,7 +19,7 @@ use std::{
 };
 use styx_contracts::{identity::*, operation::OperationId};
 use styx_core::enrollment::{ConnectionLease, Lane};
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(test)]
 use tokio::sync::Semaphore;
 use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -154,7 +156,6 @@ struct Binding {
     // Explicit owner/enrollment revocation never waits on this handoff.
     receipts: tokio::sync::RwLock<()>,
     ready: AtomicBool,
-    admitted_records: AtomicUsize,
     cleanup: Mutex<drain::BindingCleanup>,
     cleanup_changed: tokio::sync::Notify,
 }
@@ -229,24 +230,15 @@ pub(crate) struct Inner {
     opening: tokio::sync::Mutex<()>,
     next_owner: std::sync::atomic::AtomicU64,
 }
-/// The reservation lives at least as long as every admitted socket task.
+/// Track transport settlement without limiting the number of Hosts.
 pub(crate) struct LinkSlots {
-    #[cfg(any(not(target_os = "macos"), test))]
-    slots: Arc<Semaphore>,
-    #[cfg(any(not(target_os = "macos"), test))]
-    capacity: usize,
     _budget: OwnedSemaphorePermit,
-    #[cfg(target_os = "macos")]
     active: Arc<AtomicUsize>,
 }
 #[derive(Debug)]
 pub(crate) struct LinkPermit {
-    #[cfg(not(target_os = "macos"))]
-    _permit: OwnedSemaphorePermit,
-    #[cfg(target_os = "macos")]
     active: Arc<AtomicUsize>,
 }
-#[cfg(target_os = "macos")]
 impl Drop for LinkPermit {
     fn drop(&mut self) {
         self.active.fetch_sub(1, Ordering::AcqRel);
@@ -254,37 +246,15 @@ impl Drop for LinkPermit {
 }
 impl LinkSlots {
     fn new(budget: OwnedSemaphorePermit) -> Result<Self, RelayError> {
-        let bytes = budget.num_permits();
-        if !(PAIRED_LINK_BYTES..=GATEWAY_RELAY_BYTES).contains(&bytes)
-            || !bytes.is_multiple_of(PAIRED_LINK_BYTES)
-        {
-            return Err(RelayError::Invalid);
-        }
         Ok(Self {
-            #[cfg(any(not(target_os = "macos"), test))]
-            slots: Arc::new(Semaphore::new(bytes / PAIRED_LINK_BYTES)),
-            #[cfg(any(not(target_os = "macos"), test))]
-            capacity: bytes / PAIRED_LINK_BYTES,
             _budget: budget,
-            #[cfg(target_os = "macos")]
             active: Arc::new(AtomicUsize::new(0)),
         })
     }
-    pub(crate) fn admit(&self) -> Result<LinkPermit, &'static str> {
-        #[cfg(target_os = "macos")]
-        {
-            self.active.fetch_add(1, Ordering::AcqRel);
-            Ok(LinkPermit {
-                active: self.active.clone(),
-            })
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            self.slots
-                .clone()
-                .try_acquire_owned()
-                .map(|permit| LinkPermit { _permit: permit })
-                .map_err(|_| super::CAPACITY_ERROR_CODE)
+    pub(crate) fn admit(&self) -> LinkPermit {
+        self.active.fetch_add(1, Ordering::AcqRel);
+        LinkPermit {
+            active: self.active.clone(),
         }
     }
 }
@@ -340,18 +310,7 @@ impl RelayHandle {
     /// It does not count three capability lanes as three computers.
     pub fn connection_counts(&self) -> (usize, usize) {
         let links = &self.inner.links;
-        #[cfg(target_os = "macos")]
-        {
-            // Zero denotes no fixed connection-count ceiling.
-            (links.active.load(Ordering::Acquire), 0)
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            (
-                links.capacity - links.slots.available_permits(),
-                links.capacity,
-            )
-        }
+        (links.active.load(Ordering::Acquire), 0)
     }
     pub(crate) async fn authorize(&self, e: &Entry) -> Result<(), RelayError> {
         self.authorize_for(e, Lane::Exec).await
@@ -542,14 +501,12 @@ impl RelayHandle {
     ) -> Result<Reply, RelayError> {
         let response_budget = call.response_budget();
         let (tx, rx) = oneshot::channel();
-        #[cfg(target_os = "macos")]
         let until = tokio::time::Instant::now() + response_budget;
         let command = Command {
             call,
             result: tx,
             gate,
         };
-        #[cfg(target_os = "macos")]
         {
             let reservation = tokio::time::timeout_at(until, queue.reserve())
                 .await
@@ -557,12 +514,6 @@ impl RelayHandle {
                 .map_err(|_| RelayError::Offline)?;
             reservation.send(command);
         }
-        #[cfg(not(target_os = "macos"))]
-        queue.try_send(command).map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => RelayError::Busy,
-            mpsc::error::TrySendError::Closed(_) => RelayError::Offline,
-        })?;
-        #[cfg(target_os = "macos")]
         let response_budget = until.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(response_budget, rx).await {
             Ok(Ok(r)) => r,
@@ -743,19 +694,15 @@ impl RelayHandle {
                 .bindings
                 .lock()
                 .map_err(|_| RelayError::Unknown)?;
-            if let Some(binding) = bindings.iter().find(|binding| {
-                binding.owner.owner_id() == owner.owner_id()
-                    && binding.owner.principal_fingerprint() == owner.principal_fingerprint()
-                    && binding.entry.device == *device
-                    && !binding.retired_for(&entry)
-            }) {
-                Some(binding.clone())
-            } else {
-                if !cfg!(target_os = "macos") && bindings.len() >= 128 {
-                    return Err(RelayError::Busy);
-                }
-                None
-            }
+            bindings
+                .iter()
+                .find(|binding| {
+                    binding.owner.owner_id() == owner.owner_id()
+                        && binding.owner.principal_fingerprint() == owner.principal_fingerprint()
+                        && binding.entry.device == *device
+                        && !binding.retired_for(&entry)
+                })
+                .cloned()
         };
         if let Some(binding) = existing {
             if !binding.ready.load(Ordering::Acquire) {
@@ -784,7 +731,6 @@ impl RelayHandle {
             revoked: Arc::new(Mutex::new(false)),
             receipts: tokio::sync::RwLock::new(()),
             ready: AtomicBool::new(false),
-            admitted_records: AtomicUsize::new(0),
             cleanup: Mutex::new(drain::BindingCleanup::default()),
             cleanup_changed: tokio::sync::Notify::new(),
         });
@@ -801,15 +747,13 @@ impl RelayHandle {
                         .bindings
                         .lock()
                         .map_err(|_| RelayError::Unknown)?;
-                    if (!cfg!(target_os = "macos") && b.len() >= 128)
-                        || b.iter().any(|existing| {
-                            existing.owner.owner_id() == owner.owner_id()
-                                && existing.owner.principal_fingerprint()
-                                    == owner.principal_fingerprint()
-                                && existing.entry.device == *device
-                                && !existing.retired_for(&entry)
-                        })
-                    {
+                    if b.iter().any(|existing| {
+                        existing.owner.owner_id() == owner.owner_id()
+                            && existing.owner.principal_fingerprint()
+                                == owner.principal_fingerprint()
+                            && existing.entry.device == *device
+                            && !existing.retired_for(&entry)
+                    }) {
                         return Err(RelayError::Busy);
                     }
                     b.push(binding.clone());
@@ -1093,47 +1037,10 @@ impl RelayHandle {
             }) {
                 return Err(RelayError::Unauthorized);
             }
-            if !cfg!(target_os = "macos") && new_record && targets.len() >= 256 {
-                return Err(RelayError::Busy);
-            }
         }
-        if new_record
-            && b.inner
-                .admitted_records
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                    if cfg!(target_os = "macos") {
-                        n.checked_add(1)
-                    } else {
-                        (n < 256).then_some(n + 1)
-                    }
-                })
-                .is_err()
-        {
-            return Err(RelayError::Busy);
-        }
-        let reply = match self
+        let reply = self
             .exchange(&entry, call, Some(b.inner.revoked.clone()))
-            .await
-        {
-            Err(error @ (RelayError::Busy | RelayError::NotSent)) => {
-                if new_record {
-                    b.inner.admitted_records.fetch_sub(1, Ordering::AcqRel);
-                }
-                return Err(error);
-            }
-            result => result?,
-        };
-        if new_record
-            && matches!(
-                &reply,
-                Reply::Error {
-                    certainty: styx_contracts::error::ExecutionCertainty::NotDispatched,
-                    ..
-                }
-            )
-        {
-            b.inner.admitted_records.fetch_sub(1, Ordering::AcqRel);
-        }
+            .await?;
         let retired = match (&reply, read_target.as_ref(), start_target.as_ref()) {
             (
                 Reply::Read {
@@ -1165,8 +1072,7 @@ impl RelayHandle {
         };
         if let Some(id) = retired {
             let mut targets = b.inner.targets.lock().map_err(|_| RelayError::Unknown)?;
-            let count = retire_resource_targets(&mut targets, id);
-            b.inner.admitted_records.fetch_sub(count, Ordering::AcqRel);
+            retire_resource_targets(&mut targets, id);
         }
         if self.is_fenced(&b.inner.owner)?
             || *b.inner.revoked.lock().map_err(|_| RelayError::Unknown)?
@@ -1189,9 +1095,6 @@ impl RelayHandle {
                     return Err(RelayError::Unknown);
                 }
             } else if new_record {
-                if !cfg!(target_os = "macos") && targets.len() >= 256 {
-                    return Err(RelayError::Unknown);
-                }
                 targets.insert(
                     snapshot.operation_id.clone(),
                     TargetRecord {
@@ -1384,40 +1287,35 @@ mod command_queue_tests {
     }
 
     #[tokio::test]
-    async fn full_queue_is_busy_without_displacing_the_original_exchange() {
+    async fn full_queue_preserves_both_original_exchanges_without_capacity_refusal() {
         let (queue, mut receiver) = mpsc::channel(1);
-        let original = RelayHandle::exchange_command(&queue, open(7), None);
-        tokio::pin!(original);
-        assert!(futures_util::poll!(original.as_mut()).is_pending());
-        assert_eq!(receiver.len(), 1);
-
-        let refused = RelayHandle::exchange_command(&queue, open(99), None).await;
-        assert!(matches!(refused, Err(RelayError::Busy)));
+        let first = RelayHandle::exchange_command(&queue, open(7), None);
+        tokio::pin!(first);
+        assert!(futures_util::poll!(first.as_mut()).is_pending());
+        let second = RelayHandle::exchange_command(&queue, open(99), None);
+        tokio::pin!(second);
+        assert!(futures_util::poll!(second.as_mut()).is_pending());
         assert_eq!(receiver.len(), 1);
         acknowledge(receiver.try_recv().unwrap(), 7);
         assert!(matches!(
-            original.await,
+            first.await,
             Ok(Reply::OwnerOpened {
                 grant_revision: 7,
+                ..
+            })
+        ));
+        assert!(futures_util::poll!(second.as_mut()).is_pending());
+        acknowledge(receiver.try_recv().unwrap(), 99);
+        assert!(matches!(
+            second.await,
+            Ok(Reply::OwnerOpened {
+                grant_revision: 99,
                 ..
             })
         ));
         assert!(matches!(
             receiver.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
-        ));
-
-        // Released capacity accepts a distinct later command, not the refusal.
-        let next = RelayHandle::exchange_command(&queue, open(8), None);
-        tokio::pin!(next);
-        assert!(futures_util::poll!(next.as_mut()).is_pending());
-        acknowledge(receiver.try_recv().unwrap(), 8);
-        assert!(matches!(
-            next.await,
-            Ok(Reply::OwnerOpened {
-                grant_revision: 8,
-                ..
-            })
         ));
     }
 
@@ -1525,26 +1423,23 @@ mod connection_capacity_tests {
         )
     }
     #[test]
-    fn thirty_two_links_admitted_next_refused_and_disconnect_releases_slot() {
+    fn connections_have_no_count_quota_and_drop_tracks_only_the_original_link() {
         let links = reserve(GATEWAY_RELAY_BYTES).unwrap();
-        let mut admitted = (0..32).map(|_| links.admit().unwrap()).collect::<Vec<_>>();
-        assert_eq!(links.capacity, 32);
-        assert_eq!(
-            links.admit().unwrap_err(),
-            super::super::CAPACITY_ERROR_CODE
-        );
+        let mut admitted = (0..80).map(|_| links.admit()).collect::<Vec<_>>();
+        assert_eq!(links.active.load(Ordering::Acquire), 80);
         drop(admitted.pop());
-        let replacement = links.admit().unwrap();
-        assert!(links.admit().is_err());
+        assert_eq!(links.active.load(Ordering::Acquire), 79);
+        let replacement = links.admit();
+        assert_eq!(links.active.load(Ordering::Acquire), 80);
         drop(replacement);
         drop(admitted);
-        assert_eq!(links.slots.available_permits(), 32);
+        assert_eq!(links.active.load(Ordering::Acquire), 0);
     }
     #[tokio::test]
     async fn two_hundred_reconnections_release_permits_and_reap_completed_tasks() {
         let links = reserve(GATEWAY_RELAY_BYTES).unwrap();
         // Other computers remain connected while one repeatedly disconnects.
-        let others = (0..31).map(|_| links.admit().unwrap()).collect::<Vec<_>>();
+        let others = (0..31).map(|_| links.admit()).collect::<Vec<_>>();
         let mut state = State {
             entries: BTreeMap::new(),
             closing: false,
@@ -1552,7 +1447,7 @@ mod connection_capacity_tests {
         };
         for _ in 0..200 {
             assert!(state.reap_finished());
-            let slot = links.admit().unwrap();
+            let slot = links.admit();
             let stop = CancellationToken::new();
             let stopped = stop.clone();
             let job = tokio::spawn(async move {
@@ -1560,24 +1455,24 @@ mod connection_capacity_tests {
                 stopped.cancelled().await;
             });
             state.tasks.push((stop.clone(), job));
-            assert!(links.admit().is_err());
+            drop(links.admit());
             stop.cancel();
             while !state.tasks.last().unwrap().1.is_finished() {
                 tokio::task::yield_now().await;
             }
-            assert_eq!(links.slots.available_permits(), 1);
+            assert_eq!(links.active.load(Ordering::Acquire), 31);
         }
         assert!(state.reap_finished());
         assert!(state.tasks.is_empty());
         drop(others);
-        assert_eq!(links.slots.available_permits(), 32);
+        assert_eq!(links.active.load(Ordering::Acquire), 0);
     }
     #[test]
-    fn gateway_reservation_is_capped_and_independent_of_host_queue_budget() {
+    fn connection_accounting_does_not_derive_a_quota_from_reserved_bytes() {
         assert_eq!(GATEWAY_RELAY_BYTES, 32 * PAIRED_LINK_BYTES);
-        assert!(reserve(GATEWAY_RELAY_BYTES + PAIRED_LINK_BYTES).is_err());
-        assert!(reserve(PAIRED_LINK_BYTES - 1).is_err());
-        assert!(reserve(PAIRED_LINK_BYTES + 1).is_err());
+        assert!(reserve(GATEWAY_RELAY_BYTES + PAIRED_LINK_BYTES).is_ok());
+        assert!(reserve(PAIRED_LINK_BYTES - 1).is_ok());
+        assert!(reserve(PAIRED_LINK_BYTES + 1).is_ok());
         let source = Arc::new(Semaphore::new(GATEWAY_RELAY_BYTES));
         let links = LinkSlots::new(
             source

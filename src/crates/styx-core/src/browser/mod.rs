@@ -9,19 +9,14 @@ use styx_contracts::{error::ErrorCategory, identity::Sha256Digest, operation::Re
 
 use crate::operations::OwnerLease;
 
-pub const MAX_NATIVE_REFS: usize = 2048;
-pub const MAX_REFERENCE_METADATA_BYTES: usize = 256 * 1024;
 const MAX_NATIVE_REF_BYTES: usize = 64;
-const LOGICAL_ENTRY_OVERHEAD: usize = 64;
 const TOKEN_BYTES: usize = 37;
 
 /// Native reference to public opaque token. Returned values are not authority.
 pub type NativeToOpaque = BTreeMap<String, String>;
 
 /// Intentionally neither Clone nor serializable: scopes cannot be restored from
-/// request DTOs or reused as another resource's reference registry. Logical
-/// accounting bounds retained strings plus a per-entry allowance, not allocator
-/// RSS or temporary copies retained by a caller of replace_snapshot.
+/// request DTOs or reused as another resource's reference registry. References live only as long as their original snapshot.
 pub struct BrowserReferenceScope {
     owner: OwnerLease,
     target: ResourceTarget,
@@ -44,7 +39,7 @@ impl BrowserReferenceScope {
 
     /// Replaces rather than merges. Failure invalidates the previous snapshot;
     /// it never evicts one live entry and claims a partially accepted snapshot.
-    /// Even invalid/over-budget attempts consume a revision, preventing ABA.
+    /// Even invalid attempts consume a revision, preventing ABA.
     pub fn replace_snapshot(
         &mut self,
         native_epoch: u64,
@@ -58,23 +53,15 @@ impl BrowserReferenceScope {
         if native_epoch == 0 {
             return Err(ErrorCategory::InvalidRequest);
         }
-        if native_refs.len() > MAX_NATIVE_REFS {
-            return Err(ErrorCategory::Busy);
-        }
+
         let mut native_to_opaque = NativeToOpaque::new();
         let mut token_to_native = BTreeMap::new();
-        let mut metadata = 0_usize;
         for native in native_refs {
             if !valid_native_ref(native) {
                 return Err(ErrorCategory::InvalidRequest);
             }
             if native_to_opaque.contains_key(native) {
                 continue;
-            }
-            let cost = native.len() + TOKEN_BYTES + LOGICAL_ENTRY_OVERHEAD;
-            metadata = metadata.checked_add(cost).ok_or(ErrorCategory::Busy)?;
-            if metadata > MAX_REFERENCE_METADATA_BYTES {
-                return Err(ErrorCategory::Busy);
             }
             let token = self.token(native_epoch, native);
             // A truncated-hash collision is refusal, never aliasing two native

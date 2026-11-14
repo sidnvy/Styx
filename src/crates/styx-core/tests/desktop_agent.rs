@@ -51,7 +51,7 @@ fn target(r: &OperationSnapshot) -> ResourceTarget {
     }
 }
 fn setup(explicit: bool) -> (OperationLedger, OwnerLease, OperationSnapshot) {
-    let mut ledger = OperationLedger::with_budget("host".try_into().unwrap(), 1_000_000, 10);
+    let mut ledger = OperationLedger::with_retention("host".try_into().unwrap(), 10);
     let owner = ledger
         .register_verified_owner("owner".try_into().unwrap(), "epoch".try_into().unwrap())
         .unwrap();

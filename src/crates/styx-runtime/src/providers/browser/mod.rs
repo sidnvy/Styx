@@ -17,7 +17,7 @@ use std::{
 };
 use styx_contracts::{capability::CapabilityId, identity::Sha256Digest, operation::OperationId};
 use styx_core::operations::{DispatchPermit, OwnerLease};
-#[cfg(not(target_os = "macos"))]
+#[cfg(test)]
 use tokio::sync::Semaphore;
 use tokio::{
     sync::{OwnedMutexGuard, OwnedSemaphorePermit},
@@ -59,14 +59,6 @@ fn canonical_path(path: &Path) -> Result<PathBuf> {
 
 const IO_BYTES: usize = 16 * 1024 * 1024;
 const FRAME_BYTES: usize = 8 * 1024 * 1024;
-#[cfg(not(target_os = "macos"))]
-// One MiB logical retained metadata, conservatively 8KiB per record.
-// This is not an I/O pool or a second Host byte allocator. No live eviction.
-const MAX_RECORDS: usize = 128;
-#[cfg(not(target_os = "macos"))]
-type MetadataRecord = OwnedSemaphorePermit;
-#[cfg(target_os = "macos")]
-type MetadataRecord = ();
 pub use crate::providers::browser_contract::{BrowserAction, BrowserError};
 type Result<T> = std::result::Result<T, BrowserError>;
 /// Trusted bootstrap input only, never a network DTO. Caller verifies release
@@ -182,14 +174,9 @@ struct Inner {
     reference_link: Arc<Mutex<ReferenceLink>>,
     budget: Arc<BrowserIoBudget>,
     resources: Mutex<BTreeMap<OperationId, Arc<Resource>>>,
-    #[cfg(not(target_os = "macos"))]
-    metadata: Arc<Semaphore>,
 }
 struct Resource {
     reference_link: Arc<Mutex<ReferenceLink>>,
-    metadata_record: Mutex<Option<MetadataRecord>>,
-    #[cfg(not(target_os = "macos"))]
-    metadata: Arc<Semaphore>,
     stop: CancellationToken,
     cleanup_job: Mutex<Option<tokio::sync::watch::Receiver<Option<BrowserCleanup>>>>,
     operation: OperationId,
@@ -221,15 +208,7 @@ struct Live {
     uncertain: bool,
     context_closed: bool,
     timeout: Duration,
-    actions: BTreeMap<
-        OperationId,
-        (
-            Sha256Digest,
-            BrowserActionEvidence,
-            Option<BrowserError>,
-            MetadataRecord,
-        ),
-    >,
+    actions: BTreeMap<OperationId, (Sha256Digest, BrowserActionEvidence, Option<BrowserError>)>,
     config_file: PathBuf,
     #[cfg(target_os = "linux")]
     scope: Option<LinuxOwnedScope>,
@@ -275,7 +254,6 @@ pub struct BrowserOpenReceipt {
 }
 pub struct BrowserOpenSlot {
     worker: BrowserWorker,
-    metadata: MetadataRecord,
 }
 pub struct BrowserActionSlot {
     captured_reference_revision: u64,
@@ -289,8 +267,6 @@ impl BrowserWorker {
                 reference_link: Arc::new(Mutex::new(ReferenceLink { revision: 1 })),
                 budget,
                 resources: Mutex::new(BTreeMap::new()),
-                #[cfg(not(target_os = "macos"))]
-                metadata: Arc::new(Semaphore::new(MAX_RECORDS)),
             }),
         }
     }
@@ -303,28 +279,7 @@ impl BrowserWorker {
         // Poisoned mutex already makes every resolution/mint fail closed.
     }
     pub fn try_reserve_open(&self) -> Result<BrowserOpenSlot> {
-        #[cfg(not(target_os = "macos"))]
-        if self
-            .inner
-            .resources
-            .lock()
-            .map_err(|_| BrowserError::Unknown)?
-            .len()
-            >= MAX_RECORDS
-        {
-            return Err(BrowserError::Busy);
-        }
-        #[cfg(not(target_os = "macos"))]
-        let metadata = self
-            .inner
-            .metadata
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| BrowserError::Busy)?;
-        #[cfg(target_os = "macos")]
-        let metadata = ();
         Ok(BrowserOpenSlot {
-            metadata,
             worker: self.clone(),
         })
     }
@@ -422,7 +377,6 @@ use crate::providers::linux_scope::{LinuxOwnedScope, ScopeCommand, ScopeError};
 impl From<ScopeError> for BrowserError {
     fn from(value: ScopeError) -> Self {
         match value {
-            ScopeError::Busy => Self::Busy,
             ScopeError::InvalidRequest => Self::InvalidRequest,
             ScopeError::PermissionDenied => Self::PermissionDenied,
             ScopeError::Unsupported => Self::Unsupported,
@@ -448,39 +402,7 @@ impl std::fmt::Debug for BrowserOpenFailure {
     }
 }
 impl OwnedBrowserConfig {
-    /// Owned metadata only; executable pins and I/O budgets are shared Arcs.
-    pub(crate) fn retained_profile_bytes(&self) -> usize {
-        let bytes = std::mem::size_of::<Self>()
-            + [
-                &self.node_binary,
-                &self.worker_entry,
-                &self.browser_binary,
-                &self.workspace_dir,
-                &self.profile_dir,
-                &self.output_dir,
-            ]
-            .iter()
-            .map(|p| p.capacity())
-            .sum::<usize>();
-        #[cfg(any(target_os = "windows", target_os = "macos"))]
-        let bytes = bytes
-            + self
-                .environment
-                .iter()
-                .map(|(k, v)| 128 + k.capacity() + v.capacity())
-                .sum::<usize>();
-        bytes
-    }
-    pub(crate) fn validate_metadata_bound(&self) -> Result<()> {
-        #[cfg(not(target_os = "macos"))]
-        if self.retained_profile_bytes() > 128 * 1024 {
-            return Err(BrowserError::InvalidRequest);
-        }
-        Ok(())
-    }
-
     fn validate(&self) -> Result<()> {
-        self.validate_metadata_bound()?;
         if self.rpc_timeout.is_zero() || self.rpc_timeout > Duration::from_secs(35) {
             return Err(BrowserError::InvalidRequest);
         }
@@ -663,9 +585,6 @@ impl BrowserOpenSlot {
         );
         let resource = Arc::new(Resource {
             reference_link: self.worker.inner.reference_link.clone(),
-            metadata_record: Mutex::new(Some(self.metadata)),
-            #[cfg(not(target_os = "macos"))]
-            metadata: self.worker.inner.metadata.clone(),
             stop: CancellationToken::new(),
             cleanup_job: Mutex::new(None),
             operation: operation.clone(),
@@ -966,7 +885,7 @@ impl BrowserActionSlot {
         {
             return refuse(BrowserError::PermissionDenied);
         }
-        if let Some((previous, evidence, cause, _metadata)) = self.state.actions.get(&operation) {
+        if let Some((previous, evidence, cause)) = self.state.actions.get(&operation) {
             if *previous != digest {
                 return refuse(BrowserError::PermissionDenied);
             }
@@ -986,10 +905,6 @@ impl BrowserActionSlot {
         };
         if let Err(error) = action.validate() {
             return refuse(error);
-        }
-        #[cfg(not(target_os = "macos"))]
-        if self.state.actions.len() >= MAX_RECORDS {
-            return refuse(BrowserError::Busy);
         }
         if self.state.uncertain && !action.is_close() {
             return refuse(BrowserError::Unknown);
@@ -1143,20 +1058,12 @@ impl BrowserActionSlot {
                     .into(),
                 );
             }
-            #[cfg(not(target_os = "macos"))]
-            let metadata = match self.resource.metadata.clone().try_acquire_owned() {
-                Ok(permit) => permit,
-                Err(_) => return refuse(BrowserError::Busy),
-            };
-            #[cfg(target_os = "macos")]
-            let metadata = ();
             self.state.actions.insert(
                 operation.clone(),
                 (
                     digest,
                     BrowserActionEvidence::Unknown,
                     Some(BrowserError::Unknown),
-                    metadata,
                 ),
             );
             let peer = match &self.state.client {
@@ -1506,35 +1413,3 @@ mod tests;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "link_reference_tests.rs"]
 mod link_reference_tests;
-
-#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
-#[test]
-fn sixty_four_profile_metadata_has_an_enforced_memory_bound() {
-    let path = PathBuf::from(format!("/{}", "x".repeat(4094)));
-    let config = OwnedBrowserConfig {
-        node_binary: path.clone(),
-        worker_entry: path.clone(),
-        browser_binary: path.clone(),
-        workspace_dir: path.clone(),
-        profile_dir: path.clone(),
-        output_dir: path,
-        rpc_timeout: Duration::from_secs(1),
-    };
-    config.validate_metadata_bound().unwrap();
-    let profiles: Vec<_> = (0..64).map(|_| config.clone()).collect();
-    let measured = profiles
-        .iter()
-        .map(OwnedBrowserConfig::retained_profile_bytes)
-        .sum::<usize>();
-    assert!(measured < 64 * 128 * 1024);
-    let mut oversized = config;
-    oversized.node_binary.reserve(128 * 1024);
-    assert!(oversized.validate_metadata_bound().is_err());
-    println!(
-        "PROFILE_METADATA Linux Browser: copies={} inline_bytes={} owned_bytes={} per_copy={} enforced_limit_per_copy=131072 aggregate_limit_64=8388608",
-        profiles.len(),
-        std::mem::size_of::<OwnedBrowserConfig>(),
-        measured,
-        measured / 64
-    );
-}

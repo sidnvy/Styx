@@ -21,7 +21,7 @@ fn fixed_native_spawn_input_boundary() {
 #[tokio::test]
 #[ignore = "requires protected owned Windows fixture with original Codex PE copies; actual JobObject/native initialization"]
 async fn actual_pinned_codex_suspended_job_cleanup_and_waiter_drop() {
-    use crate::store::{PayloadLimits, PrivateRoot};
+    use crate::store::PayloadPrivateRoot;
     use tokio::sync::Semaphore;
     let root =
         PathBuf::from(std::env::var_os("STYX_TEST_WINDOWS_SPAWN_ROOT").expect("explicit fixture"));
@@ -159,7 +159,6 @@ async fn actual_pinned_codex_suspended_job_cleanup_and_waiter_drop() {
             ),
         ]),
         rpc_timeout: Duration::from_secs(10),
-        retained_process_limit: 16,
     };
     let provider = crate::providers::codex::CodexStdio::spawn_pinned_with_reserved_budget(
         config,

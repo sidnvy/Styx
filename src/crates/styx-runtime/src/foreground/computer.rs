@@ -20,7 +20,6 @@ use std::{
 use styx_contracts::{error::ErrorCategory, session::SessionBinding};
 use styx_core::operations::OwnerLease;
 
-const MAX_OWNERS: usize = 64;
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 type Result<T> = std::result::Result<T, ErrorCategory>;
 struct OwnerDirectories {
@@ -253,9 +252,6 @@ impl ComputerBootstrap for LocalComputer {
         {
             return Err(ErrorCategory::Unauthorized);
         }
-        if owners.len() >= MAX_OWNERS {
-            return Err(ErrorCategory::Busy);
-        }
         let root = assets::fresh_private_directory(self.runtime.path()).map_err(map_directory)?;
         let workspace = assets::fresh_private_directory(root.path()).map_err(map_directory)?;
         let home = assets::fresh_private_directory(root.path()).map_err(map_directory)?;
@@ -276,9 +272,6 @@ impl ComputerBootstrap for LocalComputer {
         owned.temporary.revalidate().map_err(map_directory)?;
         self.validate_source()?;
         let config = self.config(&owned)?;
-        config
-            .validate_metadata_bound()
-            .map_err(|_| ErrorCategory::InvalidRequest)?;
         owners.push(owned);
         Ok(config)
     }

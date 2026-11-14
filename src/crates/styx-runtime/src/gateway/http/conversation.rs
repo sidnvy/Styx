@@ -7,11 +7,9 @@ use rmcp::model::RequestMetaObject;
 use std::sync::Arc;
 use std::time::Duration;
 use styx_contracts::identity::Sha256Digest;
-use tokio::sync::Semaphore;
 
 pub(super) struct Conversation<B: GatewayToolBackend + GatewayOwnerLifecycle> {
     pub life: Arc<Life<B>>,
-    pub calls: Arc<Semaphore>,
 }
 /// Constructed only after outer HTTP authentication. SDK preserves this typed
 /// value in HTTP Parts; it has no Deserialize or JSON constructor.
@@ -70,10 +68,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             let life = self
                 .new_life(owner, lifecycle::Boundary::TunnelConversation)
                 .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
-            let value = Arc::new(Conversation {
-                life,
-                calls: Arc::new(Semaphore::new(1)),
-            });
+            let value = Arc::new(Conversation { life });
             registry.insert(key, value.clone());
             value
         };
@@ -89,7 +84,6 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             let activity = value.life.activity.lock().expect("conversation activity");
             if activity.users == 0
                 && activity.last.elapsed() >= minimum
-                && value.calls.available_permits() == 1
                 && value.life.is_active()
                 && !self.backend.owner_has_live_work(&value.life.owner)
             {

@@ -10,8 +10,7 @@ fn hash(s: &str) -> Sha256Digest {
     Sha256Digest::of_bytes(s.as_bytes())
 }
 fn fresh() -> (EnrollmentLedger, EnrollmentControl) {
-    EnrollmentLedger::new_recovering("current-epoch".try_into().unwrap(), Limits::default())
-        .unwrap()
+    EnrollmentLedger::new_recovering("current-epoch".try_into().unwrap()).unwrap()
 }
 fn recover(ledger: &mut EnrollmentLedger, control: &EnrollmentControl, raw: &[u8]) -> Result<()> {
     let proof = control.attest_historical_baseline(
@@ -28,7 +27,7 @@ fn historical_root_versions_preserve_original_bytes_and_native_continuation() {
     assert_eq!(v1.journal_root, None);
     assert_eq!(v1.journal_root().unwrap(), &v1.enrollment_root);
     assert_eq!(contract::encode(&v1).unwrap(), V1);
-    validate_historical_baseline(&v1, Limits::default()).unwrap();
+    validate_historical_baseline(&v1).unwrap();
     let (mut original, oc) = fresh();
     recover(&mut original, &oc, V1).unwrap();
     assert_eq!(
@@ -46,7 +45,7 @@ fn historical_root_versions_preserve_original_bytes_and_native_continuation() {
     v2.journal_root = Some(v2.source_root.clone());
     assert_ne!(v2.source_root, v2.enrollment_root);
     assert_eq!(v2.journal_root().unwrap(), &v2.source_root);
-    validate_historical_baseline(&v2, Limits::default()).unwrap();
+    validate_historical_baseline(&v2).unwrap();
     let raw = contract::encode(&v2).unwrap();
     assert_eq!(contract::decode(&raw).unwrap(), v2);
     let (mut live, c) = fresh();
@@ -101,7 +100,7 @@ fn historical_root_versions_preserve_original_bytes_and_native_continuation() {
     v3.schema = 3;
     let native_raw = contract::encode(&v3).unwrap();
     assert_eq!(contract::decode(&native_raw).unwrap(), v3);
-    validate_historical_baseline(&v3, Limits::default()).unwrap();
+    validate_historical_baseline(&v3).unwrap();
     let (mut native, native_control) = fresh();
     recover(&mut native, &native_control, &native_raw).unwrap();
     assert!(native.recovering);
@@ -135,7 +134,7 @@ fn historical_root_versions_preserve_original_bytes_and_native_continuation() {
         unknown,
     ] {
         assert!(invalid.journal_root().is_err());
-        assert!(validate_historical_baseline(&invalid, Limits::default()).is_err());
+        assert!(validate_historical_baseline(&invalid).is_err());
         assert!(contract::encode(&invalid).is_err());
     }
     // Decode must also refuse malformed on-disk version/root combinations;

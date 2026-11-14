@@ -12,7 +12,7 @@ use styx_contracts::{
     enrollment::{self as contract, IntentBody},
     identity::{GatewayEpoch, Sha256Digest, TransactionId},
 };
-use styx_core::enrollment::{EnrollmentControl, EnrollmentError, EnrollmentLedger, Limits};
+use styx_core::enrollment::{EnrollmentControl, EnrollmentError, EnrollmentLedger};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(super) enum RecoveryBlocked {
@@ -153,7 +153,7 @@ fn verify_binding(intent: &OriginalIntent, actual: &IntentBinding) -> Result<()>
 pub(super) fn recover_journal(
     journal: &mut EnrollmentJournal<'_>,
     epoch: GatewayEpoch,
-    limits: Limits,
+
     trusted_now: u64,
 ) -> Result<RecoveredEnrollment> {
     let observed = journal.scan()?;
@@ -295,7 +295,7 @@ pub(super) fn recover_journal(
     let mut head = None;
     let mut revision = 0u64;
     let mut last_sequence = 0;
-    let (mut ledger, control) = EnrollmentLedger::new_recovering(epoch, limits)?;
+    let (mut ledger, control) = EnrollmentLedger::new_recovering(epoch)?;
     for (sequence, id, transaction) in commits {
         let intent = transaction
             .intent

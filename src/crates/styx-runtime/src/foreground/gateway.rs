@@ -280,10 +280,8 @@ mod platform {
     };
     use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
     use styx_contracts::identity::{GatewayEpoch, GatewayId, Sha256Digest};
-    use styx_core::enrollment::Limits;
     use tokio::{net::TcpListener, sync::Semaphore};
 
-    static LOADERS: Semaphore = Semaphore::const_new(2);
     struct Admitted {
         lease: ExecutionLeaseGuard,
         // Retains the SAME writer even if service boot fails after uncertain I/O.
@@ -528,7 +526,6 @@ mod platform {
             &runtime.admin_token,
             Sha256Digest::of_bytes(&runtime.model_token),
             vec![authority.clone()],
-            Limits::default(),
         )
         .map_err(|e| error(e.code()))?;
         for address in &runtime.lan_addresses {
@@ -596,11 +593,7 @@ mod platform {
         StopRequested,
     }
     async fn validate_for_poll(admitted: Arc<Admitted>) -> Result<Validation, ForegroundError> {
-        let permit = LOADERS
-            .try_acquire()
-            .map_err(|_| error("gateway_reader_busy"))?;
         tokio::task::spawn_blocking(move || {
-            let _permit = permit;
             #[cfg(any(
                 all(target_os = "linux", target_env = "gnu"),
                 target_os = "macos",
@@ -677,9 +670,6 @@ mod platform {
         if retained_candidate.is_some() && app_scope.is_none() {
             return Err(error("app_scope_required_for_retained_gateway_runtime"));
         }
-        let permit = LOADERS
-            .try_acquire()
-            .map_err(|_| error("gateway_reader_busy"))?;
         emit(&events, &stop, "gateway_loading");
         let Loaded {
             admitted,
@@ -700,7 +690,6 @@ mod platform {
                 d.mark("load");
             }
             tokio::task::spawn_blocking(move || {
-                let _permit = permit;
                 #[cfg(any(
                     all(target_os = "linux", target_env = "gnu"),
                     target_os = "macos",
@@ -733,14 +722,10 @@ mod platform {
         // RecoveredUnknown lanes under the exact held owner. All protected reads
         // stay on a bounded blocking worker, with its permit held until exit.
         let checked = admitted.clone();
-        let permit = LOADERS
-            .try_acquire()
-            .map_err(|_| error("gateway_reader_busy"))?;
         if let Some(d) = &diagnostic {
             d.mark("reconcile");
         }
         let service = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
             let mut service = service;
             service
                 .reconcile_recovered_foreground_transports(StartupTransportClosure {
@@ -786,11 +771,7 @@ mod platform {
             .verified_release();
         let key_state = tunnel_state.clone();
         let key_release = tunnel_release.clone();
-        let key_permit = LOADERS
-            .try_acquire()
-            .map_err(|_| error("gateway_reader_busy"))?;
         let tunnel_ingress = tokio::task::spawn_blocking(move || {
-            let _permit = key_permit;
             crate::foreground::tunnel::ingress_key(&key_state, &key_release)
         })
         .await

@@ -187,9 +187,6 @@ impl ComputerBootstrap for LocalComputer {
         {
             return Err(ErrorCategory::Unauthorized);
         }
-        if owners.len() >= 64 {
-            return Err(ErrorCategory::Busy);
-        }
         let root = Directory::fresh(&self.runtime.path)?;
         let workspace = Directory::fresh(&root.path)?;
         let home = Directory::fresh(&root.path)?;
@@ -200,9 +197,6 @@ impl ComputerBootstrap for LocalComputer {
             home,
         };
         let config = self.config(&owned)?;
-        config
-            .validate_metadata_bound()
-            .map_err(|_| ErrorCategory::InvalidRequest)?;
         owners.push(owned);
         Ok(config)
     }

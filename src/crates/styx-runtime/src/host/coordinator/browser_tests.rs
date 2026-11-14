@@ -278,7 +278,6 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
             ),
         ]),
         rpc_timeout: Duration::from_secs(3),
-        retained_process_limit: 8,
     };
     let adapter = crate::providers::codex::CodexStdio::spawn_owned(executor_config())
         .await
@@ -287,7 +286,6 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
         adapter,
         OperationLedger::new(HostGeneration::try_from("browser-host-owned-generation").unwrap()),
         fixture_facts(CapabilityId::ExecRun),
-        4,
     )
     .unwrap();
     let budget = Arc::new(Semaphore::new(16 * 1024 * 1024))

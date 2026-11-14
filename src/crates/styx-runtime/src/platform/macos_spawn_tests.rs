@@ -1,6 +1,6 @@
 //! Explicit native fixture only: private copied thin Rust test image, ad-hoc signed only after copying, no installed profile.
 use super::*;
-use crate::store::{PayloadLimits, PrivateRoot};
+use crate::store::PayloadPrivateRoot;
 use std::{
     os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::Path,

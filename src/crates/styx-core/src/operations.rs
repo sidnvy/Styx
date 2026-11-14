@@ -181,8 +181,6 @@ pub struct OperationLedger {
     records: BTreeMap<OperationId, Record>,
     next_sequence: u64,
     next_owner_incarnation: u64,
-    budget: usize,
-    enforce_budget: bool,
     retained_bytes: usize,
     retention_ms: u64,
     maintenance_fenced: bool,
@@ -198,27 +196,15 @@ impl OperationLedger {
         &self.host
     }
     pub fn new(host: HostGeneration) -> Self {
-        let ledger = Self::with_budget(
-            host,
-            styx_contracts::OPERATION_METADATA_BYTES,
-            styx_contracts::TERMINAL_OPERATION_RETENTION_MS,
-        );
-        #[cfg(target_os = "macos")]
-        let ledger = Self {
-            enforce_budget: false,
-            ..ledger
-        };
-        ledger
+        Self::with_retention(host, styx_contracts::TERMINAL_OPERATION_RETENTION_MS)
     }
-    pub fn with_budget(host: HostGeneration, budget: usize, retention_ms: u64) -> Self {
+    pub fn with_retention(host: HostGeneration, retention_ms: u64) -> Self {
         Self {
             host,
             owners: BTreeMap::new(),
             records: BTreeMap::new(),
             next_sequence: 0,
             next_owner_incarnation: 0,
-            budget,
-            enforce_budget: true,
             retained_bytes: 0,
             retention_ms,
             maintenance_fenced: false,
@@ -234,7 +220,6 @@ impl OperationLedger {
         if self.owners.contains_key(&owner) {
             return Err(ErrorCategory::StateConflict);
         }
-        self.reserve_capacity(OWNER_ACCOUNTING_OVERHEAD)?;
         let incarnation = self.next_owner_incarnation;
         let next = incarnation
             .checked_add(1)
@@ -250,12 +235,7 @@ impl OperationLedger {
             incarnation,
         })
     }
-    fn reserve_capacity(&self, bytes: usize) -> Result<(), ErrorCategory> {
-        match self.retained_bytes.checked_add(bytes) {
-            Some(total) if !self.enforce_budget || total <= self.budget => Ok(()),
-            _ => Err(ErrorCategory::Busy),
-        }
-    }
+
     fn verify_owner(&self, owner: &OwnerLease) -> Result<(), ErrorCategory> {
         if owner.host != self.host
             || self.owners.get(&owner.owner) != Some(&(owner.epoch.clone(), owner.incarnation))
@@ -483,7 +463,6 @@ impl OperationLedger {
             .len()
             .checked_add(RECORD_ACCOUNTING_OVERHEAD)
             .ok_or(ErrorCategory::Busy)?;
-        self.reserve_capacity(accounting_bytes)?;
         // No wrap, no implicit epoch reuse. Exhaustion fences new reservations
         // until the runtime explicitly establishes a fresh Host generation.
         let next = self

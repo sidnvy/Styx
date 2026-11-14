@@ -70,9 +70,8 @@ impl OwnedExecHost {
         executor: OwnedExecutorConfig,
         generation: HostGeneration,
         trusted_facts: AdmissionFacts,
-        max_jobs: usize,
     ) -> Result<Self, BootstrapError> {
-        Self::reserve(generation, trusted_facts, max_jobs)?
+        Self::reserve(generation, trusted_facts)?
             .spawn(executor)
             .await
     }
@@ -81,13 +80,10 @@ impl OwnedExecHost {
     pub fn reserve(
         generation: HostGeneration,
         trusted_facts: AdmissionFacts,
-        max_jobs: usize,
     ) -> Result<ExecHostReservation, BootstrapError> {
         // Refuse invalid composition before spawning native code or transferring
         // adapter ownership to a constructor that could reject it.
-        if max_jobs == 0
-            || max_jobs > 64
-            || trusted_facts.descriptor.capability_id != CapabilityId::ExecRun
+        if trusted_facts.descriptor.capability_id != CapabilityId::ExecRun
             || trusted_facts.descriptor.contract_version != styx_contracts::CONTRACT_VERSION
         {
             return Err(BootstrapError::InvalidConfiguration);
@@ -96,7 +92,6 @@ impl OwnedExecHost {
             partitions: Partitions::reserve()?,
             generation,
             trusted_facts,
-            max_jobs,
         })
     }
     pub(crate) async fn enable_executor(
@@ -173,7 +168,6 @@ pub struct ExecHostReservation {
     partitions: Partitions,
     generation: HostGeneration,
     trusted_facts: AdmissionFacts,
-    max_jobs: usize,
 }
 impl ExecHostReservation {
     pub fn link_budget(&self) -> Arc<HostLinkBudget> {
@@ -185,7 +179,6 @@ impl ExecHostReservation {
         let (coordinator, authority) = HostCoordinator::new_without_executor(
             OperationLedger::new(self.generation),
             self.trusted_facts,
-            self.max_jobs,
         )?;
         Ok(OwnedExecHost {
             coordinator,
@@ -213,7 +206,6 @@ impl ExecHostReservation {
             adapter,
             OperationLedger::new(self.generation),
             self.trusted_facts,
-            self.max_jobs,
         )?;
         Ok(OwnedExecHost {
             coordinator,
@@ -242,7 +234,6 @@ impl ExecHostReservation {
             adapter,
             OperationLedger::new(self.generation),
             self.trusted_facts,
-            self.max_jobs,
         )?;
         Ok(OwnedExecHost {
             coordinator,

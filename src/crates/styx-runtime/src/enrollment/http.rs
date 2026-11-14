@@ -1,5 +1,5 @@
 //! Strict TLS enrollment transport. Service owns all role/domain authorization.
-//! Counts bound this listener's work, not native RSS or a shared Host partition.
+//! Each original worker remains owned through shutdown.
 use super::{service::EnrollmentService, shared::SharedEnrollment};
 use crate::gateway::{
     http::GatewayHttp, http::lifecycle::GatewayOwnerLifecycle, mcp::GatewayToolBackend,
@@ -26,17 +26,9 @@ use styx_contracts::{
     enrollment::PairingContext,
     identity::{PairingIngressGeneration, Sha256Digest},
 };
-use tokio::{
-    net::TcpListener,
-    sync::{OwnedSemaphorePermit, Semaphore, oneshot},
-    task::JoinHandle,
-};
+use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-// Upgraded Host sockets retain their listener permit. Leave the existing HTTP
-// allowance available even when every computer slot is occupied.
-const CONNECTIONS: usize = crate::gateway::paired::CONNECTED_COMPUTERS_CAPACITY + 16;
-const REQUESTS: usize = 8;
 const BODY_BYTES: usize = 16 * 1024;
 const RESPONSE_BYTES: usize = 1024 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -79,8 +71,6 @@ pub struct EnrollmentHttp {
     mcp: Option<McpRouter>,
     allowed_hosts: BTreeSet<String>,
     ingress: PairingIngressGeneration,
-    connections: Arc<Semaphore>,
-    requests: Arc<Semaphore>,
     // Dropping a JoinHandle detaches rather than cancelling a blocking job.
     // Each closure also retains this owner until its actual work is complete.
     workers: Mutex<Vec<JoinHandle<()>>>,
@@ -130,8 +120,6 @@ impl EnrollmentHttp {
             mcp_stop: None,
             allowed_hosts: allowed_hosts.into_iter().collect(),
             ingress,
-            connections: Arc::new(Semaphore::new(CONNECTIONS)),
-            requests: Arc::new(Semaphore::new(REQUESTS)),
             workers: Mutex::new(vec![]),
             worker_failure: AtomicBool::new(false),
             listener_failure: AtomicBool::new(false),
@@ -186,14 +174,13 @@ impl EnrollmentHttp {
     async fn route(
         self: Arc<Self>,
         request: Request<hyper::body::Incoming>,
-        slot: Arc<OwnedSemaphorePermit>,
     ) -> Response<BoxBody<Bytes, Infallible>> {
         if request.uri().path().starts_with("/styx/host/") {
             if !listener_headers(request.headers(), &self.allowed_hosts, false) {
                 return failure(403, "host_or_origin_not_allowed", true).map(BodyExt::boxed);
             }
             return match &self.relay {
-                Some(relay) => relay.upgrade(request, slot).await.map(BodyExt::boxed),
+                Some(relay) => relay.upgrade(request).await.map(BodyExt::boxed),
                 None => failure(404, "not_found", true).map(BodyExt::boxed),
             };
         }
@@ -209,7 +196,6 @@ impl EnrollmentHttp {
     async fn route_lan(
         self: Arc<Self>,
         request: Request<hyper::body::Incoming>,
-        slot: Arc<OwnedSemaphorePermit>,
         host: &str,
     ) -> Response<BoxBody<Bytes, Infallible>> {
         match lan_route(request.uri().path()) {
@@ -218,7 +204,7 @@ impl EnrollmentHttp {
                     return failure(403, "host_or_origin_not_allowed", true).map(BodyExt::boxed);
                 }
                 match &self.relay {
-                    Some(relay) => relay.upgrade(request, slot).await.map(BodyExt::boxed),
+                    Some(relay) => relay.upgrade(request).await.map(BodyExt::boxed),
                     None => failure(404, "not_found", true).map(BodyExt::boxed),
                 }
             }
@@ -241,7 +227,7 @@ impl EnrollmentHttp {
     fn spawn_work(self: &Arc<Self>, work: impl FnOnce() + Send + 'static) {
         use futures_util::FutureExt;
         let mut workers = self.workers.lock().expect("enrollment worker registry");
-        let mut active = Vec::with_capacity(REQUESTS);
+        let mut active = Vec::new();
         for handle in workers.drain(..) {
             if handle.is_finished() {
                 if !matches!(handle.now_or_never(), Some(Ok(()))) {
@@ -306,10 +292,6 @@ impl EnrollmentHttp {
             ingress_generation: self.ingress.clone(),
             window: None,
         };
-        let permit = match self.requests.clone().try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => return failure(429, "enrollment_capacity", true),
-        };
         let (method, headers) = (parts.method, parts.headers);
         // This is only an early rejection. request() rechecks complete headers,
         // original device authority and Core state after the full body is read.
@@ -330,11 +312,11 @@ impl EnrollmentHttp {
                         .map_err(|e| (e.status(), e.code()))
                 })
                 .unwrap_or(Err((503, "enrollment_outcome_unknown")));
-            let _ = send.send((permit, result));
+            let _ = send.send(result);
         });
-        let permit = match tokio::time::timeout(IO_TIMEOUT, receive).await {
-            Ok(Ok((permit, Ok(())))) => permit,
-            Ok(Ok((_, Err((status, code))))) => return failure(status, code, true),
+        match tokio::time::timeout(IO_TIMEOUT, receive).await {
+            Ok(Ok(Ok(()))) => (),
+            Ok(Ok(Err((status, code)))) => return failure(status, code, true),
             _ => return failure(503, "enrollment_outcome_unknown", true),
         };
         let bytes = if method == Method::GET {
@@ -368,8 +350,6 @@ impl EnrollmentHttp {
         let (send, receive) = oneshot::channel();
         let app = self.clone();
         self.spawn_work(move || {
-            // Permit remains with actual work even if its HTTP waiter vanishes.
-            let _permit: OwnedSemaphorePermit = permit;
             let result: Result<(u16, serde_json::Value), PublicFailure> = app
                 .service
                 .blocking(|service| {
@@ -471,14 +451,9 @@ impl EnrollmentHttp {
                     break;
                 }
             };
-            let Ok(slot) = self.connections.clone().try_acquire_owned() else {
-                drop(tcp);
-                continue;
-            };
             let app = self.clone();
             let stop = cancel.clone();
             connections.spawn(async move {
-                let slot = Arc::new(slot);
                 // TLS starts with a handshake record (0x16). Only the SPAKE2 bootstrap
                 // uses the S prefix, and can return only a password-authenticated invitation.
                 let mut prefix = [0; 1];
@@ -500,12 +475,11 @@ impl EnrollmentHttp {
                 let service = hyper::service::service_fn(move |mut request: Request<hyper::body::Incoming>| {
                     request.extensions_mut().insert(leaf.clone());
                     let app = app.clone();
-                    let slot = slot.clone();
                     let lan_host = lan_host.clone();
                     async move {
                         Ok::<_, Infallible>(match lan_host {
-                            Some(host) => app.route_lan(request, slot, &host).await,
-                            None => app.route(request, slot).await,
+                            Some(host) => app.route_lan(request, &host).await,
+                            None => app.route(request).await,
                         })
                     }
                 });
@@ -592,7 +566,13 @@ impl EnrollmentHttp {
         ShutdownFacts {
             connections_joined: false,
             blocking_jobs_joined: joined,
-            blocking_slots_in_use: REQUESTS - self.requests.available_permits(),
+            blocking_slots_in_use: self
+                .workers
+                .lock()
+                .expect("enrollment workers")
+                .iter()
+                .filter(|job| !job.is_finished())
+                .count(),
             profile_jobs_in_use: self.service.reader_jobs_in_use(),
             worker_failure_observed: self.worker_failure.load(Ordering::Acquire),
             listener_error_observed: self.listener_failure.load(Ordering::Acquire),

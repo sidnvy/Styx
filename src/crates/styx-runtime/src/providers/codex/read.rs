@@ -7,9 +7,6 @@ use zeroize::Zeroize;
 pub(super) struct BufferedOutput {
     chunks: VecDeque<(String, Vec<u8>)>,
     offset: usize,
-    _wire_budget: Option<tokio::sync::OwnedSemaphorePermit>,
-    _buffer_slot: Option<tokio::sync::OwnedSemaphorePermit>,
-    _event_budget: Vec<tokio::sync::OwnedSemaphorePermit>,
 }
 impl BufferedOutput {
     fn take(&mut self, mut remaining: usize) -> Vec<(String, Vec<u8>)> {
@@ -70,11 +67,9 @@ impl CodexStdio {
                 return Err(ExecError::InvalidFrame);
             }
             let mut chunks = VecDeque::new();
-            let mut budgets = Vec::new();
             for chunk in events.chunks {
-                let (stream, bytes, budget) = chunk.into_parts();
+                let (stream, bytes) = chunk.into_parts();
                 chunks.push_back((stream, bytes));
-                budgets.push(budget);
             }
             record.cursor = Some(events.closed);
             record.last_exit = Some(events.exit.1);
@@ -83,13 +78,7 @@ impl CodexStdio {
             // No native read (or retry of a missing native record) is required.
             record.drained = true;
             if !chunks.is_empty() {
-                record.pending_output = Some(BufferedOutput {
-                    chunks,
-                    offset: 0,
-                    _wire_budget: None,
-                    _buffer_slot: None,
-                    _event_budget: budgets,
-                });
+                record.pending_output = Some(BufferedOutput { chunks, offset: 0 });
             }
         }
         Ok(())
@@ -129,10 +118,6 @@ impl CodexStdio {
         }
         self.retain_completed_output(&mut record, handle)?;
         if record.pending_output.is_none() && !record.drained {
-            #[cfg(not(target_os = "macos"))]
-            let slot = self.rpc.reserve_read_buffer()?;
-            #[cfg(target_os = "macos")]
-            let slot = self.rpc.reserve_read_buffer_wait().await?;
             let reply = self
                 .rpc
                 .request_budgeted(
@@ -184,9 +169,6 @@ impl CodexStdio {
                 record.pending_output = Some(BufferedOutput {
                     chunks: validated.chunks.into(),
                     offset: 0,
-                    _wire_budget: Some(reply._permit),
-                    _buffer_slot: Some(slot),
-                    _event_budget: vec![],
                 });
             }
         }

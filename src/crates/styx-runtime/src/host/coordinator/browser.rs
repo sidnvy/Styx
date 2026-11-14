@@ -9,8 +9,6 @@ use crate::providers::browser::{
 use std::collections::BTreeMap;
 use styx_contracts::capability::{CapabilityId, Scope};
 
-const MAX_BROWSER_HANDLES: usize = 128;
-
 pub(super) struct ProfileBinding {
     owner: OwnerLease,
     config: OwnedBrowserConfig,
@@ -181,9 +179,7 @@ impl HostAuthority {
                 Err(ErrorCategory::StateConflict.into())
             };
         }
-        if lane.profiles.len() >= 64 {
-            return Err(CoordinatorError::Busy);
-        }
+
         for other in lane.profiles.values() {
             if !profiles_disjoint(&config, &other.config) {
                 return Err(ErrorCategory::StateConflict.into());
@@ -294,12 +290,7 @@ impl HostCoordinator {
             .try_read_owned()
             .map_err(|_| CoordinatorError::Busy)?;
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
-        let job_slot = self
-            .inner
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| CoordinatorError::Busy)?;
+
         let mut state = self.inner.state.lock().expect("Host state mutex");
         // A concurrent duplicate can pass the first observation. Recheck under
         // the final admission lock before reserving another physical worker.
@@ -311,9 +302,7 @@ impl HostCoordinator {
             return Err(CoordinatorError::Busy);
         }
         let browser = lane(&state)?;
-        if browser.handles.len() >= MAX_BROWSER_HANDLES {
-            return Err(CoordinatorError::Busy);
-        }
+
         let config = profile(browser, owner)?.config.clone();
         let facts = browser.facts.clone();
         let slot = match browser.worker.try_reserve_open() {
@@ -374,7 +363,6 @@ impl HostCoordinator {
         while jobs.try_join_next().is_some() {}
         jobs.spawn_on(
             async move {
-                let _slot = job_slot;
                 let (evidence, cause, opened) = match slot.spawn_owned(permit, config).await {
                     Ok(receipt) => (receipt.evidence, None, Some(receipt.handle)),
                     Err(failure) => (failure.evidence, Some(failure.cause), failure.handle),
@@ -463,12 +451,7 @@ impl HostCoordinator {
             .try_read_owned()
             .map_err(|_| CoordinatorError::Busy)?;
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
-        let job_slot = self
-            .inner
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| CoordinatorError::Busy)?;
+
         let mut state = self.inner.state.lock().expect("Host state mutex");
         let snapshot = state.ledger.inspect(owner, id, digest)?;
         if snapshot.state != OperationState::Reserved {
@@ -511,7 +494,6 @@ impl HostCoordinator {
         while jobs.try_join_next().is_some() {}
         jobs.spawn_on(
             async move {
-                let _slot = job_slot;
                 let receipt = slot.call_once(permit).await;
                 let fact = match receipt.evidence {
                     BrowserActionEvidence::Acknowledged => ActionResult::Acknowledged,

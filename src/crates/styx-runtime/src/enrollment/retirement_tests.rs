@@ -16,7 +16,7 @@ mod linux {
         legacy::JoinPayload,
     };
     use styx_core::enrollment::{
-        EnrollmentControl, EnrollmentLedger, Limits, PendingIntent, RejectionRequest,
+        EnrollmentControl, EnrollmentLedger, PendingIntent, RejectionRequest,
     };
 
     fn hash(s: &str) -> Sha256Digest {
@@ -50,7 +50,6 @@ mod linux {
         let recovered = recovery::recover_journal(
             &mut j,
             GatewayEpoch::try_from("retire-fixture").unwrap(),
-            Limits::default(),
             time,
         )
         .unwrap();
@@ -171,8 +170,7 @@ mod linux {
         let other = selections.remove(0);
         let root = PrivateRoot::open(&path).unwrap();
         let mut writer = root.try_configuration_writer().unwrap();
-        let bootstrap =
-            EnrollmentBootstrap::recover_existing(&root, &mut writer, Limits::default()).unwrap();
+        let bootstrap = EnrollmentBootstrap::recover_existing(&root, &mut writer).unwrap();
         let mut wrong = context.clone();
         wrong.leaf = hash("different-leaf");
         assert_eq!(
@@ -192,8 +190,7 @@ mod linux {
             .abandon_pending_for_retirement(target, &context, expiries[0])
             .unwrap_err();
         assert_eq!(error.category(), "store_unproven");
-        let recovered =
-            EnrollmentBootstrap::recover_existing(&root, &mut writer, Limits::default()).unwrap();
+        let recovered = EnrollmentBootstrap::recover_existing(&root, &mut writer).unwrap();
         let pending = recovered
             .ledger
             .recovery_pending(&recovered.control)
@@ -215,8 +212,7 @@ mod linux {
         let mut target = selections.remove(0);
         let root = PrivateRoot::open(&path).unwrap();
         let mut writer = root.try_configuration_writer().unwrap();
-        let bootstrap =
-            EnrollmentBootstrap::recover_existing(&root, &mut writer, Limits::default()).unwrap();
+        let bootstrap = EnrollmentBootstrap::recover_existing(&root, &mut writer).unwrap();
         assert_eq!(
             bootstrap
                 .retirement_preflight(&target, &context, expiries[0])
@@ -272,8 +268,7 @@ mod linux {
         let target = selections.remove(0);
         let root = PrivateRoot::open(&path).unwrap();
         let mut writer = root.try_configuration_writer().unwrap();
-        let bootstrap =
-            EnrollmentBootstrap::recover_existing(&root, &mut writer, Limits::default()).unwrap();
+        let bootstrap = EnrollmentBootstrap::recover_existing(&root, &mut writer).unwrap();
         assert_eq!(
             bootstrap
                 .retirement_preflight(&target, &context, expiries[0])
@@ -293,8 +288,7 @@ mod linux {
         let target = selections.remove(0);
         let root = PrivateRoot::open(&path).unwrap();
         let mut writer = root.try_configuration_writer().unwrap();
-        let mut bootstrap =
-            EnrollmentBootstrap::recover_existing(&root, &mut writer, Limits::default()).unwrap();
+        let mut bootstrap = EnrollmentBootstrap::recover_existing(&root, &mut writer).unwrap();
         let at = now().unwrap();
         bootstrap.journal.record_time_floor(at).unwrap();
         let intent = bootstrap
@@ -306,8 +300,7 @@ mod linux {
             .prepare(intent.original_bytes(), bootstrap.facts.head)
             .unwrap();
         drop(bootstrap);
-        let recovered =
-            EnrollmentBootstrap::recover_existing(&root, &mut writer, Limits::default()).unwrap();
+        let recovered = EnrollmentBootstrap::recover_existing(&root, &mut writer).unwrap();
         assert!(recovered.diagnostics().unwrap().unresolved);
         assert_eq!(
             recovered
@@ -371,7 +364,6 @@ mod linux {
         let bootstrap = EnrollmentBootstrap::recover_existing_for_retirement(
             &gateway_root,
             &mut gateway_writer,
-            Limits::default(),
         )
         .unwrap();
         let pending_before = bootstrap

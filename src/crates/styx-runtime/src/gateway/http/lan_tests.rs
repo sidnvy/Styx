@@ -33,7 +33,6 @@ use styx_contracts::{
     identity::*,
     legacy::{JoinPayload, PairingComparison},
 };
-use styx_core::enrollment::Limits;
 use tokio::net::{TcpListener, TcpStream};
 
 fn now_ms() -> u64 {
@@ -213,7 +212,6 @@ async fn gateway_lan_scenario_inner(
         admin.as_bytes(),
         Sha256Digest::of_bytes(model.as_bytes()),
         vec![local_host.clone()],
-        Limits::default(),
     )
     .unwrap();
     for address in &addresses {
@@ -551,7 +549,6 @@ async fn gateway_lan_scenario_inner(
                     session_state: None,
                     current_observation: None,
                 },
-                2,
             )
             .unwrap();
             let host = if owner_reopen && !old_origin_namespace {
@@ -569,7 +566,6 @@ async fn gateway_lan_scenario_inner(
                             ("CODEX_HOME".into(), home.display().to_string()),
                         ]),
                         rpc_timeout: Duration::from_secs(5),
-                        retained_process_limit: 4,
                     })
                     .await
                     .unwrap()

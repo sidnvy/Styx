@@ -142,9 +142,8 @@ async fn stop<B: GatewayToolBackend + GatewayOwnerLifecycle>(app: &Arc<GatewayHt
     assert_eq!(report.unresolved_sessions, 0);
 }
 #[tokio::test]
-async fn thousand_delete_and_abandon_cycles_reuse_capacity_and_old_ids_are_404() {
+async fn thousand_sessions_have_no_quota_and_deleted_ids_stay_404() {
     let app = fixture();
-    assert_eq!(app.budget.capacity, 64);
     const {
         assert!(GATEWAY_HTTP_BYTES <= 128 * 1024 * 1024);
     }
@@ -168,12 +167,11 @@ async fn thousand_delete_and_abandon_cycles_reuse_capacity_and_old_ids_are_404()
         }
         assert_eq!(app.retained_sessions(), 0);
     }
-    for _ in 0..1050 {
-        age(&app, SESSION_EVICT_MIN_IDLE + Duration::from_secs(1));
+    for i in 0..1050 {
         initialize(&app).await.unwrap();
-        assert!(app.retained_sessions() <= 64);
+        assert_eq!(app.retained_sessions(), i + 1);
     }
-    assert_eq!(app.evicted.load(Ordering::Relaxed), 986);
+    assert_eq!(app.retained_sessions(), 1050);
     let (sid, owner) = stale.unwrap();
     assert!(owner.is_fenced());
     assert!(
@@ -209,7 +207,7 @@ async fn thousand_delete_and_abandon_cycles_reuse_capacity_and_old_ids_are_404()
     stop(&app).await;
 }
 #[tokio::test]
-async fn live_work_and_active_streams_protect_idle_sessions_and_only_overload_is_429() {
+async fn live_work_and_active_streams_survive_additional_sessions() {
     let app = fixture();
     let first = initialize(&app).await.unwrap();
     let stream = request(&app, Method::GET, Some(&first), Value::Null).await;
@@ -235,10 +233,8 @@ async fn live_work_and_active_streams_protect_idle_sessions_and_only_overload_is
     }
     age(&app, SESSION_IDLE);
     app.expire_idle(Duration::ZERO).await;
-    assert_eq!(
-        initialize(&app).await.unwrap_err(),
-        StatusCode::TOO_MANY_REQUESTS
-    );
+    initialize(&app).await.unwrap();
+    assert_eq!(app.retained_sessions(), 65);
     for id in &ids {
         assert!(app.find_session(id).unwrap().life.is_active());
     }
@@ -253,13 +249,14 @@ async fn live_work_and_active_streams_protect_idle_sessions_and_only_overload_is
         .last -= SESSION_IDLE;
     initialize(&app).await.unwrap();
     assert!(
-        !app.find_session(&oldest)
-            .is_some_and(|s| s.life.is_active())
+        app.find_session(&oldest)
+            .is_some_and(|s| s.life.is_active()),
+        "new sessions must not evict existing owners"
     );
     stop(&app).await;
 }
 #[tokio::test]
-async fn second_post_waits_and_ceiling_output_remains_bounded() {
+async fn second_post_proceeds_while_first_original_call_is_running() {
     let app = fixture();
     let sid = initialize(&app).await.unwrap();
     let body = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"exec_command","arguments":{"cmd":"block"}}});
@@ -272,22 +269,17 @@ async fn second_post_waits_and_ceiling_output_remains_bounded() {
         Some(&sid),
         json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),
     );
-    tokio::pin!(second);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), &mut second)
-            .await
-            .is_err(),
-        "second POST must wait, not return429"
-    );
+    let r = tokio::time::timeout(Duration::from_secs(1), second)
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    r.into_body().collect().await.unwrap();
     app.backend.release.add_permits(1);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     assert!(bytes.len() <= MESSAGE_BYTES + 1024);
     assert!(bytes.len() > MESSAGE_BYTES - 2048);
-    let r = second.await;
-    assert_eq!(r.status(), StatusCode::OK);
-    r.into_body().collect().await.unwrap();
     println!(
-        "second concurrent POST=200 after first stream EOF; near-ceiling SSE bytes={}",
+        "second concurrent POST=200 before first call completes; near-ceiling SSE bytes={}",
         bytes.len()
     );
     stop(&app).await;

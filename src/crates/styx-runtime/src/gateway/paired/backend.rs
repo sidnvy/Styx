@@ -332,8 +332,6 @@ use styx_contracts::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 
-#[cfg(not(target_os = "macos"))]
-const MAX_OWNERS: usize = 128;
 struct OwnerState {
     principal: Sha256Digest,
     closing: bool,

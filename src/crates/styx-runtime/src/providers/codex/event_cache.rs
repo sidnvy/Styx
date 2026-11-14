@@ -1,31 +1,19 @@
-//! Bounded retention of the same native event stream. A complete contiguous
+//! Host-owned retention of the same native event stream. A complete contiguous
 //! output/exited/closed prefix is independent of the upstream 30s read cache.
 //! It is DATA only; the existing decoded reader still validates owner/policy.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::Value;
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use std::collections::{HashMap, VecDeque};
 use zeroize::Zeroize;
 
-// Charge allocator/queue/permit metadata as well as decoded bytes. The peer's
-// existing unused reservation supplies this budget; no new memory partition.
-const CHUNK_ACCOUNTING: usize = 512;
 pub(super) struct Chunk {
     seq: u64,
     stream: &'static str,
     bytes: Vec<u8>,
-    budget: Option<OwnedSemaphorePermit>,
 }
 impl Chunk {
-    pub(super) fn into_parts(mut self) -> (String, Vec<u8>, OwnedSemaphorePermit) {
-        (
-            self.stream.into(),
-            std::mem::take(&mut self.bytes),
-            self.budget.take().expect("retained chunk budget"),
-        )
+    pub(super) fn into_parts(mut self) -> (String, Vec<u8>) {
+        (self.stream.into(), std::mem::take(&mut self.bytes))
     }
 }
 impl Drop for Chunk {
@@ -44,9 +32,9 @@ struct Stream {
 impl Stream {
     fn refuse(&mut self) {
         self.unavailable = true;
-        self.chunks = VecDeque::new(); // Drop zeroizes and releases reservations.
+        self.chunks = VecDeque::new(); // Drop zeroizes the original data.
     }
-    fn observe(&mut self, memory: &Arc<Semaphore>, method: &str, params: &Value) {
+    fn observe(&mut self, method: &str, params: &Value) {
         if self.unavailable {
             return;
         }
@@ -71,20 +59,6 @@ impl Stream {
                     self.refuse();
                     return;
                 };
-                let Some(charge) = encoded
-                    .len()
-                    .checked_add(CHUNK_ACCOUNTING)
-                    .and_then(|n| u32::try_from(n).ok())
-                else {
-                    self.refuse();
-                    return;
-                };
-                // Reserve before decoding; even malformed events cannot grow an
-                // unbudgeted replay queue. Failure disables only this proof.
-                let Ok(budget) = memory.clone().try_acquire_many_owned(charge) else {
-                    self.refuse();
-                    return;
-                };
                 let Ok(mut bytes) = STANDARD.decode(encoded) else {
                     self.refuse();
                     return;
@@ -94,12 +68,7 @@ impl Stream {
                     self.refuse();
                     return;
                 }
-                self.chunks.push_back(Chunk {
-                    seq,
-                    stream,
-                    bytes,
-                    budget: Some(budget),
-                });
+                self.chunks.push_back(Chunk { seq, stream, bytes });
             }
             "process/exited" => {
                 let Some(code) = params
@@ -132,13 +101,11 @@ pub(super) struct Completed {
 }
 pub(super) struct RetainedEvents {
     streams: HashMap<String, Option<Stream>>,
-    memory: Arc<Semaphore>,
 }
 impl RetainedEvents {
-    pub(super) fn new(bytes: usize) -> Self {
+    pub(super) fn new() -> Self {
         Self {
             streams: HashMap::new(),
-            memory: Arc::new(Semaphore::new(bytes)),
         }
     }
     pub(super) fn register(&mut self, id: &str) {
@@ -154,7 +121,7 @@ impl RetainedEvents {
     }
     pub(super) fn observe(&mut self, id: &str, method: &str, params: &Value) {
         if let Some(Some(stream)) = self.streams.get_mut(id) {
-            stream.observe(&self.memory, method, params);
+            stream.observe(method, params);
         }
     }
     pub(super) fn take_completed(&mut self, id: &str, cursor: Option<u64>) -> Option<Completed> {
@@ -194,7 +161,7 @@ mod tests {
     }
     #[test]
     fn only_an_exact_complete_original_stream_can_supply_delayed_output() {
-        let mut cache = RetainedEvents::new(8192);
+        let mut cache = RetainedEvents::new();
         cache.register("original");
         cache.register("other");
         cache.observe("original", "process/output", &output(1));
@@ -208,42 +175,40 @@ mod tests {
         assert_eq!(proof.closed, 3);
         assert_eq!(proof.chunks.front().unwrap().bytes, b"private-output");
         drop(proof);
-        assert_eq!(cache.memory.available_permits(), 8192);
+
         cache.remove("original");
         assert!(cache.take_completed("original", None).is_none());
     }
     #[test]
-    fn gaps_duplicates_malformed_events_and_memory_loss_cannot_fabricate_eof() {
+    fn gaps_duplicates_and_malformed_events_cannot_fabricate_eof() {
         for bad in [
             json!({"seq":2,"stream":"stdout","chunk":"YQ=="}),
             json!({"seq":1,"stream":"unknown","chunk":"YQ=="}),
             json!({"seq":1,"stream":"stdout","chunk":"YQ==\n"}),
         ] {
-            let mut cache = RetainedEvents::new(8192);
+            let mut cache = RetainedEvents::new();
             cache.register("p");
             cache.observe("p", "process/output", &bad);
             finish(&mut cache, "p", 3, 4);
             assert!(cache.take_completed("p", None).is_none());
         }
-        let mut cache = RetainedEvents::new(8192);
+        let mut cache = RetainedEvents::new();
         cache.register("p");
         cache.observe("p", "process/output", &output(1));
         cache.observe("p", "process/output", &output(1));
         finish(&mut cache, "p", 2, 3);
         assert!(cache.take_completed("p", None).is_none());
-        assert_eq!(cache.memory.available_permits(), 8192);
-        let mut cache = RetainedEvents::new(600);
+
+        let mut cache = RetainedEvents::new();
         cache.register("p");
         cache.observe("p", "process/output", &output(1));
         cache.observe("p", "process/output", &output(2));
         finish(&mut cache, "p", 3, 4);
-        assert!(cache.take_completed("p", None).is_none());
-        assert_eq!(cache.memory.available_permits(), 600);
+        assert_eq!(cache.take_completed("p", None).unwrap().chunks.len(), 2);
         cache.register("raw");
         cache.observe("raw", "process/output", &output(1));
         cache.disable("raw");
         finish(&mut cache, "raw", 2, 3);
         assert!(cache.take_completed("raw", None).is_none());
-        assert_eq!(cache.memory.available_permits(), 600);
     }
 }

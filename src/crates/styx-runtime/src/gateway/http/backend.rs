@@ -9,11 +9,10 @@ use rmcp::{
     model::{CallToolRequestParams, CallToolResult, ListToolsResult, PaginatedRequestParams},
 };
 use std::{future::Future, sync::Arc};
-use tokio::sync::{Semaphore, oneshot};
+use tokio::sync::oneshot;
 pub(super) struct BackendBridge<B: GatewayToolBackend + GatewayOwnerLifecycle> {
     pub backend: Arc<B>,
     pub life: Arc<Life<B>>,
-    pub calls: Arc<Semaphore>,
     #[cfg(test)]
     pub before_register:
         std::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
@@ -34,16 +33,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayToolBackend for Backe
         if !self.admitted(owner) {
             return Err(refused());
         }
-        let _slot = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            self.calls.clone().acquire_owned(),
-        )
-        .await
-        .map_err(|_| refused())?
-        .map_err(|_| refused())?;
-        if !self.admitted(owner) {
-            return Err(refused());
-        }
+        let _activity = self.life.activity().ok_or_else(refused)?;
         let result = self.backend.list_tools(owner, request).await?;
         if !bounded_message(&result) {
             let _ = self.life.close();
@@ -89,13 +79,12 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> BackendBridge<B> {
             } else {
                 authorized.is_none()
             });
-        let (owner, life, slots) = match &authorized {
+        let (owner, life) = match &authorized {
             Some(call) => (
                 call.conversation.life.owner.clone(),
                 call.conversation.life.clone(),
-                call.conversation.calls.clone(),
             ),
-            None => (owner.clone(), self.life.clone(), self.calls.clone()),
+            None => (owner.clone(), self.life.clone()),
         };
         let backend = self.backend.clone();
         #[cfg(test)]
@@ -108,11 +97,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> BackendBridge<B> {
             if !admitted || !transport.is_active() || !life.is_active() {
                 return Err(refused());
             }
-            let slot =
-                tokio::time::timeout(std::time::Duration::from_secs(5), slots.acquire_owned())
-                    .await
-                    .map_err(|_| refused())?
-                    .map_err(|_| refused())?;
+            let activity = life.activity().ok_or_else(refused)?;
             let supervisor = life.supervisor.upgrade().ok_or_else(refused)?;
             let (tx, rx) = oneshot::channel();
             #[cfg(test)]
@@ -138,8 +123,8 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> BackendBridge<B> {
                 let mut jobs = supervisor.jobs.lock().expect("backend supervisor");
                 while jobs.try_join_next().is_some() {}
                 jobs.spawn(async move {
-                    // Capacity follows actual work, not the HTTP response waiter.
-                    let _slot = slot;
+                    // Keep activity alive through the original supervised work.
+                    let _activity = activity;
                     let _authorized_call = authorized;
                     let mut result = backend.call_tool(&owner, request).await;
                     if !bounded_message(&result) {
@@ -154,7 +139,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> BackendBridge<B> {
     }
 }
 fn refused() -> ErrorData {
-    ErrorData::invalid_request("session closed or call capacity exhausted", None)
+    ErrorData::invalid_request("session closed", None)
 }
 fn uncertain() -> ErrorData {
     ErrorData::internal_error(

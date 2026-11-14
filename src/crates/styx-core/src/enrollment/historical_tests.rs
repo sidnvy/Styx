@@ -92,7 +92,7 @@ fn attest(c: &EnrollmentControl, b: &HistoricalEnrollmentBaseline) -> Historical
         .unwrap()
 }
 fn fresh() -> (EnrollmentLedger, EnrollmentControl) {
-    EnrollmentLedger::new_recovering(id("current-process"), Limits::default()).unwrap()
+    EnrollmentLedger::new_recovering(id("current-process")).unwrap()
 }
 fn assert_pristine(l: &EnrollmentLedger) {
     assert_eq!(l.revision, 0);
@@ -172,19 +172,8 @@ fn historical_baseline_is_atomic_branded_pristine_and_preserves_native_continuat
         c.attest_historical_baseline(&raw, hash("wrong"), hash("receipt")),
         Err(EnrollmentError::DurableMismatch)
     ));
-    let (mut small, sc) = EnrollmentLedger::new_recovering(
-        id("small"),
-        Limits {
-            devices: 1,
-            ..Limits::default()
-        },
-    )
-    .unwrap();
-    assert!(matches!(
-        small.recover_historical_baseline(attest(&sc, &b)),
-        Err(EnrollmentError::Capacity)
-    ));
-    assert_pristine(&small);
+    let (mut small, sc) = EnrollmentLedger::new_recovering(id("small")).unwrap();
+    small.recover_historical_baseline(attest(&sc, &b)).unwrap();
     // Each pure-link refusal is atomic, including failures after several
     // individually valid rows have already been examined.
     let mut repeated_fingerprint = b.clone();
@@ -204,7 +193,7 @@ fn historical_baseline_is_atomic_branded_pristine_and_preserves_native_continuat
         assert_pristine(&rejected);
     }
     // A pre-existing unresolved native intent must not be overwritten/merged.
-    let (mut native, nc) = EnrollmentLedger::new_owned(id("prior"), Limits::default()).unwrap();
+    let (mut native, nc) = EnrollmentLedger::new_owned(id("prior")).unwrap();
     let prior = native
         .invite(&nc.admin(), hash("prior-invitation"), 60, None, 1)
         .unwrap();

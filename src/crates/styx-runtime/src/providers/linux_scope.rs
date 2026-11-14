@@ -19,14 +19,13 @@ use std::{
     },
     path::{Component, Path, PathBuf},
     process::{ExitStatus, Stdio},
-    sync::{Arc, LazyLock},
     time::Duration,
 };
 use tokio::{
     io::AsyncReadExt,
     net::UnixStream,
     process::{Child, Command},
-    sync::{Semaphore, oneshot},
+    sync::oneshot,
     time::{Instant, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
@@ -34,12 +33,9 @@ use tokio_util::sync::CancellationToken;
 type Result<T> = std::result::Result<T, ScopeError>;
 const STDOUT_BYTES: usize = 64 * 1024;
 const STDERR_BYTES: usize = 8 * 1024;
-static TOOL_SLOT: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum ScopeError {
-    #[error("scope_busy")]
-    Busy,
     #[error("scope_invalid_request")]
     InvalidRequest,
     #[error("scope_permission_denied")]
@@ -974,8 +970,7 @@ struct ToolOutput {
     status: ExitStatus,
     stdout: Vec<u8>,
 }
-/// Mature CLI protocols run in one bounded, owned subprocess at a time. A
-/// cancelled waiter cannot drop a still-running control child or its slot.
+/// Each control subprocess is owned through completion even if its waiter exits.
 async fn tool(
     binary: &'static str,
     args: Vec<OsString>,
@@ -985,10 +980,6 @@ async fn tool(
     if Instant::now() >= end {
         return Err(ScopeError::CleanupUnconfirmed);
     }
-    let permit = TOOL_SLOT
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| ScopeError::Busy)?;
     let mut command = Command::new(binary);
     fixed_environment(&mut command, runtime);
     command
@@ -1004,7 +995,6 @@ async fn tool(
     let guard = stop.clone().drop_guard();
     let (tx, rx) = oneshot::channel();
     tokio::spawn(async move {
-        let _permit = permit;
         let mut stdout = stdout;
         let mut stderr = stderr;
         let mut out = vec![0u8; STDOUT_BYTES + 1];

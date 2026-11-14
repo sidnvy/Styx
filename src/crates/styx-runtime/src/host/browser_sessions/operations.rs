@@ -29,7 +29,6 @@ pub(crate) trait BrowserBootstrap: Send + Sync {
 pub(crate) struct BrowserInputs {
     source: Arc<dyn BrowserBootstrap>,
     tasks: TaskTracker,
-    slots: Arc<tokio::sync::Semaphore>,
     gate: Arc<tokio::sync::RwLock<()>>,
 }
 impl BrowserInputs {
@@ -37,7 +36,7 @@ impl BrowserInputs {
         Self {
             source,
             tasks: TaskTracker::new(),
-            slots: Arc::new(tokio::sync::Semaphore::new(2)),
+
             gate: Arc::new(tokio::sync::RwLock::new(())),
         }
     }
@@ -90,17 +89,11 @@ impl BrowserPort<'_> {
         if inputs.tasks.is_closed() {
             return Err(ErrorCategory::Busy);
         }
-        let permit = inputs
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ErrorCategory::Busy)?;
         let source = inputs.source.clone();
         let guard = inputs.gate.clone().read_owned().await;
         inputs
             .tasks
             .spawn_blocking(move || {
-                let _permit = permit;
                 let _guard = guard;
                 work(source)
             })

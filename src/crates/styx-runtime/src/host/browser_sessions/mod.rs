@@ -158,10 +158,6 @@ impl Engine<'_> {
         if !create {
             return Err("browser_not_open");
         }
-        #[cfg(not(target_os = "macos"))]
-        if state.sessions.len() >= 64 {
-            return Err("capacity_busy");
-        }
         let id = uuid::Uuid::new_v4().simple().to_string();
         let lease = self
             .port

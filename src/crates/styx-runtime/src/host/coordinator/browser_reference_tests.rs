@@ -140,7 +140,6 @@ async fn actual_snapshot_refs_navigation_tabs_owner_and_reopen_batch() {
                 ),
             ]),
             rpc_timeout: Duration::from_secs(3),
-            retained_process_limit: 8,
         },
     )
     .await
@@ -149,7 +148,6 @@ async fn actual_snapshot_refs_navigation_tabs_owner_and_reopen_batch() {
         adapter,
         OperationLedger::new(HostGeneration::try_from("browser-reference-host").unwrap()),
         fixture_facts(CapabilityId::ExecRun),
-        4,
     )
     .unwrap();
     let budget = Arc::new(Semaphore::new(16 * 1024 * 1024))

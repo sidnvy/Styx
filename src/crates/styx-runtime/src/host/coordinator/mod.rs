@@ -5,6 +5,8 @@
 mod browser;
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub use browser::*;
+#[cfg(test)]
+use tokio::sync::Semaphore;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod desktop;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -47,7 +49,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use styx_contracts::{error::ErrorCategory, identity::*, operation::*};
 use styx_core::{operations::*, policy::AdmissionFacts};
-use tokio::sync::{OwnedRwLockReadGuard, RwLock, Semaphore, oneshot};
+use tokio::sync::{OwnedRwLockReadGuard, RwLock, oneshot};
 use tokio::task::JoinSet;
 
 #[derive(Debug, thiserror::Error)]
@@ -201,7 +203,6 @@ struct Inner {
     adapter: Mutex<Option<Arc<CodexStdio>>>,
     state: Mutex<State>,
     jobs: Mutex<JoinSet<()>>,
-    slots: Arc<Semaphore>,
     cleanup_lock: tokio::sync::Mutex<()>,
     execution_gate: Arc<RwLock<()>>,
     origin: Instant,
@@ -331,33 +332,27 @@ impl HostCoordinator {
         adapter: CodexStdio,
         ledger: OperationLedger,
         trusted_facts: AdmissionFacts,
-        max_jobs: usize,
     ) -> Result<(Self, HostAuthority), CoordinatorError> {
-        Self::compose(Some(adapter), ledger, trusted_facts, max_jobs)
+        Self::compose(Some(adapter), ledger, trusted_facts)
     }
     /// Explicit disabled Exec composition, with the same ledger and authority.
     /// A configured executor's spawn failure must never call this as fallback.
     pub fn new_without_executor(
         ledger: OperationLedger,
         mut trusted_facts: AdmissionFacts,
-        max_jobs: usize,
     ) -> Result<(Self, HostAuthority), CoordinatorError> {
         trusted_facts.descriptor.configured = false;
         trusted_facts.descriptor.availability =
             styx_contracts::capability::Availability::Unavailable;
         trusted_facts.descriptor.authorization = styx_contracts::capability::Authorization::Unknown;
         trusted_facts.descriptor.reason = Some(ErrorCategory::CapabilityUnsupported);
-        Self::compose(None, ledger, trusted_facts, max_jobs)
+        Self::compose(None, ledger, trusted_facts)
     }
     fn compose(
         adapter: Option<CodexStdio>,
         ledger: OperationLedger,
         trusted_facts: AdmissionFacts,
-        max_jobs: usize,
     ) -> Result<(Self, HostAuthority), CoordinatorError> {
-        if max_jobs == 0 || max_jobs > 64 {
-            return Err(CoordinatorError::Busy);
-        }
         let origin = Instant::now();
         let inner = Arc::new(Inner {
             #[cfg(any(
@@ -371,7 +366,6 @@ impl HostCoordinator {
             adapter: Mutex::new(adapter.map(Arc::new)),
             state: Mutex::new(State::new(ledger, trusted_facts, origin)),
             jobs: Mutex::new(JoinSet::new()),
-            slots: Arc::new(Semaphore::new(max_jobs)),
             cleanup_lock: tokio::sync::Mutex::new(()),
             execution_gate: Arc::new(RwLock::new(())),
             origin,
@@ -474,15 +468,7 @@ impl HostCoordinator {
             .try_read_owned()
             .map_err(|_| CoordinatorError::Busy)?;
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
-        #[cfg(not(target_os = "macos"))]
-        let slot = self
-            .inner
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| CoordinatorError::Busy)?;
-        #[cfg(target_os = "macos")]
-        let slot: Option<tokio::sync::OwnedSemaphorePermit> = None;
+
         let mut state = self.inner.state.lock().expect("Host state mutex");
         if state.shutting_down {
             return Err(CoordinatorError::Busy);
@@ -515,7 +501,6 @@ impl HostCoordinator {
         };
         jobs.spawn_on(
             async move {
-                let _slot = slot;
                 let result = adapter.start(permit).await;
                 let (dispatch, cause) = match result {
                     Ok(receipt) => (receipt.dispatch, receipt.cause),
@@ -606,15 +591,7 @@ impl HostCoordinator {
             .try_read_owned()
             .map_err(|_| CoordinatorError::Busy)?;
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
-        #[cfg(not(target_os = "macos"))]
-        let slot = self
-            .inner
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| CoordinatorError::Busy)?;
-        #[cfg(target_os = "macos")]
-        let slot: Option<tokio::sync::OwnedSemaphorePermit> = None;
+
         let mut state = self.inner.state.lock().expect("Host state mutex");
         if state.shutting_down {
             return Err(CoordinatorError::Busy);
@@ -650,7 +627,6 @@ impl HostCoordinator {
         while jobs.try_join_next().is_some() {}
         jobs.spawn_on(
             async move {
-                let _slot = slot;
                 let receipt = run_action(&adapter, permit).await;
                 let fact = match receipt.evidence {
                     ActionEvidence::Acknowledged => ActionResult::Acknowledged,
@@ -793,13 +769,7 @@ impl HostCoordinator {
                 return Err(ErrorCategory::StateConflict.into());
             }
         }
-        #[cfg(not(target_os = "macos"))]
-        let _slot = self
-            .inner
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| CoordinatorError::Busy)?;
+
         let budget = Duration::from_millis(context.deadline.0.saturating_sub(now.0));
         let output = tokio::time::timeout(budget, async {
             let handle = adapter.lookup_operation(owner, id).await?;

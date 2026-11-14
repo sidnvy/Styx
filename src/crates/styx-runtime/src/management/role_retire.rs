@@ -6,7 +6,6 @@ use crate::store::{ConfigurationWriterGuard, ExecutionLeaseGuard, PrivateRoot};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 use styx_contracts::native_host::NativeHostJoinSeed;
-use styx_core::enrollment::Limits;
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -177,14 +176,10 @@ pub(crate) fn prepare(
                     .ok()
             })
             .and_then(|raw| serde_json::from_slice::<NativeHostJoinSeed>(raw.bytes()).ok());
-        let diagnostics = EnrollmentBootstrap::recover_existing(
-            &gateway.root,
-            &mut gateway.writer,
-            Limits::default(),
-        )
-        .map_err(|_| RetireError::refused("role_retire_enrollment_unproven"))?
-        .diagnostics()
-        .map_err(|_| RetireError::refused("role_retire_enrollment_unproven"))?;
+        let diagnostics = EnrollmentBootstrap::recover_existing(&gateway.root, &mut gateway.writer)
+            .map_err(|_| RetireError::refused("role_retire_enrollment_unproven"))?
+            .diagnostics()
+            .map_err(|_| RetireError::refused("role_retire_enrollment_unproven"))?;
         if diagnostics.unresolved {
             return Err(RetireError::refused("role_retire_enrollment_unproven"));
         }
@@ -1126,12 +1121,9 @@ fn retire_setup_hub_join(
         fingerprint: proof.selection.fingerprint,
         comparison: proof.selection.comparison.clone(),
     };
-    let bootstrap = EnrollmentBootstrap::recover_existing_for_retirement(
-        &gateway.root,
-        &mut gateway.writer,
-        Limits::default(),
-    )
-    .map_err(|_| unknown())?;
+    let bootstrap =
+        EnrollmentBootstrap::recover_existing_for_retirement(&gateway.root, &mut gateway.writer)
+            .map_err(|_| unknown())?;
     bootstrap
         .retirement_preflight(&selection, &proof.pairing, proof.expires_at)
         .map_err(|_| unknown())?;

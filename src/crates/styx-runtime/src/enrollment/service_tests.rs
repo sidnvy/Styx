@@ -530,14 +530,8 @@ async fn start_server(
     let listener = TcpListener::bind(address).await.unwrap();
     let address = listener.local_addr().unwrap();
     let host = format!("localhost:{}", address.port());
-    let service = EnrollmentService::recover_existing(
-        store,
-        admin,
-        mcp,
-        vec![host.clone()],
-        Limits::default(),
-    )
-    .unwrap();
+    let service =
+        EnrollmentService::recover_existing(store, admin, mcp, vec![host.clone()]).unwrap();
     let app = EnrollmentHttp::new(tls, service, vec![host.clone()]).unwrap();
     let cancel = CancellationToken::new();
     let server = app.clone();

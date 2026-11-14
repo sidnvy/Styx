@@ -22,7 +22,7 @@ pub use styx_core::session::{
     SessionProjection, SessionView,
 };
 use styx_core::session::{
-    RegistryIncarnation, SessionControl, SessionLimits, SessionRegistry, VerifiedRegistration,
+    RegistryIncarnation, SessionControl, SessionRegistry, VerifiedRegistration,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,18 +88,13 @@ impl HostSessions {
                 } else {
                     let registry =
                         RegistryIncarnation::from_fresh_entropy(entropy).and_then(|incarnation| {
-                            SessionRegistry::new_owned(
-                                generation,
-                                incarnation,
-                                principal,
-                                SessionLimits::default(),
-                            )
+                            SessionRegistry::new_owned(generation, incarnation, principal)
                         });
                     match registry {
                         Ok((registry, control)) => {
                             Storage::Enabled(Box::new(EnabledSessions { registry, control }))
                         }
-                        // The fixed defaults are valid; invalid all-zero entropy
+                        // Invalid all-zero entropy
                         // cannot produce a ready registry or fake fresh identity.
                         Err(_) => Storage::Unavailable(SessionSupport::EntropyUnavailable),
                     }

@@ -187,7 +187,7 @@ async fn authenticated_tunnel_context_across_transports_and_isolation() {
         app.expire_conversations(Duration::ZERO);
         assert!(!backend.fenced.lock().unwrap().contains(&original_owner));
         assert_eq!(backend.completed.load(Ordering::Acquire), 0);
-        assert!(app.conversations.lock().unwrap().values().any(|c| c.life.owner.owner_id().as_str()==original_owner && c.calls.available_permits()==0 && c.life.activity.lock().unwrap().users>0));
+        assert!(app.conversations.lock().unwrap().values().any(|c| c.life.owner.owner_id().as_str()==original_owner && c.life.activity.lock().unwrap().users>0));
         backend.release.add_permits(1);
         let until = tokio::time::Instant::now() + Duration::from_secs(2);
         while backend.completed.load(Ordering::Acquire)==0 {
@@ -253,14 +253,11 @@ async fn logical_capacity_and_unknown_cleanup_never_reassign_an_owner() {
     let meta = |i: usize| {
         serde_json::from_value::<RequestMetaObject>(serde_json::json!({"openai/organization":"capacity-org", "openai/subject":"capacity-subject", "openai/session":format!("capacity-chat-{i}")})).unwrap()
     };
-    for i in 0..budget.capacity {
+    for i in 0..80 {
         drop(app.conversation_call(&principal, &meta(i)).unwrap());
     }
-    assert_eq!(app.retained_sessions(), budget.capacity);
-    assert!(matches!(
-        app.conversation_call(&principal, &meta(budget.capacity)),
-        Err(StatusCode::TOO_MANY_REQUESTS)
-    ));
+    assert_eq!(app.retained_sessions(), 80);
+    drop(app.conversation_call(&principal, &meta(80)).unwrap());
     let admitted = app.conversation_call(&principal, &meta(0)).unwrap();
     let original = admitted.conversation.life.clone();
     drop(admitted);
@@ -278,7 +275,7 @@ async fn logical_capacity_and_unknown_cleanup_never_reassign_an_owner() {
     );
     app.expire_conversations(Duration::ZERO);
     assert!(!original.is_complete());
-    assert_eq!(app.retained_sessions(), budget.capacity);
+    assert_eq!(app.retained_sessions(), 81);
     assert!(
         matches!(
             app.conversation_call(&principal, &meta(0)),
@@ -286,14 +283,8 @@ async fn logical_capacity_and_unknown_cleanup_never_reassign_an_owner() {
         ),
         "closed context cannot mint another owner"
     );
-    assert!(
-        matches!(
-            app.conversation_call(&principal, &meta(budget.capacity)),
-            Err(StatusCode::TOO_MANY_REQUESTS)
-        ),
-        "unknown cleanup cannot free a reservation"
-    );
-    backend.release_cleanup.add_permits(budget.capacity);
+    drop(app.conversation_call(&principal, &meta(81)).unwrap());
+    backend.release_cleanup.add_permits(82);
     let server = HttpServer {
         app: app.clone(),
         listener_task: Mutex::new(None),
@@ -305,17 +296,14 @@ async fn logical_capacity_and_unknown_cleanup_never_reassign_an_owner() {
             && stopped.lifecycle_jobs_joined
             && stopped.session_transports_joined
     );
-    assert_eq!(stopped.unconfirmed_owner_cleanups, budget.capacity);
-    assert_eq!(stopped.unresolved_sessions, budget.capacity);
-    assert_eq!(
-        backend.cleanup_attempts.load(Ordering::Acquire),
-        budget.capacity
-    );
+    assert_eq!(stopped.unconfirmed_owner_cleanups, 82);
+    assert_eq!(stopped.unresolved_sessions, 82);
+    assert_eq!(backend.cleanup_attempts.load(Ordering::Acquire), 82);
     let repeated = server.shutdown(Duration::from_secs(1)).await;
-    assert_eq!(repeated.unconfirmed_owner_cleanups, budget.capacity);
+    assert_eq!(repeated.unconfirmed_owner_cleanups, 82);
     assert_eq!(
         backend.cleanup_attempts.load(Ordering::Acquire),
-        budget.capacity,
+        82,
         "shutdown observation never retries unknown cleanup"
     );
     drop(original);

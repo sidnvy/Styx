@@ -37,8 +37,7 @@ fn save(
     l.confirm_durable(c.attest_durable(&p, receipt)).unwrap();
 }
 fn history() -> History {
-    let (mut l, c) =
-        EnrollmentLedger::new_owned(id("previous-process"), Limits::default()).unwrap();
+    let (mut l, c) = EnrollmentLedger::new_owned(id("previous-process")).unwrap();
     let mut entries = vec![];
     let payload = JoinPayload {
         invitation: "synthetic-invitation".into(),
@@ -128,7 +127,7 @@ fn history() -> History {
     }
 }
 fn recovering() -> (EnrollmentLedger, EnrollmentControl) {
-    EnrollmentLedger::new_recovering(id("new-process"), Limits::default()).unwrap()
+    EnrollmentLedger::new_recovering(id("new-process")).unwrap()
 }
 fn replay(l: &mut EnrollmentLedger, c: &EnrollmentControl, h: &History) {
     let mut previous = None;
@@ -255,7 +254,7 @@ fn original_history_all_authority_gates_chain_and_exact_dependencies() {
             .unwrap_err(),
         EnrollmentError::DurableMismatch
     );
-    let foreign = EnrollmentLedger::new_recovering(id("new-process"), Limits::default())
+    let foreign = EnrollmentLedger::new_recovering(id("new-process"))
         .unwrap()
         .1;
     assert_eq!(

@@ -3,12 +3,11 @@ use super::*;
 use crate::policy::{AdmissionFacts, check_admission};
 use styx_contracts::{error::Recovery, operation::*};
 
-fn registry(limits: SessionLimits) -> (SessionRegistry, SessionControl) {
+fn registry() -> (SessionRegistry, SessionControl) {
     SessionRegistry::new_owned(
         HostGeneration::try_from("host-one").unwrap(),
         RegistryIncarnation::from_fresh_entropy([1; 32]).unwrap(),
         NativePrincipal::LinuxUid(1000),
-        limits,
     )
     .unwrap()
 }
@@ -55,7 +54,7 @@ fn ready(registry: &mut SessionRegistry, control: &SessionControl, binding: &Ses
 }
 #[test]
 fn selection_never_falls_back_or_turns_dto_into_authority() {
-    let (mut directory, control) = registry(SessionLimits::default());
+    let (mut directory, control) = registry();
     let authority = control.selection_authority(true);
     assert_eq!(
         directory.select(&authority, Selection::Unbound, 30).err(),
@@ -110,7 +109,7 @@ fn selection_never_falls_back_or_turns_dto_into_authority() {
             .err(),
         Some(SessionError::SessionDisconnected)
     );
-    let (mut other, other_control) = registry(SessionLimits::default());
+    let (mut other, other_control) = registry();
     let other_a = register(&mut other, &other_control, "a");
     ready(&mut other, &other_control, &other_a);
     let other_authority = other_control.selection_authority(true);
@@ -172,7 +171,7 @@ fn selection_never_falls_back_or_turns_dto_into_authority() {
 
 #[test]
 fn identity_lifecycle_and_terminal_reuse_never_revive_old_generation() {
-    let (mut directory, control) = registry(SessionLimits::default());
+    let (mut directory, control) = registry();
     let authority = control.selection_authority(true);
     let a = register(&mut directory, &control, "a");
     ready(&mut directory, &control, &a);
@@ -307,7 +306,7 @@ fn policy_facts(projection: &SessionProjection) -> AdmissionFacts {
 }
 #[test]
 fn provider_loss_is_local_and_fresh_projection_reuses_existing_policy() {
-    let (mut directory, control) = registry(SessionLimits::default());
+    let (mut directory, control) = registry();
     let a = register(&mut directory, &control, "a");
     for capability in [
         CapabilityId::DesktopPointer,
@@ -485,52 +484,31 @@ fn provider_loss_is_local_and_fresh_projection_reuses_existing_policy() {
 }
 
 #[test]
-fn metadata_entry_limits_and_event_gaps_are_atomic_and_explicit() {
-    let limits = SessionLimits {
-        sessions: 1,
-        providers_per_session: 1,
-        events: 2,
-        ..SessionLimits::default()
-    };
-    let (mut directory, control) = registry(limits);
-    let a = register(&mut directory, &control, "a");
-    ready(&mut directory, &control, &a);
-    let before = (
-        directory.list(30),
-        directory.cursor(),
-        directory.metadata_bytes(),
-        directory.issuer,
-    );
+fn sessions_and_event_history_have_no_quota_and_retire_independently() {
+    let (mut directory, control) = registry();
+    let mut bindings = Vec::new();
+    for n in 0..100 {
+        let binding = register(&mut directory, &control, &format!("session-{n}"));
+        ready(&mut directory, &control, &binding);
+        directory
+            .update_provider(&control, &binding, provider(CapabilityId::DesktopPointer))
+            .unwrap();
+        bindings.push(binding);
+    }
+    assert_eq!(directory.list(30).len(), 100);
+    assert!(directory.events_since(0).unwrap().len() > 256);
     assert_eq!(
-        directory.register(
-            &control,
-            control.attest_registration(registration("b")).unwrap()
-        ),
-        Err(SessionError::Capacity)
+        directory.forget(&control, &bindings[0]),
+        Err(SessionError::Invalid)
     );
-    assert_eq!(
-        directory.update_provider(&control, &a, provider(CapabilityId::DesktopPointer)),
-        Err(SessionError::Capacity)
-    );
-    assert_eq!(directory.forget(&control, &a), Err(SessionError::Invalid));
-    assert_eq!(
-        (
-            directory.list(30),
-            directory.cursor(),
-            directory.metadata_bytes(),
-            directory.issuer
-        ),
-        before
-    );
-    assert_eq!(directory.events_since(0).unwrap().len(), 2);
-    directory
-        .record_observation(&control, &a, CapabilityId::DesktopWindowsRead, 20)
+    let terminal = directory
+        .set_state(&control, &bindings[0], SessionState::Terminated)
         .unwrap();
-    assert_eq!(
-        directory.events_since(0),
-        Err(SessionError::ResnapshotRequired)
-    );
-    assert_eq!(directory.events_since(1).unwrap().len(), 2);
+    directory.forget(&control, &terminal).unwrap();
+    assert_eq!(directory.list(30).len(), 99);
+    directory
+        .record_observation(&control, &bindings[1], CapabilityId::DesktopWindowsRead, 20)
+        .unwrap();
     assert!(
         directory
             .events_since(directory.cursor())
@@ -541,55 +519,11 @@ fn metadata_entry_limits_and_event_gaps_are_atomic_and_explicit() {
         directory.events_since(directory.cursor() + 1),
         Err(SessionError::Invalid)
     );
-    let t = directory
-        .set_state(&control, &a, SessionState::Terminated)
-        .unwrap();
-    directory.forget(&control, &t).unwrap();
-    assert!(directory.list(30).is_empty());
-    register(&mut directory, &control, "b");
-    let (mut small, control) = registry(SessionLimits {
-        metadata_bytes: 3500,
-        ..SessionLimits::default()
-    });
-    let before = (
-        small.list(30),
-        small.cursor(),
-        small.metadata_bytes(),
-        small.issuer,
-    );
-    assert_eq!(
-        small.register(
-            &control,
-            control.attest_registration(registration("a")).unwrap()
-        ),
-        Err(SessionError::Capacity)
-    );
-    assert_eq!(
-        (
-            small.list(30),
-            small.cursor(),
-            small.metadata_bytes(),
-            small.issuer
-        ),
-        before
-    );
-    assert!(
-        SessionRegistry::new_owned(
-            HostGeneration::try_from("host").unwrap(),
-            RegistryIncarnation::from_fresh_entropy([1; 32]).unwrap(),
-            NativePrincipal::LinuxUid(1),
-            SessionLimits {
-                sessions: 33,
-                ..SessionLimits::default()
-            }
-        )
-        .is_err()
-    );
 }
 
 #[test]
 fn invalid_facts_and_counter_exhaustion_do_not_partially_mutate() {
-    let (mut directory, control) = registry(SessionLimits::default());
+    let (mut directory, control) = registry();
     let mut too_long = registration("a");
     too_long.provenance = "x".repeat(257);
     assert_eq!(
@@ -690,10 +624,7 @@ fn invalid_facts_and_counter_exhaustion_do_not_partially_mutate() {
 #[test]
 fn safety_review_regressions_revocation_incarnation_and_freshness() {
     // Revocation is a retained bounded tombstone, not an auto-rediscovery hint.
-    let (mut directory, control) = registry(SessionLimits {
-        sessions: 2,
-        ..SessionLimits::default()
-    });
+    let (mut directory, control) = registry();
     let a = register(&mut directory, &control, "a");
     ready(&mut directory, &control, &a);
     let mut alias = registration("a");
@@ -766,14 +697,15 @@ fn safety_review_regressions_revocation_incarnation_and_freshness() {
     );
     let native_new = register(&mut directory, &control, "actual-new-native-instance");
     ready(&mut directory, &control, &native_new);
-    assert_eq!(
-        directory.register(
-            &control,
-            control
-                .attest_registration(registration("third-native-instance"))
-                .unwrap()
-        ),
-        Err(SessionError::Capacity)
+    assert!(
+        directory
+            .register(
+                &control,
+                control
+                    .attest_registration(registration("third-native-instance"))
+                    .unwrap()
+            )
+            .is_ok()
     );
     assert_eq!(
         directory
@@ -795,7 +727,6 @@ fn safety_review_regressions_revocation_incarnation_and_freshness() {
             HostGeneration::try_from("host-one").unwrap(),
             RegistryIncarnation::from_fresh_entropy([byte; 32]).unwrap(),
             NativePrincipal::LinuxUid(1000),
-            SessionLimits::default(),
         )
         .unwrap()
     }
@@ -1025,7 +956,7 @@ fn safety_review_regressions_revocation_incarnation_and_freshness() {
 
 #[test]
 fn acquired_ax_observation_preserves_unknown_and_expires_with_provider() {
-    let (mut directory, control) = registry(SessionLimits::default());
+    let (mut directory, control) = registry();
     let binding = register(&mut directory, &control, "ax");
     ready(&mut directory, &control, &binding);
     let mut evidence = provider(CapabilityId::DesktopAccessibility);

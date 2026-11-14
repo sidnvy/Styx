@@ -56,10 +56,9 @@ impl EnrollmentBootstrap<'_> {
     pub(crate) fn recover_existing_for_retirement<'a>(
         root: &'a PrivateRoot,
         writer: &'a mut ConfigurationWriterGuard,
-        limits: styx_core::enrollment::Limits,
     ) -> Result<EnrollmentBootstrap<'a>, BootstrapError> {
         Self::validate_retirement_reader(root, writer)?;
-        EnrollmentBootstrap::recover_existing(root, writer, limits)
+        EnrollmentBootstrap::recover_existing(root, writer)
     }
     // This method does not write. Note that recover_existing, which must happen
     // first, advances the durable clock floor under the configuration writer.

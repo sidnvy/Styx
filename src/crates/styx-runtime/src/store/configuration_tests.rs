@@ -165,7 +165,6 @@ fn shared_configuration_writer_fence_and_sticky_unknown_batch() {
         b"configuration-test-admin-token-only-000000000000",
         styx_contracts::identity::Sha256Digest::of_bytes(b"distinct-mcp-test-token"),
         vec!["configuration.fixture.invalid".into()],
-        styx_core::enrollment::Limits::default(),
     )
     .unwrap();
     let shared = crate::enrollment::shared::SharedEnrollment::new(service);

@@ -274,12 +274,12 @@ mod linux {
     }
 
     #[tokio::test]
-    async fn capacity_is_derived_and_cleanup_refuses_substituted_inode() {
+    async fn connections_above_old_quota_remain_usable_and_cleanup_refuses_substituted_inode() {
         let scratch = Scratch::new();
         let root = scratch.endpoint();
         let (expected, stop, task, _) = start(root.clone()).await;
         let mut clients = Vec::new();
-        for i in 0..MAX_CONNECTIONS {
+        for i in 0..80 {
             let mut client = ManagementClient::connect(&root, expected.clone())
                 .await
                 .unwrap();
@@ -296,7 +296,7 @@ mod linux {
         drop(clients);
         stop.cancel();
         let report = task.await.unwrap().unwrap();
-        assert!(report.rejected_capacity >= 1);
+        assert!(report.accepted >= 80);
         assert!(report.socket_removed);
         let (expected, stop, task, _) = start(root).await;
         let _ = expected;
@@ -314,7 +314,7 @@ mod linux {
         assert!(scratch.0.join("displaced.sock").exists());
         println!(
             "ipc_observation={}",
-            serde_json::json!({"capacity":MAX_CONNECTIONS,"reservation_bytes":CONNECTION_WIRE_RESERVATION,"rejected_capacity":report.rejected_capacity,"replacement_preserved":true})
+            serde_json::json!({"connections":80,"reservation_bytes":CONNECTION_WIRE_RESERVATION,"replacement_preserved":true})
         );
     }
 

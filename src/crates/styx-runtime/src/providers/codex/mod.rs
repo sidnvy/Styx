@@ -71,9 +71,6 @@ pub struct OwnedExecutorConfig {
     pub cwd: PathBuf,
     pub environment: BTreeMap<String, String>,
     pub rpc_timeout: Duration,
-    /// Bounded retained operation resources (including exited unread handles).
-    /// Exhaustion is reported; resources are never evicted to permit a replay.
-    pub retained_process_limit: usize,
 }
 /// Already-authorized exact argv/environment/file URI, not public tool arguments.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -246,14 +243,13 @@ pub struct CodexStdio {
     records: Mutex<Records>,
     actions: Mutex<continuation::ActionRecords>,
     operations: Mutex<BTreeMap<OperationId, ProcessHandle>>,
-    limit: usize,
     session_id: String,
     provider_id: String,
 }
 impl CodexStdio {
     /// Official RPC/adapter paths over owned in-memory pipes; no native effects.
     #[cfg(test)]
-    pub(crate) fn fixture_io(limit: usize) -> (Self, tokio::io::DuplexStream) {
+    pub(crate) fn fixture_io() -> (Self, tokio::io::DuplexStream) {
         let (client, server) = tokio::io::duplex(65536);
         let (reader, writer) = tokio::io::split(client);
         let partition = Arc::new(
@@ -265,7 +261,6 @@ impl CodexStdio {
             writer,
             reader,
             Duration::from_secs(1),
-            limit,
             partition.clone(),
         );
         (
@@ -277,7 +272,6 @@ impl CodexStdio {
                 records: Mutex::new(HashMap::new()),
                 actions: Mutex::new(BTreeMap::new()),
                 operations: Mutex::new(BTreeMap::new()),
-                limit,
                 session_id: "owned-memory-fixture".into(),
                 provider_id: "codex".into(),
             },
@@ -319,8 +313,6 @@ impl CodexStdio {
             || !config.cwd.is_absolute()
             || config.rpc_timeout.is_zero()
             || config.rpc_timeout > Duration::from_secs(60)
-            || config.retained_process_limit == 0
-            || config.retained_process_limit > 4096
         {
             return Err(ExecError::InvalidRequest);
         }
@@ -337,8 +329,6 @@ impl CodexStdio {
             || !config.cwd.is_absolute()
             || config.rpc_timeout.is_zero()
             || config.rpc_timeout > Duration::from_secs(60)
-            || config.retained_process_limit == 0
-            || config.retained_process_limit > 4096
         {
             return Err(ExecError::InvalidRequest);
         }
@@ -363,13 +353,8 @@ impl CodexStdio {
                 let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
             })
         });
-        let rpc = Rpc::new_with_reserved_partition(
-            stdin,
-            stdout,
-            config.rpc_timeout,
-            config.retained_process_limit,
-            partition.clone(),
-        );
+        let rpc =
+            Rpc::new_with_reserved_partition(stdin, stdout, config.rpc_timeout, partition.clone());
         let initialized = match rpc
             .request("initialize", json!({"clientName":"styx-rust-native-host"}))
             .await
@@ -414,7 +399,6 @@ impl CodexStdio {
             records: Mutex::new(HashMap::new()),
             actions: Mutex::new(BTreeMap::new()),
             operations: Mutex::new(BTreeMap::new()),
-            limit: config.retained_process_limit,
             session_id,
             provider_id,
         })
@@ -452,9 +436,6 @@ impl CodexStdio {
                     evidence: DispatchEvidence::Unknown,
                     error: ExecError::AlreadyDispatched,
                 });
-            }
-            if !cfg!(target_os = "macos") && operations.len() >= self.limit {
-                return Err(not_dispatched(ExecError::Capacity));
             }
             operations.insert(operation.clone(), handle.clone());
         }
@@ -723,7 +704,7 @@ impl CodexStdio {
             let reply = self.rpc.request_budgeted("process/read", json!({"processId":handle.process_id,"afterSeq":record.cursor,"maxBytes":65536,"waitMs":50})).await?;
             let page: ReadPage =
                 serde_json::from_value(reply.result?).map_err(|_| ExecError::InvalidFrame)?;
-            let _wire_budget = reply._permit;
+
             let mut validated = output::validate(
                 &page,
                 record.cursor,
@@ -806,7 +787,7 @@ impl CodexStdio {
                 let reply=self.rpc.request_budgeted("process/read",json!({"processId":handle.process_id,"afterSeq":null,"maxBytes":65536,"waitMs":50})).await?;
                 let page: ReadPage =
                     serde_json::from_value(reply.result?).map_err(|_| ExecError::InvalidFrame)?;
-                let _wire_budget = reply._permit;
+
                 output::validate(&page, None, 0, styx_contracts::EXEC_FRAME_BYTES)?;
                 if page.failure.is_some() {
                     return Ok::<TerminationEvidence, ExecError>(TerminationEvidence::Unknown);

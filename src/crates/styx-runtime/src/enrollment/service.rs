@@ -29,7 +29,7 @@ use styx_contracts::{
 };
 use styx_core::enrollment::{
     ConnectionLease, ConnectionObservation, DeviceSelfProof, EnrollmentControl, EnrollmentError,
-    EnrollmentLedger, Lane, Limits, PendingIntent,
+    EnrollmentLedger, Lane, PendingIntent,
 };
 use zeroize::Zeroizing;
 
@@ -406,7 +406,6 @@ impl EnrollmentService {
         admin_token: &[u8],
         ordinary_mcp_digest: Sha256Digest,
         allowed_hosts: Vec<String>,
-        limits: Limits,
     ) -> Result<Self, ServiceError> {
         if verify_slices_are_equal(
             Sha256Digest::of_bytes(admin_token).as_bytes(),
@@ -422,7 +421,7 @@ impl EnrollmentService {
         let epoch = GatewayEpoch::try_from(format!("enrollment-service-{}", uuid::Uuid::new_v4()))
             .map_err(|_| invalid())?;
         let recovered = store
-            .with_journal(|j| Ok(recovery::recover_journal(j, epoch, limits, now)))?
+            .with_journal(|j| Ok(recovery::recover_journal(j, epoch, now)))?
             .map_err(|_| ServiceError::new(503, "enrollment_recovery_required"))?;
         let mut service = Self {
             offers: Default::default(),

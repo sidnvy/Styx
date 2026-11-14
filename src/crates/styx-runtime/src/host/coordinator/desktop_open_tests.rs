@@ -33,7 +33,6 @@ async fn fixture() -> (HostCoordinator, HostAuthority, OwnerLease, OwnerLease) {
     let (host, authority) = HostCoordinator::new_without_executor(
         OperationLedger::new("handoff-generation".try_into().unwrap()),
         facts,
-        2,
     )
     .unwrap();
     let a = authority
@@ -197,7 +196,6 @@ async fn desktop_open_waits_for_cleanup_gate_without_holding_worker_or_job_slots
     let waiting = host.reserve_desktop_open(&b, &open.id, open.payload_digest);
     tokio::pin!(waiting);
     assert!(futures_util::poll!(&mut waiting).is_pending());
-    assert_eq!(host.inner.slots.available_permits(), 2);
     let worker_slot = desktop(&host.inner.state.lock().unwrap())
         .unwrap()
         .worker

@@ -49,35 +49,6 @@ pub enum SessionError {
     Provider(ErrorCategory),
 }
 type Result<T> = std::result::Result<T, SessionError>;
-#[derive(Debug, Clone, Copy)]
-pub struct SessionLimits {
-    pub sessions: usize,
-    pub providers_per_session: usize,
-    pub events: usize,
-    pub metadata_bytes: usize,
-}
-impl Default for SessionLimits {
-    fn default() -> Self {
-        Self {
-            sessions: 32,
-            providers_per_session: 16,
-            events: 256,
-            metadata_bytes: 1024 * 1024,
-        }
-    }
-}
-impl SessionLimits {
-    fn valid(self) -> bool {
-        self.sessions > 0
-            && self.sessions <= 32
-            && self.providers_per_session > 0
-            && self.providers_per_session <= 16
-            && self.events > 0
-            && self.events <= 256
-            && self.metadata_bytes > 0
-            && self.metadata_bytes <= 1024 * 1024
-    }
-}
 /// Only trusted bootstrap retains this handle. Its holder must prove kernel
 /// peer, user/login/compositor/Agent association before attesting any facts.
 pub struct SessionControl {
@@ -192,7 +163,6 @@ pub struct SessionRegistry {
     host: HostGeneration,
     incarnation: RegistryIncarnation,
     principal: NativePrincipal,
-    limits: SessionLimits,
     issuer: u64,
     cursor: u64,
     records: BTreeMap<SessionId, Record>,
@@ -203,9 +173,8 @@ impl SessionRegistry {
         host: HostGeneration,
         incarnation: RegistryIncarnation,
         principal: NativePrincipal,
-        limits: SessionLimits,
     ) -> Result<(Self, SessionControl)> {
-        if !limits.valid() || matches!(&principal, NativePrincipal::WindowsSid(s) if !bounded(s)) {
+        if matches!(&principal, NativePrincipal::WindowsSid(s) if !bounded(s)) {
             return Err(SessionError::Invalid);
         }
         let brand = Arc::new(());
@@ -218,15 +187,12 @@ impl SessionRegistry {
             host,
             incarnation,
             principal,
-            limits,
             issuer: 0,
             cursor: 0,
             records: BTreeMap::new(),
             events: VecDeque::new(),
         };
-        if registry.metadata_bytes() > limits.metadata_bytes {
-            return Err(SessionError::Capacity);
-        }
+
         Ok((registry, control))
     }
     fn authority(&self, brand: &Arc<()>) -> Result<()> {
@@ -285,19 +251,6 @@ impl SessionRegistry {
         issuer: Option<u64>,
     ) -> Result<SessionBinding> {
         let cursor = self.cursor.checked_add(1).ok_or(SessionError::Exhausted)?;
-        let previous = self.records.get(&record.binding.id);
-        if previous.is_none() && self.records.len() >= self.limits.sessions {
-            return Err(SessionError::Capacity);
-        }
-        let event_count = (self.events.len() + 1).min(self.limits.events);
-        let bytes = self.metadata_bytes()
-            - self.events.len() * 1024
-            - previous.map_or(0, Self::record_bytes)
-            + Self::record_bytes(&record)
-            + event_count * 1024;
-        if bytes > self.limits.metadata_bytes {
-            return Err(SessionError::Capacity);
-        }
         let binding = record.binding.clone();
         self.records.insert(binding.id.clone(), record);
         self.commit_event(SessionEvent {
@@ -313,9 +266,7 @@ impl SessionRegistry {
     }
     fn commit_event(&mut self, event: SessionEvent) {
         self.cursor = event.cursor;
-        if self.events.len() == self.limits.events {
-            self.events.pop_front();
-        }
+
         self.events.push_back(event);
     }
     pub fn register(
@@ -417,11 +368,7 @@ impl SessionRegistry {
         ) {
             return Err(SessionError::SessionDisconnected);
         }
-        if !old.providers.contains_key(&facts.capability)
-            && old.providers.len() >= self.limits.providers_per_session
-        {
-            return Err(SessionError::Capacity);
-        }
+
         if old
             .providers
             .get(&facts.capability)
@@ -667,13 +614,6 @@ impl SessionRegistry {
             return Err(SessionError::Invalid);
         }
         let cursor = self.cursor.checked_add(1).ok_or(SessionError::Exhausted)?;
-        let count = (self.events.len() + 1).min(self.limits.events);
-        if self.metadata_bytes() - Self::record_bytes(record) - self.events.len() * 1024
-            + count * 1024
-            > self.limits.metadata_bytes
-        {
-            return Err(SessionError::Capacity);
-        }
         self.records.remove(&binding.id);
         self.commit_event(SessionEvent {
             cursor,

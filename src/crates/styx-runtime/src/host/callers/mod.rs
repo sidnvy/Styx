@@ -5,7 +5,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use styx_contracts::error::ErrorCategory;
 use styx_contracts::identity::*;
 use styx_core::operations::OwnerLease;
-pub(crate) const OWNER_LIMIT: usize = 128;
 pub(crate) mod order;
 pub(crate) struct OwnerRecord {
     pub(crate) lease: Option<OwnerLease>,

@@ -12,23 +12,12 @@ use std::{
 use tokio::{io::AsyncWriteExt, sync::oneshot};
 use tokio_util::codec::{FramedRead, LinesCodec};
 
-// Reserve maximum request + response wire frames per in-flight RPC, plus
-// one reader frame. Derive concurrency from the frozen 16MiB peer budget.
-const MAX_INFLIGHT: usize = (styx_contracts::OPERATION_METADATA_BYTES
-    - styx_contracts::EXEC_FRAME_BYTES)
-    / (2 * styx_contracts::EXEC_FRAME_BYTES);
-const EVENT_CACHE_BYTES: usize = styx_contracts::OPERATION_METADATA_BYTES
-    - styx_contracts::EXEC_FRAME_BYTES
-    - MAX_INFLIGHT * 2 * styx_contracts::EXEC_FRAME_BYTES;
-
 pub(super) struct BudgetedReply {
     pub(super) result: Result<Value, ExecError>,
-    pub(super) _permit: tokio::sync::OwnedSemaphorePermit,
 }
 struct Pending {
     reply: oneshot::Sender<BudgetedReply>,
     read_process: Option<String>,
-    _permit: tokio::sync::OwnedSemaphorePermit,
 }
 #[derive(Clone, Debug, Default)]
 pub(super) struct Observation {
@@ -74,9 +63,6 @@ pub(super) struct Rpc {
     sequence: AtomicU64,
     closed: AtomicBool,
     timeout: Duration,
-    permits: Arc<tokio::sync::Semaphore>,
-    read_buffers: Arc<tokio::sync::Semaphore>,
-    observation_limit: usize,
     reader_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 impl Rpc {
@@ -88,18 +74,11 @@ impl Rpc {
         stdin: W,
         stdout: R,
         timeout: Duration,
-        observation_limit: usize,
     ) -> Arc<Self> {
         let partition = Arc::new(tokio::sync::Semaphore::new(16 * 1024 * 1024))
             .try_acquire_many_owned(16 * 1024 * 1024)
             .expect("owned fixture partition");
-        Self::new_with_reserved_partition(
-            stdin,
-            stdout,
-            timeout,
-            observation_limit,
-            Arc::new(partition),
-        )
+        Self::new_with_reserved_partition(stdin, stdout, timeout, Arc::new(partition))
     }
     pub fn new_with_reserved_partition<
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -108,7 +87,6 @@ impl Rpc {
         stdin: W,
         stdout: R,
         timeout: Duration,
-        observation_limit: usize,
         partition: Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> Arc<Self> {
         let rpc = Arc::new(Self {
@@ -116,15 +94,10 @@ impl Rpc {
             stdin: tokio::sync::Mutex::new(Some(Box::new(stdin))),
             pending: Mutex::new(HashMap::new()),
             observations: Mutex::new(HashMap::new()),
-            retained_events: Mutex::new(super::event_cache::RetainedEvents::new(EVENT_CACHE_BYTES)),
+            retained_events: Mutex::new(super::event_cache::RetainedEvents::new()),
             sequence: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             timeout,
-            permits: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT)),
-            // A retained page keeps its existing RPC reservation. Leave one
-            // original wire slot for termination/cleanup; no new peer budget.
-            read_buffers: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT - 1)),
-            observation_limit,
             reader_task: Mutex::new(None),
         });
         let weak = Arc::downgrade(&rpc);
@@ -216,17 +189,12 @@ impl Rpc {
         } else {
             Ok(message["result"].clone())
         };
-        let _ = pending.reply.send(BudgetedReply {
-            result,
-            _permit: pending._permit,
-        });
+        let _ = pending.reply.send(BudgetedReply { result });
         Ok(())
     }
     pub fn register(&self, id: &str) -> Result<(), ExecError> {
         let mut observations = self.observations.lock().expect("observation mutex");
-        if (!cfg!(target_os = "macos") && observations.len() >= self.observation_limit)
-            || observations.contains_key(id)
-        {
+        if observations.contains_key(id) {
             return Err(ExecError::Capacity);
         }
         observations.insert(id.to_owned(), Observation::default());
@@ -273,11 +241,9 @@ impl Rpc {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
-        self.permits.close();
         for (_, pending) in self.pending.lock().expect("pending mutex").drain() {
             let _ = pending.reply.send(BudgetedReply {
                 result: Err(error.clone()),
-                _permit: pending._permit,
             });
         }
         for observation in self
@@ -288,24 +254,6 @@ impl Rpc {
         {
             observation.lost = true;
         }
-    }
-    #[cfg(any(not(target_os = "macos"), test))]
-    pub(super) fn reserve_read_buffer(
-        &self,
-    ) -> Result<tokio::sync::OwnedSemaphorePermit, ExecError> {
-        self.read_buffers
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ExecError::Capacity)
-    }
-    #[cfg(target_os = "macos")]
-    pub(super) async fn reserve_read_buffer_wait(
-        &self,
-    ) -> Result<tokio::sync::OwnedSemaphorePermit, ExecError> {
-        tokio::time::timeout(self.timeout, self.read_buffers.clone().acquire_owned())
-            .await
-            .map_err(|_| ExecError::NotSent)?
-            .map_err(|_| ExecError::NotSent)
     }
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, ExecError> {
         self.request_budgeted(method, params).await?.result
@@ -325,19 +273,6 @@ impl Rpc {
             })
             .map_err(|_| ExecError::Capacity)?
             + 1;
-        // Reserve wire capacity before serializing a maximum-size request.
-        // macOS waits within the request budget rather than rejecting concurrency.
-        #[cfg(target_os = "macos")]
-        let permit = tokio::time::timeout(self.timeout, self.permits.clone().acquire_owned())
-            .await
-            .map_err(|_| ExecError::NotSent)?
-            .map_err(|_| ExecError::NotSent)?;
-        #[cfg(not(target_os = "macos"))]
-        let permit = self
-            .permits
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ExecError::Capacity)?;
         #[derive(serde::Serialize)]
         struct WireRequest<'a> {
             id: u64,
@@ -363,7 +298,6 @@ impl Rpc {
                 reply,
                 read_process: (method == "process/read")
                     .then(|| params["processId"].as_str().unwrap_or_default().to_owned()),
-                _permit: permit,
             },
         );
         let mut guard = PendingGuard {
@@ -499,7 +433,7 @@ mod tests {
     fn pair(timeout: Duration) -> (Arc<Rpc>, tokio::io::DuplexStream) {
         let (client, server) = tokio::io::duplex(4096);
         let (reader, writer) = tokio::io::split(client);
-        (Rpc::new(writer, reader, timeout, 2), server)
+        (Rpc::new(writer, reader, timeout), server)
     }
     #[tokio::test]
     async fn reply_timeout_is_local_and_late_reply_does_not_replay_or_dispose_executor() {
@@ -555,7 +489,6 @@ mod tests {
             rpc.request("initialize", json!({})).await.unwrap_err(),
             ExecError::NotSent
         );
-        assert_eq!(rpc.permits.available_permits(), MAX_INFLIGHT);
     }
     #[tokio::test]
     async fn rpc_ids_never_wrap_and_observations_are_bounded() {
@@ -568,9 +501,9 @@ mod tests {
         assert_eq!(rpc.sequence.load(Ordering::SeqCst), u64::MAX);
         rpc.register("a").unwrap();
         rpc.register("b").unwrap();
-        assert_eq!(rpc.register("c"), Err(ExecError::Capacity));
-        rpc.unregister("a");
         rpc.register("c").unwrap();
+        rpc.unregister("a");
+        assert!(rpc.observation("c").is_some());
     }
 }
 #[cfg(test)]
@@ -578,43 +511,32 @@ mod budget_tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     #[tokio::test]
-    async fn delivered_unconsumed_replies_keep_wire_budget_reserved() {
+    async fn retained_replies_do_not_block_other_original_requests() {
         let (client, server) = tokio::io::duplex(4096);
         let (r, w) = tokio::io::split(client);
-        let rpc = Rpc::new(w, r, Duration::from_millis(200), 4);
+        let rpc = Rpc::new(w, r, Duration::from_secs(2));
         let (r, mut w) = tokio::io::split(server);
         let worker = tokio::spawn(async move {
             let mut lines = BufReader::new(r).lines();
-            for _ in 0..MAX_INFLIGHT {
+            for _ in 0..40 {
                 let q: Value =
                     serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
                 w.write_all(format!("{}\n", json!({"id":q["id"],"result":{"ok":true}})).as_bytes())
                     .await
                     .unwrap();
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         });
-        let mut calls = (0..MAX_INFLIGHT)
-            .map(|_| Box::pin(rpc.request("parked", json!({}))))
-            .collect::<Vec<_>>();
-        for call in &mut calls {
-            assert!(futures_util::poll!(call.as_mut()).is_pending());
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(rpc.permits.available_permits(), 0);
-        assert_eq!(
-            rpc.request("saturated", json!({})).await.unwrap_err(),
-            ExecError::Capacity
-        );
-        drop(calls);
-        assert_eq!(rpc.permits.available_permits(), MAX_INFLIGHT);
+        let replies =
+            futures_util::future::join_all((0..40).map(|_| rpc.request("original", json!({}))))
+                .await;
+        assert!(replies.iter().all(Result::is_ok));
         worker.await.unwrap();
     }
     #[tokio::test]
     async fn oversized_frame_and_partial_send_have_bounded_explicit_transport_failure() {
         let (client, mut server) = tokio::io::duplex(4096);
         let (r, w) = tokio::io::split(client);
-        let rpc = Rpc::new(w, r, Duration::from_millis(100), 4);
+        let rpc = Rpc::new(w, r, Duration::from_millis(100));
         let worker = tokio::spawn(async move {
             let _ = server
                 .write_all(&vec![b'x'; styx_contracts::EXEC_FRAME_BYTES + 1])
@@ -627,7 +549,7 @@ mod budget_tests {
         worker.await.unwrap();
         let (client, _server) = tokio::io::duplex(64);
         let (r, w) = tokio::io::split(client);
-        let rpc = Rpc::new(w, r, Duration::from_millis(20), 4);
+        let rpc = Rpc::new(w, r, Duration::from_millis(20));
         assert_eq!(
             rpc.request("partial-send", json!({"data":"x".repeat(8192)}))
                 .await

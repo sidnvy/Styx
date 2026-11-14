@@ -227,7 +227,6 @@ async fn unsent_cli_and_app_join_retry_but_dispatched_join_stays_fenced_requires
             "a".repeat(43).as_bytes(),
             Sha256Digest::of_bytes(b"model"),
             vec![address.to_string()],
-            styx_core::enrollment::Limits::default(),
         )
         .unwrap();
         EnrollmentHttp::new(server_tls.clone(), service, vec![address.to_string()]).unwrap()

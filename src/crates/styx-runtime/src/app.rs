@@ -404,7 +404,6 @@ struct ConnectionStatus {
 impl ConnectionStatus {
     fn stopped_with_reason(reason: &'static str) -> Self {
         match reason {
-            crate::gateway::paired::CAPACITY_ERROR_CODE => Self::hub_full(),
             "gateway_wss_admission_refused" | "gateway_pairing_revoked" => {
                 let mut status = Self::pairing_refused();
                 status.error = Some(reason);
@@ -431,21 +430,7 @@ impl ConnectionStatus {
             ),
         }
     }
-    fn hub_full() -> Self {
-        Self {
-            status: "hub_full",
-            // Existing native views display this field as text. Keep the
-            // actionable message visible without requiring a native UI change.
-            exec_connection: crate::gateway::paired::CAPACITY_HINT,
-            error: Some(crate::gateway::paired::CAPACITY_ERROR_CODE),
-            computer_error: None,
-            #[cfg(target_os = "macos")]
-            computer_probe: None,
-            #[cfg(target_os = "macos")]
-            computer_initial_epoch_advanced: None,
-            hint: Some(crate::gateway::paired::CAPACITY_HINT),
-        }
-    }
+
     fn stopped() -> Self {
         Self {
             status: "stopped",
@@ -1054,22 +1039,7 @@ impl HostApp {
                     #[cfg(target_os = "macos")]
                     let computer_initial_epoch_advanced =
                         status.borrow().computer_initial_epoch_advanced;
-                    if event.reason == Some(crate::gateway::paired::CAPACITY_ERROR_CODE) {
-                        let mut value = ConnectionStatus::hub_full();
-                        value.computer_error = computer_error;
-                        #[cfg(target_os = "macos")]
-                        {
-                            value.computer_probe = computer_probe;
-                            value.computer_initial_epoch_advanced = computer_initial_epoch_advanced;
-                        }
-                        status.send_replace(value);
-                        continue;
-                    }
-                    if status.borrow().error == Some(crate::gateway::paired::CAPACITY_ERROR_CODE)
-                        && matches!(event.event, "connecting" | "reconnecting" | "disconnected")
-                    {
-                        continue;
-                    }
+
                     let status_value = match event.event {
                         "connected" => ConnectionStatus {
                             status: "connected",
@@ -1892,22 +1862,4 @@ async fn serve_app<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         return Err(error);
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod hub_capacity_message_tests {
-    use super::*;
-    #[test]
-    fn full_hub_message_is_visible_to_existing_native_views() {
-        let status = serde_json::to_value(ConnectionStatus::hub_full()).unwrap();
-        assert_eq!(status["error"], crate::gateway::paired::CAPACITY_ERROR_CODE);
-        assert!(
-            status["execConnection"]
-                .as_str()
-                .unwrap()
-                .contains("This hub is at its limit of 32 connected computers")
-        );
-        assert_eq!(status["execConnection"], status["hint"]);
-        assert_ne!(status["status"], "started");
-    }
 }

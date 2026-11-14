@@ -13,7 +13,6 @@ use std::{
 use styx_contracts::identity::Sha256Digest;
 
 const RESPONSE_BYTES: usize = 1024 * 1024;
-const MAX_REFS: usize = 2048;
 const RETAINED_BYTES: usize = 256 * 1024;
 const ENTRY_OVERHEAD: usize = 96;
 // These fixed upstream fields contain native cache/debug correlation, not
@@ -251,9 +250,7 @@ fn parse_snapshot(
     if elements.is_empty() {
         return Err(CuaError::Unsupported);
     }
-    if elements.len() > MAX_REFS {
-        return Err(CuaError::Busy);
-    }
+
     let returned = object.get("returned_element_count").and_then(Value::as_u64);
     let total = object.get("total_element_count").and_then(Value::as_u64);
     let count = object.get("element_count").and_then(Value::as_u64);

@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::{future::Future, io::Write, pin::Pin, time::Duration};
 use styx_contracts::{
-    CONTROL_FRAME_BYTES, HOST_QUEUED_BYTES, PER_PEER_QUEUED_BYTES,
+    CONTROL_FRAME_BYTES, PER_PEER_QUEUED_BYTES,
     control::*,
     error::{ErrorCategory, ErrorEnvelope, ExecutionCertainty, Recovery},
     identity::*,
@@ -29,13 +29,10 @@ pub use stdio::BackendStdio;
 /// No application request queue, concurrent requests, or unbounded encoder buffer.
 pub const CONNECTION_WIRE_RESERVATION: usize =
     (2 * (CONTROL_FRAME_BYTES + 8192) + 4 * CONTROL_FRAME_BYTES).next_power_of_two();
-pub const MAX_CONNECTIONS: usize = HOST_QUEUED_BYTES / CONNECTION_WIRE_RESERVATION;
 const _: () = assert!(CONNECTION_WIRE_RESERVATION <= PER_PEER_QUEUED_BYTES);
-const _: () = assert!(MAX_CONNECTIONS > 0);
 #[derive(Clone, Debug, Serialize)]
 pub struct ServerReport {
     pub accepted: u64,
-    pub rejected_capacity: u64,
     pub rejected_identity: u64,
     pub rejected_frame: u64,
     pub denied_scope: u64,

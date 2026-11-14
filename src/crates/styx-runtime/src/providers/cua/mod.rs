@@ -70,8 +70,6 @@ mod windows_config;
 const IO_BYTES: usize = 8 * 1024 * 1024;
 const FRAME_BYTES: usize = 1024 * 1024;
 const REQUEST_BYTES: usize = 64 * 1024;
-#[cfg(not(target_os = "macos"))]
-const ACTION_RECORDS: usize = 256;
 type Result<T> = std::result::Result<T, CuaError>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum CuaError {
@@ -96,7 +94,6 @@ pub enum CuaError {
 impl From<ScopeError> for CuaError {
     fn from(value: ScopeError) -> Self {
         match value {
-            ScopeError::Busy => Self::Busy,
             ScopeError::InvalidRequest => Self::InvalidRequest,
             ScopeError::PermissionDenied => Self::PermissionDenied,
             ScopeError::Unsupported => Self::Unsupported,
@@ -152,36 +149,6 @@ pub(crate) struct OwnedCuaConfig {
     pub(crate) environment: BTreeMap<String, String>,
 }
 impl OwnedCuaConfig {
-    pub(crate) fn retained_profile_bytes(&self) -> usize {
-        // Session identities have fixed contract maxima; shared source/image
-        // Arcs are not multiplied by the number of owner profiles.
-        let bytes =
-            std::mem::size_of::<Self>() + 4096 + self.workspace.capacity() + self.home.capacity();
-        #[cfg(target_os = "linux")]
-        let bytes = bytes
-            + self.launch.runtime_dir.capacity()
-            + self.launch.session_bus.capacity()
-            + self.launch.wayland_display.capacity()
-            + self.launch.hyprland_instance.capacity();
-        #[cfg(target_os = "windows")]
-        let bytes = bytes
-            + self
-                .environment
-                .iter()
-                .map(|(k, v)| 128 + k.capacity() + v.capacity())
-                .sum::<usize>();
-        #[cfg(target_os = "macos")]
-        let bytes = bytes + macos::profile_launch_bytes(&self.launch);
-        bytes
-    }
-    pub(crate) fn validate_metadata_bound(&self) -> Result<()> {
-        #[cfg(not(target_os = "macos"))]
-        if self.retained_profile_bytes() > 128 * 1024 {
-            return Err(CuaError::InvalidRequest);
-        }
-        Ok(())
-    }
-
     #[cfg(target_os = "linux")]
     fn validate(&self) -> Result<()> {
         if self.launch.uid != nix::unistd::Uid::current().as_raw()
@@ -244,7 +211,6 @@ pub struct CuaOpenSpec {
 }
 impl CuaOpenSpec {
     pub(crate) fn for_config(config: &OwnedCuaConfig) -> Result<Self> {
-        config.validate_metadata_bound()?;
         Ok(Self {
             config_digest: config.digest()?,
         })
@@ -608,17 +574,6 @@ impl CuaWorker {
         }
     }
     pub fn try_reserve_open(&self) -> Result<CuaOpenSlot> {
-        #[cfg(not(target_os = "macos"))]
-        if self
-            .inner
-            .resources
-            .lock()
-            .map_err(|_| CuaError::Unknown)?
-            .len()
-            >= 16
-        {
-            return Err(CuaError::Busy);
-        }
         Ok(CuaOpenSlot {
             worker: self.clone(),
         })
@@ -1197,10 +1152,6 @@ impl CuaActionSlot {
             || self.resource.stop.is_cancelled()
         {
             return refused("worker_unavailable", CuaError::Unknown);
-        }
-        #[cfg(not(target_os = "macos"))]
-        if self.live.actions.len() >= ACTION_RECORDS {
-            return refused("action_capacity", CuaError::Busy);
         }
         if self.live.config.validate().is_err() {
             return refused("configuration_revalidation", CuaError::PermissionDenied);

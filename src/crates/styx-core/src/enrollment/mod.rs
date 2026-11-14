@@ -26,23 +26,7 @@ pub enum EnrollmentError {
     Recovering,
 }
 type Result<T> = std::result::Result<T, EnrollmentError>;
-#[derive(Debug, Clone, Copy)]
-pub struct Limits {
-    pub invitations: usize,
-    pub pending: usize,
-    pub devices: usize,
-    pub retired: usize,
-}
-impl Default for Limits {
-    fn default() -> Self {
-        Self {
-            invitations: 64,
-            pending: 64,
-            devices: 1024,
-            retired: 4096,
-        }
-    }
-}
+
 // An Arc identity is a process-local authority brand, not a bearer/cryptographic
 // credential. Only the trusted bootstrap receives the control handle.
 pub struct EnrollmentControl {
@@ -194,7 +178,7 @@ pub enum ClaimView {
 pub struct EnrollmentLedger {
     brand: Arc<()>,
     epoch: GatewayEpoch,
-    limits: Limits,
+
     revision: u64,
     sequence: u64,
     time_floor: u64,
@@ -391,21 +375,7 @@ impl EnrollmentControl {
 impl EnrollmentLedger {
     /// Production starts closed until the trusted store adapter proves the complete
     /// original journal, material references and clock high-water mark.
-    pub fn new_recovering(
-        epoch: GatewayEpoch,
-        limits: Limits,
-    ) -> Result<(Self, EnrollmentControl)> {
-        if limits.invitations == 0
-            || limits.invitations > 64
-            || limits.pending == 0
-            || limits.pending > 64
-            || limits.devices == 0
-            || limits.devices > 4096
-            || limits.retired == 0
-            || limits.retired > 8192
-        {
-            return Err(EnrollmentError::Invalid);
-        }
+    pub fn new_recovering(epoch: GatewayEpoch) -> Result<(Self, EnrollmentControl)> {
         let brand = Arc::new(());
         let control = EnrollmentControl {
             brand: brand.clone(),
@@ -414,7 +384,7 @@ impl EnrollmentLedger {
             Self {
                 brand,
                 epoch,
-                limits,
+
                 revision: 0,
                 sequence: 0,
                 time_floor: 0,
@@ -435,8 +405,8 @@ impl EnrollmentLedger {
         ))
     }
     #[cfg(test)]
-    fn new_owned(epoch: GatewayEpoch, limits: Limits) -> Result<(Self, EnrollmentControl)> {
-        let (mut ledger, control) = Self::new_recovering(epoch, limits)?;
+    fn new_owned(epoch: GatewayEpoch) -> Result<(Self, EnrollmentControl)> {
+        let (mut ledger, control) = Self::new_recovering(epoch)?;
         ledger.recovering = false;
         Ok((ledger, control))
     }
@@ -613,9 +583,7 @@ impl EnrollmentLedger {
             .comparison_code()
             .map_err(|_| EnrollmentError::Invalid)?;
         }
-        if self.invitations.iter().filter(|i| i.expires > now).count() >= self.limits.invitations {
-            return Err(EnrollmentError::Capacity);
-        }
+
         let expires = now
             .checked_add(ttl_seconds * 1000)
             .ok_or(EnrollmentError::Clock)?;
@@ -664,9 +632,7 @@ impl EnrollmentLedger {
             return Err(EnrollmentError::Conflict);
         }
         // Bound the ENTIRE retained collection, not merely its active subset.
-        if self.pending.len() >= self.limits.pending {
-            return Err(EnrollmentError::Capacity);
-        }
+
         let expires = now
             .checked_add(15 * 60 * 1000)
             .ok_or(EnrollmentError::Clock)?;
@@ -750,20 +716,10 @@ impl EnrollmentLedger {
         }
         // Reserve a retirement slot BEFORE publishing the new credential.
         // Every approved active key must remain revocable at full capacity.
-        let active = self.devices.values().filter(|d| !d.revoked).count();
         if self.registered_identity_conflict(&p.facts.device, fingerprint) {
             return Err(EnrollmentError::Conflict);
         }
-        if self.retained_device_count() >= self.limits.devices
-            || self
-                .retired
-                .len()
-                .checked_add(active)
-                .ok_or(EnrollmentError::Capacity)?
-                >= self.limits.retired
-        {
-            return Err(EnrollmentError::Capacity);
-        }
+
         let new_generation = self.next_generation(&p.facts.device)?;
         let device = Device {
             id: p.facts.device.clone(),
@@ -1174,9 +1130,7 @@ impl EnrollmentLedger {
             .get(id)
             .filter(|d| !d.revoked)
             .ok_or(EnrollmentError::NotFound)?;
-        if self.retired.len() >= self.limits.retired && !self.retired.contains(&d.fingerprint) {
-            return Err(EnrollmentError::Capacity);
-        }
+
         self.stage(
             now,
             Mutation::Revoke {

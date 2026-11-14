@@ -47,7 +47,7 @@ fn facts() -> AdmissionFacts {
     }
 }
 fn ledger() -> (OperationLedger, OwnerLease) {
-    let mut ledger = OperationLedger::with_budget(id("host-1"), 100_000, 10);
+    let mut ledger = OperationLedger::with_retention(id("host-1"), 10);
     let owner = ledger
         .register_verified_owner(id("owner-A"), id("epoch-A"))
         .unwrap();

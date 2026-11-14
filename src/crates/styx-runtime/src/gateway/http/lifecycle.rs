@@ -54,7 +54,6 @@ pub(super) struct Life<L: GatewayOwnerLifecycle> {
     pub cancellation: Mutex<Option<CancellationToken>>,
     pub supervisor: Weak<Supervisor>,
     // All SDK handler/transport and cleanup owners retain this same real lease.
-    pub _session_slot: tokio::sync::OwnedSemaphorePermit,
     pub _budget: Arc<super::HttpBudget>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]

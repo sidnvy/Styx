@@ -187,7 +187,6 @@ fn registry_host() -> (
             session_state: None,
             current_observation: None,
         },
-        4,
     )
     .unwrap()
     .without_executor()

@@ -6,9 +6,7 @@ use std::{
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
 };
 use styx_contracts::{enrollment::*, identity::*, legacy::JoinPayload};
-use styx_core::enrollment::{
-    ApprovalRequest, EnrollmentControl, EnrollmentLedger, Limits, PendingIntent,
-};
+use styx_core::enrollment::{ApprovalRequest, EnrollmentControl, EnrollmentLedger, PendingIntent};
 
 pub(crate) struct Temp(pub PathBuf);
 impl Temp {
@@ -197,8 +195,7 @@ fn gateway_with_device(path: &Path, revoked: bool) -> (DeviceId, Sha256Digest) {
         EnrollmentJournal::open(&root, &mut writer, JournalBudget::default()).unwrap();
     journal.record_time_floor(1000).unwrap();
     let (mut ledger, control) =
-        EnrollmentLedger::new_recovering("retire-fixture".try_into().unwrap(), Limits::default())
-            .unwrap();
+        EnrollmentLedger::new_recovering("retire-fixture".try_into().unwrap()).unwrap();
     ledger
         .finish_recovery(control.attest_recovery_closure(0, 0, None, None, 1000, 1000))
         .unwrap();

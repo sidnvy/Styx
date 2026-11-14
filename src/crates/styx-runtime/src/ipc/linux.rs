@@ -24,7 +24,6 @@ use tokio::{
         UnixListener, UnixStream,
         unix::{OwnedReadHalf, OwnedWriteHalf},
     },
-    sync::Semaphore,
     task::JoinSet,
     time::{Instant, timeout, timeout_at},
 };
@@ -125,7 +124,6 @@ impl Drop for OwnedSocket {
 #[derive(Default)]
 struct Metrics {
     accepted: AtomicU64,
-    rejected_capacity: AtomicU64,
     rejected_identity: AtomicU64,
     rejected_frame: AtomicU64,
     denied_scope: AtomicU64,
@@ -220,7 +218,6 @@ impl<H: ReadHandler> ManagementServer<H> {
             handler,
             metrics,
         } = self;
-        let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         let mut tasks = JoinSet::new();
         loop {
             while tasks.try_join_next().is_some() {}
@@ -228,11 +225,10 @@ impl<H: ReadHandler> ManagementServer<H> {
                 _ = shutdown.cancelled() => break,
                 accepted = listener.accept() => {
                     let (stream, _) = accepted?;
-                    let permit = match slots.clone().try_acquire_owned() { Ok(p) => p, Err(_) => { metrics.rejected_capacity.fetch_add(1,Ordering::Relaxed); continue; } };
                     let peer = match peer(&stream) { Ok(p) => p, Err(_) => { metrics.rejected_identity.fetch_add(1,Ordering::Relaxed); continue; } };
                     metrics.accepted.fetch_add(1,Ordering::Relaxed);
                     let handler = handler.clone(); let metrics = metrics.clone(); let stop = shutdown.clone();
-                    tasks.spawn(async move { let _permit = permit; tokio::select! {
+                    tasks.spawn(async move { tokio::select! {
                         _ = stop.cancelled() => {},
                         _ = serve_peer(stream, peer, handler, metrics) => {},
                     }});
@@ -245,7 +241,6 @@ impl<H: ReadHandler> ManagementServer<H> {
         socket.cleanup()?;
         Ok(ServerReport {
             accepted: metrics.accepted.load(Ordering::Relaxed),
-            rejected_capacity: metrics.rejected_capacity.load(Ordering::Relaxed),
             rejected_identity: metrics.rejected_identity.load(Ordering::Relaxed),
             rejected_frame: metrics.rejected_frame.load(Ordering::Relaxed),
             denied_scope: metrics.denied_scope.load(Ordering::Relaxed),

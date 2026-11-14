@@ -45,12 +45,11 @@ fn fixture() -> (
     Arc<Peer>,
     tokio::task::JoinHandle<()>,
 ) {
-    let (adapter, io) = CodexStdio::fixture_io(16); // Exact limit in the failing paired fixture.
+    let (adapter, io) = CodexStdio::fixture_io();
     let (host, authority) = HostCoordinator::new_owned(
         adapter,
         OperationLedger::new("settled-exec-host".try_into().unwrap()),
         facts(),
-        4,
     )
     .unwrap();
     let peer = Arc::new(Peer {
@@ -197,7 +196,7 @@ async fn sixty_four_open_owners_with_settled_execs_do_not_exhaust_sixteen_proces
     driver.await.unwrap();
 }
 #[tokio::test]
-async fn sixteen_live_execs_refuse_the_next_start_without_native_io_or_uncertainty() {
+async fn live_execs_beyond_old_limit_keep_independent_results() {
     let (host, authority, peer, driver) = fixture();
     let protocol = protocol(&host, &authority);
     peer.exited.store(false, Ordering::Relaxed);
@@ -219,27 +218,14 @@ async fn sixteen_live_execs_refuse_the_next_start_without_native_io_or_uncertain
         targets.push((o, t));
     }
     assert_eq!(host.retained_exec_processes_for_test(), 16);
-    let rejected = owner(17);
-    let target = prepare(&protocol, &rejected).await;
-    assert!(matches!(
-        protocol
-            .handle(Call::DispatchStart {
-                owner: rejected,
-                target
-            })
-            .await,
-        Reply::Error {
-            category: ErrorCategory::Busy,
-            certainty: ExecutionCertainty::NotDispatched,
-            cursor_may_be_consumed: false
-        }
-    ));
-    assert_eq!(
-        peer.starts.load(Ordering::Relaxed),
-        16,
-        "capacity failure must send no process/start frame"
-    );
-    // Exit alone is insufficient: undrained output still owns a process slot.
+    let additional = owner(17);
+    let target = prepare(&protocol, &additional).await;
+    assert!(matches!(protocol.handle(Call::DispatchStart {
+        owner: additional.clone(), target: target.clone()
+    }).await, Reply::Start { dispatch, .. } if dispatch == "started"));
+    targets.push((additional, target));
+    assert_eq!(peer.starts.load(Ordering::Relaxed), 17);
+    // Exit alone is insufficient: undrained output must remain readable.
     peer.exited.store(true, Ordering::Relaxed);
     assert!(matches!(
         read(&protocol, &targets[0].0, &targets[0].1).await,
@@ -249,7 +235,7 @@ async fn sixteen_live_execs_refuse_the_next_start_without_native_io_or_uncertain
             ..
         }
     ));
-    assert_eq!(host.retained_exec_processes_for_test(), 16);
+    assert_eq!(host.retained_exec_processes_for_test(), 17);
     peer.drained.store(true, Ordering::Relaxed);
     for (o, t) in targets {
         assert!(matches!(
@@ -268,7 +254,7 @@ async fn sixteen_live_execs_refuse_the_next_start_without_native_io_or_uncertain
         matches!(protocol.handle(Call::DispatchStart{owner:fresh.clone(),target:target.clone()}).await,Reply::Start{dispatch,..} if dispatch=="started")
     );
     read(&protocol, &fresh, &target).await;
-    assert_eq!(peer.starts.load(Ordering::Relaxed), 17);
+    assert_eq!(peer.starts.load(Ordering::Relaxed), 18);
     host.close_exec_fixture_for_test().await;
     driver.await.unwrap();
 }

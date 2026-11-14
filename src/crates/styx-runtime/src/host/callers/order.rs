@@ -52,9 +52,7 @@ impl Order {
         if sequence <= history.high {
             return Err(ErrorCategory::Unauthorized);
         }
-        if self.records.len() >= OWNER_LIMIT {
-            return Err(ErrorCategory::Busy);
-        }
+
         history.high = sequence;
         self.records.insert(
             (owner.owner_id.clone(), owner.owner_epoch.clone()),
@@ -129,18 +127,14 @@ mod tests {
         };
         let mut order = Order::default();
         order.admit(&epoch, &owner(1)).unwrap();
-        for n in 2..=OWNER_LIMIT as u64 {
+        for n in 2..=256 {
             order.admit(&epoch, &owner(n)).unwrap();
             assert!(order.complete(&owner(n)).is_empty());
         }
         assert_eq!(order.histories[&epoch].watermark, 0);
-        assert!(matches!(
-            order.admit(&epoch, &owner(129)),
-            Err(ErrorCategory::Busy)
-        ));
-        order.fence_unseen(&epoch, &owner(129)).unwrap();
-        assert_eq!(order.complete(&owner(1)).len(), OWNER_LIMIT);
-        for n in 130..=2200 {
+        order.fence_unseen(&epoch, &owner(257)).unwrap();
+        assert_eq!(order.complete(&owner(1)).len(), 256);
+        for n in 258..=2200 {
             order.admit(&epoch, &owner(n)).unwrap();
             order.complete(&owner(n));
             assert!(order.admit(&epoch, &owner(n)).is_err());

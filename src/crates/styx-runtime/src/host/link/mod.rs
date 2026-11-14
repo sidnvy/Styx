@@ -11,9 +11,11 @@ use std::{
     time::Duration,
 };
 use styx_contracts::identity::ConnectionGeneration;
+#[cfg(test)]
+use tokio::sync::Semaphore;
 use tokio::{
     net::TcpStream,
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
+    sync::{OwnedSemaphorePermit, mpsc, oneshot},
     task::JoinHandle,
 };
 use tokio_tungstenite::{
@@ -29,7 +31,6 @@ use zeroize::Zeroizing;
 
 pub const MAX_MESSAGE: usize = 2 * 1024 * 1024;
 pub const LINK_BYTES: usize = 16 * 1024 * 1024;
-const MAX_LINKS: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LinkError {
@@ -109,7 +110,6 @@ impl LinkEndpoint {
 /// partition is exclusive to this allocator until all links have released it.
 pub struct HostLinkBudget {
     _partition: OwnedSemaphorePermit,
-    slots: Arc<Semaphore>,
 }
 impl HostLinkBudget {
     pub fn from_reserved_partition(
@@ -123,7 +123,6 @@ impl HostLinkBudget {
         }
         Ok(Arc::new(Self {
             _partition: partition,
-            slots: Arc::new(Semaphore::new((bytes / LINK_BYTES).min(MAX_LINKS))),
         }))
     }
 }
@@ -131,9 +130,7 @@ impl HostLinkBudget {
 pub struct ReceivedText {
     pub generation: ConnectionGeneration,
     text: Utf8Bytes,
-    _bytes: OwnedSemaphorePermit,
-    _delivery: OwnedSemaphorePermit,
-    _lease: Arc<(Arc<HostLinkBudget>, OwnedSemaphorePermit)>,
+    _lease: Arc<HostLinkBudget>,
 }
 impl ReceivedText {
     pub fn as_str(&self) -> &str {
@@ -160,7 +157,6 @@ struct Outgoing {
     text: String,
     state: Arc<AtomicU8>,
     ack: oneshot::Sender<Result<FrameFlushed, SendFailure>>,
-    _bytes: OwnedSemaphorePermit,
 }
 struct PendingSend(Arc<AtomicU8>);
 impl Drop for PendingSend {
@@ -177,7 +173,6 @@ pub struct HostWssLink {
     generation: ConnectionGeneration,
     outgoing: mpsc::Sender<Outgoing>,
     incoming: mpsc::Receiver<ReceivedText>,
-    out_bytes: Arc<Semaphore>,
     stop: CancellationToken,
     tasks: Vec<JoinHandle<()>>,
     // Permit and partition remain held by both IO tasks, not merely this handle.
@@ -206,12 +201,7 @@ impl HostWssLink {
                 return Err(LinkError::UnsupportedMutualTls);
             }
         };
-        let slot = budget
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| LinkError::Capacity)?;
-        let lease = Arc::new((budget, slot));
+        let lease = budget;
         let until = tokio::time::Instant::now() + Duration::from_secs(5);
         let host = match endpoint.0.host().ok_or(LinkError::InvalidEndpoint)? {
             url::Host::Domain(v) => v.to_owned(),
@@ -264,9 +254,6 @@ impl HostWssLink {
         let (outgoing, mut outgoing_rx) = mpsc::channel::<Outgoing>(2);
         let (incoming_tx, incoming) = mpsc::channel(2);
         let (control_tx, mut control_rx) = mpsc::channel::<()>(4);
-        let out_bytes = Arc::new(Semaphore::new(2));
-        let inbound_bytes = Arc::new(Semaphore::new(3));
-        let deliveries = Arc::new(Semaphore::new(2));
         let reader_stop = stop.clone();
         let reader_generation = generation.clone();
         let reader_lease = lease.clone();
@@ -275,24 +262,19 @@ impl HostWssLink {
         let reader = tokio::spawn(async move {
             let lease = reader_lease;
             loop {
-                let Ok(bytes) = inbound_bytes.clone().try_acquire_owned() else {
-                    break;
-                };
                 let next = tokio::select! { biased; _=reader_stop.cancelled()=>break, next=source.next()=>next };
                 match next {
                     Some(Ok(Message::Text(text))) => {
-                        let Ok(delivery) = deliveries.clone().try_acquire_owned() else {
-                            break;
+                        let message = ReceivedText {
+                            generation: reader_generation.clone(),
+                            text,
+                            _lease: lease.clone(),
                         };
-                        if incoming_tx
-                            .try_send(ReceivedText {
-                                generation: reader_generation.clone(),
-                                text,
-                                _bytes: bytes,
-                                _delivery: delivery,
-                                _lease: lease.clone(),
-                            })
-                            .is_err()
+                        if tokio::select! {
+                            _ = reader_stop.cancelled() => break,
+                            sent = incoming_tx.send(message) => sent,
+                        }
+                        .is_err()
                         {
                             break;
                         }
@@ -344,7 +326,6 @@ impl HostWssLink {
             generation,
             outgoing,
             incoming,
-            out_bytes,
             stop,
             tasks: vec![reader, writer],
         })
@@ -359,7 +340,6 @@ impl HostWssLink {
         LinkSender {
             generation: self.generation.clone(),
             outgoing: self.outgoing.clone(),
-            out_bytes: self.out_bytes.clone(),
             stop: self.stop.clone(),
         }
     }
@@ -417,7 +397,6 @@ mod tests;
 pub struct LinkSender {
     generation: ConnectionGeneration,
     outgoing: mpsc::Sender<Outgoing>,
-    out_bytes: Arc<Semaphore>,
     stop: CancellationToken,
 }
 impl LinkSender {
@@ -441,23 +420,22 @@ impl LinkSender {
         if self.stop.is_cancelled() {
             return Err(SendFailure::NotSent(LinkError::Closed));
         }
-        let bytes = self
-            .out_bytes
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| SendFailure::NotSent(LinkError::Capacity))?;
+        let until = tokio::time::Instant::now() + timeout;
         let state = Arc::new(AtomicU8::new(0));
         let _guard = PendingSend(state.clone());
         let (ack, reply) = oneshot::channel();
-        self.outgoing
-            .try_send(Outgoing {
+        tokio::time::timeout_at(
+            until,
+            self.outgoing.send(Outgoing {
                 text,
                 state: state.clone(),
                 ack,
-                _bytes: bytes,
-            })
-            .map_err(|_| SendFailure::NotSent(LinkError::Capacity))?;
-        match tokio::time::timeout(timeout, reply).await {
+            }),
+        )
+        .await
+        .map_err(|_| SendFailure::NotSent(LinkError::Deadline))?
+        .map_err(|_| SendFailure::NotSent(LinkError::Closed))?;
+        match tokio::time::timeout_at(until, reply).await {
             Ok(Ok(result)) => result,
             _ => {
                 if state

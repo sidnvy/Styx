@@ -148,21 +148,13 @@ fn malformed_over_budget_and_overflow_attempts_invalidate_instead_of_partial_evi
         scope.resolve(&owner, &target, &old, 1),
         Err(ErrorCategory::StaleObservation)
     );
-    let small: Vec<_> = (0..MAX_NATIVE_REFS).map(|n| format!("e{n}")).collect();
-    assert_eq!(
-        scope.replace_snapshot(2, &small).unwrap().len(),
-        MAX_NATIVE_REFS
-    );
-    let too_many = vec!["e1".to_owned(); MAX_NATIVE_REFS + 1];
-    assert_eq!(
-        scope.replace_snapshot(2, &too_many),
-        Err(ErrorCategory::Busy)
-    );
-    assert!(scope.token_to_native.is_empty());
-    let long: Vec<_> = (0..MAX_NATIVE_REFS).map(|n| format!("e{n:063}")).collect();
-    assert_eq!(scope.replace_snapshot(2, &long), Err(ErrorCategory::Busy));
-    assert!(scope.token_to_native.is_empty());
-    assert_eq!(scope.current_epoch(), None);
+    let small: Vec<_> = (0..4096).map(|n| format!("e{n}")).collect();
+    assert_eq!(scope.replace_snapshot(2, &small).unwrap().len(), 4096);
+    let repeated = vec!["e1".to_owned(); 4097];
+    assert_eq!(scope.replace_snapshot(2, &repeated).unwrap().len(), 1);
+    let long: Vec<_> = (0..4096).map(|n| format!("e{n:063}")).collect();
+    assert_eq!(scope.replace_snapshot(2, &long).unwrap().len(), 4096);
+    assert_eq!(scope.current_epoch(), Some(2));
     scope.snapshot_revision = u64::MAX - 1;
     let last = scope.replace_snapshot(3, &["e1".into()]).unwrap()["e1"].clone();
     assert_eq!(

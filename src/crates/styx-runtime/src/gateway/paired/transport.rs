@@ -21,7 +21,7 @@ use std::{
 };
 use styx_contracts::identity::*;
 use styx_core::enrollment::{ConnectionLease, Lane};
-use tokio::sync::{OwnedSemaphorePermit, mpsc};
+use tokio::sync::mpsc;
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{
@@ -32,7 +32,6 @@ use tokio_tungstenite::{
 use tokio_util::sync::CancellationToken;
 // Frame, write-buffer, command-queue and in-flight limits remain per link.
 const FRAME: usize = 2 * 1024 * 1024;
-const RETAINED_CONNECTIONS: usize = 128;
 // A blackholed idle socket must not retain a computer slot indefinitely.
 // Only a received Pong resets this clock; business traffic cannot hide a loss.
 struct Heartbeat {
@@ -82,20 +81,7 @@ fn reject(status: u16) -> Response<Full<Bytes>> {
         .body(Full::new(Bytes::new()))
         .expect("static response")
 }
-fn capacity_refusal(code: &'static str, capacity: usize) -> Response<Full<Bytes>> {
-    let hint = format!(
-        "This hub is at its limit of {capacity} connected computers. Disconnect a computer from this hub, then reconnect."
-    );
-    Response::builder()
-        .status(429)
-        .header("connection", "close")
-        .header("cache-control", "no-store")
-        .header("content-type", "application/json")
-        .body(Full::new(Bytes::from(
-            serde_json::json!({"error":code,"hint":hint,"capacity":capacity}).to_string(),
-        )))
-        .expect("static response")
-}
+
 struct LiveFence(Arc<Entry>);
 impl Drop for LiveFence {
     fn drop(&mut self) {
@@ -114,7 +100,6 @@ impl RelayHandle {
     pub(crate) async fn upgrade(
         &self,
         mut req: Request<hyper::body::Incoming>,
-        connection: Arc<OwnedSemaphorePermit>,
     ) -> Response<Full<Bytes>> {
         let Some(device) = device_path(req.uri().path()) else {
             return reject(404);
@@ -146,10 +131,7 @@ impl RelayHandle {
                 Ok(r) => r,
                 Err(_) => return reject(400),
             };
-        let slot = match self.inner.links.admit() {
-            Ok(p) => p,
-            Err(code) => return capacity_refusal(code, self.connection_counts().1),
-        };
+        let slot = self.inner.links.admit();
         let generation: ConnectionGeneration =
             match format!("paired-{}", uuid::Uuid::new_v4()).try_into() {
                 Ok(g) => g,
@@ -199,11 +181,11 @@ impl RelayHandle {
                 if !state.reap_finished() {
                     self.inner.shutdown_failed.store(true, Ordering::Release);
                 }
-                if !state.closing && state.tasks.len() < RETAINED_CONNECTIONS {
+                if !state.closing {
                     let lease = lease.take().expect("admitted lease");
                     let task = tokio::spawn(async move {
                         let _slot = slot;
-                        let _connection = connection;
+
                         let mut bootstrap_lease = Some(lease);
                         let mut lease: Option<ConnectionLease> = None;
                         let mut browser_lease: Option<ConnectionLease> = None;
@@ -307,10 +289,6 @@ impl RelayHandle {
                                             Ok(lane)=>lane,
                                             Err(error)=>{let _=command.result.send(Err(error));continue},
                                         };
-                                        let business=pending.values().filter(|p|!p.control).count();
-                                        if !cfg!(target_os="macos") && ((!control&&business>=2)||pending.len()>=3) {
-                                            let _=command.result.send(Err(RelayError::Busy));continue
-                                        }
                                         let response_budget=command.call.response_budget();
                                         let request=WireRequest{request_id:request_id()?,connection_generation:Some(e.host_connection.clone()),call:command.call};
                                         let locked=if control {e.control_lease_for(lane).await}else{e.lease_for(lane).await};
@@ -569,7 +547,6 @@ mod lane_independence_tests;
 #[cfg(test)]
 mod capacity_tests {
     use super::*;
-    use http_body_util::BodyExt;
     #[test]
     fn idle_blackholed_connection_expires_and_live_pong_renews() {
         let start = tokio::time::Instant::now();
@@ -588,16 +565,7 @@ mod capacity_tests {
             live.pong(at + Duration::from_secs(4));
         }
     }
-    #[tokio::test]
-    async fn full_hub_returns_clear_stable_code_capacity_and_hint() {
-        let response = capacity_refusal(super::super::CAPACITY_ERROR_CODE, 32);
-        assert_eq!(response.status(), 429);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["error"], super::super::CAPACITY_ERROR_CODE);
-        assert_eq!(body["capacity"], 32);
-        assert_eq!(body["hint"], super::super::CAPACITY_HINT);
-    }
+
     // This exact workload was also run in an isolated System allocator counter;
     // see the reservation report next to PAIRED_LINK_BYTES.
     fn ceiling_response(kind: &str) -> String {

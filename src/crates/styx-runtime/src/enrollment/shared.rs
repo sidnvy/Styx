@@ -8,7 +8,7 @@ use std::sync::{
 pub struct SharedEnrollment {
     inner: Arc<tokio::sync::Mutex<EnrollmentService>>,
     failed: Arc<AtomicBool>,
-    jobs: Arc<tokio::sync::Semaphore>,
+    jobs: tokio_util::task::TaskTracker,
     readers_closing: Arc<AtomicBool>,
     active_generation: Arc<AtomicU64>,
     epoch: u64,
@@ -22,7 +22,7 @@ impl SharedEnrollment {
         Self {
             inner: Arc::new(tokio::sync::Mutex::new(service)),
             failed: Arc::new(AtomicBool::new(false)),
-            jobs: Arc::new(tokio::sync::Semaphore::new(8)),
+            jobs: tokio_util::task::TaskTracker::new(),
             readers_closing: Arc::new(AtomicBool::new(false)),
             active_generation: Arc::new(AtomicU64::new(1)),
             epoch: 1,
@@ -67,7 +67,7 @@ impl SharedEnrollment {
         self.apply(&mut s, f)
     }
     /// The service callback is executed under this SAME Core mutex. The owned
-    /// blocking worker retains the slot, callback and all custody if a client leaves.
+    /// blocking worker retains its lifetime token, callback and all custody if a client leaves.
     #[cfg(any(
         all(target_os = "linux", target_env = "gnu"),
         target_os = "macos",
@@ -77,15 +77,14 @@ impl SharedEnrollment {
         &self,
         work: impl FnOnce(&mut EnrollmentService) -> T + Send + 'static,
     ) -> Result<T, SharedError> {
+        let token = self.jobs.token();
         self.require_current()?;
-        let permit = self
-            .jobs
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| SharedError)?;
+        if self.readers_closing.load(Ordering::Acquire) {
+            return Err(SharedError);
+        }
         let shared = self.clone();
         tokio::task::spawn_blocking(move || {
-            let _permit = permit;
+            let _token = token;
             shared.blocking(work)
         })
         .await
@@ -94,18 +93,14 @@ impl SharedEnrollment {
     pub(crate) async fn profiles(
         &self,
     ) -> Result<Vec<super::service::GatewayExecProfile>, SharedError> {
+        let token = self.jobs.token();
         self.require_current()?;
         if self.readers_closing.load(Ordering::Acquire) {
             return Err(SharedError);
         }
-        let permit = self
-            .jobs
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| SharedError)?;
         let shared = self.clone();
         tokio::task::spawn_blocking(move || {
-            let _permit = permit;
+            let _token = token;
             if shared.readers_closing.load(Ordering::Acquire) {
                 return Err(SharedError);
             }
@@ -119,9 +114,10 @@ impl SharedEnrollment {
     }
     pub(crate) fn close_readers(&self) {
         self.readers_closing.store(true, Ordering::Release);
+        self.jobs.close();
     }
     pub(crate) fn reader_jobs_in_use(&self) -> usize {
-        8 - self.jobs.available_permits()
+        self.jobs.len()
     }
     pub(crate) fn same_authority(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
@@ -130,9 +126,9 @@ impl SharedEnrollment {
             && other.require_current().is_ok()
     }
     pub(crate) async fn wait_readers(&self, until: tokio::time::Instant) -> bool {
-        tokio::time::timeout_at(until, self.jobs.clone().acquire_many_owned(8))
+        tokio::time::timeout_at(until, self.jobs.wait())
             .await
-            .is_ok_and(|r| r.is_ok())
+            .is_ok()
     }
 
     #[cfg(all(test, target_os = "linux", target_env = "gnu"))]

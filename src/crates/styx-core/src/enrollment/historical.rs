@@ -52,33 +52,12 @@ fn material_key(reference: &MaterialRef) -> (&'static str, String) {
 }
 /// Pure bounded DTO validation for preparation, not a durable receipt, recovered
 /// ledger, original-runtime settlement or permission to publish imported facts.
-pub fn validate_historical_baseline(
-    baseline: &HistoricalEnrollmentBaseline,
-    limits: Limits,
-) -> Result<()> {
+pub fn validate_historical_baseline(baseline: &HistoricalEnrollmentBaseline) -> Result<()> {
     baseline
         .journal_root()
         .map_err(|_| EnrollmentError::DurableMismatch)?;
     if baseline.sequence != 1 || baseline.expected_revision != 0 || baseline.prepared_at == 0 {
         return Err(EnrollmentError::DurableMismatch);
-    }
-    if limits.devices == 0
-        || limits.devices > 4096
-        || limits.retired == 0
-        || limits.retired > 8192
-        || baseline.token_bindings.len() > 4096
-        || baseline.required_materials.len() > 4096
-    {
-        return Err(EnrollmentError::Capacity);
-    }
-    let count = baseline
-        .devices
-        .len()
-        .checked_add(baseline.revoked.len())
-        .ok_or(EnrollmentError::Capacity)?;
-    // Reserve one retirement slot for EVERY approved key before publication.
-    if count > limits.devices || count > limits.retired {
-        return Err(EnrollmentError::Capacity);
     }
     let mut ids = BTreeSet::new();
     let mut fingerprints = BTreeSet::new();
@@ -161,10 +140,7 @@ impl EnrollmentLedger {
                 .values()
                 .any(|d| &d.id == id || d.fingerprint == fingerprint)
     }
-    pub(super) fn retained_device_count(&self) -> usize {
-        // Both maps are bounded before every insertion; their sum cannot wrap.
-        self.devices.len() + self.historical_revoked.len()
-    }
+
     pub fn historical_revoked_for_admin(
         &self,
         admin: &EnrollmentAdminAuthority,
@@ -217,7 +193,7 @@ impl EnrollmentLedger {
         if Sha256Digest::of_bytes(&record.bytes) != record.digest {
             return Err(EnrollmentError::DurableMismatch);
         }
-        validate_historical_baseline(baseline, self.limits)?;
+        validate_historical_baseline(baseline)?;
         // All fallible work precedes mutation. The historical facts keep their
         // original generation/grant; absent token on revoked is NOT synthesized.
         self.devices = baseline

@@ -19,7 +19,6 @@ pub(crate) trait ComputerBootstrap: Send + Sync {
 pub(super) struct ComputerInputs {
     source: Arc<dyn ComputerBootstrap>,
     tasks: TaskTracker,
-    slots: Arc<tokio::sync::Semaphore>,
     gate: Arc<tokio::sync::RwLock<()>>,
 }
 impl ComputerInputs {
@@ -30,21 +29,14 @@ impl ComputerInputs {
         if self.tasks.is_closed() {
             return Err(ErrorCategory::Busy);
         }
-        // Readers queued behind profile release must not consume validation
-        // slots: those slots bound actual blocking work, not gate waiters.
+        // Profile retirement waits for the original validation tasks.
         let guard = self.gate.clone().read_owned().await;
         if self.tasks.is_closed() {
             return Err(ErrorCategory::Busy);
         }
-        let permit = self
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ErrorCategory::Busy)?;
         let source = self.source.clone();
         self.tasks
             .spawn_blocking(move || {
-                let _permit = permit;
                 let _guard = guard;
                 work(source)
             })
@@ -66,7 +58,6 @@ impl HostProtocol<'_> {
             source,
             tasks: TaskTracker::new(),
             gate: Arc::new(tokio::sync::RwLock::new(())),
-            slots: Arc::new(tokio::sync::Semaphore::new(2)),
         });
         Ok(self)
     }
@@ -490,7 +481,6 @@ pub(crate) async fn assert_pending_factory_keeps_owner_control_live(
             session_state: None,
             current_observation: None,
         },
-        2,
     )
     .unwrap()
     .without_executor()
@@ -586,11 +576,11 @@ mod input_tests {
     }
 
     #[tokio::test]
-    async fn computer_input_waiting_readers_do_not_hold_slots() {
+    async fn computer_input_readers_survive_profile_release() {
         let inputs = ComputerInputs {
             source: Arc::new(Bootstrap),
             tasks: TaskTracker::new(),
-            slots: Arc::new(tokio::sync::Semaphore::new(2)),
+
             gate: Arc::new(tokio::sync::RwLock::new(())),
         };
         let writer = inputs.gate.clone().write_owned().await;
@@ -602,7 +592,7 @@ mod input_tests {
             assert!(futures_util::poll!(&mut first).is_pending());
             assert!(futures_util::poll!(&mut second).is_pending());
             assert!(futures_util::poll!(&mut third).is_pending());
-            assert_eq!(inputs.slots.available_permits(), 2);
+
             // Cancel queued readers while profile release still holds the gate.
         }
         drop(writer);
@@ -612,6 +602,5 @@ mod input_tests {
             .unwrap();
         inputs.tasks.close();
         inputs.tasks.wait().await;
-        assert_eq!(inputs.slots.available_permits(), 2);
     }
 }

@@ -19,12 +19,7 @@ const ORIGINAL_TOKEN: &[u8] = b"Controller_original_token_0123456789ABCDEFGHIJKL
 const HISTORICAL_INVITE: &str = "historical_invite_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const REQUEST: &str = "0123456789abcdef0123456789abcdef";
 const NAMESPACE: &str = ".styx-enrollment-journal-v1";
-fn limits() -> Limits {
-    Limits {
-        pending: 1,
-        ..Limits::default()
-    }
-}
+
 fn context() -> PairingContext {
     PairingContext {
         origin: "https://controller.fixture.invalid".into(),
@@ -110,7 +105,6 @@ fn historical_store(
         let recovered = recovery::recover_journal(
             &mut journal,
             "trusted-historical-controller".try_into().unwrap(),
-            limits(),
             now,
         )
         .unwrap();
@@ -209,7 +203,6 @@ fn recover_service(store: OwnedEnrollmentJournal) -> EnrollmentService {
         ADMIN,
         Sha256Digest::of_bytes(b"different-ordinary-mcp-fixture"),
         vec!["controller.fixture.invalid".into()],
-        limits(),
     )
     .unwrap()
 }

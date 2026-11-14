@@ -63,7 +63,7 @@ mod linux {
                 mut ledger,
                 control,
                 ..
-            } = recover_journal(journal, epoch(name), Limits::default(), 1000).unwrap();
+            } = recover_journal(journal, epoch(name), 1000).unwrap();
             if abort_first {
                 journal.record_time_floor(1001).unwrap();
                 let aborted = ledger.close_window(&control.admin(), None, 1001).unwrap();
@@ -90,11 +90,8 @@ mod linux {
         {
             let root = PrivateRoot::open(&no_namespace).unwrap();
             let mut writer = root.try_configuration_writer().unwrap();
-            let result = crate::enrollment::EnrollmentBootstrap::recover_existing(
-                &root,
-                &mut writer,
-                Limits::default(),
-            );
+            let result =
+                crate::enrollment::EnrollmentBootstrap::recover_existing(&root, &mut writer);
             assert!(
                 result.is_err(),
                 "existing bootstrap cannot create a native enrollment namespace"
@@ -112,8 +109,7 @@ mod linux {
                 mut ledger,
                 control,
                 facts,
-            } = recover_journal(journal, epoch("original-process"), Limits::default(), 1000)
-                .unwrap();
+            } = recover_journal(journal, epoch("original-process"), 1000).unwrap();
             assert_eq!(facts.revision, 0);
             journal.record_time_floor(1001).unwrap();
             let first = ledger
@@ -142,8 +138,7 @@ mod linux {
                     mut ledger,
                     control,
                     facts,
-                } = recover_journal(journal, epoch("restarted-process"), Limits::default(), 1004)
-                    .unwrap();
+                } = recover_journal(journal, epoch("restarted-process"), 1004).unwrap();
                 assert_eq!(facts.head, Some(head_two));
                 assert_eq!(facts.revision, 2);
                 assert_eq!(facts.sequence_high_water, second_sequence);
@@ -180,7 +175,7 @@ mod linux {
                 mut ledger,
                 control,
                 facts,
-            } = recover_journal(journal, epoch("third-process"), Limits::default(), 1007).unwrap();
+            } = recover_journal(journal, epoch("third-process"), 1007).unwrap();
             assert_eq!(facts.head, Some(head_three));
             assert_eq!(facts.revision, 3);
             assert_eq!(facts.unresolved, Some(pending_digest));
@@ -208,7 +203,7 @@ mod linux {
                 &pending_raw
             );
             assert!(matches!(
-                recover_journal(journal, epoch("backward-clock"), Limits::default(), 1006),
+                recover_journal(journal, epoch("backward-clock"), 1006),
                 Err(RecoveryBlocked::ClockRollback)
             ));
             assert_eq!(
@@ -224,7 +219,7 @@ mod linux {
             journal.prepare(&first_raw, None).unwrap();
             let before = inventory(journal);
             assert!(matches!(
-                recover_journal(journal, epoch("missing-clock"), Limits::default(), 2000),
+                recover_journal(journal, epoch("missing-clock"), 2000),
                 Err(RecoveryBlocked::ClockUnproven)
             ));
             assert_eq!(journal.read_time_floor().unwrap(), None);
@@ -246,12 +241,7 @@ mod linux {
             journal.commit(&prepared).unwrap();
             let before = inventory(journal);
             assert!(matches!(
-                recover_journal(
-                    journal,
-                    epoch("wrong-material-restore"),
-                    Limits::default(),
-                    2001
-                ),
+                recover_journal(journal, epoch("wrong-material-restore"), 2001),
                 Err(RecoveryBlocked::Core(EnrollmentError::DurableMismatch))
             ));
             assert_eq!(inventory(journal), before);
@@ -279,7 +269,7 @@ mod linux {
         with_journal(&fork_a, |journal| {
             let before = inventory(journal);
             assert!(matches!(
-                recover_journal(journal, epoch("fork-restore"), Limits::default(), 2000),
+                recover_journal(journal, epoch("fork-restore"), 2000),
                 Err(RecoveryBlocked::ConflictingChain
                     | RecoveryBlocked::Store(JournalError::Conflict))
             ));
@@ -301,7 +291,7 @@ mod linux {
         with_journal(&path, |journal| {
             let before = inventory(journal);
             assert!(matches!(
-                recover_journal(journal, epoch("orphan-restore"), Limits::default(), 3000),
+                recover_journal(journal, epoch("orphan-restore"), 3000),
                 Err(RecoveryBlocked::UnknownEntry)
             ));
             assert_eq!(inventory(journal), before);

@@ -324,9 +324,7 @@ impl HostAuthority {
                 Err(ErrorCategory::StateConflict.into())
             };
         }
-        if lane.profiles.len() >= 64 {
-            return Err(CoordinatorError::Busy);
-        }
+
         for old in lane.profiles.values() {
             if config.workspace.starts_with(&old.config.workspace)
                 || old.config.workspace.starts_with(&config.workspace)
@@ -570,12 +568,6 @@ impl HostCoordinator {
             execution, slot, ..
         } = admission;
         let rx = {
-            let job_slot = self
-                .inner
-                .slots
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| CoordinatorError::Busy)?;
             let runtime =
                 tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
             let mut state = self.inner.state.lock().expect("Host state mutex");
@@ -640,7 +632,6 @@ impl HostCoordinator {
             while jobs.try_join_next().is_some() {}
             jobs.spawn_on(
                 async move {
-                    let _slot = job_slot;
                     let (evidence, cause, opened) = match slot.spawn_owned(permit, config).await {
                         Ok(r) => (r.evidence, None, Some(r.handle)),
                         Err(r) => (r.evidence, Some(r.cause), r.handle),
@@ -791,12 +782,7 @@ impl HostCoordinator {
                 .clone()
                 .try_read_owned()
                 .map_err(|_| CoordinatorError::Busy)?;
-            let job_slot = self
-                .inner
-                .slots
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| CoordinatorError::Busy)?;
+
             let runtime =
                 tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
             let mut state = self.inner.state.lock().expect("Host state mutex");
@@ -941,7 +927,6 @@ impl HostCoordinator {
             while jobs.try_join_next().is_some() {}
             jobs.spawn_on(
                 async move {
-                    let _slot = job_slot;
                     let mut receipt = if let Some(observation) = write_observation.as_ref() {
                         let is_click = click.is_some();
                         let retained = observation.clone();

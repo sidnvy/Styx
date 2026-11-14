@@ -36,7 +36,6 @@ async fn fault_case(mode: Fault) {
     let host = crate::host::bootstrap::OwnedExecHost::reserve(
         "protocol-host-generation".try_into().unwrap(),
         facts(),
-        2,
     )
     .unwrap()
     .without_executor()

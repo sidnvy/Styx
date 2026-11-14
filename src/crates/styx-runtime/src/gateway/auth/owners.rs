@@ -4,7 +4,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 static NEXT: AtomicU64 = AtomicU64::new(1);
-const LIMIT: usize = 4096;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Open,
@@ -18,9 +17,6 @@ pub(super) struct Owners {
 }
 impl Owners {
     pub(super) fn mint(&mut self) -> Option<u64> {
-        if self.records.len() == LIMIT {
-            return None;
-        }
         let seq = NEXT
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .ok()?;
@@ -52,17 +48,18 @@ impl Owners {
 mod tests {
     use super::*;
     #[test]
-    fn unknown_cleanup_pins_watermark_new_admission_stops_but_fencing_never_fails() {
+    fn unknown_cleanup_pins_watermark_without_blocking_other_owners() {
         let mut ledger = Owners::default();
         let unknown = ledger.mint().unwrap();
         ledger.fence(unknown);
-        for _ in 1..LIMIT {
+        for _ in 1..5000 {
             let n = ledger.mint().unwrap();
             ledger.fence(n);
             ledger.complete(n);
         }
         assert_eq!(ledger.watermark, 0);
-        assert!(ledger.mint().is_none());
+        let additional = ledger.mint().unwrap();
+        ledger.complete(additional);
         ledger.fence(unknown);
         ledger.complete(unknown);
         assert!(ledger.records.is_empty());

@@ -371,7 +371,6 @@ async fn actual_tls_wss_codex_start_read_duplicate_and_lost_response_batch() {
                 ),
             ]),
             rpc_timeout: Duration::from_secs(2),
-            retained_process_limit: 8,
         },
         rpc_partition,
     )
@@ -381,7 +380,6 @@ async fn actual_tls_wss_codex_start_read_duplicate_and_lost_response_batch() {
         adapter,
         OperationLedger::new(HostGeneration::try_from("protocol-host-generation").unwrap()),
         facts(),
-        2,
     )
     .unwrap();
     let pkidir = PathBuf::from(std::env::var("STYX_TEST_TLS_FIXTURES").unwrap());
@@ -550,11 +548,9 @@ async fn actual_canonical_tls_wss_host_action_journey() {
                     ),
                 ]),
                 rpc_timeout: Duration::from_secs(2),
-                retained_process_limit: 4,
             },
             HostGeneration::try_from("protocol-action-host-generation").unwrap(),
             facts(),
-            2,
         )
         .await
         .unwrap(),
