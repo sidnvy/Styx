@@ -121,21 +121,11 @@ struct ProductSettingsView: View {
                 if model.nativeSupportsOperation("retireRole") {
                     Button(productText("更改这台电脑的角色…", "Change this computer's role…")) { model.nativeChangeRole() }.disabled(model.busy)
                 }
-                if model.nativeSupportsOperation("stageRuntime") || model.nativeSupportsOperation("recoverRuntimeUpdate") {
-                    DisclosureGroup(productText("高级：运行组件更新", "Advanced: runtime component updates")) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(productText("使用此 App 随附的运行组件更新本机。身份、配对和设置会保留；完成后请重新连接。", "Update this computer with the runtime components included in this App. Identity, pairing and settings are kept; reconnect after updating.")).font(.caption).foregroundStyle(.secondary)
-                            HStack {
-                                Button(productText("准备更新", "Prepare update")) { model.nativeStageRuntime() }.disabled(model.busy || ![nil, "not_started", "committed"].contains(model.nativeRuntimeUpdate["status"].string))
-                                Button(productText("更新组件…", "Update components…")) { model.nativeUpdateRuntime() }.disabled(model.busy || model.nativeRuntimeUpdate["status"].string != "staged")
-                                Button(productText("检查更新状态", "Check update status")) { model.nativeCheckRuntimeUpdate() }.disabled(model.busy)
-                                if model.nativeRuntimeUpdate["can_recover"] == .bool(true) {
-                                    Button(productText("恢复更新", "Recover update")) { model.nativeRecoverRuntimeUpdate() }.disabled(model.busy)
-                                }
-                            }
-                            Text(runtimeUpdateDescription).font(.caption).foregroundStyle(.secondary)
-                        }.padding(.top, 8)
-                    }
+                if model.nativeSupportsOperation("updateStyx") {
+                    Button(productText("更新 Styx…", "Update Styx…")) { model.updateStyx() }
+                        .disabled(model.busy).accessibilityIdentifier("styx-update")
+                    if model.busy { ProgressView(productText("正在处理，请保持 Styx 打开…", "Working… Keep Styx open.")) }
+                    Text(runtimeUpdateDescription).font(.caption).foregroundStyle(.secondary)
                 }
                 if model.nativeSupportsOperation("transferToService") || model.nativeHasServiceState {
                     ProductServiceSettings(model: model)
@@ -166,12 +156,12 @@ struct ProductSettingsView: View {
     }
     private var runtimeUpdateDescription: String {
         switch model.nativeRuntimeUpdate["status"].string {
-        case nil, "not_started": return productText("尚未开始组件更新。", "No component update has started.")
-        case "staging": return productText("正在准备更新…", "Preparing the update…")
-        case "staged": return productText("更新已准备好。请选择“更新组件”继续。", "The update is prepared. Choose Update components to continue.")
-        case "updating": return productText("正在更新组件…", "Updating components…")
-        case "committed": return productText("组件已更新，可以重新连接。", "Components are updated. You can reconnect.")
-        default: return productText("更新状态需要检查。请先检查更新状态；如显示恢复按钮，可继续恢复更新。", "The update needs review. Check update status, then use Recover update if it is available.")
+        case "staging", "staged", "updating": return productText("正在更新 Styx，请保持 App 打开。", "Updating Styx. Keep the app open.")
+        case "committed": return model.localIndicator == .connected
+            ? productText("Styx 已更新并连接。", "Styx is updated and connected.")
+            : productText("Styx 已更新，正在检查连接。", "Styx is updated. Checking the connection.")
+        case "unknown": return productText("更新需要处理。再次选择“更新 Styx”会在可恢复时继续原更新，设置与配对会保留。", "The update needs attention. Update Styx continues the original update when recovery is available; your settings and pairing are retained.")
+        default: return productText("更新会保留设置与配对，并自动恢复连接。", "Updating keeps your settings and pairing and reconnects automatically.")
         }
     }
     private var componentNotice: String? {
@@ -220,7 +210,15 @@ struct ProductSettingsView: View {
         }
     }
     @ViewBuilder private var computers: some View {
-        GroupBox(productText("这台 Mac", "This Mac")) { local.padding(8) }
+        GroupBox(productText("这台 Mac", "This Mac")) {
+            VStack(alignment: .leading, spacing: 16) {
+                Label(model.localIndicator.label, systemImage: "desktopcomputer")
+                if model.nativeHost && model.localIndicator != .connected && model.status["foreground"]["status"].string != "started" && model.nativeSupportsOperation("connect") {
+                    Button(productText("重新连接", "Reconnect")) { model.resumeForeground() }.disabled(model.busy || model.status["admission_fenced"].bool)
+                }
+                local
+            }.padding(8)
+        }
         if let notice = model.nativeLanJoinNotice { Text(notice).font(.callout).textSelection(.enabled) }
         if model.joined || (model.nativeHost && model.status["gateway"] == .null) {
             Label(productText("由管理电脑管理电脑连接", "Computer connections are managed on the main computer"), systemImage: "link")

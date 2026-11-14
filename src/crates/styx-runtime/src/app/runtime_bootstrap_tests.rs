@@ -36,6 +36,9 @@ impl Fixture {
         Self::with_tunnel(false)
     }
     fn with_tunnel(worker: bool) -> Self {
+        Self::with_version(worker, "0.4.0-test.1")
+    }
+    fn with_version(worker: bool, version: &str) -> Self {
         let top = std::env::temp_dir().join(format!("styx-bootstrap-{}", uuid::Uuid::new_v4()));
         directory(&top);
         let bundle = top.join("Styx.app");
@@ -73,7 +76,7 @@ impl Fixture {
             .unwrap();
         let mut manifest = json!({"schema":2,"runtime_format":"native_rust_v1",
             "component":"styx","scope":"runtime_candidate","minimum_reader":"native_pairing_lifecycle_v1",
-            "target":"x86_64-unknown-linux-gnu","version":"0.4.0-test.1","entrypoint":"bin/styx",
+            "target":"x86_64-unknown-linux-gnu","version":version,"entrypoint":"bin/styx",
             "source":{"revision":"1".repeat(40),"inputs_sha256":Sha256Digest::of_bytes(b"{}")},
             "contracts":{"control":1,"management_state":7},"files":files,"external_workers":[]});
         if worker {
@@ -610,4 +613,57 @@ async fn fresh_profile_reopens_from_external_runtime_after_bundle_replacement() 
     assert_eq!(quit["quit"]["status"], "ready_to_quit");
     drop(reopened);
     fs::remove_dir_all(top).unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires loopback sockets; disposable signed setup/update/reconnect fixture"]
+async fn one_desktop_update_commits_both_roles_and_requests_reconnection() {
+    let fixture = Fixture::with_tunnel(true);
+    let mut app = fixture.open().await;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let raw = |value: Value| serde_json::value::to_raw_value(&value).unwrap();
+    app.create_local(LocalInput::desktop(&raw(json!({"port":port,
+        "label":"One update", "computer":false,"browser":false,
+        "persistLogin":false,"tunnel":{"tunnelId":"tunnel_abcdefgh","apiKey":"sk-testtesttesttest"}}))).unwrap())
+        .await.unwrap();
+    app.settle_all().await.unwrap();
+    app.set_desired(NativeRunDesired::Stopped).await.unwrap();
+    let replacement = Fixture::with_version(true, "0.4.0-test.2");
+    app.runtime_selection_file = Some(replacement.candidate.clone());
+    let before = inventory(&fixture.container);
+    assert_eq!(
+        app.dispatch(Operation::UpdateStyx, raw(json!({"authorize":false})))
+            .await
+            .unwrap_err()
+            .code(),
+        "app_runtime_authorization_required"
+    );
+    assert_eq!(before, inventory(&fixture.container));
+    let result = app
+        .dispatch(Operation::UpdateStyx, raw(json!({"authorize":true})))
+        .await
+        .unwrap();
+    assert_eq!(result["runtimeUpdate"]["status"], "committed");
+    assert!(!app.runtime_update_owns_work());
+    assert!(
+        app.running.is_some(),
+        "the same user action must request Host reconnection"
+    );
+    assert!(
+        app.local_gateway.as_ref().unwrap().status()["running"]
+            .as_bool()
+            .unwrap()
+    );
+    let committed = inventory(&fixture.container);
+    app.dispatch(Operation::UpdateStyx, raw(json!({"authorize":true})))
+        .await
+        .unwrap();
+    assert_eq!(
+        committed,
+        inventory(&fixture.container),
+        "up-to-date is a no-op, not a second update"
+    );
+    app.settle_for_quit().await.unwrap();
 }

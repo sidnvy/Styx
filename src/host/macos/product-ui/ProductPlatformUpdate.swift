@@ -53,15 +53,12 @@ final class ProductPlatformUpdate: NSObject {
         guard client.isNativeHost, self.client == nil || self.client === client else { return }
         self.client = client; self.report = report
     }
-    func appendMenuItem(to menu: NSMenu) {
+    // The single General > Update Styx action reaches the platform updater too.
+    // App replacement and signing remain Sparkle's responsibility.
+    func checkAppUpdateIfAvailable() {
         #if canImport(Sparkle)
-        if controller != nil {
-            let check = menu.addItem(withTitle: productText("检查更新…", "Check for Updates…"), action: #selector(checkForUpdates(_:)), keyEquivalent: "")
-            check.target = self
-        }
+        if controller != nil { checkForUpdates(nil) }
         #endif
-        let manual = menu.addItem(withTitle: productText("准备手动更新 App…", "Prepare manual App update…"), action: #selector(prepareManualUpdate(_:)), keyEquivalent: "")
-        manual.target = self
     }
     private func attention(_ message: String) {
         if let report { report(message) }

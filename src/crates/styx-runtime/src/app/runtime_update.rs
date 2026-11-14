@@ -714,6 +714,94 @@ impl Work {
     }
 }
 impl HostApp {
+    /// One desktop action, using the existing update transaction and role owners.
+    /// No UI-side phase ledger; a lost reply never starts a replacement update.
+    pub(super) async fn update_styx(&mut self, input: StageInput) -> Result<(), AppError> {
+        if !input.authorize {
+            return Err(AppError("app_runtime_authorization_required"));
+        }
+        let continuing = self
+            .runtime_update
+            .as_ref()
+            .is_some_and(|state| state.status != "committed");
+        self.reap_runtime_update(true).await;
+        if !continuing {
+            let candidate = SelectionPin::open(
+                self.runtime_selection_file
+                    .as_deref()
+                    .ok_or(AppError("app_runtime_candidate_unavailable"))?,
+            )?;
+            if let Some(current) = &self.native_runtime
+                && current
+                    .runtime_selection()
+                    .map_err(|e| AppError(e.code()))?
+                    .manifest_sha256
+                    == candidate.selection.manifest_sha256
+            {
+                // Already on the App's components: do not copy another release,
+                // stop current tasks, or create another update transaction.
+                return Ok(());
+            }
+        }
+        if let Some(state) = &self.runtime_update
+            && state.status == "unknown"
+        {
+            if !state.can_recover {
+                return Err(AppError(
+                    state.error.unwrap_or("app_runtime_worker_unknown"),
+                ));
+            }
+            let transaction_id = state
+                .transaction_id
+                .clone()
+                .ok_or(AppError("app_runtime_original_transaction_required"))?;
+            self.update_runtime(
+                UpdateInput {
+                    authorize: true,
+                    transaction_id,
+                },
+                true,
+            )
+            .await?;
+            self.reap_runtime_update(true).await;
+        } else if self.runtime_update.as_ref().is_none_or(|state| {
+            state.status != "staged" && !(continuing && state.status == "committed")
+        }) {
+            self.stage_runtime(input).await?;
+            self.reap_runtime_update(true).await;
+        }
+        if self
+            .runtime_update
+            .as_ref()
+            .is_some_and(|state| state.status == "staged")
+        {
+            let transaction_id =
+                TransactionId::try_from(format!("app-runtime-{}", uuid::Uuid::new_v4().simple()))
+                    .map_err(|_| AppError("app_runtime_input_invalid"))?;
+            self.update_runtime(
+                UpdateInput {
+                    authorize: true,
+                    transaction_id,
+                },
+                false,
+            )
+            .await?;
+            self.reap_runtime_update(true).await;
+        }
+        let state = self
+            .runtime_update
+            .as_ref()
+            .ok_or(AppError("app_runtime_not_staged"))?;
+        if state.status != "committed" {
+            return Err(AppError(
+                state.error.unwrap_or("app_runtime_worker_unknown"),
+            ));
+        }
+        if let Some(gateway) = &mut self.local_gateway {
+            gateway.start().await?;
+        }
+        self.connect_host().await
+    }
     /// Discover only already-published immutable original inputs. No stage,
     /// C07 phase, pairing request or role launch is performed on startup.
     pub(super) fn observe_runtime_update(&mut self) -> Result<bool, AppError> {

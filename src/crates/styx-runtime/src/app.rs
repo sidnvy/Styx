@@ -264,6 +264,7 @@ enum Operation {
     AppLifecycle,
     AppLogin,
     AppLoginResult,
+    UpdateStyx,
     StageRuntime,
     UpdateRuntime,
     RuntimeUpdateStatus,
@@ -1365,6 +1366,7 @@ impl HostApp {
                 "connect",
                 "disconnect",
                 "retireRole",
+                "updateStyx",
                 "stageRuntime",
                 "updateRuntime",
                 "runtimeUpdateStatus",
@@ -1520,6 +1522,7 @@ impl HostApp {
                 | Operation::Join
                 | Operation::CreateLocal
                 | Operation::ResumeLocal
+                | Operation::UpdateStyx
                 | Operation::StageRuntime
                 | Operation::UpdateRuntime
                 | Operation::RecoverRuntimeUpdate
@@ -1629,6 +1632,10 @@ impl HostApp {
         }
         if matches!(operation, Operation::RuntimeUpdateStatus) {
             self.scope.validate()?;
+            return Ok(self.snapshot().await);
+        }
+        if matches!(operation, Operation::UpdateStyx) {
+            self.update_styx(decode_input(&input)?).await?;
             return Ok(self.snapshot().await);
         }
         if matches!(operation, Operation::StageRuntime) {
@@ -1758,6 +1765,7 @@ impl HostApp {
             | Operation::StartupStatus
             | Operation::Status
             | Operation::NetworkInterfaces
+            | Operation::UpdateStyx
             | Operation::StageRuntime
             | Operation::UpdateRuntime
             | Operation::RuntimeUpdateStatus

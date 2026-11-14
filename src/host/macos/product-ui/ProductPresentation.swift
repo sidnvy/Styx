@@ -398,12 +398,12 @@ struct ProductDailyPanel: View {
             }.disabled(!model.nativeSupportsOperation("inspectJoin"))
         } else {
             ProductMenuRow(title: productText("这台 Mac", "This Mac"), symbol: "laptopcomputer", state: model.localIndicator, disclosure: true) {
-                controller?.present()
+                showSettings(.computers)
             }
             Divider().padding(.vertical, 5)
             if model.status["gateway"] == .null {
                 ProductMenuRow(title: productText("管理电脑连接", "Main computer"), symbol: "link", state: model.localIndicator, disclosure: true) {
-                    controller?.present()
+                    showSettings(.computers)
                 }
             } else {
                 ForEach(model.devices.filter { !$0.isLocal }) { device in

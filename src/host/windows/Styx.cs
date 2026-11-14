@@ -85,7 +85,7 @@ namespace StyxNative {
   }
   internal async Task<object> Call(string operation,Dictionary<string,object> input){
    Task failedCleanup=null;await gate.WaitAsync();try{var p=child;if(Volatile.Read(ref closed)!=0||p==null||p.HasExited||sequence==Int32.MaxValue)throw new IOException("app_core_unavailable");int id=++sequence;string request=Json.Codec.Serialize(Json.Obj("schema",1,"id",id,"operation",operation,"input",input));if(request.Length>65536)throw new IOException("app_request_too_large");
-    await p.StandardInput.WriteLineAsync(request);await p.StandardInput.FlushAsync();pendingRead=ReadLineBounded(p.StandardOutput,2097152);if(!(operation=="quitAdmission"&&Volatile.Read(ref shutdownCustody)==1)&&await Task.WhenAny(pendingRead,Task.Delay(150000))!=pendingRead){throw new IOException("app_result_unknown_no_replay");}
+    await p.StandardInput.WriteLineAsync(request);await p.StandardInput.FlushAsync();pendingRead=ReadLineBounded(p.StandardOutput,2097152);if(operation!="updateStyx"&&!(operation=="quitAdmission"&&Volatile.Read(ref shutdownCustody)==1)&&await Task.WhenAny(pendingRead,Task.Delay(150000))!=pendingRead){throw new IOException("app_result_unknown_no_replay");}
     string line=await pendingRead;pendingRead=null;if(line==null||Volatile.Read(ref closed)!=0)throw new IOException("app_result_unknown_no_replay");var response=Json.Codec.DeserializeObject(line);if(Convert.ToInt32(Json.Get(response,"id"))!=id){throw new IOException("app_correlation_unknown_no_replay");}if(!Json.Yes(response,"ok"))throw new NativeOperationException(Json.Str(response,"error"),retirement:Json.Get(response,"retirement"),joinNotSent:Json.Yes(response,"retryable")&&Json.Get(response,"uncertain") is bool&&!Json.Yes(response,"uncertain"));return Json.Get(response,"result");
    }catch(NativeOperationException){throw;}catch{if(Volatile.Read(ref shutdownCustody)!=1&&Interlocked.Exchange(ref closed,1)==0)failedCleanup=Task.Run(()=>DisposeOriginal());}finally{gate.Release();}
    if(failedCleanup!=null)await failedCleanup;throw new IOException("app_result_unknown_no_replay");
@@ -269,7 +269,7 @@ namespace StyxNative {
  }
  sealed class StyxContext:ApplicationContext {
   readonly string root,state;readonly NotifyIcon tray;readonly Icon icon;readonly Form panel;readonly Settings settings;readonly CancellationTokenSource startupCancellation=new CancellationTokenSource();readonly Stopwatch startupClock=Stopwatch.StartNew();readonly bool startupTest,loginStartup;readonly System.Windows.Forms.Timer startupTimer,statusTimer;
-  VerificationTiming verificationTiming;Core core;bool busy,closing,starting,startupHostUpdateAttempted,loginChangeUnconfirmed,actionsGatedDuringStartup=true;int mutationRevision,progressEvents;long firstPaintTicks=-1,verificationStartedTicks=-1,verifiedTicks=-1,readyTicks=-1;object snapshot;Task<object> observation;TaskCompletionSource<bool> mutationDone;readonly Label message;
+  VerificationTiming verificationTiming;Core core;bool busy,closing,starting,loginChangeUnconfirmed,actionsGatedDuringStartup=true;int mutationRevision,progressEvents;long firstPaintTicks=-1,verificationStartedTicks=-1,verifiedTicks=-1,readyTicks=-1;object snapshot;Task<object> observation;TaskCompletionSource<bool> mutationDone;readonly Label message;
   internal int ResultCode=0;
   LocalAppControl localControl;Task<object> quitWork;string quitPhase="running";object startupCoreExit;
   internal object CurrentStatus { get { return snapshot; } }
@@ -285,15 +285,17 @@ namespace StyxNative {
    panel=Window("Styx",new Size(340,420));panel.ShowInTaskbar=false;panel.FormBorderStyle=FormBorderStyle.FixedToolWindow;
    var stack=Stack(panel);Logo(stack,64);Heading(stack,"Your computer, connected");
    message=Text(stack,"Open Settings to get started.",110);
-   Button(stack,"Reconnect",Reconnect);
-   Button(stack,"Settings",()=>{OpenSettings();return Task.FromResult(0);});
+   Button(stack,"This computer",()=>{OpenSettings("overview");return Task.FromResult(0);});
+   Button(stack,"ChatGPT",()=>{OpenSettings("chat");return Task.FromResult(0);});
+   Button(stack,"General",()=>{OpenSettings("general");return Task.FromResult(0);});
+   Button(stack,"Quit Styx",RequestQuit);
    panel.FormClosing+=(s,e)=>{if(!closing){e.Cancel=true;panel.Hide();}};
    settings=new Settings(this,icon);
    localControl=control;
    if(localControl!=null){settings.CreateControl();var handle=settings.Handle;localControl.Start(LocalControlOnUi,()=>settings.BeginInvoke(new Action(Quit)));}
    startupTimer=new System.Windows.Forms.Timer {Interval=50};startupTimer.Tick+=async(s,e)=>{startupTimer.Stop();await InitializeCore();};tray=new NotifyIcon { Icon=icon,Text="Styx — open to view connection",Visible=!test };
    statusTimer=new System.Windows.Forms.Timer {Interval=1000};statusTimer.Tick+=async(s,e)=>{if(!closing&&!busy&&!starting&&core!=null&&observation==null)await Refresh();};
-   var menu=new ContextMenuStrip();menu.Items.Add("Open Styx",null,(s,e)=>ShowPanel());menu.Items.Add("Settings",null,(s,e)=>OpenSettings());menu.Items.Add("Quit Styx",null,async(s,e)=>await RequestQuit());tray.ContextMenuStrip=menu;tray.MouseClick+=(s,e)=>{if(e.Button==MouseButtons.Left)ShowPanel();};
+   var menu=new ContextMenuStrip();menu.Items.Add("Open Styx",null,(s,e)=>ShowPanel());menu.Items.Add("Computers",null,(s,e)=>OpenSettings("overview"));menu.Items.Add("ChatGPT",null,(s,e)=>OpenSettings("chat"));menu.Items.Add("General",null,(s,e)=>OpenSettings("general"));menu.Items.Add("Quit Styx",null,async(s,e)=>await RequestQuit());tray.ContextMenuStrip=menu;tray.MouseClick+=(s,e)=>{if(e.Button==MouseButtons.Left)ShowPanel();};
    if(!test){
     starting=true;settings.Startup("Opening Styx…",true,false);message.Text="Opening Styx…";
     // WM_TIMER runs after pending paints; BeginInvoke can overtake WM_PAINT.
@@ -409,7 +411,7 @@ namespace StyxNative {
   internal static Button Button(Control p,string text,Func<Task> action){var b=new Button {Text=text,AutoSize=true,MinimumSize=new Size(210,36),FlatStyle=FlatStyle.System,Margin=new Padding(0,5,0,5)};b.Click+=async(s,e)=>await action();p.Controls.Add(b);return b;}
   internal void Logo(Control p,int size){p.Controls.Add(new PictureBox { Image=Image.FromFile(Path.Combine(root,"styx-logo.png")),SizeMode=PictureBoxSizeMode.Zoom,Width=size,Height=size,Margin=new Padding(0,0,0,15) });}
   void ShowPanel(){var bounds=Screen.PrimaryScreen.WorkingArea;panel.Location=new Point(bounds.Right-panel.Width-12,bounds.Bottom-panel.Height-12);panel.Show();panel.Activate();}
-  void OpenSettings(){settings.Show();settings.Activate();}
+  void OpenSettings(string section=null){if(section!=null)settings.ShowPage(section);settings.Show();settings.Activate();}
   // Fixed protocol result names only. Never display exception Message,
   // request data, upstream errors, file paths or credentials.
   static string NativeFailureCode(string code){
@@ -435,12 +437,12 @@ namespace StyxNative {
   }
   internal async Task Run(Func<Task> action,string pending="Working…",string failure="The operation could not be confirmed. Refresh to review current state. Completed steps are retained; an interrupted operation is not automatically repeated."){
    if(busy||starting||core==null)return;string previousMessage=message.Text;busy=true;mutationDone=new TaskCompletionSource<bool>();mutationRevision++;settings.Startup(pending,true,false);message.Text=pending;settings.Feedback(pending);
-   try{var reading=observation;if(reading!=null){try{await reading;}catch{}if(observation==reading)observation=null;}await action();if(settings.HasFeedback(pending))settings.Feedback("Operation completed. Review the current connection and test evidence below.");}
+   try{var reading=observation;if(reading!=null){try{await reading;}catch{}if(observation==reading)observation=null;}await action();if(settings.HasFeedback(pending))settings.Feedback("Settings saved.");}
    catch(Exception error){string text=failure;var native=error as NativeOperationException;if(native!=null&&native.JoinNotSent)text="The pairing request was not sent. Check network access and allow styx incoming connections in the hub computer’s system prompt. Then paste a new invitation, review it and submit again. Styx will not retry automatically.";else if(native!=null&&(native.Code=="pairing_gateway_unreachable"||native.Code=="pairing_gateway_timeout"))text="Cannot reach the Gateway. Check the address and connection.";else if(native!=null&&(native.Code=="pairing_code_invalid_or_expired"||native.Code=="pairing_link_expired_or_invalid"))text="This invitation is invalid or has expired. Get a new invitation from your Gateway and review it before submitting again. Styx will not retry automatically.";else if(native!=null&&native.Code=="app_system_trust_not_supported")text="This native join currently requires an explicit Gateway CA in the invitation. System-trust-only joining is not supported; no CA or approval was fabricated.";else if(native!=null&&Array.IndexOf(new[]{"app_lan_address_invalid","app_network_interface_changed","app_network_interface_required","app_network_interfaces_unavailable","tunnel_client_unavailable"},native.Code)>=0)text="Select an available LAN or VPN network. If the network changed, detect networks again. Setup was not submitted.";else if(native!=null&&native.Code=="tunnel_client_unavailable")text="Use a Gateway package that includes the Tunnel client.";else if(native!=null&&native.Code=="app_operation_not_supported")text="This operation is unavailable in the native Host slice. Existing settings were retained.";else if(native!=null&&native.Code=="host_payload_insufficient_space")text=SpaceFeedback(native.Budget,native.Preflight);else if(native!=null&&native.Code=="windows_native_app_binding_required")text="The desktop test could not start. This package could not verify the current native Styx app. Your settings are retained.";else if(native!=null&&native.Code=="desktop_acceptance_native_app_changed")text="The native Styx app changed during this desktop test. Create a new test in this app before continuing.";else if(native!=null&&native.Code=="app_login_result_unknown_no_replay")text="The login startup change is unconfirmed and will not be repeated. Check Windows startup settings. Quit and reopen Styx to read the system state.";else if(native!=null&&native.Code=="app_login_observation_changed")text="The Startup entry changed before the operation could finish. Styx preserved the current entry. Check its current state before making another explicit change.";else if(native!=null&&native.Code=="work_in_progress")text="A task is still running. Wait for it to finish before quitting or updating Styx.";else if(native!=null&&native.Code=="work_state_unknown")text="Styx could not confirm whether tasks are running. Keep it open and try again after checking the connection.";if(native!=null){string diagnostic=NativeFailureCode(native.Code);if(diagnostic.Length>0)text+="\nNative result: "+diagnostic;}message.Text="Connection needs attention. Open Settings to review the last result.";settings.Feedback(text);}
    finally{if(message.Text==pending)message.Text=previousMessage;settings.Startup("",false,false);busy=false;mutationDone.TrySetResult(true);}
    // A mutation invalidates an in-flight startup observation. Resume only that
    // read after settling; never replay the mutation or block the ready controls.
-   if(!closing&&core!=null&&ManagementOnly)LoadInitialDetails();else await CompleteStartupUpdate();
+   if(!closing&&core!=null&&ManagementOnly)LoadInitialDetails();
   }
   internal async void FinishInviting(){if(core==null)return;try{while(busy)await mutationDone.Task;await Run(async()=>{await Call("closePairing");},"Closing invitation…","The pairing window could not be confirmed closed. Review the connection; the invitation retains its original expiry.");}catch{settings.Feedback("The pairing window could not be confirmed closed. Review the connection before inviting again.");}}
   internal async Task Read(Func<Task> action){try{await action();}catch{settings.ObservationFailed("This information could not be refreshed. Your entries and the last confirmed state are retained.");}}
@@ -456,17 +458,9 @@ namespace StyxNative {
    if(observation!=null){await observation;return;}
    int revision=mutationRevision;var pending=Call("status");observation=pending;
    try{var latest=await pending;if(!closing&&revision==mutationRevision){snapshot=latest;PublishStatus();}}finally{if(observation==pending)observation=null;}
-   await CompleteStartupUpdate();
-  }
-  async Task CompleteStartupUpdate(){
-   if(RustHost)return;
-   if(closing||busy||core==null||startupHostUpdateAttempted||Json.Str(snapshot,"status","nativeStartup","status")!="reconciliation_required"||Json.Str(snapshot,"status","nativeStartup","reason")!="host_payload_update_required"||!Json.Yes(snapshot,"status","nativeStartup","automaticUpdate"))return;
-   // Core owns the decision. This launch attempts it once; failure remains an
-   // explicit recovery action, including when later status reads say to update.
-   startupHostUpdateAttempted=true;await UpdateRuntime(false);
   }
   void PublishStatus(){
-   if(RustHost){string phase=Json.Str(snapshot,"foreground","status"),nativeExec=Json.Str(snapshot,"foreground","execConnection");message.Text=phase=="connected"&&nativeExec=="connected"?"Connected to this computer. Exec transport is online; tool execution is checked separately.":Json.Yes(snapshot,"admission_fenced")?"A result or cleanup needs review. Operations are fenced; no action is replayed.":phase=="started"?(nativeExec=="connecting"?"Connecting to the gateway…":"The gateway is unavailable. Styx will reconnect when it is reachable."):"Connection is paused or awaiting approval. Open Settings to review.";tray.Text=phase=="connected"&&nativeExec=="connected"?"Styx — connected":"Styx — connection settings";settings.ShowStatus(snapshot);return;}
+   if(RustHost){message.Text=ConnectionText(snapshot);tray.Text=Connected(snapshot)?"Styx — connected":"Styx — connection settings";settings.ShowStatus(snapshot);return;}
    if(Json.Yes(snapshot,"status","joinRecovery","rollbackRequired")){message.Text="Joining needs recovery. Open Settings to continue.";tray.Text="Styx — joining needs recovery";settings.ShowPage("join-interrupted");return;}
    if(ManagementOnly){message.Text="Reading connection settings… Component update and recovery are available.";tray.Text="Styx — connection not checked";settings.ShowPage("component-start");return;}
    if(Json.Str(snapshot,"status","nativeStartup","status")=="reconciliation_required"&&Json.Str(snapshot,"status","nativeStartup","reason").StartsWith("host_payload_")){message.Text="The installed Styx update needs its components reconciled.";tray.Text="Styx — component update";settings.ShowPage("update-recovery");return;}
@@ -499,27 +493,23 @@ namespace StyxNative {
    if(volumes!=null)foreach(var volume in volumes){double required,available;if(!Double.TryParse(Convert.ToString(Json.Get(volume,"requiredBytes")),out required)||!Double.TryParse(Convert.ToString(Json.Get(volume,"availableBytes")),out available)||Double.IsNaN(required)||Double.IsNaN(available)||Double.IsInfinity(required)||Double.IsInfinity(available)||required<0||available<0||required>9007199254740991d||available>9007199254740991d)continue;text+="\nRequired: "+(required/1073741824d).ToString("0.00")+" GB; available: "+(available/1073741824d).ToString("0.00")+" GB.";}
    return text+"\nFree up disk space, then retry.";
   }
-  internal Task UpdateRuntime(){return UpdateRuntime(true);}
-  Task UpdateRuntime(bool confirm){return Run(async()=>{
-   startupHostUpdateAttempted=true;
-   if(confirm&&MessageBox.Show(settings,"Styx will close briefly to update its components, then reopen. Finish any running tasks before continuing.","Update Styx components",MessageBoxButtons.OKCancel,MessageBoxIcon.Information)!=DialogResult.OK)return;
-   var prepared=await Call("runtimeUpgradePrepare");string ticket=Json.Str(prepared,"handoff","ticketId");
-   if(Json.Str(prepared,"handoff","status")!="awaiting_exit"||!System.Text.RegularExpressions.Regex.IsMatch(ticket,"^[a-f0-9]{32}$"))throw new IOException();
-   await AdmitQuit();
-   var launched=await Call("runtimeUpgradeLaunch",Json.Obj("ticketId",ticket));if(Json.Str(launched,"status")!="launched"||Json.Str(launched,"ticketId")!=ticket)throw new IOException();
-   settings.Feedback("The updater is ready. Closing Styx…");settings.BeginInvoke(new Action(Quit));
-  },confirm?"Preparing the component update…":"Finishing the Styx update… Styx will close briefly and reopen.","The update could not be started. Keep Styx open and review the update status before trying again. Your settings and pairing are retained.");}
+  internal Task UpdateStyx(){
+   if(!Supports("updateStyx"))return Task.FromResult(0);
+   if(MessageBox.Show(settings,"Styx will finish the update and reconnect this computer. Running tasks will stop; your settings and pairing will be kept.","Update Styx",MessageBoxButtons.OKCancel,MessageBoxIcon.Information)!=DialogResult.OK)return Task.FromResult(0);
+   return Run(async()=>{await Call("updateStyx",Json.Obj("authorize",true));await RefreshAfterMutation();settings.ShowPage("general");settings.Feedback("Styx is up to date. " + ConnectionText(CurrentStatus));},"Updating Styx… Keep the app open.","The update needs attention. Your settings and pairing are retained. Review the current status before continuing the same update.");
+  }
+  internal static string ConnectionText(object data){
+   if(Json.Yes(data,"admission_fenced"))return "Styx needs attention. Your settings and pairing are retained.";
+   string enrollment=Json.Str(data,"enrollment","status");
+   if(enrollment=="awaiting_approval")return "Waiting for the original invitation to be approved.";
+   if(enrollment=="rejected"||Json.Str(data,"foreground","error")=="gateway_wss_admission_refused")return "This computer no longer has access to its main computer. Review connection settings.";
+   if(Connected(data))return String.IsNullOrEmpty(Json.Str(data,"foreground","computerStartupError"))?"This computer is connected.":"This computer is connected. Computer Use needs attention.";
+   if(Json.Str(data,"foreground","status")=="started")return "Connecting this computer…";
+   if(Json.Get(data,"configuration")==null&&Json.Get(data,"enrollment")==null&&Json.Get(data,"gateway")==null)return "Set up this computer or join an existing Styx.";
+   return "This computer is offline. Reconnect when you are ready.";
+  }
+  internal static bool Connected(object data){return Json.Str(data,"foreground","status")=="connected"&&Json.Str(data,"foreground","execConnection")=="connected";}
   async void LoadInitialDetails(){int revision=mutationRevision;try{await ObserveStatus();}catch{if(!closing&&revision==mutationRevision)settings.ObservationFailed("Connection settings could not be read. Update and recovery remain available. Refresh status to try again.");}}
-  internal Task ReviewRuntime(){return Run(async()=>{
-   var result=await Call("runtimeUpgradeStatus");string ticket=Json.Str(result,"handoff","ticketId"),status=Json.Str(result,"handoff","status"),transaction=Json.Str(result,"upgrade","transactionId");
-   if(status=="not_started"||status=="cancelled"||status=="rolled_back"){settings.Feedback("No component update is waiting. You can check for an update again.");return;}
-   bool migration=Json.Str(result,"upgrade","handoffTicketId")==ticket&&System.Text.RegularExpressions.Regex.IsMatch(transaction,"^[a-f0-9]{32}$")&&Json.Str(result,"upgrade","status")!="rolled_back";
-   if(migration){if(MessageBox.Show(settings,"Return to the previous components? Styx will close briefly, restore the saved version and reopen. Your computer identity and pairing are retained.","Recover component update",MessageBoxButtons.OKCancel,MessageBoxIcon.Question)!=DialogResult.OK)return;await AdmitQuit();var launched=await Call("runtimeUpgradeRollback",Json.Obj("ticketId",ticket));if(Json.Str(launched,"status")!="launched"||Json.Str(launched,"ticketId")!=ticket)throw new IOException();settings.BeginInvoke(new Action(Quit));return;}
-   if(status=="applied_stopped"){settings.Feedback("The components were updated. Reconnect this computer to check the connection.");return;}
-   if(MessageBox.Show(settings,"Cancel the waiting update? Your existing components will stay installed.","Cancel component update",MessageBoxButtons.OKCancel,MessageBoxIcon.Question)!=DialogResult.OK)return;
-   var cancelled=await Call("runtimeUpgradeCancel",Json.Obj("ticketId",ticket));if(Json.Str(cancelled,"handoff","status")!="cancelled")throw new IOException();settings.Feedback("The waiting update was cancelled. You can start it again when ready.");
-  },"Checking the component update…","The update recovery could not be confirmed. Keep Styx open; your recovery record is retained.");}
-  async Task AdmitQuit(){var result=await Call("quitAdmission");if(Json.Str(result,"quit","status")!="ready_to_quit"||!System.Text.RegularExpressions.Regex.IsMatch(Json.Str(result,"quit","ticketId"),"^[a-f0-9]{32}$"))throw new IOException();}
   object QuitReply(string status,string code=null,object exit=null){return Json.Obj("status",status,"code",code,"coreExit",exit);}
   async Task<object> LocalControlOnUi(string operation){
    var done=new TaskCompletionSource<object>();
@@ -589,8 +579,8 @@ namespace StyxNative {
   sealed class CapabilityDraft {internal string Label=Environment.MachineName,LanAddress="";internal bool Exec=true,Computer=true,Browser,AllowRemoteHosts;internal int Channel;internal CheckState Persist=CheckState.Checked;}
   readonly StyxContext owner;readonly FlowLayoutPanel content,navigation;readonly TableLayoutPanel startupPanel;readonly Label startupText;readonly ProgressBar startupProgress;readonly Button retryStartup;readonly Label feedback,statusReadout,observationError;readonly Dictionary<string,CapabilityDraft> capabilityDrafts=new Dictionary<string,CapabilityDraft>();
   string renderedRustOverviewKey="";
-  string page="welcome",requestedPage="overview",joinOrigin,joinCa,challengeId,tunnelDraft="",keyDraft="",readbackSubmitted;object acceptance;bool readbackInFlight,renderedRustMode,localCreationSubmitted;TextBox label,link,tunnel,key,desktopInput,challengePrompt;Label desktopInputLabel;Button confirmChat,updateRuntime;CheckBox exec,computer,browser,persist;ComboBox channel;readonly System.Windows.Forms.Timer desktopTimer;
-  internal Settings(StyxContext context,Icon icon){owner=context;Text="Styx Settings";Icon=icon;ClientSize=new Size(590,720);MinimumSize=new Size(550,650);Font=new Font("Segoe UI",10);BackColor=Color.FromArgb(249,249,247);AutoScaleMode=AutoScaleMode.Dpi;StartPosition=FormStartPosition.CenterScreen;var outer=new TableLayoutPanel { Dock=DockStyle.Fill,RowCount=3,ColumnCount=1,Padding=new Padding(0) };outer.RowStyles.Add(new RowStyle(SizeType.Absolute,62));outer.RowStyles.Add(new RowStyle(SizeType.AutoSize));outer.RowStyles.Add(new RowStyle(SizeType.Percent,100));Controls.Add(outer);navigation=new FlowLayoutPanel { Dock=DockStyle.Fill,WrapContents=false,Padding=new Padding(15,8,0,0) };outer.Controls.Add(navigation,0,0);StyxContext.Button(navigation,"Computers",()=>{ShowPage("overview");return Task.FromResult(0);}).MinimumSize=new Size(100,32);StyxContext.Button(navigation,"ChatGPT",()=>{ShowPage("chat");return Task.FromResult(0);}).MinimumSize=new Size(100,32);StyxContext.Button(navigation,"General",()=>{ShowPage(owner.RustHost?"general":"welcome");return Task.FromResult(0);}).MinimumSize=new Size(100,32);foreach(Control item in navigation.Controls){item.AutoSize=false;item.Width=165;item.Height=36;}startupPanel=new TableLayoutPanel {Dock=DockStyle.Top,AutoSize=true,ColumnCount=2,RowCount=2,Padding=new Padding(26,8,26,12),Visible=false};startupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));startupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));startupText=new Label {AutoSize=true,MaximumSize=new Size(390,0),Margin=new Padding(0,0,10,8)};startupProgress=new ProgressBar {Dock=DockStyle.Top,Height=8,Style=ProgressBarStyle.Marquee,MarqueeAnimationSpeed=25};retryStartup=new Button {Text="Retry",AutoSize=true,MinimumSize=new Size(75,32)};retryStartup.Click+=async(s,e)=>await owner.InitializeCore();startupPanel.Controls.Add(startupText,0,0);startupPanel.Controls.Add(retryStartup,1,0);startupPanel.Controls.Add(startupProgress,0,1);startupPanel.SetColumnSpan(startupProgress,2);startupText.Paint+=(s,e)=>owner.RecordFirstPaint();outer.Controls.Add(startupPanel,0,1);content=new FlowLayoutPanel {Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoScroll=true,Padding=new Padding(26)};outer.Controls.Add(content,0,2);feedback=new Label {Width=490,Height=100,ForeColor=Color.FromArgb(95,70,35)};statusReadout=new Label {Width=490,Height=140};observationError=new Label {Width=490,Height=65,ForeColor=Color.FromArgb(130,65,35)};desktopTimer=new System.Windows.Forms.Timer {Interval=1000};desktopTimer.Tick+=async(s,e)=>await ObserveDesktopReadback();desktopTimer.Start();FormClosing+=(s,e)=>{if(e.CloseReason==CloseReason.UserClosing){e.Cancel=true;Hide();if(InvitationPage(page))owner.FinishInviting();}};ShowPage("welcome");}
+  string page="welcome",requestedPage="overview",joinOrigin,joinCa,challengeId,tunnelDraft="",keyDraft="",readbackSubmitted;object acceptance;bool readbackInFlight,renderedRustMode,localCreationSubmitted;TextBox label,link,tunnel,key,desktopInput,challengePrompt;Label desktopInputLabel;Button confirmChat;CheckBox exec,computer,browser,persist;ComboBox channel;readonly System.Windows.Forms.Timer desktopTimer;
+  internal Settings(StyxContext context,Icon icon){owner=context;Text="Styx Settings";Icon=icon;ClientSize=new Size(590,720);MinimumSize=new Size(550,650);Font=new Font("Segoe UI",10);BackColor=Color.FromArgb(249,249,247);AutoScaleMode=AutoScaleMode.Dpi;StartPosition=FormStartPosition.CenterScreen;var outer=new TableLayoutPanel { Dock=DockStyle.Fill,RowCount=3,ColumnCount=1,Padding=new Padding(0) };outer.RowStyles.Add(new RowStyle(SizeType.Absolute,62));outer.RowStyles.Add(new RowStyle(SizeType.AutoSize));outer.RowStyles.Add(new RowStyle(SizeType.Percent,100));Controls.Add(outer);navigation=new FlowLayoutPanel { Dock=DockStyle.Fill,WrapContents=false,Padding=new Padding(15,8,0,0) };outer.Controls.Add(navigation,0,0);StyxContext.Button(navigation,"Computers",()=>{ShowPage("overview");return Task.FromResult(0);}).MinimumSize=new Size(100,32);StyxContext.Button(navigation,"ChatGPT",()=>{ShowPage("chat");return Task.FromResult(0);}).MinimumSize=new Size(100,32);StyxContext.Button(navigation,"General",()=>{ShowPage(owner.RustHost?"general":"welcome");return Task.FromResult(0);}).MinimumSize=new Size(100,32);foreach(Control item in navigation.Controls){item.AutoSize=false;item.Width=165;item.Height=36;}startupPanel=new TableLayoutPanel {Dock=DockStyle.Top,AutoSize=true,ColumnCount=2,RowCount=2,Padding=new Padding(26,8,26,12),Visible=false};startupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));startupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));startupText=new Label {AutoSize=true,MaximumSize=new Size(390,0),Margin=new Padding(0,0,10,8)};startupProgress=new ProgressBar {Dock=DockStyle.Top,Height=8,Style=ProgressBarStyle.Marquee,MarqueeAnimationSpeed=25};retryStartup=new Button {Text="Retry",AutoSize=true,MinimumSize=new Size(75,32)};retryStartup.Click+=async(s,e)=>await owner.InitializeCore();startupPanel.Controls.Add(startupText,0,0);startupPanel.Controls.Add(retryStartup,1,0);startupPanel.Controls.Add(startupProgress,0,1);startupPanel.SetColumnSpan(startupProgress,2);startupText.Paint+=(s,e)=>owner.RecordFirstPaint();outer.Controls.Add(startupPanel,0,1);content=new FlowLayoutPanel {Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoScroll=true,Padding=new Padding(26)};outer.Controls.Add(content,0,2);content.SizeChanged+=(sender,args)=>{foreach(Control child in content.Controls){if(child is Label||child is TextBox||child is CheckBox){child.Width=Math.Max(280,content.ClientSize.Width-content.Padding.Horizontal-22);}}};feedback=new Label {Width=490,Height=100,ForeColor=Color.FromArgb(95,70,35)};statusReadout=new Label {Width=490,Height=140};observationError=new Label {Width=490,Height=65,ForeColor=Color.FromArgb(130,65,35)};desktopTimer=new System.Windows.Forms.Timer {Interval=1000};desktopTimer.Tick+=async(s,e)=>await ObserveDesktopReadback();desktopTimer.Start();FormClosing+=(s,e)=>{if(e.CloseReason==CloseReason.UserClosing){e.Cancel=true;Hide();if(InvitationPage(page))owner.FinishInviting();}};ShowPage("welcome");}
   internal bool StartupActionsGated {get{return !navigation.Enabled&&!content.Enabled;}}
   internal bool StartupRetryAvailable {get{return startupPanel.Visible&&retryStartup.Visible&&retryStartup.Enabled;}}
   internal void Startup(string text,bool checking,bool canRetry){
@@ -650,7 +640,7 @@ namespace StyxNative {
   bool NativeSetupEmpty(object data){return Json.Str(data,"mode")=="rust_host"&&!Json.Yes(data,"admission_fenced")&&Json.Get(data,"gateway")==null&&Json.Get(data,"configuration")==null&&Json.Get(data,"enrollment")==null;}
   bool CanResumeLocal(){return !localCreationSubmitted&&owner.Supports("resumeLocal")&&Json.Str(owner.CurrentStatus,"enrollment","status")=="local_setup_pre_invite"&&Json.Yes(owner.CurrentStatus,"enrollment","can_resume_local");}
   bool NeedsNativeSetup(object data){return !localCreationSubmitted&&NativeSetupEmpty(data);}
-  internal void ShowPage(string name){if(owner.RustHost&&CanResumeLocal()&&(name=="overview"||name=="welcome"))name="create";if(owner.RustHost&&name=="overview"&&NeedsNativeSetup(owner.CurrentStatus))name="welcome";if(Json.Yes(owner.CurrentStatus,"status","joinRecovery","rollbackRequired"))name="join-interrupted";if(owner.ManagementOnly&&name!="update-recovery"){if(name!="component-start")requestedPage=name;name="component-start";}if(InvitationPage(page)&&!InvitationPage(name))owner.FinishInviting();page=name;updateRuntime=null;desktopInput=null;desktopInputLabel=null;challengePrompt=null;confirmChat=null;var previous=new Control[content.Controls.Count];content.Controls.CopyTo(previous,0);foreach(var item in previous)if(item!=feedback&&item!=statusReadout&&item!=observationError){var picture=item as PictureBox;if(picture!=null&&picture.Image!=null)picture.Image.Dispose();item.Dispose();}content.Controls.Clear();Status("");if(!owner.RustHost||name=="welcome"||name=="create"||name=="join")owner.Logo(content,48);StyxContext.Heading(content,name=="general"?"General":name=="runtime-settings"?"Runtime components":name=="login-startup"?"Startup":name=="chat"?"ChatGPT":(name=="overview"||name=="component-start"||name=="update-recovery")?"Computers":"Get started with Styx");
+  internal void ShowPage(string name){if(owner.RustHost&&CanResumeLocal()&&(name=="overview"||name=="welcome"))name="create";if(owner.RustHost&&name=="overview"&&NeedsNativeSetup(owner.CurrentStatus))name="welcome";if(Json.Yes(owner.CurrentStatus,"status","joinRecovery","rollbackRequired"))name="join-interrupted";if(owner.ManagementOnly&&name!="update-recovery"){if(name!="component-start")requestedPage=name;name="component-start";}if(InvitationPage(page)&&!InvitationPage(name))owner.FinishInviting();page=name;foreach(Control tab in navigation.Controls){bool selected=tab.Text==(name=="general"||name=="login-startup"?"General":name=="chat"?"ChatGPT":"Computers");tab.BackColor=selected?Color.FromArgb(225,233,240):Color.FromArgb(249,249,247);}desktopInput=null;desktopInputLabel=null;challengePrompt=null;confirmChat=null;var previous=new Control[content.Controls.Count];content.Controls.CopyTo(previous,0);foreach(var item in previous)if(item!=feedback&&item!=statusReadout&&item!=observationError){var picture=item as PictureBox;if(picture!=null&&picture.Image!=null)picture.Image.Dispose();item.Dispose();}content.Controls.Clear();Status("");if(!owner.RustHost||name=="welcome"||name=="create"||name=="join")owner.Logo(content,48);StyxContext.Heading(content,name=="general"?"General":name=="login-startup"?"Startup":name=="chat"?"ChatGPT":(name=="overview"||name=="component-start"||name=="update-recovery")?"Computers":"Get started with Styx");
    renderedRustMode=owner.RustHost;if(renderedRustMode){ShowRustPage(name);return;}
    if(name=="welcome"){
     if(Json.Get(owner.CurrentStatus,"status","deployment")!=null){
@@ -679,9 +669,8 @@ namespace StyxNative {
     });
     Action("Cancel",()=>{joinOrigin="";joinCa="";link.Clear();Feedback("");return ContinueJoiningView();},false);
    }
-   else if(name=="overview"){updateRuntime=StyxContext.Button(content,"Update and reopen Styx",owner.UpdateRuntime);updateRuntime.Visible=CanUpdateRuntime(owner.CurrentStatus);if(Json.Yes(owner.CurrentStatus,"session","hostPayloadHandoffSupported"))StyxContext.Button(content,"Review component update",owner.ReviewRuntime);Explain("Connection and account checks are observed separately. Styx runs in your signed-in Windows session. Lock, logout, UAC and elevated applications can limit desktop control.",88);RefreshAction();PreparationAction("Continue preparation");Action("Reconnect",owner.Reconnect,false);Action("Add computer",async()=>{var r=await owner.Call("inviteComputer");ShowInvitation(r);});Action("Confirm joining computer",async()=>{ShowPendingComputers(await owner.Call("pendingComputers"));});Action("Paired computers",async()=>{var r=await owner.Call("devices");ShowDevices(r);});Action("Edit capabilities",()=>{ShowPage("capabilities");return Task.FromResult(0);},false);}
-   else if(name=="component-start"){Explain("Reading connection settings… Component update and recovery remain available while this check completes.",65);updateRuntime=StyxContext.Button(content,"Update and reopen Styx",owner.UpdateRuntime);updateRuntime.Visible=CanUpdateRuntime(owner.CurrentStatus);if(Json.Yes(owner.CurrentStatus,"session","hostPayloadHandoffSupported"))StyxContext.Button(content,"Review component update",owner.ReviewRuntime);RefreshAction();Status(ComponentNotice(owner.CurrentStatus));}
-   else if(name=="update-recovery"){Explain("Styx must finish updating its components before reconnecting this computer. If the update needs attention, review it below. Your identity and pairing are retained.",90);updateRuntime=StyxContext.Button(content,"Update and reopen Styx",owner.UpdateRuntime);updateRuntime.Visible=CanUpdateRuntime(owner.CurrentStatus);StyxContext.Button(content,"Review component update",owner.ReviewRuntime);}
+   else if(name=="overview"){Explain("Connection and account checks are observed separately. Styx runs in your signed-in Windows session. Lock, logout, UAC and elevated applications can limit desktop control.",88);RefreshAction();PreparationAction("Continue preparation");Action("Reconnect",owner.Reconnect,false);Action("Add computer",async()=>{var r=await owner.Call("inviteComputer");ShowInvitation(r);});Action("Confirm joining computer",async()=>{ShowPendingComputers(await owner.Call("pendingComputers"));});Action("Paired computers",async()=>{var r=await owner.Call("devices");ShowDevices(r);});Action("Edit capabilities",()=>{ShowPage("capabilities");return Task.FromResult(0);},false);}
+   else if(name=="component-start"||name=="update-recovery"){Explain("Styx needs attention. Open General to review the update.",65);Action("General",()=>{ShowPage("general");return Task.FromResult(0);},false);}
    else if(name=="join-waiting"){Explain("Join your main computer",40);}
    else if(name=="add-computer"){Explain("On the other computer, open Styx and choose Join existing. Use the invitation below.",70);}
    else if(name=="pending-computers"){Explain("Compare the code shown on the joining computer. Confirm only when both codes match.",70);}
@@ -697,7 +686,7 @@ namespace StyxNative {
    }
    if((page=="overview"||page=="chat")&&owner.CurrentStatus!=null)Status(EvidenceStatus(owner.CurrentStatus));content.Controls.Add(statusReadout);content.Controls.Add(observationError);content.Controls.Add(feedback);
   }
-  void Unavailable(string title){var button=StyxContext.Button(content,title+" — unavailable in this native slice",()=>Task.FromResult(0));button.Enabled=false;}
+  void Unavailable(string title){var button=StyxContext.Button(content,title+" — unavailable",()=>Task.FromResult(0));button.Enabled=false;}
   Task ChangeRole(){return ChangeRoleAndShow("welcome");}
   bool JoinNeedsReview(object data){return Json.Yes(data,"admission_fenced")||(localCreationSubmitted&&Json.Get(data,"gateway")==null&&Json.Get(data,"configuration")==null&&Json.Get(data,"enrollment")==null);}
   async Task JoinGateway(){
@@ -854,34 +843,14 @@ namespace StyxNative {
    if(status=="awaiting_approval")text+="\nCompare on your Gateway: "+Json.Str(enrollment,"comparison_code")+"\nFingerprint: "+Json.Str(enrollment,"fingerprint")+"\nThen choose Check Gateway approval here.";
    return text+"\nTool execution, desktop control and target ChatGPT account acceptance are not inferred from connection status.";
   }
-  string NativeSettingsStatus(object data){
-   if(data!=null&&NeedsNativeSetup(data)&&(page=="welcome"||page=="create"||page=="join"))return "This computer is not configured. Complete setup or join a Gateway to connect.";
-   if(Json.Str(data,"enrollment","status")=="rejected")return "The Gateway rejected this request. No access was granted. Change this computer's setup to apply again with a new invitation.";
-   if(Json.Str(data,"foreground","error")=="gateway_wss_admission_refused")return "The Gateway refused this computer's access. Change this computer's role to pair again.";
-   if(Json.Yes(data,"admission_fenced")||Json.Str(data,"enrollment","status")=="awaiting_approval")return NativeStatus(data);
-   if(page!="overview"&&page!="join-waiting")return "";
-   string host=Json.Str(data,"foreground","status"),exec=Json.Str(data,"foreground","execConnection");
-   string message=host=="connected"&&exec=="connected"?"This computer is connected.":host=="started"?"Connecting this computer…":"This computer is not connected. Choose Reconnect to continue.";
-   if(!String.IsNullOrEmpty(Json.Str(data,"foreground","computerStartupError")))message+="\nComputer Use could not start. Quit Styx normally, then reopen it.";
-   return message;
-  }
-  static string NativeOverviewKey(object data){return Json.Codec.Serialize(new object[]{Json.Str(data,"enrollment","status"),Json.Str(data,"foreground","error"),Json.Str(data,"runtimeUpdate","status"),Json.Yes(data,"runtimeUpdate","can_recover"),Json.Str(data,"runtimeUpdate","transaction_id"),Json.Get(data,"supportedOperations")});}
+  string NativeSettingsStatus(object data){return StyxContext.ConnectionText(data);}
+  static string NativeOverviewKey(object data){return Json.Codec.Serialize(new object[]{Json.Str(data,"enrollment","status"),Json.Str(data,"foreground","error"),Json.Str(data,"foreground","status"),Json.Str(data,"foreground","execConnection"),Json.Get(data,"capabilities"),Json.Str(data,"runtimeUpdate","status"),Json.Yes(data,"runtimeUpdate","can_recover"),Json.Str(data,"runtimeUpdate","transaction_id"),Json.Get(data,"supportedOperations")});}
   sealed class NetworkChoice {
    internal string Name,Address;
    public override string ToString(){return String.IsNullOrEmpty(Address)?Name:Name+" · "+Address;}
   }
-  void ShowRustPage(string name){
-   if(name=="general"){
-    StyxContext.Heading(content,"Gateway");JoinGatewayAction();
-    NativeAction("This computer's capabilities…","hostCapabilities",()=>{ShowPage("host-capabilities");return Task.FromResult(0);});
-    StyxContext.Heading(content,"Startup");
-    Explain("Closing the window keeps Styx running in the system tray. Choose Quit Styx to stop this session.");
-    StyxContext.Button(content,"Quit Styx",owner.RequestQuit);
-    NativeAction("Login startup…","appLifecycle",async()=>{ShowPage("login-startup");await ReadLogin();});
-    StyxContext.Heading(content,"About Styx");Explain("Styx for Windows");
-    NativeAction("Change this computer's role…","retireRole",ChangeRole);
-    var advanced=StyxContext.Button(content,"Advanced: runtime components",()=>{ShowPage("runtime-settings");return Task.FromResult(0);});advanced.MinimumSize=new Size(260,36);
-   }else if(name=="host-capabilities"){
+  void HostCapabilities(){
+   if(!owner.Supports("hostCapabilities")){Explain("Connect this computer to change its capabilities.",45);return;}
     Explain("Turning off a capability stops its existing tasks. Other capabilities and the Gateway connection keep running.",80);
     foreach(string capability in new[]{"exec","browser","computer"}){
      string selectedCapability=capability;
@@ -889,16 +858,27 @@ namespace StyxNative {
      content.Controls.Add(toggle);
      toggle.CheckedChanged+=async(sender,args)=>{toggle.Enabled=false;try{var result=await owner.Call("hostCapabilities",Json.Obj(selectedCapability,toggle.Checked));await owner.RefreshAfterMutation();if(!Json.Yes(result,"applied"))Feedback("Settings have not fully applied. Refresh to check their status.");}catch(Exception){Feedback("The setting result is unconfirmed. Refresh the status before trying again.");}finally{if(!toggle.IsDisposed)toggle.Enabled=true;}};
     }
+  }
+  void UpdateStatus(){
+   string update=Json.Str(owner.CurrentStatus,"runtimeUpdate","status");
+   if(update=="committed")Explain(StyxContext.Connected(owner.CurrentStatus)?"Styx is updated and connected.":"Styx is updated. Connection needs attention.",50);
+   else if(update=="staging"||update=="staged"||update=="updating")Explain("An update is in progress. Keep Styx open.",50);
+   else if(update=="unknown")Explain("The update needs attention. Update Styx continues the original update when recovery is available; your settings are retained.",75);
+  }
+  void ShowRustPage(string name){
+   if(name=="general"){
+    StyxContext.Heading(content,"Connection settings");JoinGatewayAction();
+    StyxContext.Heading(content,"Startup");
+    Explain("Closing the window keeps Styx running in the system tray. Choose Quit Styx to stop this session.");
+    StyxContext.Button(content,"Quit Styx",owner.RequestQuit);
+    NativeAction("Login startup…","appLifecycle",async()=>{ShowPage("login-startup");await ReadLogin();});
+    StyxContext.Heading(content,"About Styx");Explain("Styx " + Application.ProductVersion,35);
+    NativeAction("Change this computer's role…","retireRole",ChangeRole);
+    NativeAction("Update Styx…","updateStyx",owner.UpdateStyx);
+    UpdateStatus();
+   }else if(name=="host-capabilities"){
+    HostCapabilities();
     Action("Refresh",async()=>{await owner.RefreshAfterMutation();ShowPage("host-capabilities");},false);
-    Action("Back to General",()=>{ShowPage("general");return Task.FromResult(0);},false);
-   }else if(name=="runtime-settings"){
-    Explain("Runtime updates preserve your identity, pairing and settings. Both App roles are stopped first and stay stopped until you reconnect. The two configuration updates are separate transactions.",95);
-    NativeAction("Prepare runtime update","stageRuntime",async()=>{await owner.Call("stageRuntime",new Dictionary<string,object>{{"authorize",true}});await owner.RefreshAfterMutation();ShowPage("runtime-settings");});
-    NativeAction("Check runtime update","runtimeUpdateStatus",async()=>{await owner.Call("runtimeUpdateStatus");await owner.RefreshAfterMutation();ShowPage("runtime-settings");});
-    string updateState=Json.Str(owner.CurrentStatus,"runtimeUpdate","status"),updateTransaction=Json.Str(owner.CurrentStatus,"runtimeUpdate","transaction_id");
-    if(updateState=="staged")NativeAction("Update runtime…","updateRuntime",async()=>{if(MessageBox.Show(this,"Update this App’s runtime components? Your identity, pairing and settings will be kept. Connections will pause; reconnect when the update completes. If it does not complete, use Recover update.","Update runtime",MessageBoxButtons.OKCancel,MessageBoxIcon.Question)!=DialogResult.OK)return;await owner.Call("updateRuntime",new Dictionary<string,object>{{"authorize",true},{"transactionId","app-runtime-"+Guid.NewGuid().ToString("N")}});await owner.RefreshAfterMutation();ShowPage("runtime-settings");});
-    if(Json.Yes(owner.CurrentStatus,"runtimeUpdate","can_recover")&&ValidTransaction(updateTransaction))NativeAction("Recover original runtime update","recoverRuntimeUpdate",async()=>{await owner.Call("recoverRuntimeUpdate",new Dictionary<string,object>{{"authorize",true},{"transactionId",updateTransaction}});await owner.RefreshAfterMutation();ShowPage("runtime-settings");});
-    if(!String.IsNullOrEmpty(updateState))Explain("Runtime update: "+updateState,40);
     Action("Back to General",()=>{ShowPage("general");return Task.FromResult(0);},false);
    }else if(name=="welcome"){
 
@@ -991,20 +971,19 @@ namespace StyxNative {
     Action("Return",()=>{ShowPage("welcome");return Task.FromResult(0);},false);
    }else if(name=="overview"||name=="join-waiting"){
     string enrollment=Json.Str(owner.CurrentStatus,"enrollment","status");
-    if(enrollment=="awaiting_approval"){StyxContext.Heading(content,"Join request sent — waiting for Gateway approval");Explain("The Gateway owner must compare the code below and approve this computer on the Gateway. Then choose Check Gateway approval here. No need to send the request again.",100);}
-    else Explain("Styx keeps your local connection and gateway running while the App is open. If you joined another computer, its gateway is still used.",85);
-    RefreshAction();
-    if(enrollment=="awaiting_approval")NativeAction("Check Gateway approval","claimJoin",async()=>{var result=await owner.Call("claimJoin");string actual=Json.Str(result,"status");if(actual!="awaiting_approval"&&actual!="ready_to_connect"&&actual!="rejected")throw new IOException();await owner.RefreshAfterMutation();ShowPage("overview");Feedback(actual=="rejected"?"The Gateway rejected this request. No access was granted.":actual=="awaiting_approval"?"The Gateway has not approved this request. No connection was started.":"The Gateway confirmed this identity. Check the current connection status above.");});
-    if(Json.Str(owner.CurrentStatus,"foreground","error")!="gateway_wss_admission_refused")NativeAction("Reconnect","connect",async()=>{await owner.Call("connect");await owner.RefreshAfterMutation();Feedback(StyxContext.ReconnectResult(owner.CurrentStatus));});
-    JoinGatewayAction();
-    NativeAction("Change this computer's role…","retireRole",ChangeRole);
-    if(owner.Supports("computers")){
+    StyxContext.Heading(content,"This computer");
+    Explain(NativeSettingsStatus(owner.CurrentStatus),55);
+    if(enrollment=="awaiting_approval"){
+     Explain("Waiting for the original invitation to be approved.",45);
+     NativeAction("Check approval","claimJoin",async()=>{await owner.Call("claimJoin");await owner.RefreshAfterMutation();ShowPage("overview");});
+    }else if(!StyxContext.Connected(owner.CurrentStatus)&&Json.Str(owner.CurrentStatus,"foreground","status")!="started"&&Json.Str(owner.CurrentStatus,"foreground","error")!="gateway_wss_admission_refused")NativeAction("Reconnect","connect",async()=>{await owner.Call("connect");await owner.RefreshAfterMutation();ShowPage("overview");});
+    StyxContext.Heading(content,"What ChatGPT can do on this computer");
+    HostCapabilities();
+    if(Json.Get(owner.CurrentStatus,"gateway")!=null){
+     StyxContext.Heading(content,"Other computers");
      NativeAction("Computers…","computers",ShowNativeComputers);
      NativeAction("Add computer…","inviteComputer",InviteNativeComputer);
-    }
-    var selected=Json.Get(owner.CurrentStatus,"enrollment","selected_features");
-    if(selected!=null)Explain("Selected during setup: Exec; Computer Use "+(Json.Yes(selected,"computer")?"on":"off")+"; Browser Automation "+(Json.Yes(selected,"browser")?"on":"off")+". Selection does not confirm Gateway approval or system permissions.",65);
-    NativeAction("This computer's capabilities…","hostCapabilities",()=>{ShowPage("host-capabilities");return Task.FromResult(0);});
+    }else Explain("This computer is connected through your main computer. Manage the ChatGPT connection there.",65);
    }else if(name=="chat"){
     if(owner.Supports("tunnelSave")){NativeAction("Configure Tunnel…","tunnelSave",EditNativeTunnel);NativeAction("Check Tunnel status","tunnelStatus",async()=>{var value=await owner.Call("tunnelStatus");Feedback(Json.Str(value,"tunnelId")+"\n"+Json.Str(value,"status")+" / "+Json.Str(value,"transport"));});}
     if(owner.Supports("tunnelSave")){CustomMcpGuide();RefreshAction();}
@@ -1019,8 +998,8 @@ namespace StyxNative {
     }
    }
    else{Explain("This operation is not implemented by the native Host App. Existing identities and configuration are retained.",80);Unavailable("Legacy operation");Action("Open this computer",ContinueJoiningView,false);}
-   if(name=="overview"||name=="join-waiting")renderedRustOverviewKey=NativeOverviewKey(owner.CurrentStatus);
-   Status(NativeSettingsStatus(owner.CurrentStatus));content.Controls.Add(statusReadout);content.Controls.Add(observationError);content.Controls.Add(feedback);
+   if(name=="overview"||name=="join-waiting"||name=="general")renderedRustOverviewKey=NativeOverviewKey(owner.CurrentStatus);
+   Status("");content.Controls.Add(statusReadout);content.Controls.Add(observationError);content.Controls.Add(feedback);
   }
 
   static bool ValidTransaction(string value){return !String.IsNullOrEmpty(value)&&value.Length<=128&&System.Text.RegularExpressions.Regex.IsMatch(value,"^[A-Za-z0-9._-]+$");}
@@ -1077,7 +1056,6 @@ namespace StyxNative {
   internal void ObservationFailed(string text){SetText(observationError,text,45);}
   internal static bool TargetProofReady(object value){return Json.Str(value,"requestProof","status")=="verified"&&(Json.Str(value,"desktop","status")=="verified"||Json.Str(value,"desktop","status")=="not_required")&&(Json.Str(value,"browser","status")=="verified"||Json.Str(value,"browser","status")=="not_required");}
   static string Proof(string state){return state=="verified"?"verified through MCP":state=="not_required"?"not requested":"not yet verified";}
-  internal static bool CanUpdateRuntime(object data){return Json.Yes(data,"session","hostPayloadHandoffSupported")&&Json.Str(data,"status","components","host","status")=="update_available";}
   internal static string ComponentNotice(object data){string state=Json.Str(data,"status","components","host","status");
    if(state=="publisher_changed")return "Runtime components have not been updated. A publisher trust migration is required; existing settings and connections are retained.\n\n";
    if(state=="update_available")return "A component update is available. Update and reopen Styx to use the version included with this app.\n\n";
@@ -1097,10 +1075,9 @@ namespace StyxNative {
    catch(NativeOperationException error){readbackSubmitted=id+":"+window;Feedback(error.Code=="desktop_acceptance_native_app_changed"?"The native Styx app changed. Create a new desktop test before continuing.":"The desktop readback could not be confirmed. Refresh status and create a new test before retrying.");}catch{readbackSubmitted=id+":"+window;Feedback("The desktop readback could not be confirmed. Refresh status and create a new test before retrying.");}finally{readbackInFlight=false;}
   }
   internal void ShowStatus(object data){
-   if(owner.RustHost){SetText(observationError,"",0);if(!renderedRustMode){ShowPage(page=="welcome"&&!NeedsNativeSetup(data)?"overview":page);return;}if(page=="welcome"&&!NeedsNativeSetup(data)){ShowPage("overview");return;}if((page=="overview"||page=="join-waiting")&&renderedRustOverviewKey!=NativeOverviewKey(data)){ShowPage("overview");return;}Status(NativeSettingsStatus(data));return;}
+   if(owner.RustHost){SetText(observationError,"",0);if(!renderedRustMode){ShowPage(page=="welcome"&&!NeedsNativeSetup(data)?"overview":page);return;}if(page=="welcome"&&!NeedsNativeSetup(data)){ShowPage("overview");return;}if((page=="overview"||page=="join-waiting"||page=="general")&&renderedRustOverviewKey!=NativeOverviewKey(data)){ShowPage(page);return;}Status("");return;}
    if(page=="join-interrupted"&&!Json.Yes(data,"status","joinRecovery","rollbackRequired"))ShowPage("overview");
    if(page=="component-start"&&!owner.ManagementOnly)ShowPage(requestedPage);
-   if(updateRuntime!=null)updateRuntime.Visible=CanUpdateRuntime(data);
    SetText(observationError,"",0);var latest=Json.Get(data,"acceptance");
    // A fresh observation may follow another Cua attempt that set the same text.
    // Permit a new local readback for pending proof; never replay desktop input.

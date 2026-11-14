@@ -222,29 +222,18 @@ enum ProductRestorationPolicy {
         }
     }
     var nativeRuntimeUpdate: ProductJSON { status["runtimeUpdate"] }
-    func nativeStageRuntime() {
-        perform { [self] in try applyNative(try await client.native("stageRuntime", ["authorize": .bool(true)])) }
-    }
-    func nativeCheckRuntimeUpdate() {
-        perform { [self] in try applyNative(try await client.native("runtimeUpdateStatus")) }
-    }
-    func nativeUpdateRuntime() {
-        guard !busy, nativeRuntimeUpdate["status"].string == "staged" else { return }
+    var checkAppUpdate: (() -> Void)?
+    func updateStyx() {
+        guard !busy, nativeSupportsOperation("updateStyx") else { return }
         let alert = NSAlert()
-        alert.messageText = productText("更新运行组件？", "Update runtime components?")
-        alert.informativeText = productText("更新会暂停此 App 的连接，并保留身份、配对和设置。完成后请重新连接；未完成时请使用恢复按钮。", "Updating pauses this App’s connections and keeps your identity, pairing and settings. Reconnect when the update completes. If it does not complete, use Recover update.")
-        alert.addButton(withTitle: productText("保留设置并更新", "Keep settings and update"))
+        alert.messageText = productText("更新 Styx？", "Update Styx?")
+        alert.informativeText = productText("Styx 会完成更新并重新连接这台电脑。正在运行的任务会停止，设置与配对会保留。", "Styx will finish the update and reconnect this computer. Running tasks will stop; your settings and pairing will be kept.")
+        alert.addButton(withTitle: productText("更新", "Update"))
         alert.addButton(withTitle: productText("取消", "Cancel"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let transaction = "app-runtime-" + UUID().uuidString.lowercased()
         perform { [self] in
-            try applyNative(try await client.native("updateRuntime", ["authorize": .bool(true), "transactionId": .string(transaction)]))
-        }
-    }
-    func nativeRecoverRuntimeUpdate() {
-        guard let transaction = nativeRuntimeUpdate["transaction_id"].string else { return }
-        perform { [self] in
-            try applyNative(try await client.native("recoverRuntimeUpdate", ["authorize": .bool(true), "transactionId": .string(transaction)]))
+            try applyNative(try await client.native("updateStyx", ["authorize": .bool(true)]))
+            checkAppUpdate?()
         }
     }
     #if STYX_TESTING

@@ -61,7 +61,7 @@ final class ProductOwnedCore: @unchecked Sendable {
     private var sequence = 0
     private var buffer = Data()
     // Fixed diagnostic vocabulary only. Rust owns operation support and admission.
-    static let diagnosticOperations: Set<String> = ["computers", "inviteComputer", "pendingComputers", "approveComputer", "rejectComputer", "revokeComputer", "tunnelStatus", "tunnelSave", "pluginRead", "pluginSave", "pluginExport", "startupStatus", "status", "hostCapabilities", "networkInterfaces", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "retireRole", "appLifecycle", "appLogin", "appLoginResult", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService", "prepareAppMaintenance", "appMaintenanceStatus", "cancelAppMaintenance"]
+    static let diagnosticOperations: Set<String> = ["computers", "inviteComputer", "pendingComputers", "approveComputer", "rejectComputer", "revokeComputer", "tunnelStatus", "tunnelSave", "pluginRead", "pluginSave", "pluginExport", "startupStatus", "status", "hostCapabilities", "networkInterfaces", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "retireRole", "appLifecycle", "appLogin", "appLoginResult", "updateStyx", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService", "prepareAppMaintenance", "appMaintenanceStatus", "cancelAppMaintenance"]
 
     // Only the fixed package bootstrap below can construct this owner.
     private init(cli: URL, selection: URL, state: URL, cliPin: FileHandle, selectionPin: FileHandle) throws {
@@ -152,7 +152,7 @@ final class ProductOwnedCore: @unchecked Sendable {
                         ProductNativeDiagnostics.lifecycle(.deadlineEOF, operation: operation, id: id)
                         eof(operation: operation, id: id)
                     }
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 150, execute: timeout)
+                    if operation != "updateStyx" { DispatchQueue.global().asyncAfter(deadline: .now() + 150, execute: timeout) }
                     defer { timeout.cancel() }
                     try input.write(contentsOf: raw)
                     ProductNativeDiagnostics.lifecycle(.requestWritten, operation: operation, id: id)

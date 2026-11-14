@@ -346,7 +346,7 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
     appMenu.addItem(withTitle: text("打开 Styx…", "Open Styx…"), action: #selector(StyxDelegate.openSettings), keyEquivalent: "o").target = actionTarget
     #if STYX_PRODUCT_UI
     appMenu.addItem(withTitle: text("设置…", "Settings…"), action: #selector(StyxDelegate.openProductPreferences), keyEquivalent: ",").target = actionTarget
-    actionTarget?.platformUpdate?.appendMenuItem(to: appMenu)
+    // Updates live in General, shared with the main window and status menu.
     #endif
     appMenu.addItem(NSMenuItem.separator())
     appMenu.addItem(withTitle: text("退出 Styx", "Quit Styx"), action: #selector(StyxDelegate.quit), keyEquivalent: "q").target = actionTarget
@@ -591,6 +591,7 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
                 ProductNativeDiagnostics.lifecycle(.windowCreated)
                 await model.bootstrap()
                 guard model.loaded else { core.requestEOF(); nativeCore = nil; throw ProductOwnedCoreError.unavailable }
+                model.checkAppUpdate = { [weak self] in self?.platformUpdate?.checkAppUpdateIfAvailable() }
                 platformUpdate?.bind(client: model.client, report: { [weak self, weak model] message in
                     model?.reportNativeAppUpdateFailure(message)
                     // Present feedback after the deferred termination reply has

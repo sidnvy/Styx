@@ -39,6 +39,13 @@ struct ProductView: View {
         _usePluginPackage = State(initialValue: showPluginPackage)
     }
     var body: some View {
+        if model.nativeHost && [.overview, .computers, .settings].contains(model.page) {
+            ProductSettingsView(model: model, controller: controller)
+        } else {
+            onboardingBody
+        }
+    }
+    private var onboardingBody: some View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
@@ -615,7 +622,11 @@ struct ProductAcceptanceField: NSViewRepresentable {
         }
     }
     required init?(coder: NSCoder) { nil }
-    func present() { menuPopover?.performClose(nil); model.onboardingVisible = true; model.observePermissions(); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+    func present() {
+        if model.nativeHost && [.overview, .computers, .settings].contains(model.page) {
+            showSettings(.computers); return
+        }
+        menuPopover?.performClose(nil); model.onboardingVisible = true; model.observePermissions(); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     func showPreferences() { showSettings(.general) }
     func showOnboarding() {
         menuPopover?.performClose(nil)
