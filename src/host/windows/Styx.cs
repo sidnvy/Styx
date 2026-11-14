@@ -931,7 +931,8 @@ namespace StyxNative {
     NativeAction("Login startup…","appLifecycle",async()=>{ShowPage("login-startup");await ReadLogin();});
     StyxContext.Heading(content,"About Styx");Explain("Styx " + Application.ProductVersion,35);
     NativeAction("Change this computer's role…","retireRole",ChangeRole);
-    NativeAction("Update Styx…","updateStyx",owner.UpdateStyx);
+    if(owner.Supports("updateStyx"))StyxContext.Button(content,"Update Styx…",owner.UpdateStyx);
+    else Unavailable("Update Styx…");
     UpdateStatus();
    }else if(name=="host-capabilities"){
     HostCapabilities();
