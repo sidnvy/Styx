@@ -553,7 +553,7 @@ namespace StyxNative {
   internal Task UpdateStyx(){
    if(busy||starting||core==null||!Supports("updateStyx"))return Task.FromResult(0);
    if(MessageBox.Show(settings,UI("Styx will finish the update and reconnect this computer. Running tasks will stop; your settings and pairing will be kept."),UI("Update Styx"),MessageBoxButtons.OKCancel,MessageBoxIcon.Information)!=DialogResult.OK)return Task.FromResult(0);
-   return Run(async()=>{tray.Text=UI("Updating Styx… Keep the app open.");await Call("updateStyx",Json.Obj("authorize",true));await RefreshAfterMutation();settings.ShowPage("general");settings.Feedback(UI("Styx is up to date.")+" "+UI(ConnectionText(CurrentStatus)));},"Updating Styx… Keep the app open.","The update needs attention. Your settings and pairing are retained. Review the current status before continuing the same update.");
+   return Run(async()=>{tray.Text=UI("Updating Styx… Keep the app open.");await Call("updateStyx",Json.Obj("authorize",true));await RefreshAfterMutation();settings.ShowPage("general");settings.Feedback(UI("Styx is up to date."));},"Updating Styx… Keep the app open.","The update needs attention. Your settings and pairing are retained. Review the current status before continuing the same update.");
   }
   internal static string ConnectionText(object data){
    if(Json.Yes(data,"admission_fenced"))return "Styx needs attention. Your settings and pairing are retained.";
@@ -925,12 +925,12 @@ namespace StyxNative {
   void ShowRustPage(string name){
    if(name=="general"){
     StyxContext.Heading(content,"Connection settings");JoinGatewayAction();
+    NativeAction("Change this computer's role…","retireRole",ChangeRole);
     StyxContext.Heading(content,"Startup");
     Explain("Closing the window keeps Styx running in the system tray. Choose Quit Styx to stop this session.");
     StyxContext.Button(content,"Quit Styx",owner.RequestQuit);
     NativeAction("Login startup…","appLifecycle",async()=>{ShowPage("login-startup");await ReadLogin();});
     StyxContext.Heading(content,"About Styx");Explain("Styx " + Application.ProductVersion,35);
-    NativeAction("Change this computer's role…","retireRole",ChangeRole);
     if(owner.Supports("updateStyx"))StyxContext.Button(content,"Update Styx…",owner.UpdateStyx);
     else Unavailable("Update Styx…");
     UpdateStatus();
