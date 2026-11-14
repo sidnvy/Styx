@@ -11,7 +11,42 @@
 本轮目标以 [REFACTOR-PLAN.md](REFACTOR-PLAN.md) 为准。下述结果是开发验证，
 不改变已发布 0.4.0 的历史结果，也不代表重构版已经完成原生交付。
 
-### 更新完成后的所有权释放与 Windows 实机闭环（2026-11-14，最新检查点）
+### 独立 ChatGPT 账号路线（2026-11-14，最新检查点）
+
+所有者手动完成测试插件 Connect 后，已从 ChatGPT 的 Try in chat 实际执行，
+不是用本机 MCP 客户端代替账号验证。测试插件 `Styx Refactor Acceptance` 的安装
+详情与 Logo 已核对；插件 ID `plugin_asdk_app_6af84c550df08191bd93df8ab8f4c351`，
+独立 Tunnel `tunnel_6af84bfad2d48191b7024bdf97b602b5`。测试密钥仅有 Tunnels
+Read/Use，2026-11-21 到期。原测试及生产 Tunnel 均未修改。
+
+[实际验收对话](https://chatgpt.com/c/6af85143-d800-83ec-98c2-6538d0609351)
+经本机 Gateway 同时发现 Windows `styx-4a5bb86fa5e81ac4daad3f1a` 与 Mac
+`styx-c5eb21d10370078af5328188` 在线。Gateway 的 Tunnel 调用观测文件从不存在
+变为有实际调用计数；同一账号对话分别选择两台 Host，未操作旧离线 Windows 身份。
+
+- 两台 Exec 创建独占测试文件并退出 0，同一任务的后续结果读取通过；独立 SSH
+  读取文件内容及 SHA-256 匹配。Windows 首次嵌套 PowerShell 引号错误退出 1，
+  第二次错误 shell 别名被明确拒绝、未派发；两次均独立确认无文件。修正测试参数
+  后使用新文件成功，保留失败，不将它们归因于产品执行失败或重放未知操作。
+- 两台 Browser 均导航到指定示例页面、读取标题与正文；明确关闭各自本次会话后，
+  列表均为空。没有接手其他 Browser 会话。
+- Windows Computer `list_windows(app="Styx")` 实际返回 `Styx Settings`，
+  window ID `262214`、App PID `11000`。本轮只证明原生读取，不宣称验证了输入效果。
+- **Mac Computer 未通过**：账号返回 `computer_not_dispatched`、`uncertain:false`。
+  独立原机日志出现 `native_before_observation / native_protocol`；原 App/Core/Cua
+  PID `49833/49835/49836` 仍运行，控制台用户在线。后续账号只读状态显示 Computer
+  已配置、连接正常，但 readiness/permission 为 unknown。未重放窗口读取、切换能力
+  或重启；实际原因尚未确定。该故障与早先未独立复现的同名观测故障对应，但不能据此
+  假定同一根因。下一步保留原现场，定位 Mac 原生观测协议失败，再做受影响场景恢复。
+
+证据位于 `/tmp/styx-browser-handoff-20261114/account/account-route.json`、同目录
+`browser-computer-result.txt` 与 `plugin-installed.jpg`；Mac 原日志仍为
+`artifacts/pairing-dev/browser-final-reopen.stderr.log`。本轮没有产品改动或新构建；
+Windows 仍绑定下节源码 `6835d82` / build 2009，Mac 仍是 `284eff4` / build 2007。
+账号路线已取得真实双 Host 效果，Mac Computer 缺口和最终发布版本绑定仍未关闭；
+重构版交付未完成，Stable 仍为 NO-GO。
+
+### 更新完成后的所有权释放与 Windows 实机闭环（2026-11-14）
 
 源码 `6835d82` 修复了两个可复现边界：已完成的 Runtime 更新仍持有工作对象，
 使同一 App 的角色退役返回 `role_retire_runtime_owner_retained`；已取得本地退出结果
