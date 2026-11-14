@@ -62,6 +62,8 @@ Mac/Windows 首次加入、本机 Gateway+Host 设置以及继续未完成设置
 质量门 20 项 PASS：`/tmp/styx-capability-onboarding-quality-20261114/receipt.json`。
 验证：Rust 配置兼容性回归、Windows 实际控件默认值/取消/页面返回保持/参数输出，Mac 生产 Swift 编译与原有自检。
 
+Mac 安装前接线检查发现 Swift 还维护第二份操作准入名单，新增 `hostCapabilities` 会被客户端先行拒绝。已移除该重复准入，支持状态和输入验证交给 Rust；固定名称集合仅用于可选诊断日志。
+
 设备核对：PilotMac 正常配置目录只有签名材料，原 App build 2001 已安装但未配置配对、未运行；完整连接与恢复验收等待指定 Gateway。Windows 源码存在其他未提交修改，保留未覆盖，原生编译在已使用的 pairing-dev 输入目录进行。
 
 ## 当前开发检查点（2026-11-12）

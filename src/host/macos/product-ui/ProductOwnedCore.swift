@@ -60,7 +60,8 @@ final class ProductOwnedCore: @unchecked Sendable {
     private var maintenanceUnknown = false
     private var sequence = 0
     private var buffer = Data()
-    static let operations: Set<String> = ["computers", "inviteComputer", "pendingComputers", "approveComputer", "rejectComputer", "revokeComputer", "tunnelStatus", "tunnelSave", "pluginRead", "pluginSave", "pluginExport", "startupStatus", "status", "networkInterfaces", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "retireRole", "appLifecycle", "appLogin", "appLoginResult", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService", "prepareAppMaintenance", "appMaintenanceStatus", "cancelAppMaintenance"]
+    // Fixed diagnostic vocabulary only. Rust owns operation support and admission.
+    static let diagnosticOperations: Set<String> = ["computers", "inviteComputer", "pendingComputers", "approveComputer", "rejectComputer", "revokeComputer", "tunnelStatus", "tunnelSave", "pluginRead", "pluginSave", "pluginExport", "startupStatus", "status", "hostCapabilities", "networkInterfaces", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "retireRole", "appLifecycle", "appLogin", "appLoginResult", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService", "prepareAppMaintenance", "appMaintenanceStatus", "cancelAppMaintenance"]
 
     // Only the fixed package bootstrap below can construct this owner.
     private init(cli: URL, selection: URL, state: URL, cliPin: FileHandle, selectionPin: FileHandle) throws {
@@ -133,7 +134,8 @@ final class ProductOwnedCore: @unchecked Sendable {
         }
     }
     func call(_ operation: String, _ body: [String: ProductJSON] = [:]) async throws -> ProductJSON {
-        guard Self.operations.contains(operation) else { throw ProductCoreError.rejected }
+        // Forward the operation to the original Core. Its advertised operations
+        // and closed request decoder are the sole support/admission authority.
         ProductNativeDiagnostics.lifecycle(.queued, operation: operation)
         // This original queued job retains all child/pipe/pin ownership even if
         // its caller disappears. No cancellation retries or replacement child.

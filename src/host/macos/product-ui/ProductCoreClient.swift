@@ -3,9 +3,9 @@ import Foundation
 // Opt-in local diagnostics: fixed route names, codes and numeric results only.
 // Never emit request/response bodies, session URLs, headers or credentials.
 enum ProductNativeDiagnostics {
-    private static func operationIsSupported(_ operation: String) -> Bool {
+    private static func operationIsDiagnosticName(_ operation: String) -> Bool {
         #if STYX_PRODUCT_UI
-        return ProductOwnedCore.operations.contains(operation)
+        return ProductOwnedCore.diagnosticOperations.contains(operation)
         #else
         return false
         #endif
@@ -24,7 +24,7 @@ enum ProductNativeDiagnostics {
     }
     static func lifecycle(_ stage: LifecycleStage, operation: String? = nil, id: Int? = nil, ok: Bool? = nil) {
         guard CommandLine.arguments.contains("--native-diagnostics") else { return }
-        if let operation { guard operationIsSupported(operation) else { return } }
+        if let operation { guard operationIsDiagnosticName(operation) else { return } }
         var message = "lifecycle stage=" + stage.rawValue
         if let operation { message += " operation=" + operation }
         if let id { message += " id=" + String(id) }
@@ -75,7 +75,7 @@ enum ProductNativeDiagnostics {
         event("core_exited pid=" + String(pid) + " status=" + String(status) + " reason=" + label)
     }
     static func rejection(operation: String, id: Int, response: ProductJSON) {
-        guard CommandLine.arguments.contains("--native-diagnostics"), operationIsSupported(operation) else { return }
+        guard CommandLine.arguments.contains("--native-diagnostics"), operationIsDiagnosticName(operation) else { return }
         event("rejection operation=" + operation + " id=" + String(id) + " code=" + rejectionCode(response))
     }
     private static let computerProbeStages: Set<String> = ["native_before_binding", "native_before_observation", "native_before_final_binding", "session_binding", "session_begin_exchange", "session_begin_reply", "list_windows_exchange", "list_windows_result", "list_windows_rows", "read_binding_after", "read_deadline", "native_after_binding", "native_after_observation", "native_after_final_binding", "console_match", "evidence_lookup", "coordinator_refresh", "observation_mutex", "control_mutex", "already_fenced"]
