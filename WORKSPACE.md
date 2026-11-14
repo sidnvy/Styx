@@ -40,6 +40,10 @@ when taking over an existing chat. Resolve skill references in that source check
 Do not assume instructions in a child repository are loaded from a parent cwd.
 
 Use check-only for syntax/type diagnosis and real App/Core execution for runtime behavior.
+The macOS Settings menu opens `ProductSettingsView` in `src/host/macos/product-ui/ProductSettingsViews.swift`;
+the setup/main window lives in `ProductViews.swift`. Both use `ProductHostCapabilitySettings` for native
+capability changes. Verify the menu-opened window when changing settings; exercising a similarly named
+view or calling Core directly does not prove that user entry point is connected.
 A directly built desktop App still needs its valid full Runtime, original signing identity
 and normal qualification checks. Source, caches and outputs live in Developer; the trusted
 installed execution path may remain in /Applications or AppData. A DMG/Inno producer is

@@ -83,6 +83,47 @@ Mac 安装前接线检查发现 Swift 还维护第二份操作准入名单，新
 
 **这是一台尚未配对的 App/Core 生命周期验证。** 正常配置中尚无已配对 Host；当前等待所有者
 指定 PilotMac 的目标 Gateway。未执行 Gateway/Tunnel 变更、系统权限授予或重新配对。
+
+### 本机测试 Gateway 与 Mac 能力开关（2026-11-14，后续实测）
+
+所有者已指定开发工作站作为测试 Gateway。现在使用 `10.0.38.2:38443`，仅监听该地址与
+loopback；PilotMac 经现有直达网络连接。最初选择的 Tailscale 地址从 Mac 不可达，未修改
+底层网络；未配对的原测试配置正常退出后保留为 `test-gateway-unused-tailnet`。
+当前配置位于 `/tmp/styx-host-capabilities-native-20261114/test-gateway`，无 Tunnel、无
+本机 Host；不涉及生产 Tunnel/plugin。后续复用此 Gateway、CA 和已加入的 Mac，不重新配对。
+
+Mac 从已安装 App 欢迎页输入地址和短码，核对实际 CA 指纹后自动加入。首次页面默认
+Exec 开、Browser/Computer Use 关；本次选择三项开启。既有 Styx 的系统权限可用，无新增
+授权。真实 MCP 上的 Exec 输出、Browser 受控网页和 Computer Use 窗口读取均通过。
+
+实际菜单设置入口暴露一个接线遗漏：旧页已有开关，`ProductSettingsView` 仍显示重新配对
+规则。`6e16b27` 将两个入口统一为 `ProductHostCapabilitySettings`，删除 Exec “始终包含”
+文案；没有新增配置或准入所有者。已整合 develop，生产 Swift 编译及签名 App build 2003
+通过，原位安装后从正常菜单执行以下场景：
+
+- 关闭 Exec：原长任务停止、新命令明确未派发，同一 Browser 页面保持可读；重新开启成功。
+- 关闭 Browser：专用 Browser 收尾、后续调用拒绝；原 Exec 长任务及 Computer Use 读取继续。
+- 关闭 Computer Use：已有会话清理生效、后续调用拒绝；原 Exec 任务最终 exit 0，并独立
+  写出 `STYX_EXEC_SURVIVED`。这不宣称覆盖正在派发的桌面点击中断。
+- 从 MCP 关闭剩余 Exec，全关仍可读取管理状态。正常菜单 Quit 后原 App/Core/Cua/Exec
+  退出，Core exit 0；同一 profile 重开后全关选择保留，随后从 MCP 恢复三项成功。
+- 重开后新 Exec、Browser、Computer Use 独立调用与短时组合调用通过；原身份、凭据和 CA
+  哈希不变。按 bundle id 发出的早期退出事件未进入主 App 退出流程，仅观察到 Cua 退出；
+  不把该事件当主 App 退出证据。上述退出证据来自 PID 绑定的实际「退出 Styx」菜单。
+
+版本边界：实际 App/Core 为 build 2003 / `6e16b27`，Core SHA `633fe901…`；安装内的
+manifest 为 `9c30d3bf…`。Host 仍选择首次加入时 App 外的 `b13b53de…` Runtime（原 worker
+不变）。没有执行或宣称完成 Runtime 更新旅程，也不是统一版本的最终发布验收。
+
+记录集中在 `/tmp/styx-host-capabilities-native-20261114` 的 `mcp/`、`mcp-settings/`、
+`capability-settings-*.json` 与 `close-*.json`；原机记录仍在 `artifacts/pairing-dev`。
+**两次较长的混合会话在 DELETE 时返回 HTTP 500，原因尚未确认，未重放原关闭请求。**
+只读、单能力、三能力短时组合及显式 Browser close 后结束的新独立会话均通过；这些正控
+不关闭原失败。另一个三能力会话持续三分钟、六次状态心跳及最终结束均通过，未将时长
+认定为根因。`capability-acceptance-summary.json` 汇总已核对响应与未关闭项。开发路径指引
+已补充实际 Mac Settings 菜单入口，避免用旧页或直接 Core 调用替代该入口验收。
+下一步先定位会话结束问题，再推进 Exec 跨对话和 Browser 转交，避免把
+未解释的资源生命周期带入下一阶段。重构版 Stable 仍为 NO-GO。
 Host 运行中 GUI 能力切换、Cua 活跃会话停止、其他能力不中断以及已配置 Host 重启恢复，
 仍是下一验收出口。Windows 仅完成本批原生控件/编译回归，原 source 的其他未提交修改保留。
 重构版 Stable 仍为 NO-GO。
