@@ -239,11 +239,11 @@ impl BrowserPort<'_> {
                 {
                     return reply;
                 }
-                match self.coordinator.dispatch_browser_open(
-                    &owner,
-                    &target.operation_id,
-                    target.payload_digest,
-                ) {
+                match self
+                    .coordinator
+                    .dispatch_browser_open(&owner, &target.operation_id, target.payload_digest)
+                    .await
+                {
                     Ok(BrowserOpenSubmission::Existing(snapshot)) => Reply::Start {
                         snapshot: snapshot.into(),
                         dispatch: "existing_no_replay".into(),
@@ -319,11 +319,11 @@ impl BrowserPort<'_> {
                 {
                     return reply;
                 }
-                match self.coordinator.dispatch_browser_action(
-                    &owner,
-                    &action.operation_id,
-                    action.payload_digest,
-                ) {
+                match self
+                    .coordinator
+                    .dispatch_browser_action(&owner, &action.operation_id, action.payload_digest)
+                    .await
+                {
                     Ok(BrowserActionSubmission::Existing(snapshot)) => Reply::BrowserAction {
                         snapshot: snapshot.into(),
                         dispatch: "existing_no_replay".into(),

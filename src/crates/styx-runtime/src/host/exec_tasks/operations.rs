@@ -134,11 +134,11 @@ impl ExecPort<'_> {
                 }
             }
             Call::DispatchStart { owner: _, target } => {
-                match self.coordinator.dispatch_start(
-                    owner,
-                    &target.operation_id,
-                    target.payload_digest,
-                ) {
+                match self
+                    .coordinator
+                    .dispatch_start(owner, &target.operation_id, target.payload_digest)
+                    .await
+                {
                     Ok(StartSubmission::Existing(v)) => Reply::Start {
                         snapshot: v.into(),
                         dispatch: "existing_no_replay".into(),
@@ -247,11 +247,11 @@ impl ExecPort<'_> {
                 }
             }
             Call::DispatchAction { owner: _, action } => {
-                match self.coordinator.dispatch_action(
-                    owner,
-                    &action.operation_id,
-                    action.payload_digest,
-                ) {
+                match self
+                    .coordinator
+                    .dispatch_action(owner, &action.operation_id, action.payload_digest)
+                    .await
+                {
                     Ok(ActionSubmission::Existing(snapshot)) => {
                         match self.coordinator.lookup_action(
                             owner,

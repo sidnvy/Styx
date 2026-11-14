@@ -185,6 +185,7 @@ async fn opened(host: &HostCoordinator, owner: &OwnerLease) -> OperationSnapshot
         .unwrap();
     let completion = match host
         .dispatch_browser_open(owner, &reserved.id, reserved.payload_digest)
+        .await
         .unwrap()
     {
         BrowserOpenSubmission::Submitted(t) => t.wait().await.unwrap(),
@@ -211,6 +212,7 @@ async fn acted(
         .unwrap();
     let result = match host
         .dispatch_browser_action(owner, &reservation.id, reservation.payload_digest)
+        .await
         .unwrap()
     {
         BrowserActionSubmission::Submitted(t) => t.wait().await.unwrap(),
@@ -401,7 +403,7 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
         stage = "drop_waiter_effect_a";
         let expression=format!("async()=>{{await fetch('/effect',{{method:'POST',body:{}}});return document.querySelector('#nonce').textContent}}",serde_json::to_string(&nonce).unwrap());
         let operation=host.prepare_browser_action(&owner,target(&open),browser_context(&host),&BrowserAction::Evaluate{function:expression}).unwrap();
-        match host.dispatch_browser_action(&owner,&operation.id,operation.payload_digest).unwrap(){BrowserActionSubmission::Submitted(ticket)=>drop(ticket),_=>panic!("expected new action")}
+        match host.dispatch_browser_action(&owner,&operation.id,operation.payload_digest).await.unwrap(){BrowserActionSubmission::Submitted(ticket)=>drop(ticket),_=>panic!("expected new action")}
         tokio::time::timeout(Duration::from_secs(20),async {loop {if effects.lock().unwrap().len()==1 {break;}tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
         assert_eq!(*effects.lock().unwrap(),vec![nonce.clone()]);
         tokio::time::timeout(Duration::from_secs(20),async {
@@ -412,11 +414,11 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.unwrap();
-        assert!(matches!(host.dispatch_browser_action(&owner,&operation.id,operation.payload_digest).unwrap(),BrowserActionSubmission::Existing(_)));
+        assert!(matches!(host.dispatch_browser_action(&owner,&operation.id,operation.payload_digest).await.unwrap(),BrowserActionSubmission::Existing(_)));
         stage = "policy_denial";
         let mut denied=fixture_facts(CapabilityId::BrowserHeadless);denied.local_policy_allowed=false;authority.replace_browser_facts(denied).unwrap();
         let forbidden=host.prepare_browser_action(&owner,target(&open),browser_context(&host),&BrowserAction::Navigate{url:format!("http://{address}/probe/forbidden")}).unwrap();
-        assert!(matches!(host.dispatch_browser_action(&owner,&forbidden.id,forbidden.payload_digest),Err(CoordinatorError::Admission(ErrorCategory::PermissionDenied))));
+        assert!(matches!(host.dispatch_browser_action(&owner,&forbidden.id,forbidden.payload_digest).await,Err(CoordinatorError::Admission(ErrorCategory::PermissionDenied))));
         assert_eq!(navigations.load(Ordering::SeqCst),1);assert_eq!(effects.lock().unwrap().len(),1);
         authority.replace_browser_facts(fixture_facts(CapabilityId::BrowserHeadless)).unwrap();
         stage = "close_and_retire_a";
@@ -434,12 +436,12 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
         stage = "real_effect_then_response_timeout_b";
         let expression=format!("async()=>{{await fetch('/effect',{{method:'POST',body:{}}});await new Promise(()=>{{}})}}",serde_json::to_string(&unknown_nonce).unwrap());
         let uncertain=host.prepare_browser_action(&other,target(&b),browser_context(&host),&BrowserAction::Evaluate{function:expression}).unwrap();
-        let unknown=match host.dispatch_browser_action(&other,&uncertain.id,uncertain.payload_digest).unwrap(){BrowserActionSubmission::Submitted(t)=>t.wait().await.unwrap(),_=>panic!("new timeout action required")};
+        let unknown=match host.dispatch_browser_action(&other,&uncertain.id,uncertain.payload_digest).await.unwrap(){BrowserActionSubmission::Submitted(t)=>t.wait().await.unwrap(),_=>panic!("new timeout action required")};
         observations["unknown_after_timeout"]=serde_json::json!({"state":unknown.snapshot.state,"evidence":unknown.receipt.evidence,"effect_count":effects.lock().unwrap().iter().filter(|n|*n==&unknown_nonce).count()});
         assert_eq!(unknown.snapshot.state,OperationState::Unknown);assert_eq!(unknown.receipt.evidence,BrowserActionEvidence::Unknown);
         assert_eq!(effects.lock().unwrap().iter().filter(|n|*n==&unknown_nonce).count(),1);
         stage = "unknown_duplicate_no_replay";
-        let duplicate=host.dispatch_browser_action(&other,&uncertain.id,uncertain.payload_digest).unwrap();
+        let duplicate=host.dispatch_browser_action(&other,&uncertain.id,uncertain.payload_digest).await.unwrap();
         assert!(matches!(duplicate,BrowserActionSubmission::Existing(ref s) if s.state==OperationState::Unknown));
         assert_eq!(effects.lock().unwrap().iter().filter(|n|*n==&unknown_nonce).count(),1);
         observations["unknown_duplicate_existing_no_replay"]=serde_json::json!(true);
@@ -453,7 +455,7 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
         // A stuck evaluate may also prevent the upstream Close ACK. Only actual
         // scope exit+stdio join+descendant proof establishes physical cleanup.
         let close=host.prepare_browser_action(&other,target(&b),browser_context(&host),&BrowserAction::Close).unwrap();
-        let closed_b=match host.dispatch_browser_action(&other,&close.id,close.payload_digest).unwrap(){BrowserActionSubmission::Submitted(t)=>t.wait().await.unwrap(),_=>panic!("new close required")};
+        let closed_b=match host.dispatch_browser_action(&other,&close.id,close.payload_digest).await.unwrap(){BrowserActionSubmission::Submitted(t)=>t.wait().await.unwrap(),_=>panic!("new close required")};
         assert!(closed_b.cleanup.as_ref().is_some_and(physical_complete));
         observations["b_close"]=serde_json::json!({"action_state":closed_b.snapshot.state,"context_ack":closed_b.cleanup.as_ref().unwrap().context_closed,"worker_exited":closed_b.cleanup.as_ref().unwrap().worker_exited,"stdio_joined":closed_b.cleanup.as_ref().unwrap().stdio_joined,"descendants_confirmed":closed_b.cleanup.as_ref().unwrap().descendants==BrowserDescendants::Confirmed});
         stage = "retire_b_unknown_bundle";
@@ -476,7 +478,7 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
             tty: false,
         };
         let process = host.prepare_start(&owner, exec_context, &process).unwrap();
-        match host.dispatch_start(&owner, &process.id, process.payload_digest).unwrap() {
+        match host.dispatch_start(&owner, &process.id, process.payload_digest).await.unwrap() {
             StartSubmission::Submitted(ticket) => { ticket.wait().await.unwrap(); },
             _ => panic!("fresh process required"),
         }

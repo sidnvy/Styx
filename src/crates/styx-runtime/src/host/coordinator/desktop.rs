@@ -776,12 +776,7 @@ impl HostCoordinator {
             }
         };
         let rx = {
-            let execution = self
-                .inner
-                .execution_gate
-                .clone()
-                .try_read_owned()
-                .map_err(|_| CoordinatorError::Busy)?;
+            let execution = self.execution_for_operation(owner, id, digest).await?;
 
             let runtime =
                 tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;

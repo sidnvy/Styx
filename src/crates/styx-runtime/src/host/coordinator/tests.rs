@@ -63,13 +63,14 @@ fn spec(root: &std::path::Path, file: &str, nonce: &str) -> StartProcess {
         tty: false,
     }
 }
-fn submitted(
+async fn submitted(
     host: &HostCoordinator,
     owner: &OwnerLease,
     reservation: &OperationSnapshot,
 ) -> StartTicket {
     match host
         .dispatch_start(owner, &reservation.id, reservation.payload_digest)
+        .await
         .unwrap()
     {
         StartSubmission::Submitted(ticket) => ticket,
@@ -154,15 +155,17 @@ async fn real_owned_start_read_and_dropped_response_scenario() {
         !root.join("normal.txt").exists(),
         "prepare has no native effect"
     );
-    let completion = submitted(&host, &owner, &first).wait().await.unwrap();
+    let completion = submitted(&host, &owner, &first).await.wait().await.unwrap();
     assert_eq!(completion.dispatch, DispatchEvidence::Started);
     assert!(matches!(
         host.dispatch_start(&owner, &first.id, first.payload_digest)
+            .await
             .unwrap(),
         StartSubmission::Existing(_)
     ));
     assert!(
         host.dispatch_start(&owner, &first.id, Sha256Digest::of_bytes(b"altered"))
+            .await
             .is_err()
     );
     assert!(
@@ -188,7 +191,8 @@ async fn real_owned_start_read_and_dropped_response_scenario() {
     denied.local_policy_allowed = false;
     authority.replace_trusted_facts(denied);
     assert!(matches!(
-        host.dispatch_start(&owner, &denied_start.id, denied_start.payload_digest),
+        host.dispatch_start(&owner, &denied_start.id, denied_start.payload_digest)
+            .await,
         Err(CoordinatorError::Admission(ErrorCategory::PermissionDenied))
     ));
     assert!(matches!(
@@ -246,7 +250,7 @@ async fn real_owned_start_read_and_dropped_response_scenario() {
             &spec(&root, "dropped.txt", &nonce),
         )
         .unwrap();
-    drop(submitted(&host, &owner, &dropped)); // no response consumer, but owned job survives
+    drop(submitted(&host, &owner, &dropped).await); // no response consumer, but owned job survives
     for _ in 0..100 {
         if host
             .inspect_start(&owner, &dropped.id, dropped.payload_digest)
@@ -260,6 +264,7 @@ async fn real_owned_start_read_and_dropped_response_scenario() {
     }
     assert!(matches!(
         host.dispatch_start(&owner, &dropped.id, dropped.payload_digest)
+            .await
             .unwrap(),
         StartSubmission::Existing(_)
     ));
@@ -275,7 +280,11 @@ async fn real_owned_start_read_and_dropped_response_scenario() {
             &spec(&root, "unknown-control.txt", &nonce),
         )
         .unwrap();
-    submitted(&host, &owner, &uncertain).wait().await.unwrap();
+    submitted(&host, &owner, &uncertain)
+        .await
+        .wait()
+        .await
+        .unwrap();
     host.inner
         .state
         .lock()
@@ -297,7 +306,11 @@ async fn real_owned_start_read_and_dropped_response_scenario() {
             &spec(&root, "delivery-sensitive.txt", &nonce),
         )
         .unwrap();
-    submitted(&host, &owner, &delivery).wait().await.unwrap();
+    submitted(&host, &owner, &delivery)
+        .await
+        .wait()
+        .await
+        .unwrap();
     let arrived = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     *host.inner.delivery_gate.lock().unwrap() = Some((arrived.clone(), release.clone()));
@@ -391,13 +404,14 @@ async fn real_owned_start_read_and_dropped_response_scenario() {
     );
 }
 
-fn submitted_action(
+async fn submitted_action(
     host: &HostCoordinator,
     owner: &OwnerLease,
     action: &OperationSnapshot,
 ) -> ActionTicket {
     match host
         .dispatch_action(owner, &action.id, action.payload_digest)
+        .await
         .unwrap()
     {
         ActionSubmission::Submitted(ticket) => ticket,
@@ -482,6 +496,7 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
         let resource = host.prepare_start(&owner, short, &process).unwrap();
         assert_eq!(
             submitted(&host, &owner, &resource)
+                .await
                 .wait()
                 .await
                 .unwrap()
@@ -489,7 +504,8 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
             DispatchEvidence::Started
         );
         assert!(matches!(
-            host.dispatch_action(&owner, &resource.id, resource.payload_digest),
+            host.dispatch_action(&owner, &resource.id, resource.payload_digest)
+                .await,
             Err(CoordinatorError::Admission(ErrorCategory::StateConflict))
         ));
         tokio::time::sleep(Duration::from_millis(
@@ -548,7 +564,8 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
                 Err(CoordinatorError::Busy)
             ));
             assert!(matches!(
-                host.dispatch_start(&owner, &reserved.id, reserved.payload_digest),
+                host.dispatch_start(&owner, &reserved.id, reserved.payload_digest)
+                    .await,
                 Err(CoordinatorError::Busy)
             ));
             assert_eq!(
@@ -558,7 +575,8 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
                 OperationState::Reserved
             );
             assert!(matches!(
-                host.dispatch_action(&owner, &pending.id, pending.payload_digest),
+                host.dispatch_action(&owner, &pending.id, pending.payload_digest)
+                    .await,
                 Err(CoordinatorError::Busy)
             ));
             assert_eq!(
@@ -570,6 +588,7 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
             // Existing receipts/read are cleanup/observation, not new I/O admission.
             assert!(matches!(
                 host.dispatch_start(&owner, &resource.id, resource.payload_digest)
+                    .await
                     .unwrap(),
                 StartSubmission::Existing(_)
             ));
@@ -591,7 +610,7 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
                 .0
                 .store(false, std::sync::atomic::Ordering::Release);
         }
-        let ticket = submitted_action(&host, &owner, &write);
+        let ticket = submitted_action(&host, &owner, &write).await;
         // This current-thread test has not yielded since spawn. The complete
         // guard must be owned by the job, not dropped in dispatch_action.
         assert_eq!(
@@ -606,7 +625,8 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
                 .is_none()
         );
         assert!(matches!(
-            host.dispatch_action(&owner, &pending.id, pending.payload_digest),
+            host.dispatch_action(&owner, &pending.id, pending.payload_digest)
+                .await,
             Err(CoordinatorError::Busy)
         ));
         assert_eq!(
@@ -616,7 +636,8 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
             OperationState::Reserved
         );
         assert!(matches!(
-            host.dispatch_start(&owner, &write.id, write.payload_digest),
+            host.dispatch_start(&owner, &write.id, write.payload_digest)
+                .await,
             Err(CoordinatorError::Admission(ErrorCategory::StateConflict))
         ));
         drop(ticket); // only the receiver is lost; the supervised native job continues
@@ -652,15 +673,18 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
         .unwrap();
         assert!(matches!(
             host.dispatch_action(&owner, &write.id, write.payload_digest)
+                .await
                 .unwrap(),
             ActionSubmission::Existing(_)
         ));
         assert!(matches!(
-            host.dispatch_action(&owner, &write.id, Sha256Digest::of_bytes(b"changed")),
+            host.dispatch_action(&owner, &write.id, Sha256Digest::of_bytes(b"changed"))
+                .await,
             Err(CoordinatorError::Admission(ErrorCategory::IntegrityFailure))
         ));
         assert!(matches!(
-            host.dispatch_action(&foreign, &write.id, write.payload_digest),
+            host.dispatch_action(&foreign, &write.id, write.payload_digest)
+                .await,
             Err(CoordinatorError::Admission(ErrorCategory::Unauthorized))
         ));
         assert!(matches!(
@@ -694,7 +718,8 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
         changed_grant.grant_revision = 2;
         authority.replace_trusted_facts(changed_grant);
         assert!(matches!(
-            host.dispatch_action(&owner, &denied.id, denied.payload_digest),
+            host.dispatch_action(&owner, &denied.id, denied.payload_digest)
+                .await,
             Err(CoordinatorError::Admission(ErrorCategory::StateConflict))
         ));
         assert_eq!(
@@ -713,7 +738,8 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(matches!(
-            host.dispatch_action(&owner, &expired.id, expired.payload_digest),
+            host.dispatch_action(&owner, &expired.id, expired.payload_digest)
+                .await,
             Err(CoordinatorError::Admission(ErrorCategory::OperationTimeout))
         ));
         #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
@@ -723,6 +749,7 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
                 .store(true, std::sync::atomic::Ordering::Release);
             assert!(matches!(
                 host.dispatch_action(&owner, &write.id, write.payload_digest)
+                    .await
                     .unwrap(),
                 ActionSubmission::Existing(_)
             ));
@@ -761,6 +788,7 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
             )
             .unwrap();
         let result = submitted_action(&host, &owner, &terminate)
+            .await
             .wait()
             .await
             .unwrap();
@@ -827,7 +855,11 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
                     &spec(&root, "admission-resumed-effect", &resumed_nonce),
                 )
                 .unwrap();
-            let completed = submitted(&host, &owner, &resumed).wait().await.unwrap();
+            let completed = submitted(&host, &owner, &resumed)
+                .await
+                .wait()
+                .await
+                .unwrap();
             assert_eq!(completed.dispatch, DispatchEvidence::Started);
             drain(&host, &owner, &resumed, 1).await;
             assert_eq!(
@@ -958,6 +990,7 @@ async fn real_host_physical_retention_and_unknown_archival_scenario() {
             .unwrap();
         assert_eq!(
             submitted(&host, &owner, &resource)
+                .await
                 .wait()
                 .await
                 .unwrap()
@@ -1017,10 +1050,16 @@ async fn real_host_physical_retention_and_unknown_archival_scenario() {
             "collector is queued behind the actual read lease"
         );
         assert!(!waiting_collection.is_finished());
-        assert!(matches!(
-            host.dispatch_action(&owner, &first.id, first.payload_digest),
-            Err(CoordinatorError::Busy)
-        ));
+        let mut waiting_action =
+            Box::pin(host.dispatch_action(&owner, &first.id, first.payload_digest));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut waiting_action)
+                .await
+                .is_err(),
+            "collection must wait without rejecting the original operation"
+        );
+        drop(waiting_action); // Still Reserved: no native dispatch occurred.
+
         assert_eq!(
             host.inspect_action(&owner, &first.id, first.payload_digest)
                 .unwrap()
@@ -1044,6 +1083,7 @@ async fn real_host_physical_retention_and_unknown_archival_scenario() {
                 make_write(&format!("{nonce}:{index}"))
             };
             let completion = submitted_action(&host, &owner, &action)
+                .await
                 .wait()
                 .await
                 .unwrap();
@@ -1128,7 +1168,7 @@ async fn real_host_physical_retention_and_unknown_archival_scenario() {
                 .await
         });
         tokio::time::sleep(Duration::from_millis(30)).await;
-        let ticket = submitted_action(&host, &owner, &unknown);
+        let ticket = submitted_action(&host, &owner, &unknown).await;
         assert_eq!(
             host.inspect_action(&owner, &unknown.id, unknown.payload_digest)
                 .unwrap()
@@ -1181,6 +1221,7 @@ async fn real_host_physical_retention_and_unknown_archival_scenario() {
         let unknown_write_id = unknown_receipt.write_id.clone().unwrap();
         assert!(matches!(
             host.dispatch_action(&owner, &unknown.id, unknown.payload_digest)
+                .await
                 .unwrap(),
             ActionSubmission::Existing(_)
         ));
@@ -1269,6 +1310,7 @@ async fn real_host_physical_retention_and_unknown_archival_scenario() {
             .unwrap();
         assert_eq!(
             submitted(&host, &owner, &next)
+                .await
                 .wait()
                 .await
                 .unwrap()
@@ -1328,8 +1370,48 @@ async fn real_host_physical_retention_and_unknown_archival_scenario() {
     outcome.unwrap();
 }
 
-/// Explicitly disabled Exec has no native receipt, yet the SAME Host ledger,
-/// owner authority and local session registry remain available. No native IO.
+#[tokio::test]
+async fn collection_contention_waits_without_a_capacity_refusal() {
+    let (host, _) = HostCoordinator::new_without_executor(
+        OperationLedger::new("host-collection-wait".try_into().unwrap()),
+        facts(),
+    )
+    .unwrap();
+    let first = host.execution_before(MonotonicMillis(2000)).await.unwrap();
+    let second = host.execution_before(MonotonicMillis(2000)).await.unwrap();
+    let gate = host.inner.execution_gate.clone();
+    let collector = tokio::spawn(async move { gate.write_owned().await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while host.inner.execution_gate.clone().try_read_owned().is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut next = Box::pin(host.execution_before(MonotonicMillis(2000)));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut next)
+            .await
+            .is_err()
+    );
+    drop(first);
+    drop(second);
+    let collection = collector.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut next)
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        host.execution_before(MonotonicMillis(host.now().0 + 10))
+            .await,
+        Err(CoordinatorError::Admission(ErrorCategory::OperationTimeout))
+    ));
+    drop(collection);
+    assert!(next.await.is_ok());
+}
+
+/// Explicitly disabled Exec retains its Host ledger and owner authority.
 #[tokio::test]
 async fn optional_executor_refuses_exec_without_fabricating_cleanup() {
     let ledger = OperationLedger::new("host-no-executor".try_into().unwrap());

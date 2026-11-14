@@ -425,6 +425,35 @@ impl HostCoordinator {
     pub fn now(&self) -> MonotonicMillis {
         self.inner.now()
     }
+    // Wait on the existing lifecycle lock within this request's original
+    // deadline. Another owner's collection is not a capacity refusal.
+    async fn execution_before(
+        &self,
+        deadline: MonotonicMillis,
+    ) -> Result<OwnedRwLockReadGuard<()>, CoordinatorError> {
+        if let Ok(guard) = self.inner.execution_gate.clone().try_read_owned() {
+            return Ok(guard);
+        }
+        let remaining = Duration::from_millis(deadline.0.saturating_sub(self.now().0));
+        tokio::time::timeout(remaining, self.inner.execution_gate.clone().read_owned())
+            .await
+            .map_err(|_| ErrorCategory::OperationTimeout.into())
+    }
+    async fn execution_for_operation(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+    ) -> Result<OwnedRwLockReadGuard<()>, CoordinatorError> {
+        let deadline = {
+            let state = self.inner.state.lock().expect("Host state mutex");
+            if state.shutting_down {
+                return Err(CoordinatorError::Busy);
+            }
+            state.ledger.inspect_context(owner, id, digest)?.deadline
+        };
+        self.execution_before(deadline).await
+    }
     /// No action occurs until the returned reservation is explicitly dispatched.
     pub fn prepare_start(
         &self,
@@ -442,7 +471,7 @@ impl HostCoordinator {
         state.reserve_exec(owner, context, payload, None, self.now())
     }
     /// Admission commits before returning a ticket. Dropping the ticket cannot drop the job.
-    pub fn dispatch_start(
+    pub async fn dispatch_start(
         &self,
         owner: &OwnerLease,
         id: &OperationId,
@@ -461,12 +490,7 @@ impl HostCoordinator {
             }
         }
         let adapter = self.inner.exec_adapter()?;
-        let execution = self
-            .inner
-            .execution_gate
-            .clone()
-            .try_read_owned()
-            .map_err(|_| CoordinatorError::Busy)?;
+        let execution = self.execution_for_operation(owner, id, digest).await?;
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
 
         let mut state = self.inner.state.lock().expect("Host state mutex");
@@ -566,7 +590,7 @@ impl HostCoordinator {
     }
     /// Commit one action before returning a response ticket. Receiver loss does
     /// not cancel the supervised job or permit a second dispatch.
-    pub fn dispatch_action(
+    pub async fn dispatch_action(
         &self,
         owner: &OwnerLease,
         id: &OperationId,
@@ -584,12 +608,7 @@ impl HostCoordinator {
             }
         }
         let adapter = self.inner.exec_adapter()?;
-        let execution = self
-            .inner
-            .execution_gate
-            .clone()
-            .try_read_owned()
-            .map_err(|_| CoordinatorError::Busy)?;
+        let execution = self.execution_for_operation(owner, id, digest).await?;
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
 
         let mut state = self.inner.state.lock().expect("Host state mutex");
@@ -755,12 +774,7 @@ impl HostCoordinator {
         wait: Duration,
     ) -> Result<ProcessOutput, CoordinatorError> {
         let adapter = self.inner.exec_adapter()?;
-        let _execution = self
-            .inner
-            .execution_gate
-            .clone()
-            .try_read_owned()
-            .map_err(|_| CoordinatorError::Busy)?;
+        let _execution = self.execution_before(context.deadline).await?;
         let now = self.now();
         {
             let state = self.inner.state.lock().expect("Host state mutex");

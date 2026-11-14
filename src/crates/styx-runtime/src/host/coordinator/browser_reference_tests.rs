@@ -26,6 +26,7 @@ async fn execute(
         .unwrap();
     let completed = match host
         .dispatch_browser_action(owner, &reserved.id, reserved.payload_digest)
+        .await
         .unwrap()
     {
         BrowserActionSubmission::Submitted(ticket) => ticket.wait().await.unwrap(),

@@ -266,7 +266,7 @@ impl HostCoordinator {
         let payload = profile(lane(&state)?, owner)?.open_payload.clone();
         Ok(state.ledger.prepare(owner, context, payload, self.now())?)
     }
-    pub fn dispatch_browser_open(
+    pub async fn dispatch_browser_open(
         &self,
         owner: &OwnerLease,
         id: &OperationId,
@@ -283,12 +283,7 @@ impl HostCoordinator {
                 return Ok(BrowserOpenSubmission::Existing(snapshot));
             }
         }
-        let execution = self
-            .inner
-            .execution_gate
-            .clone()
-            .try_read_owned()
-            .map_err(|_| CoordinatorError::Busy)?;
+        let execution = self.execution_for_operation(owner, id, digest).await?;
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
 
         let mut state = self.inner.state.lock().expect("Host state mutex");
@@ -427,7 +422,7 @@ impl HostCoordinator {
             .ledger
             .prepare_targeted(owner, target, context, payload, self.now())?)
     }
-    pub fn dispatch_browser_action(
+    pub async fn dispatch_browser_action(
         &self,
         owner: &OwnerLease,
         id: &OperationId,
@@ -444,12 +439,7 @@ impl HostCoordinator {
                 return Ok(BrowserActionSubmission::Existing(snapshot));
             }
         }
-        let execution = self
-            .inner
-            .execution_gate
-            .clone()
-            .try_read_owned()
-            .map_err(|_| CoordinatorError::Busy)?;
+        let execution = self.execution_for_operation(owner, id, digest).await?;
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
 
         let mut state = self.inner.state.lock().expect("Host state mutex");
