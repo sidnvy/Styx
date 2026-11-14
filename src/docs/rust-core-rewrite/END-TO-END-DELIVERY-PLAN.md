@@ -11,6 +11,41 @@
 本轮目标以 [REFACTOR-PLAN.md](REFACTOR-PLAN.md) 为准。下述结果是开发验证，
 不改变已发布 0.4.0 的历史结果，也不代表重构版已经完成原生交付。
 
+### Windows 组件更新收尾与 UX 审核（2026-11-14）
+
+沿用上一检查点 `0.4.0.2011`、源码 `4802c83` 的安装和原配置，完成当前原生界面的
+Prepare runtime update → Update runtime 确认。配置选择已提交为随 App 安装的
+`50838693c4b6cf5a9f42096ebc4afc40058b39756c27f4e99ad04c7d6d2bebfe`，原更新
+`app-runtime-03cb44b5fa9d4e9ca2cc823ebe892e59` 的 Host select 提交为 sequence 3。
+没有编辑选择文件、重配对、改权限或替换任何封装内容。
+
+原 App/Core `14752/5380` 经正常 Quit 均退出 0。原路径、原配置重开后的 App/Core 为
+`13828/2068`，设置窗口 `2228928`。从此窗口的 Reconnect 入口恢复连接后，实际 Cua
+`11260` 从上述选定包的 `workers/cua-native/bin/cua-driver.exe` 启动。独立读取确认
+安装包记录与保存的 manifest 完全一致；运行 Core SHA
+`5b39cda8eb30d1b50e0f38ef5c1a888821066bfda2686851a1407bc427d71f57` 和 Cua SHA
+`d30d445acbb9ecd6e1ca6bb0053f78d6b6d8a8fd18ed9ebf31a642864b26526c` 均匹配选定包。
+deployment、Host 凭据、CA、identity 四项文件哈希与更新前一致。
+
+经原本机测试 Gateway，两段独立 MCP 会话的 12 次重叠窗口列表读取全部成功，
+Busy/Unknown 均为 0，约 0.21–0.28 秒；另一次窗口界面树返回 13 个元素。
+至此关闭前一检查点的“完整运行组件选择迁移未完成”项。未重新执行未受影响的
+Exec/Browser/账号矩阵，不把此结果扩大为重构版全部交付完成。
+
+原证据目录 `computer-concurrency/` 新增 `overlap-after-runtime-restart/`、
+`update-ui-*.json`、`update-final.py` 及 `update-*.ps1`；Windows 原 artifacts 中保存
+`window-read-runtime-updated-{quit,app,final}.json`。本次只收集必要的进程、版本和
+文件哈希摘要，不复制完整配置或凭据。
+
+实机暴露的 UX 缺陷已写入 [REFACTOR-PLAN.md 的桌面 UX 梳理](REFACTOR-PLAN.md#桌面-ux-梳理2026-11-14)：
+当前原生路径没有旧 UI 中的一键更新；阶段变化未重绘更新页，提交返回后错误地显示
+Operation completed；用户必须手动串联准备、检查、执行和连接。准备阶段还曾通过
+MCP 返回未派发的 Busy；该次调用没有执行按钮，后续通过本机同一原生按钮查询原更新。
+过期的界面引用拒绝和不支持的截图/树组合读取均保留为失败，不计入窗口读取通过。
+后续按钮操作前独立观察了原 App/窗口/控件，并在操作后核对状态。
+**本机更新收尾通过，不等于一键更新 UX 已实现。** 本轮先完成问题梳理，不新增另一套
+更新状态、限制或服务；下一步在原生 UI 与原 Core 更新操作上统一用户流程。
+
 ### 窗口读取跨对话干扰修正（2026-11-14，Windows 对照已通过）
 
 NAB5 上两段独立 MCP 会话完成打开后，各执行 6 次重叠 `list_windows(app="Styx")`；
