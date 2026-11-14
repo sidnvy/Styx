@@ -99,7 +99,9 @@ import SwiftUI
             }
             // Completing onboarding already leaves the main window visible.
             // Every menu/settings route must reuse that same AppKit window.
-            let controller = ProductWindowController(model: model)
+            let navigationModel = try ProductModel(sessionURL: URL(string: "http://127.0.0.1:1/#session=" + String(repeating: "a", count: 43))!, permissionReader: { (true, true) }, permissionActions: ProductPermissionActions(request: { _ in }, openSettings: { _ in }))
+            navigationModel.loaded = true; navigationModel.testSuppressObservations = true; navigationModel.testPreview = true
+            let controller = ProductWindowController(model: navigationModel)
             guard let main = controller.window else { throw ProductCoreError.invalidResponse }
             controller.present()
             let visibleBefore = Set(app.windows.filter(\.isVisible).map(ObjectIdentifier.init))
@@ -107,10 +109,10 @@ import SwiftUI
                 controller.showSettings(section)
                 try require(controller.window === main && main.isVisible, "Settings replaced the main window")
                 try require(Set(app.windows.filter(\.isVisible).map(ObjectIdentifier.init)) == visibleBefore, "A settings entry created another visible window")
-                try require(model.settingsSection == section, "Settings route did not navigate")
+                try require(navigationModel.settingsSection == section, "Settings route did not navigate")
             }
             main.performClose(nil)
-            try require(!model.settingsVisible && !model.onboardingVisible, "Closing the main window retained a visible presentation")
+            try require(!navigationModel.settingsVisible && !navigationModel.onboardingVisible, "Closing the main window retained a visible presentation")
             controller.showPreferences()
             try require(controller.window === main && main.isVisible, "Reopening Settings did not reuse the original window")
             main.close()
