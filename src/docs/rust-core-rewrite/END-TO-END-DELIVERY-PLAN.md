@@ -117,16 +117,50 @@ manifest 为 `9c30d3bf…`。Host 仍选择首次加入时 App 外的 `b13b53de�
 
 记录集中在 `/tmp/styx-host-capabilities-native-20261114` 的 `mcp/`、`mcp-settings/`、
 `capability-settings-*.json` 与 `close-*.json`；原机记录仍在 `artifacts/pairing-dev`。
-**两次较长的混合会话在 DELETE 时返回 HTTP 500，原因尚未确认，未重放原关闭请求。**
+**本检查点的两次较长混合会话在 DELETE 时返回 HTTP 500，当时原因未确认，未重放原关闭请求。后续定位见下一节。**
 只读、单能力、三能力短时组合及显式 Browser close 后结束的新独立会话均通过；这些正控
 不关闭原失败。另一个三能力会话持续三分钟、六次状态心跳及最终结束均通过，未将时长
 认定为根因。`capability-acceptance-summary.json` 汇总已核对响应与未关闭项。开发路径指引
 已补充实际 Mac Settings 菜单入口，避免用旧页或直接 Core 调用替代该入口验收。
 下一步先定位会话结束问题，再推进 Exec 跨对话和 Browser 转交，避免把
 未解释的资源生命周期带入下一阶段。重构版 Stable 仍为 NO-GO。
-Host 运行中 GUI 能力切换、Cua 活跃会话停止、其他能力不中断以及已配置 Host 重启恢复，
-仍是下一验收出口。Windows 仅完成本批原生控件/编译回归，原 source 的其他未提交修改保留。
-重构版 Stable 仍为 NO-GO。
+Windows 仅完成本批原生控件/编译回归，原 source 的其他未提交修改保留。
+
+### 延迟会话清理与 Mac 能力重新开启（2026-11-14，后续定位）
+
+`279068b` 修复 Exec 清理读取已过期上游任务记录的问题。单独运行一条命令，保留未读取的
+最终结果并等待 45 秒，旧版 DELETE 稳定返回 500；Host 实际已有完整的 output/exited/closed
+事件，但清理另走 process/read，未复用正常读取的事件证据。现在两条路径共用同一证据，
+撤销后的清理仅丢弃输出，不向旧 owner 交付，也不重发动作。缺少完整事件时仍拒绝确认释放。
+新回归先在旧实现失败，修复后 Codex 相关测试 19 PASS、3 个真实执行器专用用例未运行。
+
+`6cfb199` 修复 Mac 能力开关与原生组件寿命的冲突。Rust 在关闭 Computer Use 时结束其
+任务、保留当前平台源；App 原先同时撤掉发现信息，使该源被永久停止使用，重新开启无效。
+App 现在仅为同一仍活跃的 Host 保留已启动的源；禁用时不新建组件，任务准入仍由 Rust 决定。
+Host 停止、系统权限变化与正常退出保持各自原生命周期。
+
+实际签名 App build 2004 / 源码 `279068b` 已原位安装。Core SHA 为 `f0de34cb…`，安装内
+Runtime manifest 为 `7b739d08…`。Host 继续使用原 `b13b53de…` worker Runtime；没有执行
+Runtime 更新旅程，也不宣称统一版本发布验收。复用本机 Gateway 与原 Mac 配对，实际验证：
+
+- 单 Exec 未读结果等待 45 秒后 DELETE 返回 202，修复前同场景返回 500。
+- 真实 Mac 设置菜单关闭 Computer Use 后 MCP 返回 PERMISSION_DENIED / not_dispatched；
+  重新开启后窗口读取成功，App/Core/Cua PID 均未变化。
+- 三能力混合调用、逐项关闭、等待 45 秒再结束，DELETE 返回 202。随后恢复三项，原 Host
+  的 Cua 窗口读取成功。首轮混合复测因测试网页服务已退出而中断，该会话 DELETE 为 202；
+  最终测试由自身持有并正常结束网页服务，未将前置条件失败记为产品通过。
+- 新版正常菜单 Quit 后原 App/Core/Cua/Exec 全部退出，Core exit 0；同 profile 重开后
+  Exec 输出 STYX_CLEANUP_FIX_REOPEN_OK、Cua 窗口读取通过，身份/凭据/CA 摘要不变。
+
+标准工作区质量门 19 项 PASS，唯一格式失败已修正并单独复查通过；原失败收据保留。
+后续 Rust 改动仅为格式，行为实测绑定上述 `279068b`。生产 Swift 编译和原生 self-test 通过。
+agent 原生开发指导加入单一事实归属、同进程关闭再开启及上游保留期后的清理回归。
+证据仍在 `/tmp/styx-host-capabilities-native-20261114`，总收据为 `cleanup-fix-acceptance.json`。
+原两次 500 不改写为成功；用独立复现及修复后的同场景证明原因和修复。旧进程另一次
+native_before_observation / native_protocol 故障未独立复现，不与已定位的能力开关故障混称。
+
+下一步按 REFACTOR-PLAN 推进 Exec 任务与对话解绑、Browser 明确转交；Windows 实际能力
+切换、跨平台与真实账号验收仍未关闭。重构版 Stable 仍为 NO-GO。
 
 ## 当前开发检查点（2026-11-12）
 
