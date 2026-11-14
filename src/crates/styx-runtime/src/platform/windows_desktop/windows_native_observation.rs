@@ -60,8 +60,6 @@ pub(crate) enum ObservationError {
     InputDesktopUnavailable,
     #[error("windows_session_identity_changed")]
     Changed,
-    #[error("windows_session_reader_busy")]
-    Busy,
     #[error("windows_session_observation_stopped")]
     Stopped,
     #[error("windows_window_enumeration_limit")]

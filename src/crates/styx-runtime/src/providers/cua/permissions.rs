@@ -165,14 +165,6 @@ pub(super) async fn query(live: &mut Live, stop: &CancellationToken, until: Inst
     }
 }
 impl CuaHandle {
-    pub(crate) async fn current_permissions(&self) -> Option<DriverPermissions> {
-        let live = self.resource.live.lock().await;
-        if live.retired || live.uncertain || self.resource.stop.is_cancelled() {
-            None
-        } else {
-            live.permissions.clone()
-        }
-    }
     pub(crate) async fn refresh_permissions(&self) -> Result<Option<DriverPermissions>> {
         let mut live = self
             .resource

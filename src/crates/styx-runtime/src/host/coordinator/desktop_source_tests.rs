@@ -3,6 +3,26 @@ use super::*;
 use crate::platform::linux::Association;
 use watch::{Invalidation, InvalidationReason};
 
+#[tokio::test]
+async fn overlapping_source_reads_wait_for_the_original_reader_not_busy() {
+    let mut source = DesktopSource::for_tests();
+    let (requests, mut receive) = mpsc::channel(1);
+    Arc::get_mut(&mut source.inner).unwrap().requests = requests;
+    let first = source.fresh();
+    let second = source.fresh();
+    tokio::pin!(first, second);
+    assert!(futures_util::poll!(&mut first).is_pending());
+    assert!(futures_util::poll!(&mut second).is_pending());
+    receive.recv().await.unwrap().send(Ok(())).unwrap();
+    assert_eq!(first.await, Ok(()));
+    assert!(futures_util::poll!(&mut second).is_pending());
+    receive.recv().await.unwrap().send(Ok(())).unwrap();
+    assert_eq!(second.await, Ok(()));
+    // An ended original reader still fails; waiting never selects another source.
+    drop(receive);
+    assert_eq!(source.fresh().await, Err(DesktopSourceError::Fenced));
+}
+
 fn selected() -> LinuxCandidate {
     LinuxCandidate {
         session_id: "owned-session".into(),

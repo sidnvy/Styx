@@ -11,6 +11,22 @@
 本轮目标以 [REFACTOR-PLAN.md](REFACTOR-PLAN.md) 为准。下述结果是开发验证，
 不改变已发布 0.4.0 的历史结果，也不代表重构版已经完成原生交付。
 
+### 窗口读取跨对话干扰修正（2026-11-14，实机验证中）
+
+NAB5 上两段独立 MCP 会话完成打开后，各执行 6 次重叠 `list_windows(app="Styx")`；
+12 次调用中 2 次返回 `capacity_busy / uncertain:false`。本轮基线保存在
+`/tmp/styx-browser-handoff-20261114/computer-concurrency/overlap-before/results.json`。
+源码存在两处 Styx 自己的耦合：读取前后遍历所有 Cua worker 查询权限并占用各 worker
+执行锁；原桌面来源读取器把重叠读取直接拒绝为 Busy。上游原生 Busy 在当前响应适配中
+不会生成这种已知未派发的容量错误，不能把此次错误推给 Cua。
+
+现移除全局 worker 权限遍历及启动时把某一 worker 权限发布为共享准入事实的路径。
+窗口列表不探测输入权限；其他调用仅查询自己的 worker，权限结果在同一状态临界区内
+用于当前调用，写入前复核和结果交付也使用该 worker 的事实。原桌面来源读取器沿用
+既有有界通道处理重叠请求，不新增锁、队列、重试或并发配额。原来源失效、权限拒绝、
+本机能力开关与未知结果保护保留。回归覆盖来源读取重叠和原 reader 结束；旧实现失败、
+修改后通过。Windows 原生编译及同组重叠调用对照仍待完成，不能提前声称部署修复。
+
 ### Computer 单会话门禁删除（2026-11-14，Windows 实机检查点）
 
 NAB5 原 App PID 11000、Core PID 11768 和 Cua PID 8668 仍运行时，新的独立 MCP

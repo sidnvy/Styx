@@ -125,11 +125,9 @@ impl DesktopSource {
         let (answer, receive) = oneshot::channel();
         self.inner
             .requests
-            .try_send(answer)
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => ObservationError::Busy,
-                mpsc::error::TrySendError::Closed(_) => ObservationError::Fenced,
-            })?;
+            .send(answer)
+            .await
+            .map_err(|_| ObservationError::Fenced)?;
         receive.await.map_err(|_| ObservationError::Fenced)?
     }
     /// Cached native facts installed only by the original successful reader.
@@ -317,4 +315,41 @@ async fn supervise(
     .await
     .unwrap_or(Err(ObservationError::NativeQueryFailed));
     stopped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn overlapping_source_reads_wait_for_the_original_reader_not_busy() {
+        let (requests, mut receive) = mpsc::channel(1);
+        let source = DesktopSource {
+            inner: Arc::new(Inner {
+                state: Arc::new(State {
+                    fenced: AtomicBool::new(false),
+                    epoch: AtomicU64::new(1),
+                    latest: Mutex::new(None),
+                    source_id: "fixture".into(),
+                    native_invalidated: Mutex::new(None),
+                }),
+                cancel: CancellationToken::new(),
+                requests,
+                worker: AsyncMutex::new(None),
+                terminal: Mutex::new(None),
+            }),
+        };
+        let first = source.fresh();
+        let second = source.fresh();
+        tokio::pin!(first, second);
+        assert!(futures_util::poll!(&mut first).is_pending());
+        assert!(futures_util::poll!(&mut second).is_pending());
+        receive.recv().await.unwrap().send(Ok(())).unwrap();
+        assert_eq!(first.await, Ok(()));
+        assert!(futures_util::poll!(&mut second).is_pending());
+        receive.recv().await.unwrap().send(Ok(())).unwrap();
+        assert_eq!(second.await, Ok(()));
+        drop(receive);
+        assert_eq!(source.fresh().await, Err(ObservationError::Fenced));
+    }
 }

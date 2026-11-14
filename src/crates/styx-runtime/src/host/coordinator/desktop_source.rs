@@ -32,8 +32,6 @@ pub(crate) enum DesktopSourceError {
     Acquisition(crate::session_probe::association::AssociationProbeError),
     #[error("desktop source changed or ended")]
     Fenced,
-    #[error("desktop source probe busy")]
-    Busy,
     #[error("desktop source supervisor failed")]
     Supervisor,
 }
@@ -43,7 +41,6 @@ impl DesktopSourceError {
             Self::Unavailable => "desktop_source_unavailable",
             Self::Acquisition(error) => error.code(),
             Self::Fenced => "desktop_source_fenced",
-            Self::Busy => "desktop_source_busy",
             Self::Supervisor => "desktop_source_supervisor_failed",
         }
     }
@@ -164,10 +161,13 @@ impl DesktopSource {
             return Err(DesktopSourceError::Fenced);
         }
         let (tx, rx) = oneshot::channel();
-        self.inner.requests.try_send(tx).map_err(|e| match e {
-            mpsc::error::TrySendError::Full(_) => DesktopSourceError::Busy,
-            mpsc::error::TrySendError::Closed(_) => DesktopSourceError::Fenced,
-        })?;
+        // Use the original reader's normal channel backpressure. A concurrent
+        // read is not a desktop-capacity refusal and creates no second probe.
+        self.inner
+            .requests
+            .send(tx)
+            .await
+            .map_err(|_| DesktopSourceError::Fenced)?;
         rx.await.map_err(|_| DesktopSourceError::Supervisor)?
     }
     /// Caller invokes on its existing blocking boundary: registration_facts
@@ -346,9 +346,8 @@ async fn supervise(
                 let _ = pending.answer.send(result);
                 if failed { break None; }
             },
-            request = requests.recv(), if ready.is_none() => match request {
-                Some(answer) if pending.is_none() => pending = Some(begin_probe(&selected, &state, answer)),
-                Some(answer) => { let _ = answer.send(Err(DesktopSourceError::Busy)); },
+            request = requests.recv(), if ready.is_none() && pending.is_none() => match request {
+                Some(answer) => pending = Some(begin_probe(&selected, &state, answer)),
                 None => break None,
             }
         }
