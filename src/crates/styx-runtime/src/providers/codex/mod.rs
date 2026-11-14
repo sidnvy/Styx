@@ -714,6 +714,11 @@ impl CodexStdio {
         // Original validated page stays owned until delivery or revoked cleanup.
         // Dropping it zeroizes cached bytes and releases its RPC reservation.
         record.pending_output = None;
+        self.retain_completed_output(&mut record, handle)?;
+        // Cleanup consumes the same complete native events as a normal read,
+        // without delivering their bytes to a revoked owner or querying an
+        // expired upstream process record.
+        record.pending_output = None;
         if !record.drained {
             let reply = self.rpc.request_budgeted("process/read", json!({"processId":handle.process_id,"afterSeq":record.cursor,"maxBytes":65536,"waitMs":50})).await?;
             let page: ReadPage =

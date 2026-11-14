@@ -1815,6 +1815,62 @@ async fn retained_read_pages_leave_a_control_rpc_slot_and_refuse_before_another_
 }
 
 #[tokio::test]
+async fn revoked_cleanup_uses_complete_events_after_native_read_retention_expires() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    for complete in [true, false] {
+        let mut auth = authority();
+        let (_, id, _) = auth.issue(spec(&std::env::temp_dir(), "unused", false));
+        let owner = auth.owner.clone();
+        let (adapter, handle, server) = fixture_adapter(owner.clone(), id);
+        let process = handle.process_id.clone();
+        let (done_tx, mut done_rx) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let (r, mut w) = tokio::io::split(server);
+            let mut lines = BufReader::new(r).lines();
+            if complete {
+                w.write_all(format!("{}\n", json!({"method":"process/output","params":{"processId":process,"seq":1,"stream":"stdout","chunk":STANDARD.encode("unread output")}})).as_bytes()).await.unwrap();
+            }
+            for event in [
+                json!({"method":"process/exited","params":{"processId":process,"seq":2,"exitCode":0}}),
+                json!({"method":"process/closed","params":{"processId":process,"seq":3}}),
+            ] {
+                w.write_all(format!("{event}\n").as_bytes()).await.unwrap();
+            }
+            let mut reads = 0;
+            loop {
+                tokio::select! {
+                    _ = &mut done_rx => return reads,
+                    line = lines.next_line() => {
+                        let q: Value = serde_json::from_str(&line.unwrap().unwrap()).unwrap();
+                        assert_eq!(q["method"], "process/read");
+                        reads += 1;
+                        w.write_all(format!("{}\n", json!({"id":q["id"],"error":{"code":-32602,"message":"process no longer retained"}})).as_bytes()).await.unwrap();
+                    }
+                }
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while adapter.rpc.observation(&handle.process_id).unwrap().closed.is_none() {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let cleanup = auth.ledger.fence_owner_for_cleanup(&owner, MonotonicMillis(2)).unwrap();
+        let result = adapter.discard_for_cleanup(&cleanup, &handle).await;
+        done_tx.send(()).unwrap();
+        let reads = worker.await.unwrap();
+        if complete {
+            let facts = result.expect("complete original events must settle expired native output");
+            assert_eq!(facts.exit_code, Some(0));
+            assert!(facts.drained);
+            assert_eq!(reads, 0, "cleanup must not query an expired native record");
+        } else {
+            assert!(result.is_err(), "exit/close without the output prefix is not a drain proof");
+            assert_eq!(reads, 1);
+        }
+    }
+}
+
+#[tokio::test]
 async fn complete_native_events_retain_delayed_output_without_replaying_an_expired_read() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let mut auth = authority();
