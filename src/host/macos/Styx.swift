@@ -376,14 +376,15 @@ func styxStatusItemImage(source: NSImage) -> NSImage? {
 }
 
 #if STYX_PRODUCT_UI
-func productComputerUseRequested(_ status: ProductJSON, guiAvailable: Bool) -> Bool {
+func productComputerUseRequested(_ status: ProductJSON, guiAvailable: Bool, retainingSource: Bool = false) -> Bool {
     if status["mode"].string == "rust_host" || status["desktop_intent"] != .null {
         let intent = status["desktop_intent"]
         return guiAvailable && status["schema"] == .number(1) && status["mode"].string == "rust_host" &&
             status["admission_fenced"] == .bool(false) &&
             ["started", "connected"].contains(status["foreground"]["status"].string ?? "") &&
             intent["schema"] == .number(1) && intent["source"] == .string("approved_host_configuration") &&
-            intent["computer_requested"] == .bool(true)
+            (intent["computer_requested"] == .bool(true) ||
+             (retainingSource && intent["computer_requested"] == .bool(false)))
     }
     guard guiAvailable, status["deployment"]["roles"]["host"].string == "local" else { return false }
     let change = status["deviceCapabilities"]
@@ -761,7 +762,13 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
             guard status["mode"].string == "rust_host" else { withdrawNativeComputerUse("Core status invalid; Computer Use unavailable"); return }
             nativeDesktopIntentObservedAt = requestedAt
             let session = CGSessionCopyCurrentDictionary() as? [String: Any]
-            let requested = productComputerUseRequested(status, guiAvailable: session?[kCGSessionOnConsoleKey as String] as? Bool == true)
+            // Rust stops disabled capability tasks and retains its original Cua
+            // source. Keep that source discoverable for the same live Host;
+            // withdrawing it here permanently fences a later re-enable. This
+            // never starts a disabled component or grants a native operation.
+            let requested = productComputerUseRequested(status,
+                guiAvailable: session?[kCGSessionOnConsoleKey as String] as? Bool == true,
+                retainingSource: daemon?.isRunning == true)
             let changed = requested != computerUseRequested
             computerUseRequested = requested
             if requested {
@@ -1301,6 +1308,12 @@ if CommandLine.arguments.contains("--self-test") {
         "schema": .number(1), "source": .string("approved_host_configuration"), "computer_requested": .bool(true)])])
     precondition(productComputerUseRequested(nativeApproved, guiAvailable: true))
     precondition(!productComputerUseRequested(nativeApproved, guiAvailable: false))
+    var nativeDisabled = nativeApproved.object
+    nativeDisabled["desktop_intent"] = .object(["schema": .number(1),
+        "source": .string("approved_host_configuration"), "computer_requested": .bool(false)])
+    precondition(!productComputerUseRequested(.object(nativeDisabled), guiAvailable: true))
+    precondition(productComputerUseRequested(.object(nativeDisabled), guiAvailable: true, retainingSource: true))
+    precondition(!productComputerUseRequested(.object(nativeDisabled), guiAvailable: false, retainingSource: true))
     let invalidNativeIntents: [ProductJSON] = [.null, .object([:]), .object(["schema": .number(1), "source": .string("requestJoin"), "computer_requested": .bool(true)]),
                                       .object(["schema": .number(1), "source": .string("approved_host_configuration"), "computer_requested": .bool(false)]),
                                       .object(["schema": .number(2), "source": .string("approved_host_configuration"), "computer_requested": .bool(true)]),
@@ -1319,6 +1332,7 @@ if CommandLine.arguments.contains("--self-test") {
     for (key, value) in inconsistentNativeFields {
         var invalid = nativeApproved.object; invalid[key] = value
         precondition(!productComputerUseRequested(.object(invalid), guiAvailable: true))
+        precondition(!productComputerUseRequested(.object(invalid), guiAvailable: true, retainingSource: true))
     }
     precondition(productDesktopIntentFresh(10, now: 160))
     precondition(!productDesktopIntentFresh(10, now: 160.001))
