@@ -223,6 +223,7 @@ enum ProductRestorationPolicy {
     }
     var nativeRuntimeUpdate: ProductJSON { status["runtimeUpdate"] }
     var checkAppUpdate: (() -> Void)?
+    @Published var updatingStyx = false
     func updateStyx() {
         guard !busy, nativeSupportsOperation("updateStyx") else { return }
         let alert = NSAlert()
@@ -232,6 +233,8 @@ enum ProductRestorationPolicy {
         alert.addButton(withTitle: productText("取消", "Cancel"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         perform { [self] in
+            updatingStyx = true
+            defer { updatingStyx = false }
             try applyNative(try await client.native("updateStyx", ["authorize": .bool(true)]))
             checkAppUpdate?()
         }

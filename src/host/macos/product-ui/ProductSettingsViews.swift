@@ -91,8 +91,8 @@ struct ProductSettingsView: View {
                       window.identifier?.rawValue == "Styx.SettingsWindow" else { return }
                 editTunnel = false; editPackage = false; setupChat = false; tryChat = false; addComputer = false
             }
-            .task(id: model.settingsVisible) {
-                if model.settingsVisible { await model.observePresentation() }
+            .task(id: model.settingsVisible || model.onboardingVisible) {
+                if model.settingsVisible || model.onboardingVisible { await model.observePresentation() }
             }
     }
     private func settingsGroup<Content: View>(_ section: ProductSettingsSection, @ViewBuilder content: () -> Content) -> some View {
@@ -212,7 +212,8 @@ struct ProductSettingsView: View {
     @ViewBuilder private var computers: some View {
         GroupBox(productText("这台 Mac", "This Mac")) {
             VStack(alignment: .leading, spacing: 16) {
-                Label(model.localIndicator.label, systemImage: "desktopcomputer")
+                if model.updatingStyx { ProgressView(productText("正在更新 Styx…", "Updating Styx…")) }
+                else { Label(model.localIndicator.label, systemImage: "desktopcomputer") }
                 if model.nativeHost && model.localIndicator != .connected && model.status["foreground"]["status"].string != "started" && model.nativeSupportsOperation("connect") {
                     Button(productText("重新连接", "Reconnect")) { model.resumeForeground() }.disabled(model.busy || model.status["admission_fenced"].bool)
                 }

@@ -390,7 +390,9 @@ struct ProductDailyPanel: View {
         else { model.requestSettings(section) }
     }
     @ViewBuilder private var nativeRows: some View {
-        if model.status["configuration"] == .null && model.status["enrollment"] == .null && model.status["gateway"] == .null {
+        if model.updatingStyx {
+            ProgressView(productText("正在更新 Styx…", "Updating Styx…")).padding(16)
+        } else if model.status["configuration"] == .null && model.status["enrollment"] == .null && model.status["gateway"] == .null {
             ProductMenuRow(title: productText("开始设置", "Get started"), symbol: "sparkles") { controller?.showOnboarding() }
                 .disabled(!model.nativeCanCreateLocal)
             ProductMenuRow(title: productText("加入已有 Styx", "Join an existing Styx"), symbol: "link") {
@@ -409,13 +411,7 @@ struct ProductDailyPanel: View {
                 ForEach(model.devices.filter { !$0.isLocal }) { device in
                     ProductMenuRow(title: device.label, symbol: "desktopcomputer", state: device.indicator, disclosure: true) { showSettings(.computers) }
                 }
-                ProductMenuRow(title: productText("添加电脑", "Add computer"), symbol: "plus") {
-                    model.beginDeviceInvitation()
-                }.disabled(model.busy)
-                if model.invitationExpanded {
-                    ProductInvitationView(model: model).padding(.horizontal, 10).padding(.bottom, 8)
-                    ProductPendingIdentities(model: model)
-                }
+
             }
             ProductMenuRow(title: "ChatGPT", symbol: "globe", disclosure: true) { showSettings(.chat) }
         }
