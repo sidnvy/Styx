@@ -221,7 +221,6 @@ enum ProductRestorationPolicy {
             page = .welcome
         }
     }
-    func nativePause() { guard nativeSupportsOperation("disconnect") else { return }; perform { [self] in _ = try await client.native("disconnect") } }
     var nativeRuntimeUpdate: ProductJSON { status["runtimeUpdate"] }
     func nativeStageRuntime() {
         perform { [self] in try applyNative(try await client.native("stageRuntime", ["authorize": .bool(true)])) }

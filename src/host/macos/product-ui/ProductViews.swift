@@ -417,9 +417,6 @@ struct ProductView: View {
                     } else if model.nativeSupportsOperation("connect") {
                         Button(productText("重新连接", "Reconnect")) { model.resumeForeground() }.disabled(model.busy || model.status["admission_fenced"].bool)
                     }
-                    if model.nativeSupportsOperation("disconnect") {
-                        Button(productText("暂停连接", "Pause connection")) { model.nativePause() }.disabled(model.busy)
-                    }
                     Text(model.nativeQuitDescription)
                 } else {
                 statusRow(ProductCapabilityKind.cli.title, model.journey["readiness"]["exec"]["status"].string)
