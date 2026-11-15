@@ -165,23 +165,82 @@ pub(super) async fn run(options: Options) -> Result<(), Failure> {
             if !same_mode {
                 return Err(Failure::new("install_existing_role_preserved"));
             }
-            if existing.payload.payload_dir == payload {
-                link(&payload, &bin, None)?;
+            use styx_runtime::management::native_gateway_admin as admin;
+            let previous = match std::fs::read_link(bin.join("styx")) {
+                Ok(command) => {
+                    let previous = command
+                        .parent()
+                        .and_then(Path::parent)
+                        .ok_or_else(|| Failure::new("install_existing_command_preserved"))?;
+                    if command != previous.join("bin/styx")
+                        || !(previous.starts_with(&parent)
+                            || previous == existing.payload.payload_dir)
+                    {
+                        return Err(Failure::new("install_existing_command_preserved"));
+                    }
+                    let key = if previous == existing.payload.payload_dir {
+                        existing.payload.publisher_file.clone()
+                    } else {
+                        previous
+                            .parent()
+                            .ok_or_else(|| Failure::new("install_existing_command_preserved"))?
+                            .join("publisher.pem")
+                    };
+                    styx_runtime::release::inspect_selection(previous, &key, &pin)
+                        .await
+                        .map_err(release_failure)?;
+                    Some(previous.to_owned())
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => return Err(Failure::new("install_existing_command_preserved")),
+            };
+            let mut selections = Vec::new();
+            for directory in ["gateway", "host"] {
+                let path = root.join(directory);
+                if !path.exists() {
+                    continue;
+                }
+                selections.push(
+                    admin::committed_runtime_selection(&path)
+                        .await
+                        .map_err(Failure::admin)?,
+                );
+            }
+            let selected = !selections.is_empty()
+                && selections
+                    .iter()
+                    .all(|s| s.manifest_sha256 == installed.manifest_sha256);
+            let mut resume_setup = selections.is_empty();
+            if !selections.is_empty() {
+                println!("Existing Styx configuration found; checking its update progress.");
+                match super::upgrade::run(
+                    payload.clone(),
+                    Some(publisher.clone()),
+                    Some(pin.clone()),
+                    Some(root),
+                    false,
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(error) if error.code == "upgrade_already_running" => {}
+                    Err(error)
+                        if selected && error.code == "upgrade_existing_linux_services_required" =>
+                    {
+                        resume_setup = true
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            // A completed service update may only need its CLI link published.
+            // Do not replay the update or use immutable first-setup paths as current state.
+            link(&payload, &bin, previous.as_deref())?;
+            if resume_setup {
                 if matches!(mode, Mode::Gateway) {
                     super::install_boot::ensure_gateway_boot()?;
                 }
                 return super::setup::run_installed(existing.payload, mode).await;
             }
-            println!("Existing Styx configuration found; updating it without pairing again.");
-            super::upgrade::run(
-                payload.clone(),
-                Some(publisher.clone()),
-                Some(pin.clone()),
-                Some(root),
-                false,
-            )
-            .await?;
-            link(&payload, &bin, Some(&existing.payload.payload_dir))?;
             println!("Styx updated. Existing configuration and pairing were kept.");
             return Ok(());
         }
