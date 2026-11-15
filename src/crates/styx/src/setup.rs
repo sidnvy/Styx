@@ -413,14 +413,22 @@ impl Answers {
         Ok(value)
     }
 }
-fn interactive(root: &Path) -> Result<(Answers, Option<String>)> {
+fn interactive(
+    root: &Path,
+    installed: Option<(Payload, super::install::Mode)>,
+) -> Result<(Answers, Option<String>)> {
     prompt::section("Styx setup");
     prompt::info("Connect only the computers and capabilities you approve.");
     prompt::section("This computer's role");
-    let headless = cfg!(target_os = "linux")
-        && ["WAYLAND_DISPLAY", "DISPLAY"]
-            .iter()
-            .all(|key| std::env::var_os(key).is_none_or(|v| v.is_empty()));
+    let headless = installed
+        .as_ref()
+        .map(|(_, mode)| matches!(mode, super::install::Mode::Gateway))
+        .unwrap_or_else(|| {
+            cfg!(target_os = "linux")
+                && ["WAYLAND_DISPLAY", "DISPLAY"]
+                    .iter()
+                    .all(|key| std::env::var_os(key).is_none_or(|v| v.is_empty()))
+        });
     let role = if headless {
         prompt::info("Set up the Gateway server. Other computers connect as Hosts.");
         Role::Gateway
@@ -438,32 +446,40 @@ fn interactive(root: &Path) -> Result<(Answers, Option<String>)> {
             _ => return Err("setup_role_invalid".into()),
         }
     };
-    prompt::section("Trusted release");
-    println!(
-        "Styx checks that your installed files are authentic. You need the publisher public key file and the fingerprint from the download page / release notes."
-    );
-    let inferred = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent()?.parent().map(Path::to_path_buf))
-        .filter(|p| p.join("manifest.json").is_file());
-    let payload_dir = if let Some(path) = inferred {
-        println!("Installed Styx files: {}", path.display());
-        path
+    let payload = if let Some((payload, _)) = installed {
+        println!(
+            "Using installed Styx files: {}",
+            payload.payload_dir.display()
+        );
+        payload
     } else {
-        PathBuf::from(prompt::line("Installed payload directory", None)?)
-    };
-    let publisher = publisher_default(&payload_dir);
-    let payload = Payload {
-        payload_dir,
-        publisher_file: prompt::line(
-            "Publisher public PEM file",
-            publisher.as_ref().and_then(|p| p.to_str()),
-        )?
-        .into(),
-        expected_publisher: normalize_publisher_pin(&prompt::line(
-            "Publisher fingerprint shown on the download page / release notes (colons and spaces optional)",
-            None,
-        )?),
+        prompt::section("Trusted release");
+        println!(
+            "Styx checks that your installed files are authentic. You need the publisher public key file and the fingerprint from the download page / release notes."
+        );
+        let inferred = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent()?.parent().map(Path::to_path_buf))
+            .filter(|p| p.join("manifest.json").is_file());
+        let payload_dir = if let Some(path) = inferred {
+            println!("Installed Styx files: {}", path.display());
+            path
+        } else {
+            PathBuf::from(prompt::line("Installed payload directory", None)?)
+        };
+        let publisher = publisher_default(&payload_dir);
+        Payload {
+            payload_dir,
+            publisher_file: prompt::line(
+                "Publisher public PEM file",
+                publisher.as_ref().and_then(|p| p.to_str()),
+            )?
+            .into(),
+            expected_publisher: normalize_publisher_pin(&prompt::line(
+                "Publisher fingerprint shown on the download page / release notes (colons and spaces optional)",
+                None,
+            )?),
+        }
     };
     let mut networks = Vec::new();
     let mut tunnel = None;
@@ -839,7 +855,7 @@ async fn service(
         session.skip(step);
         return Ok(());
     }
-    session.consent(step, "Install, start and enable this role as your systemd --user service. It starts at user login; Styx never uses sudo or enables linger.")?;
+    session.consent(step, "Install, start and enable this role as your systemd --user service. It starts at user login; This step does not change system authorization or login policy.")?;
     // Enable while stopped: starting a service only proves systemd admission,
     // not readiness of the Gateway's original live configuration writer.
     // Enabling immediately after start can race its private control endpoint.
@@ -963,7 +979,7 @@ fn plan_steps(answers: &Answers, foreground: bool, root: &Path) -> Vec<String> {
         if answers.tunnel.is_some() {
             steps.push("Connect ChatGPT through a Secure MCP Tunnel and save its API key privately. Briefly stop and restart an existing hub service if configuration requires it.".into());
         }
-        steps.push(if foreground { "Run the hub in this terminal until Ctrl-C." } else { "Install, start and enable the hub as your systemd user service at login. No sudo or linger." }.into());
+        steps.push(if foreground { "Run the hub in this terminal until Ctrl-C." } else { "Install, start and enable the hub as your systemd user service at login. Using the existing login policy." }.into());
         if answers.role == Role::Hub {
             steps
                 .push("Pair this computer with its own hub using its exact local identity.".into());
@@ -981,7 +997,7 @@ fn plan_steps(answers: &Answers, foreground: bool, root: &Path) -> Vec<String> {
             if answers.browser { "on" } else { "off" },
             if answers.computer { "on" } else { "off" }
         ));
-        steps.push(if foreground { "Run this computer's connection in this terminal until Ctrl-C." } else { "Install, start and enable this computer's connection as your systemd user service at login. No sudo or linger." }.into());
+        steps.push(if foreground { "Run this computer's connection in this terminal until Ctrl-C." } else { "Install, start and enable this computer's connection as your systemd user service at login. Using the existing login policy." }.into());
         steps.push(
             if answers.role.owns_gateway() {
                 "Wait for the hub to confirm this computer is connected."
@@ -1743,6 +1759,28 @@ pub(super) async fn run(
     foreground_mode: bool,
     exit_when_connected: bool,
 ) -> Result<()> {
+    run_inner(
+        root,
+        answers_file,
+        foreground_mode,
+        exit_when_connected,
+        None,
+    )
+    .await
+}
+
+#[cfg(target_os = "linux")]
+pub(super) async fn run_installed(payload: Payload, mode: super::install::Mode) -> Result<()> {
+    run_inner(None, None, false, false, Some((payload, mode))).await
+}
+
+async fn run_inner(
+    root: Option<PathBuf>,
+    answers_file: Option<PathBuf>,
+    foreground_mode: bool,
+    exit_when_connected: bool,
+    installed: Option<(Payload, super::install::Mode)>,
+) -> Result<()> {
     // console restores termios before raising SIGINT on Ctrl-C. Register the
     // same Tokio signal handling used by the running setup before prompts too,
     // so a read error can unwind Dialoguer and restore the terminal cursor.
@@ -1786,7 +1824,7 @@ pub(super) async fn run(
         );
         (Answers::load(&intent)?, None)
     } else {
-        interactive(&root)?
+        interactive(&root, installed)?
     };
     if intent.exists() && answers.role.owns_gateway() && answers.tunnel.is_none() {
         if let Ok(status) = styx_runtime::foreground::tunnel::status(&root.join("gateway")).await {
@@ -2196,8 +2234,8 @@ pub(super) async fn uninstall(_: Option<PathBuf>, _: bool) -> Result<()> {
 }
 /// Service processes started for this root (`__service-run --state-dir <root>/...`).
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn running_roles(root: &Path) -> Vec<u32> {
-    let prefix = root.as_os_str().as_encoded_bytes();
+pub(super) fn running_roles(root: &Path) -> Vec<u32> {
+    use std::os::unix::ffi::OsStrExt;
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return Vec::new();
     };
@@ -2207,9 +2245,10 @@ fn running_roles(root: &Path) -> Vec<u32> {
             std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|raw| {
                 let args: Vec<&[u8]> = raw.split(|b| *b == 0).collect();
                 args.iter().any(|a| *a == b"__service-run")
-                    && args
-                        .windows(2)
-                        .any(|w| w[0] == b"--state-dir" && w[1].starts_with(prefix))
+                    && args.windows(2).any(|w| {
+                        w[0] == b"--state-dir"
+                            && Path::new(std::ffi::OsStr::from_bytes(w[1])).starts_with(root)
+                    })
             })
         })
         .collect()

@@ -12,6 +12,12 @@ use tokio_util::sync::CancellationToken;
 mod computers;
 #[path = "install.rs"]
 mod install;
+#[cfg(target_os = "linux")]
+#[path = "install_boot.rs"]
+mod install_boot;
+#[cfg(target_os = "linux")]
+#[path = "lifecycle.rs"]
+mod lifecycle;
 #[path = "plugin_command.rs"]
 mod plugin_command;
 #[path = "plugin_package.rs"]
@@ -93,7 +99,13 @@ enum LocalAppCommand {
 }
 #[derive(Subcommand)]
 enum Command {
-    /// Quit the current user's native Windows App through its original owner.
+    /// Start this user's configured Linux services, retaining the existing pairing.
+    #[cfg(target_os = "linux")]
+    Start {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Quit Styx through its existing platform owner; settings are retained.
     Quit {
         #[arg(long)]
         state_dir: Option<PathBuf>,
@@ -105,7 +117,7 @@ enum Command {
         #[command(subcommand)]
         command: LocalAppCommand,
     },
-    /// Install a verified Linux CLI into your private bin directory.
+    /// Install signed Linux files persistently and optionally run first-time setup.
     Install {
         #[arg(long)]
         payload_dir: PathBuf,
@@ -117,6 +129,10 @@ enum Command {
         bin_dir: Option<PathBuf>,
         #[arg(long)]
         authorize: bool,
+        #[arg(long)]
+        setup: bool,
+        #[arg(long, value_enum, default_value = "desktop")]
+        mode: install::Mode,
     },
     /// Configure or export this hub's plugin name, descriptions and icon.
     Plugin {
@@ -1258,7 +1274,15 @@ async fn local_app(
 pub(crate) async fn run(cli: Cli) -> ExitCode {
     use styx_runtime::foreground::{self, HostWireMode};
     match cli.command {
+        #[cfg(target_os = "linux")]
+        Command::Start { root } => setup_result(lifecycle::run(root, true).await),
         Command::Quit { state_dir, json } => {
+            #[cfg(target_os = "linux")]
+            {
+                let _ = json;
+                setup_result(lifecycle::run(state_dir, false).await)
+            }
+            #[cfg(not(target_os = "linux"))]
             local_app(state_dir, styx_runtime::app_control::Operation::Quit, json).await
         }
         Command::App {
@@ -1277,14 +1301,18 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             expected_publisher,
             bin_dir,
             authorize,
+            setup,
+            mode,
         } => setup_result(
-            install::run(
-                payload_dir,
-                publisher_file,
-                expected_publisher,
-                bin_dir,
+            install::run(install::Options {
+                payload: payload_dir,
+                publisher: publisher_file,
+                pin: expected_publisher,
+                bin: bin_dir,
                 authorize,
-            )
+                setup,
+                mode,
+            })
             .await,
         ),
         Command::Plugin {

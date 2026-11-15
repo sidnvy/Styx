@@ -1,0 +1,28 @@
+# Styx @VERSION@ — Linux Gateway
+
+For a Linux server that connects your computers to ChatGPT. This package runs the
+Gateway only; it does not run commands, browsers or Computer Use on this server.
+
+Extract the archive, enter its folder, and start installation:
+
+```sh
+cd @BUNDLE@
+./install.sh
+```
+
+The installer keeps Styx in your user data directory, registers the `styx`
+command, and opens setup. No administrator shell is needed. After installation
+you can remove the extracted folder; the installed program is retained separately.
+
+Setup runs the Gateway as your systemd user service. To keep it running after you
+log out, systemd linger must be enabled for your account. The installer explains
+when system authorization is needed; this package does not run a sudo script or
+silently change that setting.
+
+You can invite computers before connecting ChatGPT, then configure the Gateway's
+Tunnel later. Connected computers use this one Gateway connection.
+
+Use `styx quit` to stop Styx and `styx start` to start it again. To remove its
+user services while retaining your configuration, run `styx uninstall`.
+Install a newer package through its same `./install.sh` entry; the installer
+updates an existing setup and preserves its configuration.
