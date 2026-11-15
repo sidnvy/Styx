@@ -305,12 +305,8 @@ impl PairedGatewayBackend {
             Ok(None) => return failure("computer_not_open", None, false),
             Err(e) => return failure(e, None, false),
         };
-        // No unbounded per-context waiter queue. The caller can issue a new
-        // independent request after Busy; no pending request is replayed here.
-        let mut record = match cell.try_lock() {
-            Ok(r) => r,
-            Err(_) => return failure("busy", None, false),
-        };
+        // Preserve this context's operation order without refusing another read.
+        let mut record = cell.lock().await;
         if !self.active(owner) {
             return failure("permission_denied", None, false);
         }

@@ -1,7 +1,6 @@
 import Foundation
 import AppKit
 import CryptoKit
-import Security
 import Darwin
 
 // Original rc12 publisher/certificate, independently recovered from retained
@@ -14,7 +13,6 @@ struct ProductOwnedCoreRejection: Error, Sendable {
     let response: ProductJSON
 }
 private let productOriginalMacPublisher = "bbb49c2626c3d4ef3cf9e1679db5305b100cee4a8c41c29c958ede82fb868bed"
-private let productOriginalAppRequirement = "identifier \"app.styx.host\" and certificate leaf = H\"9a4c8c7e15d006f9d0a576b137c7696f143f46d8\""
 private func productDigest(_ raw: Data) -> String { SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined() }
 
 // No command-line/environment switch can redirect a production build. The
@@ -141,6 +139,7 @@ final class ProductOwnedCore: @unchecked Sendable {
         // its caller disappears. No cancellation retries or replacement child.
         return try await withCheckedThrowingContinuation { continuation in
             queue.async { [self] in
+                var dispatchStarted = false
                 do {
                     guard !closed, child.isRunning, sequence < Int.max else { throw ProductOwnedCoreError.unavailable }
                     sequence += 1; let id = sequence
@@ -148,12 +147,7 @@ final class ProductOwnedCore: @unchecked Sendable {
                     let request = ProductJSON.object(["schema": .number(1), "id": .number(Double(id)), "operation": .string(operation), "input": .object(body)])
                     var raw = try JSONEncoder().encode(request)
                     guard raw.count <= 65536 else { throw ProductCoreError.rejected }; raw.append(10)
-                    let timeout = DispatchWorkItem { [self] in
-                        ProductNativeDiagnostics.lifecycle(.deadlineEOF, operation: operation, id: id)
-                        eof(operation: operation, id: id)
-                    }
-                    if operation != "updateStyx" { DispatchQueue.global().asyncAfter(deadline: .now() + 150, execute: timeout) }
-                    defer { timeout.cancel() }
+                    dispatchStarted = true
                     try input.write(contentsOf: raw)
                     ProductNativeDiagnostics.lifecycle(.requestWritten, operation: operation, id: id)
                     guard let response = try line(), !closed else { throw ProductOwnedCoreError.unknownNoReplay }
@@ -167,6 +161,7 @@ final class ProductOwnedCore: @unchecked Sendable {
                     }
                     continuation.resume(returning: value["result"])
                 } catch {
+                    guard dispatchStarted else { continuation.resume(throwing: error); return }
                     // EOF requests original Rust cleanup. Retain/wait the same
                     // process; no timer is evidence that its role stopped.
                     ProductNativeDiagnostics.lifecycle(.callFailed, operation: operation)
@@ -332,21 +327,10 @@ final class ProductOwnedCore: @unchecked Sendable {
         #endif
     }
     private static func privateDirectory(_ url: URL) throws {
-        // Only create the requested leaf. Existing ancestors must remain real
-        // directories owned by this user/root, without other-user write bits.
-        // Never follow a substituted Application Support/home directory, create
-        // missing ancestors, or repair permissions on an existing path.
+        // Own the private leaf, not the permissions of the user's home or
+        // other shared ancestors. Rust owns profile and credential validation.
         guard url.isFileURL, url.path.hasPrefix("/"),
               url.path == url.standardizedFileURL.path else { throw ProductOwnedCoreError.invalidPackage }
-        var parent = url.deletingLastPathComponent()
-        while true {
-            var ancestor = stat()
-            guard lstat(parent.path, &ancestor) == 0, ancestor.st_mode & S_IFMT == S_IFDIR,
-                  ancestor.st_uid == 0 || ancestor.st_uid == getuid(),
-                  ancestor.st_mode & 0o022 == 0 else { throw ProductOwnedCoreError.invalidPackage }
-            if parent.path == "/" { break }
-            parent.deleteLastPathComponent()
-        }
         if mkdir(url.path, 0o700) != 0 && errno != EEXIST { throw ProductOwnedCoreError.invalidPackage }
         var st = stat()
         guard lstat(url.path, &st) == 0, st.st_mode & S_IFMT == S_IFDIR,
@@ -358,8 +342,8 @@ final class ProductOwnedCore: @unchecked Sendable {
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         var st = stat()
         guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_nlink == 1,
-              st.st_uid == getuid(), st.st_mode & 0o022 == 0, st.st_size <= Int64(limit),
-              !privateFile || st.st_mode & 0o077 == 0 else { try? handle.close(); throw ProductOwnedCoreError.invalidPackage }
+              st.st_mode & 0o022 == 0, st.st_size <= Int64(limit),
+              !privateFile || (st.st_uid == getuid() && st.st_mode & 0o077 == 0) else { try? handle.close(); throw ProductOwnedCoreError.invalidPackage }
         let raw = try handle.read(upToCount: limit + 1) ?? Data()
         guard raw.count == Int(st.st_size) else { try? handle.close(); throw ProductOwnedCoreError.invalidPackage }
         return (handle, raw)
@@ -368,22 +352,23 @@ final class ProductOwnedCore: @unchecked Sendable {
         let bundle = Bundle.main.bundleURL
         guard ProductNativeLaunchScope.acceptsPackagePath(bundle.path, identifier: Bundle.main.bundleIdentifier),
               bundle.resolvingSymlinksInPath().path == bundle.path else { throw ProductOwnedCoreError.originalPackageRequired }
-        // The OS owns launch-time bundle validation. Bind this running App to
-        // its original identity without walking sealed resources again.
-        var code: SecCode?, requirement: SecRequirement?
-        guard SecCodeCopySelf([], &code) == errSecSuccess,
-              SecRequirementCreateWithString(productOriginalAppRequirement as CFString, [], &requirement) == errSecSuccess,
-              let originalCode = code, let originalRequirement = requirement,
-              SecCodeCheckValidity(originalCode, [], originalRequirement) == errSecSuccess else { throw ProductOwnedCoreError.originalPackageRequired }
+        // The OS owns launch-time code signing. Install/update verifies the
+        // publisher; ordinary startup does not repeat the OS signature check.
         // New native package metadata is mandatory. Never infer a publisher
         // from payload key bytes or use the old Node-backed App as a fallback.
         let (_, metadataRaw) = try pinned(resources.appendingPathComponent("macos-runtime.json"), limit: 16384)
         let metadata = try JSONDecoder().decode(ProductJSON.self, from: metadataRaw)["nativeRuntime"]
-        guard metadata["schema"].number == 1, metadata["cli"].string == "native/bin/styx", metadata["payload"].string == "native", metadata["publisher"].string == "native-publisher.pem", metadata["publisherSpkiSha256"].string == productOriginalMacPublisher,
-              let cliHash = metadata["cliSha256"].string, cliHash.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else { throw ProductOwnedCoreError.invalidPackage }
+        guard metadata["schema"].number == 1, metadata["cli"].string == "native/bin/styx", metadata["payload"].string == "native", metadata["publisher"].string == "native-publisher.pem", metadata["publisherSpkiSha256"].string == productOriginalMacPublisher else { throw ProductOwnedCoreError.invalidPackage }
         let cli = resources.appendingPathComponent("native/bin/styx"), payload = resources.appendingPathComponent("native"), pub = resources.appendingPathComponent("native-publisher.pem")
-        let (cliPin, cliRaw) = try pinned(cli, limit: 1024 * 1024 * 1024)
-        guard productDigest(cliRaw) == cliHash else { throw ProductOwnedCoreError.invalidPackage }
+        // Installation owns signature/integrity verification. Retain the
+        // executable object without reading and hashing its complete contents.
+        let cliFD = Darwin.open(cli.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard cliFD >= 0 else { throw ProductOwnedCoreError.invalidPackage }
+        let cliPin = FileHandle(fileDescriptor: cliFD, closeOnDealloc: true)
+        var cliStat = stat()
+        guard fstat(cliFD, &cliStat) == 0, cliStat.st_mode & S_IFMT == S_IFREG else {
+            try? cliPin.close(); throw ProductOwnedCoreError.invalidPackage
+        }
         let verify = Process(), stdout = Pipe(), err = Pipe()
         verify.executableURL = cli; verify.arguments = ["release", "installed-selection", "--payload-dir", payload.path, "--publisher-file", pub.path, "--expected-publisher", productOriginalMacPublisher]
         verify.environment = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin", "TMPDIR": NSTemporaryDirectory()]

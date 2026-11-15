@@ -55,24 +55,6 @@ impl<L: GatewayOwnerLifecycle> BoundedManager<L> {
         let facts = self.life.facts.lock().expect("session lifetime");
         !self.created.load(Ordering::Acquire) || facts.transport_joined
     }
-    pub(super) async fn close_idle(&self) -> Result<(), SessionError> {
-        let id = self.id.lock().expect("SDK session id").clone();
-        if let Some(id) = id {
-            self.close_session(&id).await
-        } else {
-            if !self.created.load(Ordering::Acquire) {
-                self.life
-                    .facts
-                    .lock()
-                    .expect("session lifetime")
-                    .transport_joined = true;
-            }
-            self.life
-                .wait_complete()
-                .await
-                .map_err(|_| SessionError::Refused)
-        }
-    }
     pub fn new(life: Arc<Life<L>>) -> Self {
         let mut inner = LocalSessionManager::default();
         inner.session_config.channel_capacity = 1;

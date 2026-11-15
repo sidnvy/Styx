@@ -155,3 +155,16 @@ fn ordinary_state_root_socket_roundtrip_and_oversized_preflight() {
     std::fs::remove_file(&endpoint).unwrap();
     std::fs::remove_dir(&root).unwrap();
 }
+
+#[test]
+fn persistent_service_label_is_scoped_without_mount_device() {
+    let path = Path::new("/Users/sid/Library/Application Support/Styx/profile");
+    let label = service_label(path, 42, 501, ServiceRole::Host);
+    assert_ne!(label, service_label(path, 43, 501, ServiceRole::Host));
+    assert_ne!(label, service_label(path, 42, 502, ServiceRole::Host));
+    assert_ne!(label, service_label(path, 42, 501, ServiceRole::Gateway));
+    assert_ne!(
+        label,
+        service_label(Path::new("/Users/sid/other"), 42, 501, ServiceRole::Host)
+    );
+}

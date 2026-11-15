@@ -879,9 +879,6 @@ impl HostApp {
         for entry in std::fs::read_dir(&directory)
             .map_err(|_| AppError("app_runtime_original_input_invalid"))?
         {
-            if ids.len() >= 64 {
-                return Err(AppError("app_runtime_input_budget"));
-            }
             let name = entry
                 .map_err(|_| AppError("app_runtime_original_input_invalid"))?
                 .file_name();

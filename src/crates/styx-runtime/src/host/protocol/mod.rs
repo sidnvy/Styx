@@ -297,9 +297,7 @@ impl<'a> HostProtocol<'a> {
         if registry.active_epoch.as_ref() == Some(epoch) {
             return Ok(());
         }
-        if registry.retired_epochs.contains(epoch)
-            || (registry.active_epoch.is_some() && registry.retired_epochs.len() >= 64)
-        {
+        if registry.retired_epochs.contains(epoch) {
             return Err(ProtocolError::NegotiationRejected);
         }
         // Fence all old scope leases before accepting a new authenticated server epoch.

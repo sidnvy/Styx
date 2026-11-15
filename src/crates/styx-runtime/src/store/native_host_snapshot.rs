@@ -694,10 +694,6 @@ impl NativeHostSnapshot {
     pub(crate) fn canonical(&self) -> &native_state::ValidatedNativeState {
         &self.canonical
     }
-    pub(crate) fn management_inventory(&self) -> JournalResult<management::ManagementInventory> {
-        self.revalidate()?;
-        management::readonly_inventory(&self.journal)
-    }
     pub(crate) fn root_identity(&self) -> RootIdentity {
         self.root.identity()
     }

@@ -1,3 +1,4 @@
+#if STYX_TESTING
 import Foundation
 import AppKit
 import SwiftUI
@@ -329,4 +330,6 @@ extension ProductWindowController {
         try png.write(to: URL(fileURLWithPath: snapshot.path + ".status-icon.png"), options: .atomic)
     }
 }
+#endif
+
 #endif

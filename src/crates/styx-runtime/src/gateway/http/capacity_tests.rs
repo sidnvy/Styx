@@ -194,15 +194,13 @@ async fn thousand_sessions_have_no_quota_and_deleted_ids_stay_404() {
         .status(),
         StatusCode::NOT_FOUND
     );
-    age(&app, SESSION_IDLE);
-    app.expire_idle(SESSION_IDLE).await;
-    for _ in 0..100 {
-        if app.retained_sessions() == 0 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(app.retained_sessions(), 0);
+    age(&app, Duration::from_secs(86400));
+    app.collect_closed();
+    assert_eq!(
+        app.retained_sessions(),
+        1050,
+        "idle sessions remain available"
+    );
     initialize(&app).await.unwrap(); // Client's fresh initialization after 404.
     stop(&app).await;
 }
@@ -212,8 +210,8 @@ async fn live_work_and_active_streams_survive_additional_sessions() {
     let first = initialize(&app).await.unwrap();
     let stream = request(&app, Method::GET, Some(&first), Value::Null).await;
     assert_eq!(stream.status(), StatusCode::OK);
-    age(&app, SESSION_IDLE);
-    app.expire_idle(Duration::ZERO).await;
+    age(&app, Duration::from_secs(86400));
+    app.collect_closed();
     assert!(app.find_session(&first).unwrap().life.is_active());
     drop(stream);
     let mut ids = vec![first];
@@ -231,8 +229,8 @@ async fn live_work_and_active_streams_survive_additional_sessions() {
                 .to_owned(),
         );
     }
-    age(&app, SESSION_IDLE);
-    app.expire_idle(Duration::ZERO).await;
+    age(&app, Duration::from_secs(86400));
+    app.collect_closed();
     initialize(&app).await.unwrap();
     assert_eq!(app.retained_sessions(), 65);
     for id in &ids {
@@ -246,7 +244,7 @@ async fn live_work_and_active_streams_survive_additional_sessions() {
         .activity
         .lock()
         .unwrap()
-        .last -= SESSION_IDLE;
+        .last -= Duration::from_secs(86400);
     initialize(&app).await.unwrap();
     assert!(
         app.find_session(&oldest)
@@ -327,5 +325,25 @@ async fn session_memory_measurement() {
     );
     drop(frame);
     drop(body);
+    stop(&app).await;
+}
+
+#[tokio::test]
+async fn idle_session_remains_usable_without_reinitialization() {
+    let app = fixture();
+    let sid = initialize(&app).await.unwrap();
+    age(&app, Duration::from_secs(24 * 60 * 60));
+    app.collect_closed();
+    let r = request(
+        &app,
+        Method::POST,
+        Some(&sid),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let body = r.into_body().collect().await.unwrap().to_bytes();
+    assert!(!String::from_utf8_lossy(&body).contains("Session terminated"));
+    assert_eq!(app.status()["expired"], 0);
     stop(&app).await;
 }

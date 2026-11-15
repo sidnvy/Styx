@@ -165,7 +165,10 @@ async fn remote_unknown_cannot_authorize_installation_handoff() {
     app.cleanup = Some(outcome());
     assert!(app.dispatch(Operation::QuitAdmission, raw()).await.is_err());
     assert!(app.quit_ticket.is_none());
-    assert!(app.admission_fenced());
+    assert!(
+        !app.admission_fenced(),
+        "handoff refusal is not a global gate"
+    );
 }
 
 #[tokio::test]
@@ -217,4 +220,26 @@ async fn runtime_stop_reason_retains_cleanup_and_allows_local_quit() {
         assert_eq!(reply["cleanup"]["stop_reason"], reason);
         assert_eq!(reply["cleanup"]["remote_transport_drain"], "unknown");
     }
+}
+
+#[tokio::test]
+async fn remote_cleanup_observation_does_not_fence_unrelated_app_admission() {
+    let f = Fixture::new();
+    let mut app = f.app().await;
+    app.cleanup = Some(outcome());
+    assert!(app.quit_ticket.is_none());
+    assert!(!app.admission_fenced());
+    assert!(
+        !app.desktop_component_requested().await,
+        "no running Host requests Cua"
+    );
+    assert!(
+        app.remote_cleanup_unconfirmed(),
+        "original evidence is retained"
+    );
+    app.quit_ticket = Some("local-quit".into());
+    assert!(
+        app.admission_fenced(),
+        "explicit quit still stops admission"
+    );
 }

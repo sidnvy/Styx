@@ -581,9 +581,6 @@ fn app_retire_suffix_valid(value: &str) -> bool {
 fn app_retire_names(path: &Path) -> Result<std::collections::BTreeSet<String>, ()> {
     let mut names = std::collections::BTreeSet::new();
     for entry in std::fs::read_dir(path).map_err(|_| ())? {
-        if names.len() >= 64 {
-            return Err(());
-        }
         let name = entry
             .map_err(|_| ())?
             .file_name()

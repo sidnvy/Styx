@@ -564,3 +564,15 @@ fn completed_retire_journal_still_requires_done_digest_and_structure() {
     file(&entry.join("unexpected"), b"kept");
     assert!(check_app_retire_journal(&parent, &temp.0).is_err());
 }
+
+#[test]
+fn retirement_history_inventory_has_no_count_quota() {
+    let temp = Temp::new();
+    for index in 0..130 {
+        file(
+            &temp.0.join(format!("record-{index}")),
+            b"historical fixture",
+        );
+    }
+    assert_eq!(app_retire_names(&temp.0).unwrap().len(), 130);
+}

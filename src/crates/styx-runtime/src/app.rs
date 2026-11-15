@@ -1273,13 +1273,12 @@ impl HostApp {
         self.service_fenced()
             || self.runtime_update_fenced()
             || self.unknown
-            || self.remote_cleanup_unconfirmed()
             || self.retained.is_some()
             || self.quit_ticket.is_some()
             || self
                 .local_gateway
                 .as_ref()
-                .is_some_and(|gateway| gateway.is_fenced())
+                .is_some_and(|gateway| gateway.local_exit_fenced())
     }
     async fn desktop_component_requested(&self) -> bool {
         if self.admission_fenced() {

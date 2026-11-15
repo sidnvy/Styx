@@ -5,7 +5,6 @@ use crate::gateway::{auth::AuthenticatedGatewayPrincipal, mcp::GatewayToolBacken
 use http::StatusCode;
 use rmcp::model::RequestMetaObject;
 use std::sync::Arc;
-use std::time::Duration;
 use styx_contracts::identity::Sha256Digest;
 
 pub(super) struct Conversation<B: GatewayToolBackend + GatewayOwnerLifecycle> {
@@ -54,7 +53,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             return Err(StatusCode::FORBIDDEN);
         }
         let key = correlation(meta, principal.fingerprint())?;
-        self.expire_conversations(super::SESSION_IDLE);
+        self.collect_closed_conversations();
         let mut registry = self.conversations.lock().expect("Tunnel conversations");
         if self.stop.is_cancelled() {
             return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -78,19 +77,13 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             _activity: Arc::new(activity),
         })
     }
-    pub(super) fn expire_conversations(&self, minimum: Duration) {
-        let mut registry = self.conversations.lock().expect("Tunnel conversations");
-        for value in registry.values() {
-            let activity = value.life.activity.lock().expect("conversation activity");
-            if activity.users == 0
-                && activity.last.elapsed() >= minimum
-                && value.life.is_active()
-                && !self.backend.owner_has_live_work(&value.life.owner)
-            {
-                let _ = value.life.close();
-            }
-        }
-        registry.retain(|_, value| !value.life.is_complete());
+    pub(super) fn collect_closed_conversations(&self) {
+        // Idle conversations keep their owner and resources. Only an explicitly
+        // closed, fully settled lifecycle can be removed.
+        self.conversations
+            .lock()
+            .expect("Tunnel conversations")
+            .retain(|_, value| !value.life.is_complete());
     }
     pub(super) fn close_conversations(&self) {
         for value in self

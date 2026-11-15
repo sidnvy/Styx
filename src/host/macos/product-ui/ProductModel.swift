@@ -530,6 +530,7 @@ enum ProductRestorationPolicy {
             } else { page = .overview }
         }
     }
+    #if STYX_TESTING
     init(sessionURL: URL, permissionReader: @escaping () -> (accessibility: Bool, screenRecording: Bool) = {
         (AXIsProcessTrusted(), CGPreflightScreenCaptureAccess())
     }, permissionActions: ProductPermissionActions? = nil, permissionResume: ProductPermissionResume? = nil) throws {
@@ -539,6 +540,7 @@ enum ProductRestorationPolicy {
         self.permissionResume = permissionResume
     }
 
+    #endif
     func bootstrap() async {
         #if STYX_TESTING
         if testSuppressObservations { return }

@@ -606,10 +606,12 @@ struct ProductAcceptanceField: NSViewRepresentable {
     private var menuSizeTimer: Timer?
     var showMenuInvitation: (() -> Void)?
 
+    #if STYX_TESTING
     convenience init(sessionURL: URL) {
         do { self.init(model: try ProductModel(sessionURL: sessionURL)) }
         catch { preconditionFailure("Invalid owned Styx bootstrap") }
     }
+    #endif
     init(model: ProductModel) {
         self.model = model
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 640), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)

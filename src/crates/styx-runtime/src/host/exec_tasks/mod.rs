@@ -325,10 +325,7 @@ impl Engine<'_> {
             Ok(r) => r,
             Err(e) => return failure(e, None, false),
         };
-        let mut r = match tokio::time::timeout(Duration::from_secs(5), cell.lock()).await {
-            Ok(r) => r,
-            Err(_) => return failure("busy", Some(id), false),
-        };
+        let mut r = cell.lock().await;
         if let Some(result) = &r.completed {
             return success(result.clone());
         }
@@ -405,10 +402,7 @@ impl Engine<'_> {
             Ok(value) => value,
             Err(error) => return failure(error, None, false),
         };
-        let mut r = match tokio::time::timeout(Duration::from_secs(5), cell.lock()).await {
-            Ok(r) => r,
-            Err(_) => return failure("busy", None, false),
-        };
+        let mut r = cell.lock().await;
         let call = Call::PrepareStart {
             owner: r.binding.owner_ref(),
             grant_revision: r.binding.grant_revision(),
@@ -508,10 +502,7 @@ impl Engine<'_> {
             Ok(r) => r,
             Err(e) => return failure(e, None, false),
         };
-        let mut r = match tokio::time::timeout(Duration::from_secs(5), cell.lock()).await {
-            Ok(r) => r,
-            Err(_) => return failure("busy", None, false),
-        };
+        let mut r = cell.lock().await;
         if let Some(result) = &r.completed {
             return if args.chars.as_ref().is_some_and(|s| !s.is_empty()) {
                 failure("task_completed", Some(args.session_id), false)

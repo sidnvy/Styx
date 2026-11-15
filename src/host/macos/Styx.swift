@@ -567,7 +567,6 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
     }
     func startSetup(openWindow: Bool) throws {
         setupOpenRequested = setupOpenRequested || openWindow
-        if let url = setupURL { if setupOpenRequested { showSetup(url) }; return }
         guard setupProcess == nil else { return }
         guard let resources = Bundle.main.resourceURL else { throw HostError.daemonUnavailable }
         #if STYX_PRODUCT_UI
@@ -623,18 +622,6 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         throw HostError.daemonUnavailable
         #endif
     }
-    func showSetup(_ url: URL) {
-        if setupWindow == nil {
-            #if STYX_PRODUCT_UI
-            setupWindow = makeProductWindow(url)
-            #else
-            setupWindow = SetupWindowController(sessionURL: url)
-            #endif
-        }
-        setupWindow?.present()
-        setupOpenRequested = false
-        UserDefaults.standard.set(true, forKey: setupPreference)
-    }
     @objc func openSettings() {
         do { try startSetup(openWindow: true) }
         catch {
@@ -653,64 +640,7 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         menuOpenRequested = true
         do {
             try startSetup(openWindow: false)
-            guard let url = setupURL, let button = statusItem?.button else { return }
-            menuOpenRequested = false
-            if setupWindow == nil { setupWindow = makeProductWindow(url) }
-            setupWindow?.toggleMenu(relativeTo: button, quit: { [weak self] in self?.quit() })
         } catch { openSettings() }
-    }
-    func makeProductWindow(_ url: URL) -> ProductWindowController {
-        let controller = ProductWindowController(sessionURL: url)
-        controller.model.recoverComputerUse = { [weak self] in
-            guard let owner = self else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
-            try await owner.recoverComputerUseAfterPermissions(url)
-        }
-        controller.model.launchPayloadUpdater = { [weak self] ticket in
-            guard let owner = self, !owner.terminationPending,
-                  ticket.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil,
-                  let bundled = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("StyxUpdater") else { throw HostError.unsafeRuntime }
-            let root = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/Styx/Setup")
-            let state = root.appendingPathComponent("deployment").path
-            let binding = SHA256.hash(data: Data(state.utf8)).map { String(format: "%02x", $0) }.joined().prefix(16)
-            let stages = root.appendingPathComponent("host-payload-updaters"), group = stages.appendingPathComponent(String(binding)), directory = group.appendingPathComponent(ticket), helper = directory.appendingPathComponent("StyxUpdater")
-            for url in [root, stages, group, directory, helper] {
-                let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-                guard attributes[.type] as? FileAttributeType == (url == helper ? .typeRegular : .typeDirectory),
-                      (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
-                      let mode = attributes[.posixPermissions] as? NSNumber, mode.intValue & 0o077 == 0 else { throw HostError.unsafeRuntime }
-            }
-            guard SHA256.hash(data: try Data(contentsOf: helper)) == SHA256.hash(data: try Data(contentsOf: bundled)) else { throw HostError.unsafeRuntime }
-            let process = Process(); process.executableURL = helper; process.arguments = [ticket]
-            process.standardInput = FileHandle.nullDevice; process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
-            process.environment = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": NSTemporaryDirectory()]
-            try process.run()
-            productScheduleApplicationTermination()
-        }
-        controller.showMenuInvitation = { [weak self] in
-            self?.toggleProductPanel()
-            self?.setupWindow?.model.beginDeviceInvitation()
-        }
-        return controller
-    }
-    func recoverComputerUseAfterPermissions(_ url: URL) async throws {
-        guard setupURL == url, !terminationPending else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
-        let status = try await ProductCoreClient(sessionURL: url).read("native-status")
-        let session = CGSessionCopyCurrentDictionary() as? [String: Any]
-        guard setupURL == url, !terminationPending,
-              productComputerUseRequested(status, guiAvailable: session?[kCGSessionOnConsoleKey as String] as? Bool == true),
-              AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
-        // Observe a change before accepting Continue, even if the 200ms poll
-        // has not run yet. Only this explicit action may restore this stop cause.
-        poll()
-        if phase == "permissions_changed" || computerPermissionRecoveryRequired {
-            await stopAndJoin()
-            guard computerUseRequested, daemon == nil else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
-            computerPermissionRecoveryRequired = false
-            do { try start() }
-            catch { computerPermissionRecoveryRequired = true; throw error }
-        }
-        guard daemon?.isRunning == true else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
-        // A live owned child is not native GUI or chat-account acceptance.
     }
     @objc func openProductPreferences() {
         openSettings()
@@ -841,36 +771,6 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         }
         guard daemon?.isRunning == true, daemonStopTask == nil else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
         // Permission recovery remains distinct from native effect acceptance.
-    }
-    func observeProductComponents(_ url: URL) {
-        componentTimer?.invalidate()
-        componentTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            guard let owner = self else { return }
-            Task { @MainActor in await owner.refreshProductComponents(url) }
-        }
-        Task { @MainActor in await refreshProductComponents(url) }
-    }
-    func refreshProductComponents(_ url: URL) async {
-        guard setupURL == url, !componentObservationPending, !terminationPending else { return }
-        componentObservationPending = true
-        defer { componentObservationPending = false }
-        do {
-            let client = try ProductCoreClient(sessionURL: url)
-            let status = try await client.read("native-status")
-            guard setupURL == url, !terminationPending else { return }
-            let session = CGSessionCopyCurrentDictionary() as? [String: Any]
-            let requested = productComputerUseRequested(status, guiAvailable: session?[kCGSessionOnConsoleKey as String] as? Bool == true)
-            guard requested != computerUseRequested else { return }
-            computerUseRequested = requested
-            if requested {
-                if runtime == nil { runtime = try RuntimeDirectory() }
-                try start()
-            } else { stop(); statusLine?.title = "Computer Use is not enabled in this session" }
-        } catch {
-            // A failed read is not a new capability decision. Keep the last
-            // scoped state; a terminated Core separately withdraws its child.
-            setupStatusLine?.title = "Component status unavailable; reopen Settings"
-        }
     }
     #endif
     func stopSetup() {
@@ -1123,35 +1023,6 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
                 } else {
                     owner.terminationPending = false
                     ProductNativeDiagnostics.lifecycle(.terminateReply, ok: false)
-                    sender.reply(toApplicationShouldTerminate: false)
-                }
-            }
-            return .terminateLater
-        }
-        let reason = NSAppleEventManager.shared().currentAppleEvent?.paramDescriptor(forKeyword: AEKeyword(kAEQuitReason))?.enumCodeValue
-        let userQuit = !terminationPreservesRecovery && !productSystemQuitReason(reason)
-        if userQuit && !terminationApproved && setupURL == nil {
-            let alert = NSAlert()
-            alert.messageText = "Styx could not finish quitting"
-            alert.informativeText = "The local control connection is unavailable, so login recovery cannot yet be checked. Reopen Styx settings and retry Quit."
-            alert.runModal()
-            return .terminateCancel
-        }
-        if userQuit && !terminationApproved, let url = setupURL {
-            if setupWindow == nil { setupWindow = makeProductWindow(url) }
-            terminationPending = true
-            setupWindow?.prepareToQuit { [weak self] approved in
-                guard let owner = self else { sender.reply(toApplicationShouldTerminate: false); return }
-                owner.terminationApproved = approved
-                if approved {
-                    owner.stopSetup()
-                    Task {
-                        await owner.stopAndJoin()
-                        owner.terminationPending = false
-                        sender.reply(toApplicationShouldTerminate: true)
-                    }
-                } else {
-                    owner.terminationPending = false
                     sender.reply(toApplicationShouldTerminate: false)
                 }
             }

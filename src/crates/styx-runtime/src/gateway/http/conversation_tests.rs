@@ -184,7 +184,7 @@ async fn authenticated_tunnel_context_across_transports_and_isolation() {
         let waiter = tokio::spawn(async move { pending_http.send().await });
         tokio::time::timeout(Duration::from_secs(2), backend.entered.acquire()).await.unwrap().unwrap().forget();
         waiter.abort(); let _ = waiter.await;
-        app.expire_conversations(Duration::ZERO);
+        app.collect_closed_conversations();
         assert!(!backend.fenced.lock().unwrap().contains(&original_owner));
         assert_eq!(backend.completed.load(Ordering::Acquire), 0);
         assert!(app.conversations.lock().unwrap().values().any(|c| c.life.owner.owner_id().as_str()==original_owner && c.life.activity.lock().unwrap().users>0));
@@ -195,13 +195,8 @@ async fn authenticated_tunnel_context_across_transports_and_isolation() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert_eq!(backend.completed.load(Ordering::Acquire), 1);
-        let until = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            app.expire_conversations(Duration::ZERO);
-            if app.conversations.lock().unwrap().len() == 1 { break; }
-            assert!(tokio::time::Instant::now() < until, "idle completed contexts must return their reservations");
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        app.collect_closed_conversations();
+        assert!(app.conversations.lock().unwrap().values().any(|c| c.life.owner.owner_id().as_str() == original_owner), "idle owner must remain usable");
         assert!(!backend.fenced.lock().unwrap().contains(&original_owner), "live logical work cannot expire");
         assert_ne!(second.call_tool(request("write_stdin", meta)).await.unwrap().is_error, Some(true));
         assert_eq!(std::fs::read_to_string(&backend.file).unwrap(), "one-owned-resource-effect\n", "one independent effect, no replay");
@@ -273,7 +268,7 @@ async fn logical_capacity_and_unknown_cleanup_never_reassign_an_owner() {
         original.facts.lock().unwrap().cleanup,
         Some(OwnerCleanup::Unknown)
     );
-    app.expire_conversations(Duration::ZERO);
+    app.collect_closed_conversations();
     assert!(!original.is_complete());
     assert_eq!(app.retained_sessions(), 81);
     assert!(

@@ -18,14 +18,11 @@ impl HostApp {
             return Ok(());
         }
         if gateway.root.get().is_none()
-            && let Ok(current) =
+            && let Ok(_current) =
                 crate::store::native_host_snapshot::NativeHostSnapshot::observe_for_app(
                     self.scope.state_dir(),
                     self.scope.clone(),
                 )
-            && self
-                .completed_runtime_history(&current)
-                .map_err(|_| AppError("role_retire_history_unproven"))?
         {
             return Ok(());
         }
@@ -41,9 +38,6 @@ impl HostApp {
         for item in
             std::fs::read_dir(&directory).map_err(|_| AppError("role_retire_history_unproven"))?
         {
-            if names.len() >= 64 {
-                return Err(AppError("role_retire_history_unproven"));
-            }
             let name = item
                 .map_err(|_| AppError("role_retire_history_unproven"))?
                 .file_name()

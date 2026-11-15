@@ -1161,7 +1161,7 @@ async fn capacity_cycles(
                 assert_eq!(r.status(), reqwest::StatusCode::ACCEPTED);
                 r.bytes().await.unwrap();
             }
-            assert!(http.retained_sessions() <= 64);
+            assert!(http.retained_sessions() <= 2100);
         }
     }
     assert_eq!(
@@ -1173,8 +1173,8 @@ async fn capacity_cycles(
         "independent native effects"
     );
     http.age_idle_sessions_for_test(Duration::from_secs(601));
-    http.expire_idle_for_test().await;
-    // Host-owned work survives HTTP session expiry without a background GET.
+    http.collect_closed_sessions_for_test().await;
+    // Idle HTTP sessions and Host-owned work survive without a background GET.
     // A fresh caller below must discover/continue the original resources.
     let r=post(raw,uri,token,None,json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"live-native-oracle","version":"1"}}})).await;
     assert_eq!(r.status(), reqwest::StatusCode::OK);
@@ -1201,7 +1201,7 @@ async fn capacity_cycles(
     let pid = std::fs::read_to_string(root.join("protected.pid")).unwrap();
     assert!(Path::new(&format!("/proc/{pid}/stat")).exists());
     http.age_idle_sessions_for_test(Duration::from_secs(601));
-    http.expire_idle_for_test().await;
+    http.collect_closed_sessions_for_test().await;
     assert!(
         Path::new(&format!("/proc/{pid}/stat")).exists(),
         "expiry must preserve the original running exec"
@@ -1245,7 +1245,7 @@ async fn capacity_cycles(
     assert_eq!(result["exit_code"], 0);
     file_within(&root.join("protected.txt"), "still-owned").await;
     http.age_idle_sessions_for_test(Duration::from_secs(601));
-    http.expire_idle_for_test().await;
+    http.collect_closed_sessions_for_test().await;
     let live = new_session(raw, uri, token).await;
     tool(
         raw,
@@ -1275,7 +1275,7 @@ async fn capacity_cycles(
     )
     .await;
     http.age_idle_sessions_for_test(Duration::from_secs(601));
-    http.expire_idle_for_test().await;
+    http.collect_closed_sessions_for_test().await;
     assert_eq!(
         raw.get(uri)
             .bearer_auth(token)
@@ -1284,7 +1284,7 @@ async fn capacity_cycles(
             .await
             .unwrap()
             .status(),
-        reqwest::StatusCode::NOT_FOUND
+        reqwest::StatusCode::OK
     );
     println!(
         "SESSION_MEMORY open_native_tab_parent_process_increment={browser_bytes} (Gateway+Host Rust in one fixture; native browser processes excluded)"

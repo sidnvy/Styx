@@ -167,21 +167,15 @@ impl VerifiedNativeRelease {
         target_os = "macos"
     ))]
     pub(crate) fn runtime_root(&self) -> Result<PathBuf> {
-        self.revalidate()?;
         Ok(self.prefix.clone())
     }
     /// Derive only from the original verified roots and retained publisher
     /// locator. The caller persists this inside its existing canonical target.
     pub fn runtime_selection(&self) -> Result<NativeRuntimeSelection> {
-        self.revalidate()?;
         let selection = self.selection_metadata()?;
-        self.revalidate()?;
         Ok(selection)
     }
-    /// Revalidate the entire original retained release once, then compare its
-    /// immutable selection metadata. Callers already holding the authoritative
-    /// C07 selection must not use the publication getter (two full scans) inside
-    /// another full validation. This is not a cross-operation verification cache.
+    /// Revalidate an explicit install/update boundary and compare its target.
     pub(crate) fn revalidate_matches_selection(
         &self,
         expected: &NativeRuntimeSelection,
@@ -277,9 +271,8 @@ impl VerifiedNativeRelease {
     pub fn manifest(&self) -> &NativeReleaseManifest {
         &self.manifest
     }
-    /// Revalidated publisher-signed reader support; not a readiness/commit proof.
+    /// Reader support from the admitted manifest; no filesystem work on access.
     pub fn supports_state_reader(&self, reader: ReaderContract) -> Result<bool> {
-        self.revalidate()?;
         Ok(self.manifest.scope == NativeReleaseScope::RuntimeCandidate
             && self.manifest.minimum_reader.supports_state_reader(reader))
     }
@@ -322,7 +315,6 @@ impl VerifiedNativeRelease {
     /// OS permission. Retain this release through actual child cleanup; Darwin
     /// callers must use the verified suspended-spawn adapter, never a raw path.
     pub fn worker_image(&self, kind: NativeExternalWorker) -> Result<&PinnedExecutable> {
-        self.revalidate()?;
         self.workers
             .iter()
             .find(|(candidate, _)| *candidate == kind)
@@ -333,7 +325,6 @@ impl VerifiedNativeRelease {
     /// from the same retained, approved inventory, never from a network path or
     /// a worker descriptor supplied separately from the verified release.
     pub(crate) fn pin_worker(&self, kind: NativeExternalWorker) -> Result<PinnedExecutable> {
-        self.revalidate()?;
         let entry = &self
             .manifest
             .worker_closures
@@ -342,7 +333,6 @@ impl VerifiedNativeRelease {
             .ok_or(ReleaseError::Unsupported)?
             .entrypoint;
         let pinned = self.inventory.pin_executable(entry)?;
-        self.revalidate()?;
         Ok(pinned)
     }
     /// Code identity of the retained, publisher-verified CLI, for a platform
@@ -350,22 +340,18 @@ impl VerifiedNativeRelease {
     /// this does not authorize a process, writer or service registration.
     #[cfg(target_os = "macos")]
     pub(crate) fn macos_executable_cdhash(&self) -> Result<Vec<u8>> {
-        self.revalidate()?;
         let cdhash = self.executable.expected_cdhash()?;
-        self.revalidate()?;
         Ok(cdhash)
     }
     /// Original native CLI pin for SCM identity comparisons only. This does not
     /// enable pathname-based spawning on Windows.
     #[cfg(target_os = "windows")]
     pub(crate) fn windows_executable(&self) -> Result<&PinnedExecutable> {
-        self.revalidate()?;
         Ok(&self.executable)
     }
     /// Returns only the fixed, retained native image's kernel FD path. This
     /// function does not spawn, install, activate or authorize arbitrary commands.
     pub fn launch_path(&self) -> Result<PathBuf> {
-        self.revalidate()?;
         self.executable.launch_path().map_err(ReleaseError::from)
     }
 }

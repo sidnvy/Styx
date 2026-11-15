@@ -16,7 +16,8 @@ spec.loader.exec_module(m)
 def fixture(role='gateway'):
     uid = 501
     root = {'device': 123, 'inode': 456, 'uid': uid}
-    label = 'app.styx.native.501.' + m.digest(b'styx-native-system-service-v1:123:456:501')[:32] + '.' + role
+    state = "/Users/test/profile 'quoted' $(literal)"
+    label = 'app.styx.native.501.' + m.digest(('styx-native-system-service-v2:%s:456:501' % state).encode())[:32] + '.' + role
     selection = {'schema': 1, 'payload_path': '/Users/test/native payload', 'payload_root': {'platform': 'macos', 'device': 123, 'inode': 789, 'uid': uid}, 'manifest_sha256': 'a' * 64, 'publisher_file': '/Users/test/public/publisher.pem', 'publisher_spki_sha256': m.PIN}
     exe = selection['payload_path'] + '/bin/styx'
     state = "/Users/test/profile 'quoted' $(literal)"
@@ -151,6 +152,19 @@ class MacServicePackageTests(unittest.TestCase):
 
 
 class MacRegisteredLifecycleTests(unittest.TestCase):
+    def test_reboot_keeps_legacy_registered_label_without_device_rebinding(self):
+        for report in [lifecycle_fixture('start'), repair_fixture()]:
+            request = report['installation_request_v1']
+            legacy = 'app.styx.native.501.' + m.digest(b'styx-native-system-service-v1:123:456:501')[:32] + '.' + request['role']
+            report = json.loads(json.dumps(report).replace(request['label'], legacy))
+            request = report['installation_request_v1']
+            request['state_root']['device'] = 999
+            request['definition_sha256'] = m.digest(request['definition_plist'].encode())
+            m.validate(report)
+        report = fixture()
+        report['installation_request_v1']['state_root']['device'] = 999
+        m.validate(report)
+
     def test_review_packages_never_replace_original_plist_or_dispatch(self):
         for role in ['host', 'gateway']:
             for action in ['start', 'enable', 'disable', 'uninstall']:

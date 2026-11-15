@@ -100,7 +100,13 @@ def validate(report):
     tx = text(request["transaction_id"], 128)
     require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", tx), "transaction_shape")
     integer(request["revision"], 1)
-    label = "app.styx.native.%d.%s.%s" % (uid, digest(("styx-native-system-service-v1:%d:%d:%d" % (root["device"], root["inode"], uid)).encode())[:32], role)
+    label = "app.styx.native.%d.%s.%s" % (uid, digest(("styx-native-system-service-v2:%s:%d:%d" % (state, root["inode"], uid)).encode())[:32], role)
+    if repair or lifecycle:
+        # Existing registrations retain their original name, including v1
+        # labels whose device number predates a reboot. The exact original
+        # plist, state path, UID, role and observed job are bound below.
+        label = text(request["label"], 128)
+        require(re.fullmatch(r"app\.styx\.native\.%d\.[a-f0-9]{32}\.%s" % (uid, role), label), "original_service_label")
     require(request["label"] == label and request["definition_path"] == "/Library/LaunchDaemons/" + label + ".plist", "fixed_profile_label_and_destination")
     exe = path(request["executable_path"])
     require(not any(part.endswith(".app") for part in exe.parts), "stable_non_app_runtime_required")

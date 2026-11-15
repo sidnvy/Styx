@@ -6,14 +6,13 @@ use crate::{
     release::{self, VerifiedNativeRelease},
     store::{self, PrivateRoot, ProcessIdentity, RootIdentity, native_state},
 };
-use core_foundation::url::CFURL;
 use nix::{
     fcntl::{OFlag, open, openat},
     sys::stat::Mode,
     unistd::{Uid, User},
 };
 use security_framework::os::macos::code_signing::{
-    Flags, GuestAttributes, SecCode, SecRequirement, SecStaticCode,
+    Flags, GuestAttributes, SecCode, SecRequirement,
 };
 use serde::Serialize;
 use std::{
@@ -994,15 +993,35 @@ impl Definition {
             return Err(ServiceError::Invalid);
         }
         path_text(&user.dir)?;
-        let hash = Sha256Digest::of_bytes(
-            format!("styx-native-system-service-v1:{device}:{inode}:{uid}").as_bytes(),
-        )
-        .to_hex();
-        let label = format!("app.styx.native.{uid}.{}.{}", &hash[..32], role.name());
-        let filename = format!("{label}.plist");
-        let expected = definition_bytes(&label, &user.name, &user.dir, &executable, path, role)?;
+        // A launchd label survives reboot. st_dev belongs only to the live
+        // root pin, not the persistent registration name.
+        let mut label = service_label(path, inode, uid, role);
         let parent = DirectoryPin::open(Path::new(PLIST_PARENT))?;
-        let pin = DefinitionPin::open(&parent, &filename)?;
+        let mut filename = format!("{label}.plist");
+        let mut pin = DefinitionPin::open(&parent, &filename)?;
+        if !install_preparation && pin.is_none() {
+            // Retain an existing v1 registration using the original persisted
+            // device value. Never rename a service or rewrite its marker.
+            let styx_contracts::native_management::NativeRootIdentity::Macos {
+                device: original_device,
+                inode: original_inode,
+                uid: original_uid,
+            } = &marker.root_identity
+            else {
+                return Err(ServiceError::Conflict);
+            };
+            let hash = Sha256Digest::of_bytes(
+                format!("styx-native-system-service-v1:{original_device}:{original_inode}:{original_uid}").as_bytes(),
+            ).to_hex();
+            let legacy = format!("app.styx.native.{uid}.{}.{}", &hash[..32], role.name());
+            let legacy_filename = format!("{legacy}.plist");
+            if let Some(original) = DefinitionPin::open(&parent, &legacy_filename)? {
+                label = legacy;
+                filename = legacy_filename;
+                pin = Some(original);
+            }
+        }
+        let expected = definition_bytes(&label, &user.name, &user.dir, &executable, path, role)?;
         if (install_preparation && pin.is_some()) || pin.as_ref().is_some_and(|p| p.raw != expected)
         {
             return Err(ServiceError::Conflict);
@@ -1015,11 +1034,8 @@ impl Definition {
         .map_err(unavailable)?;
         let tool = File::from(fd);
         let tool_stamp = stamp(&tool, false, 0)?;
-        let url = CFURL::from_path(LAUNCHCTL, false).ok_or(ServiceError::Unavailable)?;
-        let code = SecStaticCode::from_path(&url, Flags::NONE).map_err(unavailable)?;
-        let apple: SecRequirement = "anchor apple".parse().map_err(unavailable)?;
-        code.check_validity(Flags::STRICT_VALIDATE | Flags::NO_NETWORK_ACCESS, &apple)
-            .map_err(unavailable)?;
+        // /bin/launchctl is an OS-owned tool. Its open descriptor and stamp
+        // bind this operation; macOS owns verification of system code.
         let result = Self {
             root,
             root_identity: RootIdentity::Macos { device, inode, uid },
@@ -1611,6 +1627,18 @@ impl Definition {
         }
     }
 }
+fn service_label(path: &Path, inode: u64, uid: u32, role: ServiceRole) -> String {
+    let hash = Sha256Digest::of_bytes(
+        format!(
+            "styx-native-system-service-v2:{}:{inode}:{uid}",
+            path.display()
+        )
+        .as_bytes(),
+    )
+    .to_hex();
+    format!("app.styx.native.{uid}.{}.{}", &hash[..32], role.name())
+}
+
 fn definition_bytes(
     label: &str,
     user: &str,

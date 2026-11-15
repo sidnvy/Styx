@@ -1,347 +1,9 @@
-//! Current read-only startup observation. Recovery and mutations keep their
-//! original coordinators; a historical observation never resumes a transaction.
-#[cfg(test)]
-use super::runtime_update::root_digest;
-use super::runtime_update::{OriginalInput, SelectionPin, root_digest_matches, same_file};
+//! Startup observes the current committed profile. Historical update inputs
+//! remain available to their original recovery path, not startup admission.
 use super::*;
-use crate::store::{
-    ExecutionLeaseGuard, RawFile, management::ManagementInventory,
-    native_host_snapshot::NativeHostSnapshot,
-};
-use std::collections::BTreeSet;
-use styx_contracts::{identity::TransactionId, management::DurableStage};
-
-fn committed(inventory: &ManagementInventory, id: &TransactionId, sequence: u64) -> bool {
-    inventory.orphans.is_empty()
-        && inventory.transactions.iter().any(|transaction| {
-            transaction.intent.transaction_id == *id
-                && transaction.intent.sequence == sequence
-                && transaction
-                    .phase_receipts
-                    .last()
-                    .is_some_and(|receipt| receipt.stage == DurableStage::Committed)
-        })
-}
-fn names(path: &Path) -> Result<BTreeSet<std::ffi::OsString>, AppError> {
-    bounded_names(path, 64)
-}
-fn bounded_names(path: &Path, limit: usize) -> Result<BTreeSet<std::ffi::OsString>, AppError> {
-    let mut names = BTreeSet::new();
-    for entry in
-        std::fs::read_dir(path).map_err(|_| AppError("app_runtime_original_input_invalid"))?
-    {
-        if names.len() >= limit {
-            return Err(AppError("app_runtime_input_budget"));
-        }
-        names.insert(
-            entry
-                .map_err(|_| AppError("app_runtime_original_input_invalid"))?
-                .file_name(),
-        );
-    }
-    Ok(names)
-}
-
-/// Historical DATA for another physical root. This never resumes its updates
-/// or changes its desired state. Its existing execution lease remains held
-/// until every original input and C07 file has been revalidated.
-struct RetiredHistoryRoot {
-    path: PathBuf,
-    root: PrivateRoot,
-    lease: ExecutionLeaseGuard,
-    pins: Vec<RawFile>,
-    journal: PrivateRoot,
-    journal_names: BTreeSet<std::ffi::OsString>,
-    journal_pins: Vec<RawFile>,
-    inventory: ManagementInventory,
-}
-impl RetiredHistoryRoot {
-    fn open(path: PathBuf) -> Result<Self, AppError> {
-        const JOURNAL: &str = ".styx-management-journal-v1";
-        const MAX: usize = 1024 * 1024;
-        let changed = |_| AppError("app_runtime_original_input_changed");
-        let root = PrivateRoot::open(&path).map_err(changed)?;
-        let lease = root.try_existing_execution_lease().map_err(changed)?;
-        let pins = [
-            ".styx-native-root-v1.json",
-            "state.json",
-            "deployment.json",
-            ".styx-configuration-writer.lock",
-        ]
-        .into_iter()
-        .map(|name| root.read_raw(name, MAX).map_err(changed))
-        .collect::<Result<Vec<_>, _>>()?;
-        let journal_path = path.join(JOURNAL);
-        let journal = PrivateRoot::open(&journal_path).map_err(changed)?;
-        let budget = crate::store::enrollment::JournalBudget::default();
-        let journal_names = bounded_names(&journal_path, budget.max_files)?;
-        let mut journal_pins = Vec::new();
-        let mut total = 0usize;
-        for name in &journal_names {
-            let pin = journal.read_raw(Path::new(name), MAX).map_err(changed)?;
-            total = total
-                .checked_add(pin.bytes().len())
-                .filter(|total| *total <= budget.max_bytes)
-                .ok_or(AppError("app_runtime_input_budget"))?;
-            journal_pins.push(pin);
-        }
-        // The original native parser proves the complete canonical C07 chain;
-        // names or a retired suffix alone are never completion evidence.
-        let observed = crate::store::native_observation::read(&path)
-            .map_err(|_| AppError("app_runtime_original_input_changed"))?;
-        if !observed.inventory.orphans.is_empty()
-            || observed.inventory.transactions.iter().any(|t| {
-                t.phase_receipts
-                    .last()
-                    .is_none_or(|r| r.stage != DurableStage::Committed)
-            })
-        {
-            return Err(AppError("app_runtime_original_input_changed"));
-        }
-        let held = Self {
-            path,
-            root,
-            lease,
-            pins,
-            journal,
-            journal_names,
-            journal_pins,
-            inventory: observed.inventory,
-        };
-        held.validate()?;
-        Ok(held)
-    }
-    fn validate(&self) -> Result<(), AppError> {
-        let changed = |_| AppError("app_runtime_original_input_changed");
-        let path = self.path.join(".styx-management-journal-v1");
-        if PrivateRoot::open(&self.path).map_err(changed)?.identity() != self.root.identity()
-            || PrivateRoot::open(&path).map_err(changed)?.identity() != self.journal.identity()
-            || bounded_names(
-                &path,
-                crate::store::enrollment::JournalBudget::default().max_files,
-            )? != self.journal_names
-        {
-            return Err(AppError("app_runtime_original_input_changed"));
-        }
-        self.lease.validate().map_err(changed)?;
-        for (root, pins) in [
-            (&self.root, &self.pins),
-            (&self.journal, &self.journal_pins),
-        ] {
-            for pin in pins {
-                let after = root
-                    .read_raw(pin.relative_path(), 1024 * 1024)
-                    .map_err(changed)?;
-                if after.observation() != pin.observation() || after.bytes() != pin.bytes() {
-                    return Err(AppError("app_runtime_original_input_changed"));
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-struct RetiredHistoryPair {
-    host: RetiredHistoryRoot,
-    gateway: RetiredHistoryRoot,
-}
-impl RetiredHistoryPair {
-    fn matches(&self, input: &OriginalInput) -> Result<bool, AppError> {
-        Ok(input.roles.len() == 2
-            && root_digest_matches(&self.host.root, input.roles[0].root_sha256, input)?
-            && root_digest_matches(&self.gateway.root, input.roles[1].root_sha256, input)?)
-    }
-    fn prove(&self, input: &OriginalInput) -> Result<(), AppError> {
-        if !self.matches(input)?
-            || input
-                .roles
-                .iter()
-                .zip([&self.host, &self.gateway])
-                .any(|(role, root)| {
-                    !committed(
-                        &root.inventory,
-                        &role.select_transaction,
-                        role.select_sequence,
-                    )
-                })
-        {
-            return Err(AppError("app_runtime_original_input_changed"));
-        }
-        Ok(())
-    }
-}
+use crate::store::native_host_snapshot::NativeHostSnapshot;
 
 impl HostApp {
-    pub(super) fn completed_runtime_history(
-        &self,
-        profile: &NativeHostSnapshot,
-    ) -> Result<bool, AppError> {
-        if self
-            .scope
-            .container
-            .parent
-            .ensure_absent("runtime-updates")
-            .is_ok()
-        {
-            return Ok(true);
-        }
-        let directory = self.scope.container.parent_path.join("runtime-updates");
-        let held = PrivateRoot::open(&directory)
-            .map_err(|_| AppError("app_runtime_original_input_invalid"))?;
-        let original_names = names(&directory)?;
-        let inventory = profile
-            .management_inventory()
-            .map_err(|_| AppError("app_startup_observation_changed"))?;
-        let root = self
-            .scope
-            .root
-            .get()
-            .ok_or(AppError("app_not_configured"))?;
-        let mut inputs = Vec::new();
-        let mut selections = Vec::new();
-        let mut retired: Vec<RetiredHistoryPair> = Vec::new();
-        let mut retired_namespace = None;
-        for name in &original_names {
-            let name = name
-                .to_str()
-                .ok_or(AppError("app_runtime_original_input_invalid"))?;
-            let id = name
-                .strip_suffix(".json")
-                .and_then(|id| TransactionId::try_from(id).ok())
-                .ok_or(AppError("app_runtime_original_input_invalid"))?;
-            let raw = held
-                .read_raw(name, 65536)
-                .map_err(|_| AppError("app_runtime_original_input_invalid"))?;
-            let input: OriginalInput = serde_json::from_slice(raw.bytes())
-                .map_err(|_| AppError("app_runtime_original_input_invalid"))?;
-            input.validate_shape(&id)?;
-            if !root_digest_matches(&self.scope.container.parent, input.container_sha256, &input)? {
-                return Err(AppError("app_runtime_original_input_changed"));
-            }
-            let selection = SelectionPin::open(
-                &self
-                    .scope
-                    .container
-                    .parent_path
-                    .join("runtime-versions")
-                    .join(&input.selection_file),
-            )?;
-            if selection.selection != input.selection
-                || styx_contracts::identity::Sha256Digest::of_bytes(selection.file.bytes())
-                    != input.selection_sha256
-            {
-                return Err(AppError("app_runtime_original_input_changed"));
-            }
-            if input.roles.len() == 1 {
-                let role = &input.roles[0];
-                if !root_digest_matches(root, role.root_sha256, &input)? || role.gateway {
-                    return Err(AppError("app_runtime_original_input_changed"));
-                }
-                if !committed(&inventory, &role.select_transaction, role.select_sequence) {
-                    return Ok(false);
-                }
-            } else {
-                // Live split composition keeps its original recovery path.
-                if self.scope.gateway_sibling()?.root.get().is_some() {
-                    return Ok(false);
-                }
-                if root_digest_matches(root, input.roles[0].root_sha256, &input)? {
-                    return Err(AppError("app_runtime_original_input_changed"));
-                }
-                if !retired
-                    .iter()
-                    .any(|pair| pair.matches(&input).unwrap_or(false))
-                {
-                    let parent = &self.scope.container.parent_path;
-                    let namespace = names(parent)?;
-                    let host_name = self
-                        .scope
-                        .state_dir
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .ok_or(AppError("app_runtime_original_input_changed"))?;
-                    let prefix = format!("{host_name}.retired-");
-                    let mut found = None;
-                    for name in &namespace {
-                        let Some(suffix) = name.to_str().and_then(|s| s.strip_prefix(&prefix))
-                        else {
-                            continue;
-                        };
-                        if suffix.is_empty()
-                            || !namespace.contains(std::ffi::OsStr::new(&format!(
-                                "gateway.retired-{suffix}"
-                            )))
-                        {
-                            continue;
-                        }
-                        let host_path = parent.join(name);
-                        let gateway_path = parent.join(format!("gateway.retired-{suffix}"));
-                        let Ok(host) = PrivateRoot::open(&host_path) else {
-                            continue;
-                        };
-                        let Ok(gateway) = PrivateRoot::open(&gateway_path) else {
-                            continue;
-                        };
-                        if !root_digest_matches(&host, input.roles[0].root_sha256, &input)?
-                            || !root_digest_matches(&gateway, input.roles[1].root_sha256, &input)?
-                        {
-                            continue;
-                        }
-                        found = Some(RetiredHistoryPair {
-                            host: RetiredHistoryRoot::open(host_path)?,
-                            gateway: RetiredHistoryRoot::open(gateway_path)?,
-                        });
-                        break;
-                    }
-                    retired.push(found.ok_or(AppError("app_runtime_original_input_changed"))?);
-                    if retired_namespace
-                        .as_ref()
-                        .is_some_and(|before| before != &namespace)
-                    {
-                        return Err(AppError("app_runtime_original_input_changed"));
-                    }
-                    retired_namespace = Some(namespace);
-                }
-                retired
-                    .iter()
-                    .find(|pair| pair.matches(&input).unwrap_or(false))
-                    .ok_or(AppError("app_runtime_original_input_changed"))?
-                    .prove(&input)?;
-            }
-            inputs.push(raw);
-            selections.push(selection);
-        }
-        // The one validated journal observation is DATA. Detect any change to
-        // its namespace, original inputs or original selection files before use.
-        if names(&directory)? != original_names
-            || PrivateRoot::open(&directory)
-                .map_err(|_| AppError("app_runtime_original_input_changed"))?
-                .identity()
-                != held.identity()
-        {
-            return Err(AppError("app_runtime_original_input_changed"));
-        }
-        for input in &inputs {
-            same_file(&held, input)?;
-        }
-        for selection in &selections {
-            selection.validate()?;
-        }
-        for pair in &retired {
-            pair.host.validate()?;
-            pair.gateway.validate()?;
-        }
-        if retired_namespace.is_some_and(|before| {
-            names(&self.scope.container.parent_path).ok().as_ref() != Some(&before)
-        }) {
-            return Err(AppError("app_runtime_original_input_changed"));
-        }
-        profile
-            .revalidate()
-            .map_err(|_| AppError("app_startup_observation_changed"))?;
-        self.scope.validate()?;
-        Ok(true)
-    }
     pub(super) async fn try_ready_startup(&mut self) -> Result<bool, AppError> {
         // Existing service clients and split local Gateway composition keep
         // their original path. No sibling is created or paired here.
@@ -362,9 +24,6 @@ impl HostApp {
             // original recovery/fencing path; no cached success substitutes it.
             _ => return Ok(false),
         };
-        if !self.completed_runtime_history(&profile)? {
-            return Ok(false);
-        }
         let state = profile.canonical();
         self.configuration = Some(native::NativeManagementReport {
             schema: 1,
@@ -411,12 +70,8 @@ impl HostApp {
 
 #[cfg(test)]
 mod tests {
+    use super::super::runtime_update::{OriginalInput, root_digest, same_file};
     use super::*;
-    use crate::store::management::ManagementTransactionObservation;
-    use styx_contracts::{
-        identity::Sha256Digest,
-        management::{DesiredStateCommit, JournalReceipt, ReaderContract},
-    };
 
     #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     fn retirement_test_parent() -> PathBuf {
@@ -482,7 +137,6 @@ mod tests {
             startup_diagnostic: None,
             startup_profile: None,
         };
-        assert!(app.completed_runtime_history(&profile).unwrap());
         profile.revalidate().unwrap();
         app.scope.validate().unwrap();
     }
@@ -825,51 +479,9 @@ mod tests {
         std::fs::remove_dir_all(parent).unwrap();
     }
 
-    #[test]
-    fn history_observation_never_treats_pending_unknown_or_another_assignment_as_complete() {
-        let id: TransactionId = "startup-history-host-select".try_into().unwrap();
-        let other: TransactionId = "other-host-select".try_into().unwrap();
-        let mut inventory = ManagementInventory {
-            high_water: 7,
-            transactions: vec![ManagementTransactionObservation {
-                intent: DesiredStateCommit {
-                    transaction_id: id.clone(),
-                    sequence: 7,
-                    deployment_raw_sha256: Sha256Digest::of_bytes(b"deployment"),
-                    before_state_sha256: Sha256Digest::of_bytes(b"before"),
-                    target_state_sha256: Sha256Digest::of_bytes(b"after"),
-                    reader: ReaderContract::NativeAppRuntimeSelectedStateV1,
-                },
-                prepared: None,
-                phase_receipts: Vec::new(),
-            }],
-            orphans: Vec::new(),
-        };
-        for stage in [
-            DurableStage::Prepared,
-            DurableStage::Applied,
-            DurableStage::Verified,
-        ] {
-            inventory.transactions[0].phase_receipts = vec![JournalReceipt {
-                transaction_id: id.clone(),
-                sequence: 7,
-                stage,
-                previous: None,
-                record_sha256: Sha256Digest::of_bytes(b"observed"),
-            }];
-            assert!(!committed(&inventory, &id, 7));
-        }
-        inventory.transactions[0].phase_receipts[0].stage = DurableStage::Committed;
-        assert!(committed(&inventory, &id, 7));
-        assert!(!committed(&inventory, &id, 8));
-        assert!(!committed(&inventory, &other, 7));
-        inventory.orphans.push("unsettled-original.tmp".into());
-        assert!(!committed(&inventory, &id, 7));
-    }
-
     #[cfg(unix)]
     #[test]
-    fn history_original_pin_rejects_same_content_replacement_and_namespace_growth_is_bounded() {
+    fn active_update_input_pin_rejects_same_content_replacement() {
         use std::{
             fs,
             io::Write,
@@ -894,15 +506,6 @@ mod tests {
         fs::rename(path.join("original.json"), path.join("retained.json")).unwrap();
         create("original.json");
         assert!(same_file(&held, &raw).is_err());
-        let before = names(&path).unwrap();
-        create("added.json");
-        assert_ne!(names(&path).unwrap(), before);
-        for index in 0..61 {
-            create(&format!("entry-{index}.json"));
-        }
-        assert_eq!(names(&path).unwrap().len(), 64);
-        create("over-budget.json");
-        assert!(names(&path).is_err());
         drop(raw);
         drop(held);
         fs::remove_dir_all(path).unwrap();

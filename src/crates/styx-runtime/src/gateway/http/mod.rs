@@ -38,7 +38,6 @@ const SESSION_BYTES: usize = 1536 * 1024;
 /// HTTP queue reservation, independent of Host and relay allocations.
 pub const GATEWAY_HTTP_BYTES: usize = FIXED_BYTES + 64 * SESSION_BYTES;
 const MAX_HTTP_BYTES: usize = 128 * 1024 * 1024;
-const SESSION_IDLE: Duration = Duration::from_secs(600);
 const FIXED_BYTES: usize = 8 * 1024 * 1024;
 const OLDEST: &str = "2024-10-07";
 const SID: &str = "mcp-session-id";
@@ -88,8 +87,7 @@ pub struct GatewayHttp<B: GatewayToolBackend + GatewayOwnerLifecycle> {
     conversations: Mutex<BTreeMap<[u8; 32], Arc<conversation::Conversation<B>>>>,
     supervisor: Arc<Supervisor>,
     stop: CancellationToken,
-    idle_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    expired: std::sync::atomic::AtomicU64,
+    collection_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     admission: tokio::sync::Mutex<()>,
     #[cfg(test)]
     oldest_methods: std::sync::atomic::AtomicU8,
@@ -137,8 +135,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
                 accepting_cleanup_jobs: std::sync::atomic::AtomicBool::new(true),
             }),
             stop: CancellationToken::new(),
-            idle_task: Mutex::new(None),
-            expired: std::sync::atomic::AtomicU64::new(0),
+            collection_task: Mutex::new(None),
             admission: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             oldest_methods: std::sync::atomic::AtomicU8::new(0),
@@ -147,18 +144,15 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
         });
         let weak = Arc::downgrade(&app);
         let stop = app.stop.clone();
-        *app.idle_task.lock().expect("idle supervisor") = Some(tokio::spawn(async move {
+        *app.collection_task.lock().expect("session collector") = Some(tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(15));
             loop {
                 tokio::select! {
                     _ = stop.cancelled() => break,
                     _ = tick.tick() => {
                         let Some(app) = weak.upgrade() else { break; };
-                        tokio::select! {
-                            _ = stop.cancelled() => break,
-                            _ = app.expire_idle(SESSION_IDLE) => {}
-                        }
-                        app.expire_conversations(SESSION_IDLE);
+                        app.collect_closed();
+                        app.collect_closed_conversations();
                     }
                 }
             }
@@ -240,51 +234,9 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
     }
     pub fn status(&self) -> serde_json::Value {
         serde_json::json!({"open":self.retained_sessions(),"capacity":0,
-            "expired":self.expired.load(std::sync::atomic::Ordering::Relaxed),
+            "expired":0u64,
             "evicted":0,
             "reservation_bytes":self.budget._partition.num_permits()})
-    }
-    fn idle_candidate(&self, minimum: Duration) -> Option<Arc<Session<B>>> {
-        self.collect_closed();
-        self.sessions
-            .lock()
-            .expect("HTTP sessions")
-            .values()
-            .filter_map(|s| {
-                let a = s.life.activity.lock().expect("session activity");
-                (a.users == 0 && a.last.elapsed() >= minimum && s.life.is_active())
-                    .then(|| (a.last, s.clone()))
-            })
-            .filter(|(_, s)| !self.backend.owner_has_live_work(&s.life.owner))
-            .min_by_key(|(last, _)| *last)
-            .map(|(_, s)| s)
-    }
-    async fn close_idle(&self, session: Arc<Session<B>>, minimum: Duration) -> bool {
-        {
-            let a = session.life.activity.lock().expect("session activity");
-            if a.users != 0
-                || a.last.elapsed() < minimum
-                || !session.life.is_active()
-                || self.backend.owner_has_live_work(&session.life.owner)
-            {
-                return false;
-            }
-            if session.life.close().is_err() {
-                return false;
-            }
-            self.expired
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        session.manager.close_idle().await.is_ok()
-    }
-    async fn expire_idle(&self, minimum: Duration) {
-        while let Some(session) = self.idle_candidate(minimum) {
-            self.close_idle(session, minimum).await;
-            if self.stop.is_cancelled() {
-                break;
-            }
-        }
-        self.collect_closed();
     }
     async fn admit_session(
         &self,
@@ -302,10 +254,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
         for (key, value) in [
             ("x-styx-sessions-open", self.retained_sessions() as u64),
             ("x-styx-sessions-capacity", 0),
-            (
-                "x-styx-sessions-expired",
-                self.expired.load(std::sync::atomic::Ordering::Relaxed),
-            ),
+            ("x-styx-sessions-expired", 0u64),
             ("x-styx-sessions-evicted", 0),
         ] {
             response
@@ -323,8 +272,8 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
         }
     }
     #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
-    pub(crate) async fn expire_idle_for_test(&self) {
-        self.expire_idle(SESSION_IDLE).await;
+    pub(crate) async fn collect_closed_sessions_for_test(&self) {
+        self.collect_closed();
     }
     fn find_session(&self, id: &str) -> Option<Arc<Session<B>>> {
         self.sessions
@@ -730,7 +679,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
                     builder.max_headers(64).max_buf_size(16*1024).header_read_timeout(Duration::from_secs(5)).timer(hyper_util::rt::TokioTimer::new());
                     let connection=builder.serve_connection(hyper_util::rt::TokioIo::new(stream),service);
                     tokio::pin!(connection);
-                    tokio::select!{_=stop.cancelled()=>{connection.as_mut().graceful_shutdown();let _=tokio::time::timeout(Duration::from_secs(1),connection).await;},_= &mut connection=>{},_=tokio::time::sleep(Duration::from_secs(120))=>{connection.as_mut().graceful_shutdown();let _=tokio::time::timeout(Duration::from_secs(1),connection).await;}}
+                    tokio::select!{_=stop.cancelled()=>{connection.as_mut().graceful_shutdown();let _=tokio::time::timeout(Duration::from_secs(1),connection).await;},_= &mut connection=>{}}
                 });
             }
             while connections.join_next().await.is_some() {}
@@ -766,7 +715,12 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> HttpServer<B> {
             };
         };
         self.app.stop.cancel();
-        let idle = self.app.idle_task.lock().expect("idle supervisor").take();
+        let idle = self
+            .app
+            .collection_task
+            .lock()
+            .expect("session collector")
+            .take();
         let mut idle_joined = true;
         if let Some(mut idle) = idle {
             match tokio::time::timeout_at(until, &mut idle).await {
@@ -779,7 +733,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> HttpServer<B> {
                 }
                 Err(_) => {
                     idle_joined = false;
-                    *self.app.idle_task.lock().expect("idle supervisor") = Some(idle);
+                    *self.app.collection_task.lock().expect("session collector") = Some(idle);
                 }
             }
         }

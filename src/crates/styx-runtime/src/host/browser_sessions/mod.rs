@@ -333,9 +333,7 @@ impl Engine<'_> {
                     Ok(v) => v,
                     Err(e) => return failure(e, false),
                 };
-                let Ok(mut session) = cell.try_lock() else {
-                    return failure("busy", false);
-                };
+                let mut session = cell.lock().await;
                 if session.operator != owner {
                     return failure("browser_session_transferred", false);
                 }

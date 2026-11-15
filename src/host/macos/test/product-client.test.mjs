@@ -12,7 +12,7 @@ test('native ZIP transport shares authenticated session and rejects redirects, M
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-native-client-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
  const here=path.dirname(fileURLToPath(import.meta.url)),run=promisify(execFile),binary=path.join(root,'client-test');
  const sdk=process.env.STYX_MACOS_SDK??execFileSync('xcrun',['--sdk','macosx','--show-sdk-path'],{encoding:'utf8'}).trim();
- await run('xcrun',['swiftc','-O','-warnings-as-errors','-sdk',sdk,'-module-cache-path',path.join(root,'modules'),path.join(here,'ProductClientAcceptance.swift'),path.join(here,'../product-ui/ProductCoreClient.swift'),'-o',binary]);
+ await run('xcrun',['swiftc','-D','STYX_TESTING','-O','-warnings-as-errors','-sdk',sdk,'-module-cache-path',path.join(root,'modules'),path.join(here,'ProductClientAcceptance.swift'),path.join(here,'../product-ui/ProductCoreClient.swift'),'-o',binary]);
  const token='a'.repeat(43),csrf='b'.repeat(43),archive=Buffer.from([0x50,0x4b,0x03,0x04,1,2,3]);
  for(const mode of ['valid','redirect','wrong-mime','not-zip','oversize','denied','work_in_progress','work_state_unknown']){
   let exports=0,traps=0;const requests=[];

@@ -179,8 +179,10 @@ final class ProductRedirectBlocker: NSObject, URLSessionTaskDelegate {
 }
 
 final class ProductCoreClient {
+    #if STYX_TESTING
     private let origin: URL?
     private let token: String?
+    #endif
     #if STYX_PRODUCT_UI
     private let owned: ProductOwnedCore?
     var isNativeHost: Bool { owned != nil }
@@ -198,6 +200,7 @@ final class ProductCoreClient {
     private var nativeServiceMutationInFlight = false
     var nativeServiceChangeAllowed: Bool { !nativeServiceUnconfirmed && !nativeServiceMutationInFlight && owned?.isRunning == true }
     #endif
+    #if STYX_TESTING
     private var csrf: String?
     private let transport: URLSession?
     private let redirectBlocker = ProductRedirectBlocker()
@@ -217,8 +220,15 @@ final class ProductCoreClient {
         return (origin, token)
     }
 
+    #endif
+
     #if STYX_PRODUCT_UI
-    init(owned: ProductOwnedCore) { self.owned = owned; origin = nil; token = nil; transport = nil }
+    init(owned: ProductOwnedCore) {
+        self.owned = owned
+        #if STYX_TESTING
+        origin = nil; token = nil; transport = nil
+        #endif
+    }
     func native(_ operation: String, _ input: [String: ProductJSON] = [:]) async throws -> ProductJSON {
         guard let owner = owned else { throw ProductCoreError.unavailable }; return try await owner.call(operation, input)
     }
@@ -265,6 +275,7 @@ final class ProductCoreClient {
         throw ProductCoreError.rejected
     }
     #endif
+    #if STYX_TESTING
     init(sessionURL: URL) throws {
         #if STYX_PRODUCT_UI
         owned = nil
@@ -278,8 +289,11 @@ final class ProductCoreClient {
         config.timeoutIntervalForRequest = 90; config.timeoutIntervalForResource = 300
         transport = URLSession(configuration: config, delegate: redirectBlocker, delegateQueue: nil)
     }
+    #endif
     deinit {
+        #if STYX_TESTING
         transport?.invalidateAndCancel()
+        #endif
         #if STYX_PRODUCT_UI
         owned?.requestEOF()
         #endif
@@ -297,8 +311,12 @@ final class ProductCoreClient {
             if route == "plugin" { return try await native("pluginRead") }
             guard route == "status" || route == "native-status" else { throw ProductCoreError.rejected }; return try await native("status")
         }
+        #if STYX_TESTING
         guard Self.reads.contains(route) else { throw ProductCoreError.rejected }
         return try await request(route, body: nil)
+        #else
+        throw ProductCoreError.rejected
+        #endif
     }
     func write(_ route: String, _ body: [String: ProductJSON]) async throws -> ProductJSON {
         if isNativeHost {
@@ -319,8 +337,12 @@ final class ProductCoreClient {
             default: throw ProductCoreError.rejected
             }
         }
+        #if STYX_TESTING
         guard Self.writes.contains(route), csrf != nil else { throw ProductCoreError.rejected }
         return try await request(route, body: .object(body))
+        #else
+        throw ProductCoreError.rejected
+        #endif
     }
     #if STYX_PRODUCT_UI
     private func changeNativeLogin(_ body: [String: ProductJSON]) async throws -> ProductJSON {
@@ -363,11 +385,16 @@ final class ProductCoreClient {
                   let bytes = Data(base64Encoded: encoded), bytes.starts(with: [0x50, 0x4b, 0x03, 0x04]) else { throw ProductCoreError.invalidResponse }
             return bytes
         }
+        #if STYX_TESTING
         guard csrf != nil else { throw ProductCoreError.rejected }
         let data = try await response("plugin/export", body: .object(["authorize": .bool(true)]), mimeType: "application/zip")
         guard data.starts(with: [0x50, 0x4b, 0x03, 0x04]) else { throw ProductCoreError.invalidResponse }
         return data
+        #else
+        throw ProductCoreError.rejected
+        #endif
     }
+    #if STYX_TESTING
     private func request(_ route: String, body: ProductJSON?) async throws -> ProductJSON {
         let data = try await response(route, body: body, mimeType: "application/json")
         let value = try JSONDecoder().decode(ProductJSON.self, from: data)
@@ -415,6 +442,8 @@ final class ProductCoreClient {
               response.mimeType == mimeType else { throw ProductCoreError.invalidResponse }
         return data
     }
+    #endif
+
 }
 
 // Small typed projections keep protocol codes separate from user-facing labels.

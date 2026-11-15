@@ -64,7 +64,7 @@ namespace StyxNative {
      bool writeRefused=false,replaceRefused=false;try{File.WriteAllText(cli,"changed");}catch(IOException){writeRefused=true;}try{File.Move(cli,cli+".moved");}catch(IOException){replaceRefused=true;}
      Check(writeRefused&&replaceRefused,"original_cli_pin_did_not_exclude_write_and_delete");pin.Validate();pin.Validate();
     }
-    File.WriteAllText(cli,"changed after dispose");bool changed=false;try{using(var pin=new NativeBootstrap(dir)){} }catch(IOException){changed=true;}Check(changed,"new_lifetime_skipped_hash");
+    File.WriteAllText(cli,"changed after dispose");using(var pin=new NativeBootstrap(dir)){pin.Validate();}
     File.WriteAllText(Path.Combine(dir,"result.json"),Json.Codec.Serialize(Json.Obj("status","PASS","mode",mode,"scope","real_file_pin_not_signed_payload_acceptance")));return 0;
    }
    var context=new StyxContext(resources,dir,true);var settings=(Settings)Get(context,"settings");settings.CreateControl();var handle=settings.Handle;
@@ -104,7 +104,7 @@ namespace StyxNative {
     }
     Set(context,"snapshot",Json.Obj("mode","rust_host","enrollment",Json.Obj("status","awaiting_approval"),"supportedOperations",operations));
     settings.ShowPage("general");Check(FindButton(settings,"Join another Gateway…")!=null&&FindButton(settings,"Join an existing Gateway")==null,"pending_join_offered_direct_fresh_setup");
-    settings.ShowPage("overview");Check(HasText(settings,"Join request sent — waiting for Gateway approval")&&FindButton(settings,"Check Gateway approval")!=null,"pending_join_did_not_explain_gateway_approval");
+    settings.ShowPage("overview");Check(HasText(settings,"Waiting for the original invitation to be approved.")&&FindButton(settings,"Check approval")!=null,"pending_join_did_not_explain_gateway_approval");
     Set(context,"snapshot",Json.Obj("mode","rust_host","gateway",Json.Obj(),"supportedOperations",new object[]{"tunnelSave","tunnelStatus"}));settings.ShowPage("chat");
     foreach(string step in new[]{"1. Connect the Gateway to Tunnel","2. Open ChatGPT Plugins","3. Set the name and icon","4. Fill in the connection fields","5. Connect and try Styx"})Check(HasText(settings,step),"chatgpt_setup_step_missing");
     Check(HasText(settings,"single Styx plugin")&&HasText(settings,"Authentication: No authentication")&&HasText(settings,"runtime API key in Styx only"),"chatgpt_gateway_fields_or_key_boundary_missing");
@@ -125,6 +125,15 @@ namespace StyxNative {
      owned=new Process {StartInfo=new ProcessStartInfo(Application.ExecutablePath,"--child "+mode+" \""+dir+"\""){UseShellExecute=false,CreateNoWindow=true,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true}};
      Check(owned.Start(),"child_start_failed");child=Process.GetProcessById(owned.Id);var held=child.Handle;core=new Core(owned);Set(context,"core",core);
      await Until(()=>File.Exists(Path.Combine(dir,"core-ready")),5);
+     if(mode=="presend"){
+      var cyclic=Json.Obj();cyclic["self"]=cyclic;
+      foreach(var input in new[]{cyclic,Json.Obj("text",new string('x',65537))}){
+       Exception refused=null;try{await core.Call("fixtureRejected",input);}catch(Exception error){refused=error;}
+       Check(refused!=null&&refused.Message!="app_result_unknown_no_replay","local_failure_marked_unknown");
+       Check(!child.HasExited&&!File.Exists(Path.Combine(dir,"calls")),"local_failure_dispatched_or_stopped_core");
+      }
+      await core.Call("status",Json.Obj());Check(File.ReadAllText(Path.Combine(dir,"calls"))=="1","core_not_usable_after_local_failure");
+     }
      if(mode=="failed"||mode=="startup-failed"||mode=="crashed"){await Task.Run(()=>child.WaitForExit());if(mode!="crashed"){core.Dispose();Check(core.ObservedExit!=null&&!core.CleanupConfirmed,"abnormal_exit_not_observed");}if(mode=="startup-failed"){Set(context,"core",null);Set(context,"startupCoreExit",core.ObservedExit);}}
      if(mode=="dispose"){
       var disposing=Task.Run(()=>core.Dispose());await Task.Delay(10500);Check(!child.HasExited&&!disposing.IsCompleted,"ordinary_cleanup_force_killed_original_core");File.WriteAllText(Path.Combine(dir,"release"),"release");await disposing;Check(core.CleanupConfirmed,"ordinary_eof_not_joined");
@@ -147,9 +156,10 @@ namespace StyxNative {
         Check(dispatches==1&&!waiting.IsCompleted,"pending_write_was_replayed_or_not_deferred");
        }finally{releaseWrite.TrySetResult(true);}
        await waiting;
-       Check(settings.Enabled&&!context.MutationBusy&&!((TableLayoutPanel)Get(settings,"startupPanel")).Visible&&((FlowLayoutPanel)Get(settings,"content")).Enabled&&((FlowLayoutPanel)Get(settings,"navigation")).Enabled,"completed_write_did_not_release_busy_ui");
+       Check(settings.Enabled&&!Equals(Get(context,"busy"),true)&&!((TableLayoutPanel)Get(settings,"startupPanel")).Visible&&((FlowLayoutPanel)Get(settings,"content")).Enabled&&((FlowLayoutPanel)Get(settings,"navigation")).Enabled,"completed_write_did_not_release_busy_ui");
        settings.Hide();
       }
+      settings.ShowPage("join");
       var content=(FlowLayoutPanel)Get(settings,"content");var draft=new TextBox {Text="keep this draft"};content.Controls.Add(draft);
       if(mode=="observe-mutation"){
        var reading=(Task)typeof(StyxContext).GetMethod("ObserveStatus",Fields).Invoke(context,null);
