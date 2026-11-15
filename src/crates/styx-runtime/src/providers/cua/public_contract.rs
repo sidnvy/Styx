@@ -120,9 +120,9 @@ pub(super) fn canonicalize(name: &str, arguments: &mut Map<String, Value>) {
             arguments
                 .entry("include_screenshot")
                 .or_insert(Value::Bool(true));
-            for (key, default) in [("max_image_dimension", 1024)] {
-                arguments.entry(key).or_insert(Value::from(default));
-            }
+            arguments
+                .entry("max_image_dimension")
+                .or_insert(Value::from(1024));
         } else if arguments.get("include_screenshot") == Some(&Value::Bool(false))
             && arguments.get("include_accessibility_tree") != Some(&Value::Bool(false))
         {

@@ -250,7 +250,8 @@ fn minimal_explicit_read_modalities_get_bounded_public_defaults() {
         tree.desktop_read_request().unwrap(),
         Some(DesktopReadRequest::Accessibility(_))
     ));
-    for (key, value) in [("max_image_dimension", json!(0))] {
+    {
+        let (key, value) = ("max_image_dimension", json!(0));
         let mut args = json!({"pid":42,"window_id":1234,"include_accessibility_tree":false})
             .as_object()
             .unwrap()
