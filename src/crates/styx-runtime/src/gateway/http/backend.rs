@@ -1,7 +1,6 @@
 use super::{
     conversation::AuthorizedCall,
     lifecycle::{GatewayOwnerLifecycle, Life},
-    session::bounded_message,
 };
 use crate::gateway::{auth::VerifiedGatewayOwner, mcp::GatewayToolBackend};
 use rmcp::{
@@ -34,12 +33,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayToolBackend for Backe
             return Err(refused());
         }
         let _activity = self.life.activity().ok_or_else(refused)?;
-        let result = self.backend.list_tools(owner, request).await?;
-        if !bounded_message(&result) {
-            let _ = self.life.close();
-            return Err(uncertain());
-        }
-        Ok(result)
+        self.backend.list_tools(owner, request).await
     }
     fn call_tool(
         &self,
@@ -119,18 +113,13 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> BackendBridge<B> {
                 if life_guard.closing || transport_guard.as_ref().is_some_and(|f| f.closing) {
                     return Err(refused());
                 }
-                let job_life = life.clone();
                 let mut jobs = supervisor.jobs.lock().expect("backend supervisor");
                 while jobs.try_join_next().is_some() {}
                 jobs.spawn(async move {
                     // Keep activity alive through the original supervised work.
                     let _activity = activity;
                     let _authorized_call = authorized;
-                    let mut result = backend.call_tool(&owner, request).await;
-                    if !bounded_message(&result) {
-                        let _ = job_life.close();
-                        result = Err(uncertain());
-                    }
+                    let result = backend.call_tool(&owner, request).await;
                     let _ = tx.send(result);
                 });
             }

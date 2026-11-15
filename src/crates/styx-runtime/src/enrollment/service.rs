@@ -1305,3 +1305,34 @@ impl ServiceError {
         Self::new(403, "device_unauthorized")
     }
 }
+
+/// The admin inventory's connection fields describe routing, not enabled Host
+/// capabilities. HostSettings peers use one control transport, not three leases.
+pub(crate) fn project_connections(
+    inventory: &mut Value,
+    observed: Option<&[crate::gateway::paired::DeviceStatus]>,
+) {
+    let Some(rows) = inventory.as_array_mut() else {
+        return;
+    };
+    for row in rows {
+        if row["status"] != "approved" {
+            continue;
+        }
+        match observed {
+            Some(devices) => {
+                let current = devices
+                    .iter()
+                    .find(|d| row["device_id"] == d.device_id.as_str());
+                if let Some(d) = current.filter(|d| d.host_settings) {
+                    row["connections"] = json!({"exec":d.online,"browser":d.browser_online,"computer":d.computer_online});
+                    row["online"] = json!(d.online);
+                }
+            }
+            None => {
+                row["connections"] = json!({"exec":null,"browser":null,"computer":null});
+                row["online"] = Value::Null;
+            }
+        }
+    }
+}

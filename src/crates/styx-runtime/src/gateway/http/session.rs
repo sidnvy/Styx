@@ -1,7 +1,4 @@
-use super::{
-    MESSAGE_BYTES,
-    lifecycle::{GatewayOwnerLifecycle, Life},
-};
+use super::lifecycle::{GatewayOwnerLifecycle, Life};
 use futures_util::Stream;
 use rmcp::{
     RoleServer,
@@ -18,7 +15,6 @@ use rmcp::{
     },
 };
 use std::{
-    io::{self, Write},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -37,8 +33,6 @@ pub(super) enum SessionError {
 pub(super) enum TransportError {
     #[error("official SDK transport rejected message")]
     Local,
-    #[error("bounded message rejected after possible action; no replay")]
-    TooLarge,
     #[error("owner fence refused; cleanup remains unresolved")]
     FenceRefused,
 }
@@ -46,25 +40,6 @@ impl From<LocalSessionWorkerError> for TransportError {
     fn from(_: LocalSessionWorkerError) -> Self {
         Self::Local
     }
-}
-struct SizeWriter(usize);
-impl Write for SizeWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0 = self
-            .0
-            .checked_add(bytes.len())
-            .ok_or_else(|| io::Error::other("message limit"))?;
-        if self.0 > MESSAGE_BYTES {
-            return Err(io::Error::other("message limit"));
-        }
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-pub(super) fn bounded_message(value: &impl serde::Serialize) -> bool {
-    serde_json::to_writer(SizeWriter(0), value).is_ok()
 }
 pub(super) struct BoundedManager<L: GatewayOwnerLifecycle> {
     inner: LocalSessionManager,
@@ -125,20 +100,10 @@ impl<L: GatewayOwnerLifecycle> Transport<RoleServer> for ObservedTransport<L> {
         &mut self,
         message: ServerJsonRpcMessage,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-        // Typed value already exists; backend source allocation must also be bounded.
-        // This check occurs before official session caches duplicate the message.
-        let allowed = bounded_message(&message);
-        let life = self.life.clone();
-        let sent = allowed.then(|| self.inner.send(message));
-        async move {
-            match sent {
-                Some(sent) => sent.await.map_err(TransportError::from),
-                None => {
-                    let _ = life.close();
-                    Err(TransportError::TooLarge)
-                }
-            }
-        }
+        // Outbound tool results (including screenshots) are passed to the SDK
+        // without applying the inbound request-body bound to their response.
+        let sent = self.inner.send(message);
+        async move { sent.await.map_err(TransportError::from) }
     }
     async fn receive(&mut self) -> Option<ClientJsonRpcMessage> {
         self.inner.receive().await

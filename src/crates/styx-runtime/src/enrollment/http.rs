@@ -349,6 +349,7 @@ impl EnrollmentHttp {
         };
         let (send, receive) = oneshot::channel();
         let app = self.clone();
+        let inventory = path == "/styx/enroll/devices";
         self.spawn_work(move || {
             let result: Result<(u16, serde_json::Value), PublicFailure> = app
                 .service
@@ -358,17 +359,26 @@ impl EnrollmentHttp {
                         .map_err(|e| (e.status(), e.code()))
                 })
                 .unwrap_or(Err((503, "enrollment_outcome_unknown")));
-            let response = match result {
-                Ok((status, value)) => match encode_response(&value) {
-                    Ok(bytes) => response(status, bytes, false),
-                    Err(()) => failure(503, "enrollment_outcome_unknown", true),
-                },
-                Err((status, code)) => failure(status, code, false),
-            };
-            let _ = send.send(response);
+            let _ = send.send(result);
         });
         match tokio::time::timeout(WORK_WAIT, receive).await {
-            Ok(Ok(response)) => response,
+            Ok(Ok(Ok((status, mut value)))) => {
+                // Only project after the service has authenticated this admin
+                // request. This observes routing, never Host capability policy.
+                if inventory
+                    && status == 200
+                    && let Some(relay) = &self.relay
+                {
+                    let observed = tokio::time::timeout(IO_TIMEOUT, relay.devices()).await;
+                    let devices = observed.ok().and_then(Result::ok);
+                    super::service::project_connections(&mut value, devices.as_deref());
+                }
+                match encode_response(&value) {
+                    Ok(bytes) => response(status, bytes, false),
+                    Err(()) => failure(503, "enrollment_outcome_unknown", true),
+                }
+            }
+            Ok(Ok(Err((status, code)))) => failure(status, code, false),
             _ => failure(503, "enrollment_outcome_unknown", true),
         }
     }

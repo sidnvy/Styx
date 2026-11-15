@@ -1678,3 +1678,38 @@ fn rejection_signed_store(path: &Path, pairing_reader: bool) -> OwnedEnrollmentJ
         .unwrap();
     store
 }
+
+#[test]
+fn shared_host_transport_inventory_uses_routing_without_changing_capabilities() {
+    let mut inventory = json!([
+        {"device_id":"shared-host","status":"approved","capabilities":{"browser":false},"connections":{"exec":true,"browser":false,"computer":false}},
+        {"device_id":"revoked-host","status":"revoked","connections":{"exec":false,"browser":false,"computer":false}},
+        {"device_id":"legacy-host","status":"approved","connections":{"exec":true,"browser":false,"computer":false}}
+    ]);
+    let device = crate::gateway::paired::DeviceStatus {
+        host_settings: true,
+        device_id: "shared-host".try_into().unwrap(),
+        label: "shared".into(),
+        platform: "linux".into(),
+        online: true,
+        browser_online: true,
+        computer_online: false,
+        capability_generation: "generation".into(),
+        host_generation: None,
+        grant_revision: None,
+    };
+    let mut revoked = device.clone();
+    revoked.device_id = "revoked-host".try_into().unwrap();
+    project_connections(&mut inventory, Some(&[device, revoked]));
+    assert_eq!(
+        inventory[0]["connections"],
+        json!({"exec":true,"browser":true,"computer":false})
+    );
+    assert_eq!(inventory[0]["capabilities"], json!({"browser":false}));
+    assert_eq!(inventory[1]["connections"]["browser"], false);
+    assert_eq!(inventory[2]["connections"]["browser"], false);
+    project_connections(&mut inventory, None);
+    assert!(inventory[0]["connections"]["browser"].is_null());
+    assert!(inventory[0]["online"].is_null());
+    assert_eq!(inventory[1]["connections"]["exec"], false);
+}

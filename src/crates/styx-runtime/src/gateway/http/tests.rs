@@ -62,6 +62,12 @@ impl GatewayToolBackend for CounterBackend {
             assert!(calls.len() < 32);
             calls.push((owner.owner_id().as_str().to_owned(), command.clone()));
         }
+        if command == "large-screenshot" {
+            return Ok(CallToolResult::success(vec![ContentBlock::image(
+                "A".repeat(MESSAGE_BYTES * 2),
+                "image/png",
+            )]));
+        }
         if command == "pending-counter-effect" {
             use std::io::Write;
             let release = Arc::new(tokio::sync::Notify::new());
@@ -174,9 +180,7 @@ async fn collected(app: &GatewayHttp<CounterBackend>) {
     panic!("session not proven closed: {facts:?}");
 }
 #[test]
-fn outbound_limit_precedes_sdk_cache_and_partition_cannot_be_empty() {
-    assert!(session::bounded_message(&"small"));
-    assert!(!session::bounded_message(&"x".repeat(MESSAGE_BYTES)));
+fn partition_cannot_be_empty() {
     let root = Arc::new(Semaphore::new(1));
     assert!(HttpBudget::from_reserved_partition(root.try_acquire_owned().unwrap()).is_err());
     let maximum = HttpBudget::from_reserved_partition(
@@ -212,7 +216,7 @@ async fn official_sdk_tcp_auth_sessions_limits_and_pending_close() {
         let raw=reqwest::Client::new();
         let versions=["2024-10-07","2024-11-05","2025-03-26","2025-06-18","2025-11-25"];
         for (index,version) in versions.iter().enumerate() {
-            let mut config=StreamableHttpClientTransportConfig::with_uri(uri.clone()).auth_header(token.clone()).reinit_on_expired_session(false).max_sse_event_size(MESSAGE_BYTES).max_concurrent_requests(1);
+            let mut config=StreamableHttpClientTransportConfig::with_uri(uri.clone()).auth_header(token.clone()).reinit_on_expired_session(false).max_sse_event_size(MESSAGE_BYTES * 4).max_concurrent_requests(1);
             config.allow_stateless=false;config.custom_headers=HashMap::from([(http::HeaderName::from_static(VERSION),version.parse().unwrap())]);
             let transport=StreamableHttpClientTransport::with_client(raw.clone(),config);
             let client=ClientConfig::new(ClientCapabilities::default(),Implementation::new("owned-http-sdk-fixture","1")).with_protocol_version(serde_json::from_value(serde_json::json!(version)).unwrap()).serve_with_lifecycle(transport,ClientLifecycleMode::Initialize).await.unwrap();
@@ -222,6 +226,14 @@ async fn official_sdk_tcp_auth_sessions_limits_and_pending_close() {
             let request:CallToolRequestParams=serde_json::from_value(serde_json::json!({"name":"exec_command","arguments":{"cmd":format!("counter-{index}")},"_meta":{"owner":"forged-other-owner"}})).unwrap();
             client.call_tool(request).await.unwrap();
             let sid=active_sid(&app);
+            if index==3 {
+                let image = client.call_tool(serde_json::from_value(serde_json::json!({"name":"exec_command","arguments":{"cmd":"large-screenshot"}})).unwrap()).await.unwrap();
+                assert!(serde_json::to_vec(&image).unwrap().len() > MESSAGE_BYTES);
+                assert_eq!(serde_json::to_value(&image).unwrap()["content"][0]["data"].as_str().unwrap().len(), MESSAGE_BYTES * 2);
+                client.call_tool(serde_json::from_value(serde_json::json!({"name":"exec_command","arguments":{"cmd":"after-screenshot"}})).unwrap()).await.unwrap();
+                assert_eq!(active_sid(&app), sid);
+                assert!(app.find_session(&sid).unwrap().life.is_active());
+            }
             // Auth is rerun for all three verbs, even for an existing valid SDK ID.
             for method in [reqwest::Method::POST,reqwest::Method::GET,reqwest::Method::DELETE] {
                 assert_eq!(raw.request(method.clone(),&uri).header(SID,&sid).send().await.unwrap().status(),StatusCode::UNAUTHORIZED);
@@ -249,7 +261,7 @@ async fn official_sdk_tcp_auth_sessions_limits_and_pending_close() {
         }
         assert_eq!(app.oldest_methods.load(Ordering::Acquire)&7,7,"actual official client oldest POST/GET/DELETE shim journey");
         let owners:BTreeSet<_>=backend.calls.lock().unwrap().iter().map(|x|x.0.clone()).collect();assert_eq!(owners.len(),5);
-        assert_eq!(backend.calls.lock().unwrap().len(),6);assert_eq!(std::fs::read_to_string(&backend.path).unwrap().lines().count(),1);
+        assert_eq!(backend.calls.lock().unwrap().len(),8);assert_eq!(std::fs::read_to_string(&backend.path).unwrap().lines().count(),1);
         let report=server.shutdown(Duration::from_secs(5)).await;assert!(report.connections_joined&&report.lifecycle_jobs_joined);assert_eq!(report.unresolved_sessions,0);
         drop(server);drop(app);drop(budget);assert_eq!(shared.available_permits(),GATEWAY_HTTP_BYTES);
         println!("HTTP owned development fixture={} PASS: real official SDK all5, frozen tools, auth each verb, isolated opaque owners, oldest header shim all3verbs, unknown/oversize refused, one pending nonce effect then real fence+observed SDK transport close+cleanup; not native/account/TLS",root.display());
