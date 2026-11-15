@@ -4,7 +4,7 @@
 //!
 //! Official zbus 5.14 MessageStream::for_match_rule owns bus subscription setup;
 //! max_queued bounds messages, not SDK allocation. Run only in the existing
-//! same-image memory-limited worker, never in the Host address space.
+//! same-image owned worker, never in the Host address space.
 //! https://docs.rs/zbus/5.14.0/zbus/struct.MessageStream.html
 use super::*;
 use std::collections::BTreeMap;
@@ -369,10 +369,6 @@ fn owner_changed(message: &Message, current: &str) -> Result<bool, WatchStop> {
     }
     Ok(name == LOGIN && (old != current || new != current))
 }
-fn isolated() -> bool {
-    use nix::sys::resource::{Resource, getrlimit};
-    matches!((getrlimit(Resource::RLIMIT_AS),getrlimit(Resource::RLIMIT_DATA)),(Ok((_,as_hard)),Ok((_,data_hard))) if as_hard<=512*1024*1024&&data_hard<=96*1024*1024)
-}
 /// Worker-only entry. No supplied UID, bus address, session selector or provider
 /// authority. Queue is exactly eight bounded <=64KiB events. Any terminal return
 /// or worker EOF is a source fence; the Host must invalidate its old bindings.
@@ -392,7 +388,7 @@ pub(crate) async fn watch_current_user(
     if cancel.is_cancelled() {
         return stop(WatchStop::Cancelled, true, false);
     }
-    if events.max_capacity() != QUEUE || !isolated() {
+    if events.max_capacity() != QUEUE {
         return stop(WatchStop::NotIsolated, false, false);
     }
     let uid = nix::unistd::geteuid().as_raw();

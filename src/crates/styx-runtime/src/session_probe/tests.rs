@@ -1,7 +1,6 @@
 //! Real owned fixture processes; not native logind or Desktop acceptance.
 use super::*;
 use crate::store::ProcessIdentity;
-use std::os::unix::process::ExitStatusExt;
 
 struct Fixtures {
     root: PathBuf,
@@ -147,84 +146,120 @@ async fn owned_worker_bounds_cancel_and_reap_batch() {
         )
         .is_err()
     );
-    let image_file = File::open("/proc/self/exe").unwrap();
-    let memory_pid = fixtures.root.join("memory-pid");
-    let memory_stage = fixtures.root.join("memory-stage");
-    let exit = Arc::new(std::sync::Mutex::new(None));
-    let image = PinnedWorker {
-        launch: PathBuf::from(format!(
-            "/proc/{}/fd/{}",
-            std::process::id(),
-            image_file.as_raw_fd()
-        )),
-        _image: image_file,
-        args: vec![
-            "--exact".into(),
-            "session_probe::tests::memory_limit_worker_fixture".into(),
-            "--ignored".into(),
-            "--nocapture".into(),
-        ],
-        environment: std::collections::BTreeMap::from([
-            (
-                "STYX_TEST_PROBE_MEMORY_PID".into(),
-                memory_pid.to_str().unwrap().into(),
-            ),
-            (
-                "STYX_TEST_PROBE_MEMORY_STAGE".into(),
-                memory_stage.to_str().unwrap().into(),
-            ),
-        ]),
-        observed_exit: Some(exit.clone()),
-    };
-    assert_eq!(run(image, uid).await.err(), Some(ProbeError::WorkerFailed));
-    assert_eq!(
-        std::fs::read_to_string(memory_stage).unwrap(),
-        "limits_set;allocation_begin"
-    );
-    let status = exit.lock().unwrap().unwrap();
     println!(
-        "memory_fixture_exit signal={:?} code={:?}",
-        status.signal(),
-        status.code()
-    );
-    assert_eq!(
-        status.signal(),
-        Some(nix::libc::SIGABRT),
-        "must observe allocator failure, not malformed output or timeout"
-    );
-    assert_original_gone(pid_fact(&memory_pid).await);
-    let (image, pid) = fixtures.image("after-memory", "valid", payload);
-    assert!(run(image, uid).await.unwrap().candidates.is_empty());
-    assert_original_gone(pid_fact(&pid).await);
-    println!(
-        "owned-process probe batch PASS: valid typed fixture, oversize>64KiB, timeout, caller future drop, independent concurrent probe, malformed facts; memory allocation SIGABRT isolated; recovery success; typed refusal preserved; exact PID/birth identities gone after actual wait; private fixture root removed on test completion; not logind/Desktop acceptance"
+        "owned-process probe batch PASS: valid typed fixture, oversize>64KiB, timeout, caller future drop, independent concurrent probe, malformed facts; typed refusal preserved; exact PID/birth identities gone after actual wait; not logind/Desktop acceptance"
     );
 }
 
-/// Child-only fixture. It is invoked by the new parent batch; the deliberately
-/// failed allocation must never run inside its parent process.
-#[test]
-#[ignore = "child-only resource isolation fixture; invoked by owned_worker_bounds_cancel_and_reap_batch"]
-fn memory_limit_worker_fixture() {
-    let pid_path =
-        std::path::PathBuf::from(std::env::var_os("STYX_TEST_PROBE_MEMORY_PID").unwrap());
-    let stage_path =
-        std::path::PathBuf::from(std::env::var_os("STYX_TEST_PROBE_MEMORY_STAGE").unwrap());
+/// Real child regression for the long-lived watcher's former cumulative CPU cap.
+/// The existing probe batch separately verifies deadline/drop cleanup ownership.
+#[tokio::test]
+async fn owned_worker_inherits_resources_and_outlives_old_cpu_quota() {
+    use nix::sys::resource::{Resource, getrlimit};
+    let fixtures = Fixtures::new();
+    let evidence = fixtures.root.join("worker.json");
+    let parent = ProcessIdentity::current().unwrap();
     let ProcessIdentity::Linux {
         pid, start_ticks, ..
-    } = ProcessIdentity::current().unwrap();
-    std::fs::write(
-        pid_path,
-        serde_json::to_vec(&serde_json::json!({"pid":pid,"birth":start_ticks})).unwrap(),
-    )
-    .unwrap();
-    prepare_worker_limits().unwrap();
-    std::fs::write(&stage_path, "limits_set;allocation_begin").unwrap();
+    } = parent;
+    let inherited: Vec<_> = [
+        Resource::RLIMIT_CPU,
+        Resource::RLIMIT_AS,
+        Resource::RLIMIT_DATA,
+        Resource::RLIMIT_STACK,
+        Resource::RLIMIT_NOFILE,
+    ]
+    .into_iter()
+    .map(|r| getrlimit(r).unwrap())
+    .collect();
+    // This regression needs a parent without the removed CPU quota; it does not
+    // raise system limits or alter the parent in order to manufacture success.
+    assert_eq!(
+        inherited[0],
+        (nix::libc::RLIM_INFINITY, nix::libc::RLIM_INFINITY)
+    );
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "session_probe::tests::worker_resource_inheritance_fixture",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("STYX_INTERNAL_PROBE_PARENT_PID", pid.to_string())
+        .env("STYX_INTERNAL_PROBE_PARENT_BIRTH", start_ticks.to_string())
+        .env("STYX_TEST_PROBE_RESOURCE_EVIDENCE", &evidence)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let original = ProcessIdentity::observe(child.id().unwrap()).unwrap();
+    let result = timeout_at(Instant::now() + Duration::from_secs(30), child.wait()).await;
+    if result.is_err() {
+        child.start_kill().unwrap();
+        child.wait().await.unwrap();
+        panic!("resource inheritance fixture did not complete");
+    }
+    assert!(
+        result.unwrap().unwrap().success(),
+        "worker died before independent completion evidence"
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&evidence).unwrap()).unwrap();
+    assert_eq!(value["inherited"], serde_json::to_value(inherited).unwrap());
+    assert!(value["cpu_micros"].as_i64().unwrap() >= 3_250_000);
+    assert_eq!(value["allocated_bytes"], 128 * 1024 * 1024);
+    assert_eq!(value["open_files"], 64);
+    assert_eq!(value["core_dump_disabled"], true);
+    assert_eq!(value["parent_death_signal_preserved"], true);
+    let ProcessIdentity::Linux {
+        pid, start_ticks, ..
+    } = original;
+    assert_original_gone((pid, start_ticks));
+}
+
+/// Child-only fixture using the production worker preparation. Real CPU work
+/// crosses both former CPU limits and still reaches a normal process exit.
+#[test]
+#[ignore = "child-only resource inheritance fixture; invoked by owned_worker_inherits_resources_and_outlives_old_cpu_quota"]
+fn worker_resource_inheritance_fixture() {
+    use nix::sys::{
+        resource::{Resource, UsageWho, getrlimit, getrusage},
+        time::TimeValLike,
+    };
+    let evidence = PathBuf::from(std::env::var_os("STYX_TEST_PROBE_RESOURCE_EVIDENCE").unwrap());
+    prepare_owned_worker().unwrap();
+    let inherited: Vec<_> = [
+        Resource::RLIMIT_CPU,
+        Resource::RLIMIT_AS,
+        Resource::RLIMIT_DATA,
+        Resource::RLIMIT_STACK,
+        Resource::RLIMIT_NOFILE,
+    ]
+    .into_iter()
+    .map(|r| getrlimit(r).unwrap())
+    .collect();
+    let files: Vec<_> = (0..64).map(|_| File::open("/dev/null").unwrap()).collect();
     let mut bytes = vec![0u8; 128 * 1024 * 1024];
     for (index, page) in bytes.chunks_mut(4096).enumerate() {
         page[0] = (index % 251) as u8;
     }
-    std::hint::black_box(&bytes);
-    assert_eq!(bytes[4096], 1);
-    std::fs::write(stage_path, "allocation_survived").unwrap();
+    let cpu_time = || {
+        let usage = getrusage(UsageWho::RUSAGE_SELF).unwrap();
+        usage.user_time().num_microseconds() + usage.system_time().num_microseconds()
+    };
+    let start = cpu_time();
+    let mut value = 1u64;
+    while cpu_time() - start < 3_250_000 {
+        for _ in 0..100_000 {
+            value = std::hint::black_box(value.wrapping_mul(6364136223846793005).wrapping_add(1));
+        }
+    }
+    std::hint::black_box((&bytes, &files, value));
+    let observed = serde_json::json!({"inherited":inherited, "cpu_micros":cpu_time()-start,
+        "allocated_bytes":bytes.len(), "open_files":files.len(),
+        "core_dump_disabled":getrlimit(Resource::RLIMIT_CORE).unwrap()==(0,0),
+        "parent_death_signal_preserved":nix::sys::prctl::get_pdeathsig().unwrap()==Some(nix::sys::signal::Signal::SIGKILL)});
+    std::fs::write(evidence, serde_json::to_vec(&observed).unwrap()).unwrap();
 }

@@ -11,10 +11,10 @@ fn main() -> ExitCode {
         return result;
     }
     let worker = arguments.is_desktop_probe_worker();
-    // A worker must be constrained before any Tokio threads/buffers exist.
-    // Limits apply only to this child process, never a normal Host or CLI.
+    // Bind the worker to its original parent before Tokio starts.
+    // Disable core dumps without imposing CPU, memory or file-count quotas.
     #[cfg(target_os = "linux")]
-    if worker && styx_runtime::session_probe::prepare_worker_limits().is_err() {
+    if worker && styx_runtime::session_probe::prepare_owned_worker().is_err() {
         eprintln!(r#"{{"schema":1,"error":"desktop_worker_limits_refused"}}"#);
         return ExitCode::from(2);
     }

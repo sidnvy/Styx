@@ -1,5 +1,5 @@
 //! Parent-only bounded watch transport. The actual zbus watcher runs exclusively
-//! inside the pinned same-image resource-limited worker. Any terminal report or
+//! inside the pinned same-image owned worker. Any terminal report or
 //! worker EOF is a full-source fence, never a Ready/registration assertion.
 use super::*;
 use crate::platform::linux::LinuxCandidate;
@@ -80,8 +80,8 @@ fn report(
         worker_shutdown: shutdown,
     }
 }
-/// Fixed worker-only CLI port. The Linux implementation refuses normal Host
-/// resource limits; hidden CLI calls prepare_worker_limits before its runtime.
+/// Fixed worker-only CLI port. The hidden CLI validates parent ownership before
+/// its runtime; the watcher runs in that owned child, not the Host address space.
 /// Neither this wrapper nor the watcher accepts an alternate UID/socket/path.
 pub async fn worker_watch(
     events: mpsc::Sender<WatchEvent>,

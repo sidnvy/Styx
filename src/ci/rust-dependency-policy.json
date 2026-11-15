@@ -346,10 +346,10 @@
       "input": "--linux-discovery fresh external STYX_TEST_LINUX_DISCOVERY_ROOT; fixed kernel system bus and independent loginctl",
       "required_for": "Linux candidate OS facts only. Unknown compositor/Agent association, no authorized Desktop/GUI acceptance."
     },
-    "session_probe::tests::memory_limit_worker_fixture": {
+    "session_probe::tests::worker_resource_inheritance_fixture": {
       "kind": "owned_child_only_fixture",
-      "parent": "session_probe::tests::owned_worker_bounds_cancel_and_reap_batch",
-      "required_for": "Child-only actual prepare_worker_limits allocation failure; invoked by parent scenario, not independent Desktop acceptance"
+      "parent": "session_probe::tests::owned_worker_inherits_resources_and_outlives_old_cpu_quota",
+      "required_for": "Child-only actual resource inheritance, sustained CPU, allocation and file use with normal exit; invoked by parent scenario, not independent Desktop acceptance"
     },
     "host::coordinator::browser::browser_tests::actual_owned_browser_host_nonce_policy_drop_and_cleanup": {
       "kind": "explicit_external_runtime",

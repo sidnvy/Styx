@@ -81,10 +81,11 @@ impl WorkerRefusal {
     }
 }
 /// Only the hidden worker calls this, before creating any Tokio runtime.
-/// AS is virtual address space, DATA is Linux allocator/mmap data; neither is
-/// described as a per-message cap or a measurement of RSS.
-pub fn prepare_worker_limits() -> Result<(), ProbeError> {
-    use nix::sys::resource::{Resource, getrlimit, setrlimit};
+/// Keep the original parent-death ownership and disable core dumps. Resource
+/// limits otherwise remain inherited from the OS: the watcher is long-lived,
+/// so a cumulative CPU allowance eventually kills a healthy desktop source.
+pub fn prepare_owned_worker() -> Result<(), ProbeError> {
+    use nix::sys::resource::{Resource, setrlimit};
     let parent: u32 = std::env::var("STYX_INTERNAL_PROBE_PARENT_PID")
         .map_err(|_| ProbeError::Limits)?
         .parse()
@@ -97,17 +98,7 @@ pub fn prepare_worker_limits() -> Result<(), ProbeError> {
     nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL)
         .map_err(|_| ProbeError::Limits)?;
     check_parent(parent, birth)?;
-    for (resource, soft, hard) in [
-        (Resource::RLIMIT_AS, 512 * 1024 * 1024, 512 * 1024 * 1024),
-        (Resource::RLIMIT_DATA, 96 * 1024 * 1024, 96 * 1024 * 1024),
-        (Resource::RLIMIT_CPU, 2, 3),
-        (Resource::RLIMIT_NOFILE, 32, 32),
-        (Resource::RLIMIT_CORE, 0, 0),
-    ] {
-        let (old_soft, old_hard) = getrlimit(resource).map_err(|_| ProbeError::Limits)?;
-        let hard = old_hard.min(hard);
-        setrlimit(resource, old_soft.min(soft).min(hard), hard).map_err(|_| ProbeError::Limits)?;
-    }
+    setrlimit(Resource::RLIMIT_CORE, 0, 0).map_err(|_| ProbeError::Limits)?;
     Ok(())
 }
 fn check_parent(pid: u32, birth: u64) -> Result<(), ProbeError> {

@@ -54,7 +54,7 @@ impl WorkerAssociationRefusal {
     }
 }
 
-/// Hidden CLI operation. Caller performs prepare_worker_limits BEFORE creating
+/// Hidden CLI operation. Caller performs prepare_owned_worker BEFORE creating
 /// Tokio, exactly like __linux-desktop-probe. The selector only identifies a
 /// candidate; the worker re-reads login facts and requires exact equality.
 pub async fn worker_association(
