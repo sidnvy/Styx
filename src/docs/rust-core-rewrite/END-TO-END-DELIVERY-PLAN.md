@@ -4,8 +4,35 @@
 为准。初次审核源码 `5c39783`；结构清理 `efab8be`，旧测试修正 `8f8d278`。
 moedeu-apps Gateway 已原配置更新至 `0.4.1-gateway.2`（源码 `70e634a`）；本机由用户
 自行安装 Linux Desktop `0.4.1-preview.2` 并加入 moedeu-apps，设备名 niuda。
-Windows Host 仍为上一轮 `d1cb41c`，Mac 保留原版；桌面 App/Host 的 C1/C2 原生更新验证仍未关闭。
+Windows 已安装源码 `8fa9a1b` 的 `0.4.1-preview.3`，正常改配 moedeu-apps；Mac 已安装
+源码 `5610aad` 的 `0.4.1-preview.3` 并改配同一 Gateway。两端已完成原生编译和实际能力验证；
+当前剩余问题与最终发布资产见下文，不再将设备离线或客户端未安装列为待办。
 历史正式 0.4.0 已发布；本轮重构版尚未正式放行。
+
+## 当前桌面更新与账号验收（2026-11-15）
+
+- Windows：`8fa9a1bcd77525cdb4aa010be947d083453826a6` 包含 C1/C2 清理、共享
+  Gateway 状态/大截图修复及应用/安装器图标。最终 Inno `0.4.1.2017` 已正常安装；
+  已安装程序含图标资源，开始菜单指向同一新包。原配置先在 NAB5 本机备份，再由用户
+  通过正常 GUI 加入 moedeu-apps，设备 `styx-74a81308ccce927899aa2950`。
+  选定 manifest 与已安装 manifest 均为 `5636ece901ea7797cc75e5a9a97d01738822878995d89d80d63d5dfd86f7cf76`，
+  Core 哈希一致。正常退出旧 App/Core 11636/7664 实际 exit0，原配置重开新 App/Core
+  12536/3804，配对与配置摘要不变。当前账号 Styx 工具已实际通过 Exec nonce 文件、
+  Browser 导航/关闭、窗口树和 740×940 PNG；直接 MCP 另有 Browser 写入/独立读回、
+  截图后同一会话继续调用结果。证据复用 `Artifacts/Styx/windows-gateway-update`。
+- Mac：原签名 App build 2015 / Runtime `0.4.1-preview.3`，源码 `5610aad`，安装、
+  选定 manifest 与实际 Core 已核对一致。经 moedeu-apps 的直接 MCP 曾实际通过 Browser
+  导航/写入/独立读回/关闭、窗口树、1024×958 PNG、截图后继续调用；证据在
+  `Artifacts/Styx/mac-gateway-update`。用户正常重启后 App/Core/Cua 为
+  36554/36556/36557，当前账号窗口列表、截图、Browser 导航/独立快照/关闭通过。
+  控件树失败已取原生证据：窗口 71781 无对应 AXWindow，返回 `ax_window_unresolved`；
+  TCC 权限正常。源码已修正错误归类，不再误报权限，并修复临时可用性变化永久隔离、
+  完整 Unknown 响应阻塞后续独立读取。新修复尚待安装及同一 owner/双 owner 实测。
+- Windows 加入进度条曾被用户报告等待较久；随后真实截图显示已配对且已连接，进度条
+  已消失。未复现持续卡死，没有重放加入，也没有据此引入重试或配额。
+- 发布身份沿用既有 Styx publisher 和 Mac 本地签名。新增 notarization、Authenticode、
+  在线自动升级仍属延期范围，不增加为本轮门槛。当前正式版本号与四平台下载资产尚未统一，
+  功能验收通过不等于已生成或已发布正式 Stable。
 
 ## 用户安装后的 niuda 能力修复与验证
 
@@ -137,12 +164,13 @@ PASS（`computer-concurrency/host-worker-resource-quality/receipt.json`）。修
 
 ## 源码收尾审核及具体清理清单
 
-C1/C2 已实施源码删除；原生端离线，仍需完成受影响平台验证。
+C1/C2 已实施源码删除，Mac/Windows 原生编译、安装及三能力实测已有结果。剩余的是当前
+Mac Computer 恢复与双 owner 场景、组合角色新增入口适用性和最终发布绑定，不是重复编译或重装。
 
 | 项目 | 审核证据与判断 | 下一步及完成标准 |
 | --- | --- | --- |
-| C1 Windows 旧 UI 模式 | InitializeCore 只接受 rust_host；已删除 ShowPage/ShowStatus 的旧模式路径、ReconnectResult 等专用回调及旧测试状态 | 源码完成，草稿/状态检查已迁到原生状态，共享向导保留；待 Windows 编译及主窗口/设置/托盘正常路径验证 |
-| C2 旧预算对象与参数 | 已删除 bootstrap Partitions、HostLinkBudget、Codex partition 句柄及 BrowserIoBudget/CuaIoBudget 空对象 | 源码完成，保留实际传输缓冲、期限及进程清理所有权；Linux 本机验证见下文，Windows/Mac 条件编译消费者已更新、原生验证待补 |
+| C1 Windows 旧 UI 模式 | InitializeCore 只接受 rust_host；已删除 ShowPage/ShowStatus 的旧模式路径、ReconnectResult 等专用回调及旧测试状态 | 源码完成，草稿/状态检查已迁到原生状态，共享向导保留；Windows 原生编译、正常主窗口、设置及图标安装路径已验证；托盘正常退出与同配置重开已通过 |
+| C2 旧预算对象与参数 | 已删除 bootstrap Partitions、HostLinkBudget、Codex partition 句柄及 BrowserIoBudget/CuaIoBudget 空对象 | 源码完成，保留实际传输缓冲、期限及进程清理所有权；Linux 本机验证见下文，Windows/Mac 条件编译消费者已更新且原生构建和三能力实测通过；Mac 双 owner 与当前恢复待补 |
 | C3 低层私有协议 | `host/protocol` 的 prepare/dispatch 仍服务 Core 资源协议、Computer 及回归；公开 Exec/Browser 经 Host 目录 | 保留有消费者的部分；删除前给出具体调用者清单，不能因为名为 private/legacy 就整片删除 |
 | C4 Gateway 的 ComputerContexts | `gateway/paired/backend_computer.rs` 按 owner/device 保存 Cua 操作关联；backend cleanup 清理该 owner | 属于当前 Computer 关联，不是重复 Exec/Browser 目录。未发现需要另造 Host 管理层的依据；不为形式统一迁移 |
 | C5 更新事实归属 | `app/runtime_update.rs` 持有原更新记录；Windows UpdateStyx 调用同一 Core 操作 | 保留原记录恢复和身份保护；不把准备/提交等内部接口重新暴露成用户步骤。不凭接口数量断言重复状态 |
@@ -158,8 +186,8 @@ Linux Runtime 严格检查通过，348 项单元测试通过；真实 Codex 保�
 证据：`/tmp/styx-browser-handoff-20261114/computer-concurrency/refactor-cleanup-quality-v2/receipt.json`。
 首轮失败原件保留在同级 `refactor-cleanup-quality`：旧动作测试要求已删除的 slot Busy；
 修正过时断言，未恢复配额。Browser 首轮因开发项目缺依赖未启动，复用原锁定依赖后通过。
-Windows/Mac 当前离线，
-条件编译接口已逐一更新，但两端原生编译、Windows 页面和最终更新验证仍待完成。
+两端条件编译接口、原生构建与正常更新已有上述当前证据；Windows 页面和正常退出重开
+已通过，Mac 当前账号 Computer 恢复与双 owner 验证仍待补。
 
 ## 角色与入口证据核对
 
@@ -167,8 +195,8 @@ Windows/Mac 当前离线，
 
 | 角色/入口 | 已有依据 | 本轮边界 |
 | --- | --- | --- |
-| Windows Host-only | 历史“更新完成后的所有权释放与 Windows 实机闭环”：正常短码自动加入、更新后改配、原配置退出重开；“取消运行时配额与双对话实机验证”：d1cb41c 双对话独立效果 | C1 改动后需原生编译及主窗口/设置/托盘验证；设备离线 |
-| Mac Host-only | 历史“本机测试 Gateway 与 Mac 能力开关”：正常短码自动加入，三项能力关闭/重开及原配置恢复；“桌面统一入口与单窗口收敛”：用户确认单窗口、正常更新退出重开 | 最新配额与 C2 清理尚未完成安装/双对话验证 |
+| Windows Host-only | 历史“更新完成后的所有权释放与 Windows 实机闭环”：正常短码自动加入、更新后改配、原配置退出重开；“取消运行时配额与双对话实机验证”：d1cb41c 双对话独立效果 | C1 后原生编译、设置/主窗口和托盘正常退出重开已通过，复用当前 8fa9a1b 证据 |
+| Mac Host-only | 历史“本机测试 Gateway 与 Mac 能力开关”：正常短码自动加入，三项能力关闭/重开及原配置恢复；“桌面统一入口与单窗口收敛”：用户确认单窗口、正常更新退出重开 | 最新配额/C2 已完成安装和直接三能力验证；双 owner 与当前账号 Computer 恢复待补 |
 | 桌面 Gateway+Host（Mac/Windows） | 历史“已完成的设备选择基础”记录 GUI Tunnel 配置；`app/runtime_bootstrap_tests.rs::desktop_gateway_setup_requires_tunnel_before_pairing_local_host` 覆盖必配 Tunnel；更早平台矩阵有组合角色运行记录 | 本轮共用 Core 的必配 Tunnel、本机自动配对及正常清理回归通过；两端实际 GUI 首设与最终版本绑定仍待核实 |
 | Linux headless Gateway-only | 历史“本机测试 Gateway 与 Mac 能力开关”明确本机无 Host、无 Tunnel 的 Gateway，随后独立账号路线接入测试 Tunnel | CLI 可先运行再接入 ChatGPT 有实际记录；本次未替换该 Gateway |
 | Linux 桌面角色 | 当前 Linux Host 有 d1cb41c 窗口读取、双对话 Exec/Browser 记录 | 实际入口是 CLI 桌面向导；本轮隔离组合角色设置及原配置恢复通过，不代表 GUI 验收。首次 Exec 可取消遗漏已修复并通过真实开/关两条设置及重开场景 |
@@ -190,14 +218,21 @@ Windows/Mac 的 SSH 及独立验收插件均再次确认离线，未派发远端
 
 ## 唯一剩余清单与顺序
 
-1. **Host 配额遗漏与 C1、C2 验证收尾。** 本机按上面的用户首次安装交接继续，验证桌面来源及长驻 watcher； 源码清理、Linux 局部回归与整合质量门已完成；设备恢复后补两端原生编译和 Windows 正常页面路径。
-2. **角色/入口剩余证据。** 上表已归并已有记录；核实 Mac/Windows 组合角色实际 GUI 首次设置，绑定最终版本；Linux 现有 CLI 入口已补验，非新增 GUI 项。未核实项不等同失败，不重跑已经通过且不受修改影响的整套拓扑。
-3. **Mac 最终更新与受影响场景。** 当前最新配额修正只验证了 Mac 编译，正常更新后核对
-   安装/选定/实际组件，再验证双对话读取及退出后继续。复用原配置、签名和安装路径。
-4. **账号缺口。** Mac 后来的本机窗口/截图恢复已有证据，但不代替原 ChatGPT 账号路线的
-   Computer 恢复验证；只补这条路径及最终版本绑定。已有双 Host Exec/Browser 成绩保留。
-5. **最终交付。** 整合上述结果后冻结产品版本，按支持平台生成发布包；复用未受影响证据，
-   核对必要的安装、原配置退出重开、卸载无残留进程和版本绑定。明确发布决定后才关闭 NO-GO。
+1. **Mac 当前 Computer 恢复及双 owner。** 已定位并修复临时可用性、Unknown 后读取和 AX 降级误报；安装后
+   验证两个独立 owner 对同一 Mac 的重叠读取，以及 A 退出后 B 继续。保留当前配置、配对与
+   失败原件，不以重配或清空 profile 替代恢复。Windows/Linux 已通过且不受变化影响的并发证据复用。
+2. **组合角色新增入口证据适用性。** 旧 Mac/Windows Gateway+Host、三能力、正常退出恢复
+   已有实机记录；本轮共享 Core 的必配 Tunnel、初始 Exec 选择和 CLI 组合首设/恢复回归已通过。
+   逐项核对新版 GUI 将 Tunnel 并入首次创建及统一导航后的入口与这些证据的映射，只补确实
+   变化且未覆盖的原生路径；不为了矩阵重新改配当前日常 Hosts，不重跑旧完整拓扑。
+3. **最终产品版本与四项下载包。** 更新正式版本元数据并冻结产品源码，复用原生缓存与
+   原发布身份，生成 Windows x64 EXE、Mac arm64 DMG、Linux Desktop 与 Gateway-only tar.gz，
+   以及统一 SHA256SUMS/公钥和安装说明。Cargo 元数据已准备为 `0.4.1`，现有
+   桌面 `preview.3` 与 Linux/Gateway 包绑定不同源码，不能直接改名宣称同源正式版。
+4. **最终绑定和发布决定。** 核对最终资产与已通过场景的源码/组件差分；保留 Windows
+   当前正常退出重开、Linux 双形态实际安装/启停/卸载、历史未改动 Mac/Windows 卸载证据。
+   只对相关差分或当前失败补验，不因重新封装重复所有用户旅程。当前 Mac 账号恢复和
+   组合角色新入口确实未覆盖的部分关闭后，记录明确的 Stable 决定，再完成发布。
 
 第 2 项剩余的是上表明确的证据缺口，尚不能宣称所有角色入口都缺实现或都已验收。
 源码清理完成不等于最终发布完成，安装完成不等于保存的组件选择已经切换。

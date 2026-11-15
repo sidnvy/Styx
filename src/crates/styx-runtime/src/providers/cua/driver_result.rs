@@ -97,6 +97,33 @@ pub(super) async fn invoke(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn complete_unknown_click_does_not_prevent_independent_read_on_same_transport() {
+        let driver = super::super::fake_driver::FakeDriver::start(
+            serde_json::json!({}),
+            CallToolResult::structured(serde_json::json!({"effect":"unknown"})),
+        )
+        .await;
+        let click = CuaAction {
+            name: "click".into(),
+            arguments: serde_json::Map::new(),
+        };
+        let original = driver.call(&click).await;
+        assert_eq!(original.0, CuaEvidence::Unknown);
+        assert!(original.1.is_some()); // complete response, not a dirty transport
+        let read = CuaAction {
+            name: "list_windows".into(),
+            arguments: serde_json::Map::new(),
+        };
+        let fresh = driver.call(&read).await;
+        assert!(fresh.1.is_some());
+        let calls = driver.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["name"], "click");
+        assert_eq!(calls[1]["name"], "list_windows");
+        assert_eq!(original.0, CuaEvidence::Unknown);
+        driver.close().await;
+    }
     fn error(value: Value) -> CallToolResult {
         let mut result = CallToolResult::structured(value);
         result.is_error = Some(true);

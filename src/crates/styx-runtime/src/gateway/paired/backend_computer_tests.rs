@@ -59,7 +59,7 @@ fn computer_routes_validate_native_arguments_and_preserve_typed_results() {
     assert_eq!(denied["execution_certainty"], "not_dispatched");
     assert_eq!(denied["uncertain"], false);
     assert!(Phase::Opening.blocks_dispatch());
-    assert!(Phase::ActionUnknown.blocks_dispatch());
+    assert!(!Phase::ActionUnknown.blocks_dispatch());
     assert!(Phase::Unknown.blocks_dispatch());
     assert!(!Phase::Ready.blocks_dispatch());
 }
@@ -71,4 +71,40 @@ fn pre_dispatch_capacity_is_known_and_retryable() {
     assert_eq!(value["error"], "capacity_busy");
     assert_eq!(value["uncertain"], false);
     assert_eq!(value["retryable"], true);
+}
+
+#[test]
+fn inspecting_unknown_action_preserves_identity_and_original_outcome() {
+    use styx_contracts::{
+        identity::{HostGeneration, OwnerEpoch},
+        operation::OperationId,
+    };
+    let id = OperationId {
+        host_generation: HostGeneration::try_from("host").unwrap(),
+        owner_epoch: OwnerEpoch::try_from("owner").unwrap(),
+        sequence: 2,
+    };
+    let target = ResourceTarget {
+        operation_id: OperationId {
+            sequence: 1,
+            ..id.clone()
+        },
+        payload_digest: Sha256Digest::of_bytes(b"resource"),
+    };
+    let action = ActionRef {
+        operation_id: id.clone(),
+        payload_digest: Sha256Digest::of_bytes(b"click"),
+    };
+    let mut snapshot = Snapshot {
+        operation_id: id,
+        payload_digest: action.payload_digest,
+        target: Some(target.clone()),
+        state: OperationState::Unknown,
+        liveness: ExecutionLiveness::NotApplicable,
+        output_drain: OutputDrain::NotOpened,
+    };
+    assert!(same_action(&snapshot, &action, &target));
+    assert_eq!(snapshot.state, OperationState::Unknown);
+    snapshot.operation_id.sequence += 1;
+    assert!(!same_action(&snapshot, &action, &target));
 }

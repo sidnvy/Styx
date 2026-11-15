@@ -1196,7 +1196,10 @@ impl CuaActionSlot {
         } else {
             driver_result::invoke(&peer, params, &self.resource.stop, until).await
         };
-        if evidence == CuaEvidence::Unknown {
+        // A complete native reply can report an unknown effect without making
+        // the correlated MCP connection unusable. Retain the original action
+        // outcome, but do not poison independent fresh observations.
+        if evidence == CuaEvidence::Unknown && result.is_none() {
             self.live.uncertain = true
         }
         self.live

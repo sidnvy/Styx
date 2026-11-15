@@ -280,11 +280,11 @@ pub(super) async fn invoke(
                 None,
                 Some(CuaError::PermissionDenied),
             ),
-            CuaEvidence::Unknown => (CuaEvidence::Unknown, None, Some(CuaError::Unknown)),
+            CuaEvidence::Unknown => (CuaEvidence::Unknown, Some(value), Some(CuaError::Unknown)),
         },
         _ => (CuaEvidence::Unknown, None, Some(CuaError::Unknown)),
     };
-    if result.0 == CuaEvidence::Unknown {
+    if result.0 == CuaEvidence::Unknown && result.1.is_none() {
         *uncertain = true;
         stop.cancel();
     }

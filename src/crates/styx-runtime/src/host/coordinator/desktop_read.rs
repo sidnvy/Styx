@@ -60,10 +60,42 @@ pub(super) fn acquisition_facts(
         current_observation: provider.observation,
     })
 }
-fn insufficient_read() -> CallToolResult {
+fn insufficient_read(error: CuaError, original: Option<&CallToolResult>) -> CallToolResult {
+    let unresolved = original
+        .and_then(|result| result.structured_content.as_ref())
+        .is_some_and(|value| {
+            value.get("degraded").and_then(serde_json::Value::as_bool) == Some(true)
+                && value
+                    .get("degraded_reason")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|reason| reason.starts_with("ax_window_unresolved:"))
+        });
+    let (category, code, reason) = if unresolved {
+        (
+            ErrorCategory::StaleObservation,
+            "desktop_window_unresolved",
+            "The window exists, but its accessibility surface is unavailable. Read it again after the window is visible and the app has settled.",
+        )
+    } else {
+        let category = match error {
+            CuaError::PermissionDenied => ErrorCategory::PermissionDenied,
+            CuaError::InvalidRequest => ErrorCategory::InvalidRequest,
+            CuaError::ProtocolMismatch => ErrorCategory::ProtocolMismatch,
+            CuaError::StaleObservation => ErrorCategory::StaleObservation,
+            CuaError::Unsupported => ErrorCategory::CapabilityUnsupported,
+            CuaError::Busy => ErrorCategory::Busy,
+            CuaError::Unknown | CuaError::CleanupUnconfirmed => ErrorCategory::ResultUnknown,
+        };
+        (
+            category,
+            "desktop_read_not_proven",
+            "The native response did not contain a usable window observation.",
+        )
+    };
     CallToolResult::error(vec![ContentBlock::text(
         serde_json::json!({
-            "category":"PERMISSION_REQUIRED", "error":"desktop_read_not_proven",
+            "category":category, "error":code, "reason":reason,
+            "native_reason":if unresolved { Some("ax_window_unresolved") } else { None },
             "execution_certainty":"acknowledged", "uncertain":false,
             "input_authorized":false
         })
@@ -149,9 +181,50 @@ pub(super) fn settle_acquired_read(
             receipt.result = Some(result);
             observation
         }
-        Err(_) => {
-            receipt.result = Some(insufficient_read());
+        Err(error) => {
+            receipt.result = Some(insufficient_read(error, receipt.result.as_ref()));
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn unresolved_native_window_is_not_a_permission_failure_or_input_target() {
+        // Minimal fields from the real Mac reply: a CG window existed but no
+        // AXWindow matched it. Never substitute menu-bar/sibling-window rows.
+        let native = CallToolResult::structured(json!({
+            "pid":42, "window_id":7, "tree_format":"elements",
+            "degraded":true,
+            "degraded_reason":"ax_window_unresolved: no AXWindow reports this CGWindowID",
+            "elements":[], "elements_complete":false, "truncated":false,
+            "element_count":0, "returned_element_count":0, "total_element_count":0
+        }));
+        let error = match parse_acquired(&native, 42, 7) {
+            Err(error) => error,
+            Ok(_) => panic!("unresolved window must not acquire input tokens"),
+        };
+        let output = insufficient_read(error, Some(&native));
+        let value: Value =
+            serde_json::from_str(&output.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(value["category"], "STALE_OBSERVATION");
+        assert_eq!(value["native_reason"], "ax_window_unresolved");
+        assert_eq!(value["input_authorized"], false);
+        assert_eq!(value["uncertain"], false);
+        assert!(value.get("elements").is_none());
+        assert!(value.get("snapshot_id").is_none());
+    }
+
+    #[test]
+    fn malformed_read_is_not_reported_as_missing_os_permission() {
+        let output = insufficient_read(CuaError::ProtocolMismatch, None);
+        let value: Value =
+            serde_json::from_str(&output.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(value["category"], "PROTOCOL_MISMATCH");
+        assert_eq!(value["input_authorized"], false);
     }
 }

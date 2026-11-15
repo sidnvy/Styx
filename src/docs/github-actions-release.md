@@ -104,13 +104,14 @@ Assets:
 
 - `Styx-<version>-windows-x64.exe`: normal Styx product identity/default path, original Inno producer.
 - `Styx-<version>-macos-arm64.dmg`: native App and new fixed local release certificate.
-- `Styx-<version>-linux-x64.tar.gz`: full signed Runtime, public pin and normal setup README.
-- `Styx-<version>-gateway-debian12-x64.tar.gz`: signed Gateway/tunnel Runtime, public pin and setup README.
+- `styx-<version>-linux-x86_64-desktop.tar.gz`: desktop Host with optional Gateway and installer.
+- `styx-<version>-linux-x86_64-gateway-only.tar.gz`: signed Gateway/tunnel Runtime and installer.
 - `SHA256SUMS` and `styx-publisher.pub`.
 
-Linux users extract to a permanent owner-private location and run
-`./payload/bin/styx setup`. Choose Gateway only on moedeu-apps; other computers choose
-Join. No profile, pairing, login state or pre-created device identity is packaged.
+Linux users extract the matching package and run `./install.sh`. The installer retains
+program files in the user data directory, configures systemd user services, and handles
+updates while preserving pairing. The downloaded archive and extracted directory can
+then be removed. No profile, pairing, login state or pre-created device identity is packaged.
 
 Windows outer installers currently have no Authenticode signature. The Mac certificate
 is local, not Developer ID/notarized. Ed25519 authenticates the Runtime payload; it does

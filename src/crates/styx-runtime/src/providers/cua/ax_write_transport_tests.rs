@@ -47,6 +47,11 @@ impl ServerHandler for RpcFixture {
             trace
                 .calls
                 .push((name.clone(), request.arguments.unwrap_or_default()));
+            if name == "list_windows" {
+                return Ok(CallToolResponse::Complete(CallToolResult::structured(
+                    json!({"windows":[]}),
+                )));
+            }
             if name != "set_value" {
                 return Err(ErrorData::invalid_request("unexpected_fixture_tool", None));
             }
@@ -133,6 +138,36 @@ async fn standard_set_value_runs_gate_before_one_strict_call_and_never_replays()
             None,
         )
         .await;
+        if matches!(reply, Reply::PostEffectError) && !deny_gate {
+            // The first operation remains Unknown. A new correlated read uses
+            // the SAME connection, with no replay of the write.
+            assert!(!uncertain);
+            assert!(!stop.is_cancelled());
+            let read = client
+                .peer()
+                .call_tool_once(CallToolRequestParams::new("list_windows"))
+                .await
+                .unwrap();
+            assert!(matches!(read, CallToolResponse::Complete(_)));
+            let trace = trace.lock().unwrap();
+            assert_eq!(
+                trace
+                    .calls
+                    .iter()
+                    .filter(|(name, _)| name == "set_value")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                trace
+                    .calls
+                    .iter()
+                    .filter(|(name, _)| name == "list_windows")
+                    .count(),
+                1
+            );
+            assert_eq!(result.0, CuaEvidence::Unknown);
+        }
         let (client_closed, server_closed) = timeout(Duration::from_secs(5), async {
             tokio::join!(client.close(), server.close())
         })
@@ -151,7 +186,7 @@ async fn standard_set_value_runs_gate_before_one_strict_call_and_never_replays()
             assert!(!uncertain);
             continue;
         }
-        assert_eq!(trace.calls,vec![("set_value".into(),json!({"pid":42,"window_id":7,"element_token":"s00000001:2","value":"owned-fixture-replacement","styx_strict_text":true}).as_object().unwrap().clone())]);
+        assert_eq!(trace.calls.iter().filter(|(name, _)| name == "set_value").cloned().collect::<Vec<_>>(),vec![("set_value".into(),json!({"pid":42,"window_id":7,"element_token":"s00000001:2","value":"owned-fixture-replacement","styx_strict_text":true}).as_object().unwrap().clone())]);
         assert_eq!(trace.write_observed_gate, Some(1));
         match reply {
             Reply::Ack => {
@@ -166,7 +201,14 @@ async fn standard_set_value_runs_gate_before_one_strict_call_and_never_replays()
                 assert!(!uncertain);
                 assert_eq!(trace.effects, 0);
             }
-            Reply::PostEffectError | Reply::Late => {
+            Reply::PostEffectError => {
+                assert_eq!(result.0, CuaEvidence::Unknown);
+                assert!(result.1.is_some());
+                assert!(!uncertain);
+                assert!(!stop.is_cancelled());
+                assert_eq!(trace.effects, 1);
+            }
+            Reply::Late => {
                 assert_eq!(result.0, CuaEvidence::Unknown);
                 assert!(result.1.is_none());
                 assert!(uncertain);

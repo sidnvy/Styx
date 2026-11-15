@@ -69,7 +69,7 @@ enum Phase {
 }
 impl Phase {
     fn blocks_dispatch(self) -> bool {
-        matches!(self, Self::Opening | Self::ActionUnknown | Self::Unknown)
+        matches!(self, Self::Opening | Self::Unknown)
     }
 }
 struct ComputerResource {
@@ -316,6 +316,48 @@ impl PairedGatewayBackend {
         }
         if record.phase.blocks_dispatch() {
             return failure("outcome_unknown", None, true);
+        }
+        if record.phase == Phase::ActionUnknown {
+            // Inspect the original action; never dispatch it again. Its outcome
+            // belongs to the Host ledger, not to this new read request.
+            if !matches!(
+                public_contract::route(name),
+                Some(
+                    public_contract::PublicComputerRoute::Metadata
+                        | public_contract::PublicComputerRoute::WindowRead
+                        | public_contract::PublicComputerRoute::DesktopRead
+                        | public_contract::PublicComputerRoute::VerifyRead
+                )
+            ) {
+                return failure("fresh_observation_required", None, false);
+            }
+            let (Some(binding), Some(target), Some(action)) = (
+                record.binding.as_ref(),
+                record.target.as_ref(),
+                record.pending_action.as_ref(),
+            ) else {
+                return failure("previous_action_unresolved", None, false);
+            };
+            match self
+                .computer_exchange(
+                    binding,
+                    ComputerCommand::InspectAction {
+                        action: ActionRef {
+                            operation_id: action.operation_id.clone(),
+                            payload_digest: action.payload_digest,
+                        },
+                    },
+                    request.budget,
+                )
+                .await
+            {
+                Ok(Reply::Inspected { snapshot }) if same_action(&snapshot, action, target) => {}
+                _ => return failure("previous_action_unresolved", None, false),
+            }
+            // Host admission still owns actual transport availability. Inspection
+            // is not proof that an unknown native operation finished.
+            record.phase = Phase::Ready;
+            record.pending_action = None;
         }
         if record.binding.is_none() {
             let binding = match tokio::time::timeout(
