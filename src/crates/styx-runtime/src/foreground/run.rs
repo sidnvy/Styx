@@ -538,6 +538,35 @@ mod connection_recovery_tests {
     use super::*;
     use crate::host::protocol::wire::TransportDrainOutcome::{Complete, Unknown, Unsupported};
     #[test]
+    fn service_exit_after_reconnection_keeps_remote_unknown_but_accepts_local_cleanup() {
+        let mut outcome = empty_outcome();
+        outcome.remote_transport_drain = Some(retain_transport_outcome(Some(Unknown), Complete));
+        assert!(outcome.local_stop_succeeded());
+        assert!(!outcome.is_complete());
+        let report = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(report["remote_transport_drain"], "unknown");
+        // Each actual local cleanup fact is still required, independently of
+        // the remote report and of a later successful connection.
+        for missing in 0..4 {
+            let mut incomplete = empty_outcome();
+            incomplete.executor_started = true;
+            incomplete.executor_exited = true;
+            match missing {
+                0 => incomplete.executor_exited = false,
+                1 => incomplete.processes_exited = false,
+                2 => incomplete.io_tasks_joined = false,
+                _ => incomplete.supervised_jobs_joined = false,
+            }
+            assert!(!incomplete.local_stop_succeeded());
+        }
+        outcome.stop_reason = Some("gateway_pairing_revoked");
+        assert!(
+            !outcome.local_stop_succeeded(),
+            "actual runtime fault still fails"
+        );
+    }
+
+    #[test]
     fn successful_new_link_cannot_clear_an_old_missing_receipt() {
         assert_eq!(retain_transport_outcome(Some(Unknown), Complete), Unknown);
         assert_eq!(retain_transport_outcome(Some(Complete), Unknown), Unknown);

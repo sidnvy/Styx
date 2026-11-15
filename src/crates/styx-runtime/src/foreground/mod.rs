@@ -52,6 +52,11 @@ impl ForegroundOutcome {
             && self.io_tasks_joined
             && self.supervised_jobs_joined
     }
+    /// Native process exit is a local fact. A missing historical remote drain
+    /// receipt remains in the report, but cannot make an observed local stop fail.
+    pub fn local_stop_succeeded(&self) -> bool {
+        self.stop_reason.is_none() && self.local_stop_complete()
+    }
     pub fn is_complete(&self) -> bool {
         self.local_stop_complete()
             && self.remote_transport_drain.is_none_or(|outcome| {

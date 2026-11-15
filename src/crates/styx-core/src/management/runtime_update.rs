@@ -51,7 +51,11 @@ fn pairing_projection(state: &NativeState) -> Result<NativeState> {
             .host
             .iter()
             .chain(state.desired.gateway.iter())
-            .any(|role| role.manager != manager)
+            .any(|role| {
+                role.manager != manager
+                    && !(manager == NativeManager::ForegroundCli
+                        && role.manager == NativeManager::PersistentService)
+            })
         {
             return Err(invalid());
         }
@@ -64,8 +68,9 @@ fn pairing_projection(state: &NativeState) -> Result<NativeState> {
                 projected.reader_contract = ReaderContract::NativeAppRuntimeSelectedStateV1;
                 projected.schema = NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA;
             }
-            // No schema7 service repair/transfer history is invented. Linux's
-            // existing fresh systemd roots are accepted below without history.
+            // This is selection history, not the current Linux service mode.
+            // The marker-aware validator below restricts systemd to Linux;
+            // restore/install/start keep this original selection history intact.
             NativeManager::PersistentService => return Err(invalid()),
         }
     } else {
@@ -1205,6 +1210,81 @@ mod tests {
             validate_state(&fresh, &invalid_marker).is_err(),
             "immutable genesis reader is never rewritten"
         );
+    }
+    #[test]
+    fn pairing_selected_linux_runtime_can_restore_and_cycle_original_service() {
+        let (marker, fresh) = fixture();
+        let (mut before, _) = pairing_update(&pairing_state(fresh), selection_at("new"), 1);
+        let extensions = before.extensions.clone();
+        for (manager, run, autostart) in [
+            (
+                NativeManager::PersistentService,
+                NativeRunDesired::Stopped,
+                NativeAutostartDesired::Disabled,
+            ),
+            (
+                NativeManager::PersistentService,
+                NativeRunDesired::Running,
+                NativeAutostartDesired::Enabled,
+            ),
+            (
+                NativeManager::PersistentService,
+                NativeRunDesired::Stopped,
+                NativeAutostartDesired::Disabled,
+            ),
+            (
+                NativeManager::ForegroundCli,
+                NativeRunDesired::Stopped,
+                NativeAutostartDesired::Disabled,
+            ),
+        ] {
+            let mut target = before.clone();
+            let role = target.desired.host.as_mut().unwrap();
+            role.manager = manager;
+            role.run = run;
+            role.autostart = autostart;
+            target.revision += 1;
+            let sequence = before.last_transaction.as_ref().unwrap().sequence + 1;
+            let transaction_id = format!("service-{sequence}").try_into().unwrap();
+            target.last_transaction = Some(NativeStateTransaction {
+                transaction_id,
+                sequence,
+            });
+            let mut intent = pairing_update(&before, selection_at("unused"), sequence).1;
+            intent.transaction_id = target
+                .last_transaction
+                .as_ref()
+                .unwrap()
+                .transaction_id
+                .clone();
+            intent.target_state_sha256 =
+                Sha256Digest::of_bytes(&serde_json::to_vec(&target).unwrap());
+            assert!(validate_transition(&before, &target, &marker, &intent).is_ok());
+            assert!(before.extensions_preserved_in(&target));
+            assert_eq!(
+                target.extensions.keys().collect::<Vec<_>>(),
+                extensions.keys().collect::<Vec<_>>()
+            );
+            if manager == NativeManager::PersistentService {
+                let mut foreign = marker.clone();
+                foreign.root_identity = NativeRootIdentity::Macos {
+                    device: 1,
+                    inode: 4,
+                    uid: 1000,
+                };
+                assert!(validate_state(&target, &foreign).is_err());
+                foreign.root_identity = NativeRootIdentity::Windows {
+                    volume_serial: 1,
+                    file_id: 4,
+                    owner_sid: "S-1-5-21-1000".into(),
+                };
+                assert!(validate_state(&target, &foreign).is_err());
+            }
+            let mut forged = target.clone();
+            forged.desired.host.as_mut().unwrap().manager = NativeManager::AppManaged;
+            assert!(validate_state(&forged, &marker).is_err());
+            before = target;
+        }
     }
     #[test]
     fn pairing_reader7_promotes_fresh_and_selected_histories_without_downgrade() {
