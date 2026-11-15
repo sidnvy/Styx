@@ -32,6 +32,8 @@ mod macos;
 mod macos_cleanup;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_source;
+#[cfg(any(target_os = "macos", test))]
+mod macos_source_hint;
 #[cfg(target_os = "macos")]
 pub(crate) mod probe_diagnostic;
 #[cfg(target_os = "macos")]

@@ -438,6 +438,13 @@ impl HostCoordinator {
         let mut state = self.inner.state.lock().expect("Host state mutex");
         if result.is_err() || source.fenced() {
             super::desktop_observation::invalidate(state.desktop.as_mut(), None);
+            // Lock/console availability and expired completed reads deny this
+            // call and invalidate old targets, without retiring the same Mac
+            // source. The next caller must acquire fresh native facts.
+            #[cfg(target_os = "macos")]
+            if !source.fenced() {
+                return Err(CuaError::StaleObservation.into());
+            }
             if let Some(lane) = state.desktop.as_ref() {
                 let binding = lane.binding.clone();
                 let _ = state.sessions.set_state(

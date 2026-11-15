@@ -293,12 +293,16 @@ impl MacProxySource {
                     |fault| ProbeDiagnostic::observed(fault.stage, fault.cause, started, until),
                 );
                 self.remember_probe_diagnostic(fault);
-                CuaError::PermissionDenied
+                if error == super::macos_source::BindingError::ObservationExpired {
+                    CuaError::StaleObservation
+                } else {
+                    CuaError::PermissionDenied
+                }
             })?;
             drop(observations);
             if !value.observed_unlocked() {
                 self.remember_probe_failure(observation, ProbeCause::Locked, started, until);
-                return Err(CuaError::PermissionDenied);
+                return Err(CuaError::StaleObservation);
             }
             self.control
                 .lock()
@@ -318,7 +322,10 @@ impl MacProxySource {
                 })?;
             Ok(value)
         })();
-        if result.is_err() {
+        if result
+            .as_ref()
+            .is_err_and(|error| *error != CuaError::StaleObservation)
+        {
             self.fence();
         }
         result
@@ -390,7 +397,11 @@ impl MacProxySource {
                     |fault| ProbeDiagnostic::observed(fault.stage, fault.cause, started, until),
                 );
                 self.remember_probe_diagnostic(fault);
-                CuaError::PermissionDenied
+                if error == super::macos_source::BindingError::ObservationExpired {
+                    CuaError::StaleObservation
+                } else {
+                    CuaError::PermissionDenied
+                }
             })?;
             if initial {
                 let mut control = self.control.lock().map_err(|_| {
@@ -486,7 +497,10 @@ impl MacProxySource {
         if result.is_err() {
             if initial {
                 self.fence_initial_sources();
-            } else {
+            } else if result
+                .as_ref()
+                .is_err_and(|error| *error != CuaError::StaleObservation)
+            {
                 self.fence();
             }
         }

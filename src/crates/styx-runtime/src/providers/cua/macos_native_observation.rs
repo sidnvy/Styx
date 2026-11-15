@@ -2,6 +2,7 @@
 //! The App's existing native bridge owns console availability; Cua's native
 //! check_permissions owns live TCC facts. No private daemon method or IOKit seed.
 use super::*;
+use serde::Deserialize;
 use std::{
     io::{Read, Write},
     time::Instant,
@@ -130,7 +131,14 @@ impl BoundMacSource {
         let permissions = permissions_from_result(&response)?;
         self.check_binding()?;
         if Instant::now() >= until {
-            return Err(BindingError::NativeProtocol);
+            // The complete reply was consumed and the original peer revalidated.
+            // Expired facts cannot authorize input, but do not retire that peer.
+            self.fenced = false;
+            return Err(BindingError::ObservationExpired);
+        }
+        let current = hint(&self.candidate.root)?;
+        if !self.candidate.hint.same_source(&current) {
+            return Err(BindingError::Fenced);
         }
         // Current hint bytes come from the same signed App generation checked
         // by check_binding; the daemon's kernel audit token supplies its ASID.
@@ -138,9 +146,7 @@ impl BoundMacSource {
             session: SessionObservation {
                 uid: Some(self.candidate.uid),
                 audit_id: Some(self.peer_token.val[6]),
-                status: if self.candidate.hint.host_on_console
-                    && !self.candidate.hint.host_session_locked
-                {
+                status: if current.host_on_console && !current.host_session_locked {
                     SessionStatus::Unlocked
                 } else {
                     SessionStatus::Locked
@@ -402,10 +408,10 @@ impl BoundMacSource {
             stage = ProbeStage::ReadBindingAfter;
             self.check_binding()?;
             stage = ProbeStage::ReadDeadline;
-            if Instant::now() >= deadline {
-                return Err(BindingError::NativeProtocol);
-            }
             self.fenced = false;
+            if Instant::now() >= deadline {
+                return Err(BindingError::ObservationExpired);
+            }
             Ok(evidence)
         })();
         if let Err(error) = result {

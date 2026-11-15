@@ -173,9 +173,20 @@ impl DesktopSource {
         if let Some(job) = slot.as_mut() {
             let result = job.await;
             slot.take();
-            if !matches!(result, Ok(Ok(_))) {
-                self.inner.fence();
-                return Err(DesktopSourceError::Supervisor);
+            match result {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) if !self.inner.source.fenced() => {
+                    *self
+                        .inner
+                        .observations
+                        .lock()
+                        .map_err(|_| DesktopSourceError::Supervisor)? = None;
+                    return Err(error);
+                }
+                _ => {
+                    self.inner.fence();
+                    return Err(DesktopSourceError::Supervisor);
+                }
             }
         }
         // A rejoined initial job may have committed Ready before its caller
@@ -213,7 +224,14 @@ impl DesktopSource {
                 Ok(())
             }
             Ok(Err(error)) => {
-                self.inner.fence();
+                *self
+                    .inner
+                    .observations
+                    .lock()
+                    .map_err(|_| DesktopSourceError::Supervisor)? = None;
+                if self.inner.source.fenced() {
+                    self.inner.fence();
+                }
                 Err(error)
             }
             _ => {
@@ -392,6 +410,37 @@ mod tests {
         assert!(stopped.expect("original_read_owner_stopped").complete());
         eprintln!(
             "MAC_QUALIFICATION_REJOIN retained_original_job=JOINED new_strict_read=PASS initial_replay=NONE original_drain=PASS input_dispatches=0"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires owner-authorized installed Mac App; read-only recovery on original source"]
+    async fn installed_transient_observation_failure_preserves_source_and_next_read() {
+        assert_eq!(
+            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
+            Ok("read-only")
+        );
+        let source = DesktopSource::start().await.expect("original_source");
+        source.fresh().await.expect("initial_native_read");
+        let epoch = source.epoch();
+        // A completed cancelled waiter may have observed a temporarily locked
+        // console or an expired complete read. Rejoining that result must deny
+        // this call, discard its old facts, and retain the original source.
+        *source.inner.job.lock().await = Some(tokio::task::spawn_blocking(|| {
+            Err(DesktopSourceError::Unavailable)
+        }));
+        assert_eq!(source.fresh().await, Err(DesktopSourceError::Unavailable));
+        assert!(!source.fenced());
+        assert_eq!(source.epoch(), epoch);
+        assert!(source.inner.observations.lock().unwrap().is_none());
+        source.fresh().await.expect("new_independent_native_read");
+        assert_eq!(source.epoch(), epoch);
+        assert!(
+            source
+                .stop()
+                .await
+                .expect("original_probe_cleanup")
+                .complete()
         );
     }
 

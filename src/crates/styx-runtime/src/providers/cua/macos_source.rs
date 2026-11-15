@@ -2,6 +2,7 @@
 //! Uses the separate fixed read-only SignedAppMembers factory in signed-app-pin/.
 //! All filesystem/Security calls run on the caller's existing blocking boundary.
 
+use super::macos_source_hint::Hint;
 use super::probe_diagnostic::{ProbeCause, ProbeDiagnostic, ProbeStage};
 use crate::store::{PrivateRoot, ProcessIdentity, SignedAppMember, SignedAppMembers, StoreError};
 use core_foundation::{base::TCFType, data::CFData};
@@ -15,7 +16,6 @@ use nix::{
 use security_framework::os::macos::code_signing::{
     Flags, GuestAttributes, SecCode, SecRequirement,
 };
-use serde::Deserialize;
 use std::{
     fs,
     os::{
@@ -49,6 +49,8 @@ pub(crate) enum BindingError {
     Unavailable,
     #[error("fixed Mac native observation protocol incomplete or refused")]
     NativeProtocol,
+    #[error("fixed Mac observation completed after its deadline")]
+    ObservationExpired,
     #[error("fixed Mac source discovery hint invalid")]
     InvalidHint,
     #[error("fixed Mac source image pin unavailable or changed")]
@@ -67,6 +69,7 @@ impl BindingError {
             Self::NotPublished => ProbeCause::NotPublished,
             Self::Unavailable => ProbeCause::Unavailable,
             Self::NativeProtocol => ProbeCause::NativeProtocol,
+            Self::ObservationExpired => ProbeCause::Deadline,
             Self::InvalidHint => ProbeCause::InvalidHint,
             Self::ImagePin => ProbeCause::ImagePin,
             Self::Signature => ProbeCause::Signature,
@@ -127,18 +130,6 @@ fn requirement(value: &str) -> Result<SecRequirement> {
     value.parse().map_err(|_| BindingError::Signature)
 }
 
-#[derive(Deserialize, Eq, PartialEq)]
-struct Hint {
-    schema: u32,
-    generation: String,
-    owner_pid: u32,
-    daemon_pid: u32,
-    bundle_id: String,
-    // Console availability is published by this same signed App owner. TCC
-    // still comes from the original daemon's standard check_permissions.
-    host_on_console: bool,
-    host_session_locked: bool,
-}
 fn missing_publication(error: StoreError) -> BindingError {
     match error {
         StoreError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -457,7 +448,7 @@ impl BoundMacSource {
         }
         if getuid().as_raw() != candidate.uid
             || geteuid().as_raw() != candidate.uid
-            || (require_publication && hint(&candidate.root)? != candidate.hint)
+            || (require_publication && !candidate.hint.same_source(&hint(&candidate.root)?))
             || socket_identity(&candidate.socket_path, candidate.uid)? != candidate.socket
             || birth(candidate.hint.owner_pid, candidate.uid)? != candidate.owner
             || birth(candidate.hint.daemon_pid, candidate.uid)? != candidate.daemon
@@ -492,7 +483,7 @@ impl BoundMacSource {
         candidate.images.revalidate()?;
         if birth(candidate.hint.owner_pid, candidate.uid)? != candidate.owner
             || birth(candidate.hint.daemon_pid, candidate.uid)? != candidate.daemon
-            || (require_publication && hint(&candidate.root)? != candidate.hint)
+            || (require_publication && !candidate.hint.same_source(&hint(&candidate.root)?))
             || socket_identity(&candidate.socket_path, candidate.uid)? != candidate.socket
         {
             return Err(BindingError::Fenced);
