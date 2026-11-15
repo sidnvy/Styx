@@ -28,8 +28,6 @@ pub(crate) enum DesktopSourceError {
     Unavailable,
     #[error("desktop source changed or ended")]
     Fenced,
-    #[error("desktop source probe busy")]
-    Busy,
     #[error("desktop source supervisor failed")]
     Supervisor,
 }
@@ -38,7 +36,6 @@ impl DesktopSourceError {
         match self {
             Self::Unavailable => "desktop_source_unavailable",
             Self::Fenced => "desktop_source_fenced",
-            Self::Busy => "desktop_source_busy",
             Self::Supervisor => "desktop_source_supervisor_failed",
         }
     }
@@ -164,11 +161,12 @@ impl DesktopSource {
         if self.fenced() {
             return Err(DesktopSourceError::Fenced);
         }
-        let mut slot = self
-            .inner
-            .job
-            .try_lock()
-            .map_err(|_| DesktopSourceError::Busy)?;
+        // Owners share the original native reader. An overlapping read waits
+        // for it; contention does not reject an unrelated conversation.
+        let mut slot = self.inner.job.lock().await;
+        if self.fenced() {
+            return Err(DesktopSourceError::Fenced);
+        }
         // Rejoin a cancelled prior observation; its old facts are never reused.
         if let Some(job) = slot.as_mut() {
             let result = job.await;
@@ -365,6 +363,38 @@ fn native_capability_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires owner-authorized installed Mac App; overlapping read-only observations"]
+    async fn installed_overlapping_source_reads_wait_and_continue_on_original_source() {
+        assert_eq!(
+            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
+            Ok("read-only")
+        );
+        let source = DesktopSource::start().await.expect("original_source");
+        let held = source.inner.job.lock().await;
+        let first = source.fresh();
+        let second = source.fresh();
+        tokio::pin!(first, second);
+        assert!(futures_util::poll!(&mut first).is_pending());
+        assert!(futures_util::poll!(&mut second).is_pending());
+        drop(held);
+        let (a, b) = tokio::join!(first, second);
+        assert_eq!(a, Ok(()));
+        assert_eq!(b, Ok(()));
+        // The same contention path is used by established window-state reads.
+        let (a, b) = tokio::join!(source.fresh(), source.fresh());
+        assert_eq!(a, Ok(()));
+        assert_eq!(b, Ok(()));
+        source.fresh().await.expect("same_source_continues");
+        assert!(
+            source
+                .stop()
+                .await
+                .expect("original_probe_cleanup")
+                .complete()
+        );
+    }
 
     #[tokio::test]
     #[ignore = "requires owner-authorized installed Mac App; retained read-job reference, no input"]

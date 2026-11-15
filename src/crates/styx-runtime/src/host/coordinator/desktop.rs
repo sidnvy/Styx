@@ -431,10 +431,6 @@ impl HostCoordinator {
             desktop(&state)?.source.clone()
         };
         let result = source.fresh().await;
-        #[cfg(target_os = "macos")]
-        if matches!(result, Err(super::desktop_source::DesktopSourceError::Busy)) {
-            return Err(CoordinatorError::Busy);
-        }
         let mut state = self.inner.state.lock().expect("Host state mutex");
         if result.is_err() || source.fenced() {
             super::desktop_observation::invalidate(state.desktop.as_mut(), None);
