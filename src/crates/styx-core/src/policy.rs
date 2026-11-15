@@ -1,6 +1,28 @@
 //! Admission uses facts supplied by authenticated adapters, never tool JSON.
 use styx_contracts::{capability::*, error::ErrorCategory, identity::*, operation::*, session::*};
 
+/// Only Computer Use can omit a caller deadline. Cancellation and owner
+/// cleanup do not depend on this admission timeout.
+pub(crate) fn deadline_expired(
+    context: &PreparedContext,
+    now: MonotonicMillis,
+) -> Result<bool, ErrorCategory> {
+    match context.deadline {
+        Some(deadline) => Ok(now >= deadline),
+        None if matches!(
+            context.capability,
+            CapabilityId::ExecRun
+                | CapabilityId::BrowserHeadless
+                | CapabilityId::BrowserHeaded
+                | CapabilityId::BrowserAttach
+        ) =>
+        {
+            Err(ErrorCategory::InvalidRequest)
+        }
+        None => Ok(false),
+    }
+}
+
 /// Fresh facts must be read under the same coordinator as dispatch and revocation.
 /// Constructing this value does not authenticate a remote caller or desktop agent.
 #[derive(Debug, Clone)]
@@ -92,7 +114,7 @@ fn check_admission_inner(
     mode: AdmissionMode,
 ) -> Result<(), ErrorCategory> {
     let d = &facts.descriptor;
-    if now >= context.deadline {
+    if deadline_expired(context, now)? {
         return Err(ErrorCategory::OperationTimeout);
     }
     if context.device_id != facts.device_id || context.grant_revision != facts.grant_revision {

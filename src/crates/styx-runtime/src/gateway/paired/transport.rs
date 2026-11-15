@@ -1,7 +1,7 @@
 //! Owned Hyper upgrades. Registry routes; Core lease and owner gates authorize.
 use super::relay::{Command, Entry, RelayError, RelayHandle, cleanup_control};
 use crate::host::protocol::wire::{
-    BROWSER_HEADLESS_V1, COMPUTER_V1, Call, HostControl, Reply, Request as WireRequest,
+    BROWSER_HEADLESS_V1, COMPUTER_V2, Call, HostControl, Reply, Request as WireRequest,
     Response as WireResponse, TRANSPORT_DRAIN_V1,
 };
 use bytes::Bytes;
@@ -94,7 +94,7 @@ struct Pending {
     control: bool,
     drain_fenced: bool,
     lane: Lane,
-    deadline: tokio::time::Instant,
+    deadline: Option<tokio::time::Instant>,
 }
 impl RelayHandle {
     pub(crate) async fn upgrade(
@@ -216,7 +216,7 @@ impl RelayHandle {
                                         && connection_generation==response.connection_generation && owner_issuance=="gateway_authenticated" => {
                                             let exec=exec_negotiated(&features,write,terminate,read_resume);
                                             let browser=features.iter().any(|v|v==BROWSER_HEADLESS_V1) && features.iter().any(|v|v==crate::host::protocol::wire::HOST_BROWSER_SESSIONS_V1);
-                                            (host_generation,connection_generation,rev,exec,browser,features.iter().any(|v|v==COMPUTER_V1),features.iter().any(|v|v==TRANSPORT_DRAIN_V1),features.iter().any(|v|v==crate::host::settings::FEATURE))
+                                            (host_generation,connection_generation,rev,exec,browser,features.iter().any(|v|v==COMPUTER_V2),features.iter().any(|v|v==TRANSPORT_DRAIN_V1),features.iter().any(|v|v==crate::host::settings::FEATURE))
                                         },
                                 _=>return Err(RelayError::Unauthorized),
                             };
@@ -259,13 +259,13 @@ impl RelayHandle {
                             let mut pending:BTreeMap<RequestId,Pending>=BTreeMap::new();
                             let mut heartbeat = Heartbeat::new(tokio::time::Instant::now());
                             loop {
-                                let until=pending.values().map(|p|p.deadline).min()
+                                let until=pending.values().filter_map(|p|p.deadline).min()
                                     .unwrap_or(heartbeat.deadline).min(heartbeat.deadline);
                                 tokio::select! {
                                     _=task_stop.cancelled()=>break,
                                     _=tokio::time::sleep_until(until)=>{
                                         let now = tokio::time::Instant::now();
-                                        if pending.values().any(|p| p.deadline <= now) { return Err(RelayError::Unknown); }
+                                        if pending.values().any(|p| p.deadline.is_some_and(|deadline| deadline <= now)) { return Err(RelayError::Unknown); }
                                         if heartbeat.tick(now)? {
                                             if let Err(error) = relay.control_lane(&e).await {
                                                 let revoked = relay.inner.shared.with(|s|s.profile_is_revoked(&e.device,&e.profile.capability_generation)).await;
@@ -301,7 +301,7 @@ impl RelayHandle {
                                         // Drop sensitive request payload after send, keep its exact lane.
                                         let command=Command{call:Call::Write{},result:command.result,gate:command.gate};
                                         match result {
-                                            Ok(())=>{pending.insert(request.request_id,Pending{command,control,drain_fenced,lane,deadline:tokio::time::Instant::now()+response_budget});},
+                                            Ok(())=>{pending.insert(request.request_id,Pending{command,control,drain_fenced,lane,deadline:response_budget.map(|budget| tokio::time::Instant::now()+budget)});},
                                             Err(error)=>{
                                                 let _=command.result.send(Err(error));
                                                 // Proven refusal before start_send is local to its lane. Actual

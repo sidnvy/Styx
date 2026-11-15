@@ -1344,7 +1344,7 @@
     {
       "name": "get_window_state",
       "title": "get_window_state",
-      "description": "Styx window observation with two exclusive supported branches. For a complete element tree use observed pid/window_id and include_screenshot:false. For pixels use include_accessibility_tree:false. The other branch flag and limits have documented defaults. No combined read, full_output, query, since, capture_mode or file output. A screenshot alone cannot ground input. Select the execution host with environment_id.",
+      "description": "Styx window observation with two exclusive supported branches. For a complete element tree use observed pid/window_id and include_screenshot:false. For pixels use include_accessibility_tree:false. Optional traversal and timeout arguments use the native executor behavior. No combined read, full_output, query, since, capture_mode or file output. A screenshot alone cannot ground input. Select the execution host with environment_id.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1382,16 +1382,10 @@
             "default": "elements"
           },
           "max_elements": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 2048,
-            "default": 250
+            "type": "integer"
           },
           "max_depth": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 64,
-            "default": 25
+            "type": "integer"
           },
           "max_image_dimension": {
             "type": "integer",
@@ -1400,10 +1394,7 @@
             "default": 1024
           },
           "timeout_ms": {
-            "type": "integer",
-            "minimum": 100,
-            "maximum": 2000,
-            "default": 1000
+            "type": "integer"
           }
         },
         "required": [
@@ -1451,16 +1442,10 @@
                 "default": "elements"
               },
               "max_elements": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 2048,
-                "default": 250
+                "type": "integer"
               },
               "max_depth": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 64,
-                "default": 25
+                "type": "integer"
               },
               "max_image_dimension": {
                 "type": "integer",
@@ -1469,10 +1454,7 @@
                 "default": 1024
               },
               "timeout_ms": {
-                "type": "integer",
-                "minimum": 100,
-                "maximum": 2000,
-                "default": 1000
+                "type": "integer"
               }
             },
             "not": {
@@ -1520,16 +1502,10 @@
                 "default": "elements"
               },
               "max_elements": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 2048,
-                "default": 250
+                "type": "integer"
               },
               "max_depth": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 64,
-                "default": 25
+                "type": "integer"
               },
               "max_image_dimension": {
                 "type": "integer",
@@ -1538,10 +1514,7 @@
                 "default": 1024
               },
               "timeout_ms": {
-                "type": "integer",
-                "minimum": 100,
-                "maximum": 2000,
-                "default": 1000
+                "type": "integer"
               }
             },
             "not": {

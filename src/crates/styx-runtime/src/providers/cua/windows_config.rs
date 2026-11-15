@@ -2,10 +2,7 @@ use super::*;
 use crate::store::PrivateRoot;
 impl OwnedCuaConfig {
     pub(super) fn validate(&self) -> Result<()> {
-        if self.launch.source.fenced()
-            || self.rpc_timeout.is_zero()
-            || self.rpc_timeout > Duration::from_secs(30)
-        {
+        if self.launch.source.fenced() {
             return Err(CuaError::PermissionDenied);
         }
         // Bootstrap retains the authoritative private runtime root; these
@@ -75,7 +72,7 @@ impl OwnedCuaConfig {
         bounded_bytes(&serde_json::json!({
             "session":self.launch.session,"native_source":self.launch.source.source_id(),
             "image":self.driver.source_path_for_suspended_spawn().map_err(|_|CuaError::PermissionDenied)?,
-            "timeout_ms":self.rpc_timeout.as_millis(),"workspace":self.workspace,"home":self.home,
+            "workspace":self.workspace,"home":self.home,
             "environment":self.environment
         }), REQUEST_BYTES).map(|v|Sha256Digest::of_bytes(&v))
     }

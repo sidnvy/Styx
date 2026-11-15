@@ -219,10 +219,7 @@ impl State {
     }
 }
 fn validate_snapshot(snapshot: &LinuxDiscoverySnapshot, uid: u32) -> Result<(), WatchStop> {
-    if snapshot.schema != 1
-        || snapshot.candidates.len() > MAX_SESSIONS
-        || snapshot.login_unique_owner.len() > MAX_FIELD
-    {
+    if snapshot.schema != 1 || snapshot.login_unique_owner.len() > MAX_FIELD {
         return Err(WatchStop::Discovery(DiscoveryError::InvalidFacts));
     }
     let mut ids = BTreeSet::new();
@@ -307,9 +304,6 @@ fn signal_reason(message: &Message, owner: &str) -> Result<Option<InvalidationRe
                 .map_err(|_| WatchStop::Discovery(DiscoveryError::InvalidFacts))?;
         if name != SESSION_INTERFACE {
             return Ok(None);
-        }
-        if changed.len() > 32 || invalidated.len() > 32 {
-            return Err(WatchStop::Discovery(DiscoveryError::Capacity));
         }
         for key in changed.keys().chain(invalidated.iter()) {
             bounded(key).map_err(WatchStop::Discovery)?;

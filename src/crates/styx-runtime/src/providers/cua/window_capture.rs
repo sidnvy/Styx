@@ -15,7 +15,6 @@ pub(crate) struct WindowCaptureRequest {
     pub(crate) pid: u32,
     pub(crate) window_id: u64,
     pub(crate) max_image_dimension: u32,
-    pub(crate) timeout_ms: u64,
 }
 impl WindowCaptureRequest {
     pub(super) fn classify(name: &str, args: &Map<String, Value>) -> Result<Option<Self>> {
@@ -36,6 +35,12 @@ impl WindowCaptureRequest {
         if args.keys().any(|key| !KEYS.contains(&key.as_str())) {
             return Err(CuaError::Unsupported);
         }
+        if args
+            .get("timeout_ms")
+            .is_some_and(|value| value.as_u64().is_none())
+        {
+            return Err(CuaError::InvalidRequest);
+        }
         let value = Self {
             pid: args
                 .get("pid")
@@ -51,20 +56,12 @@ impl WindowCaptureRequest {
                 .and_then(Value::as_u64)
                 .and_then(|n| n.try_into().ok())
                 .ok_or(CuaError::InvalidRequest)?,
-            timeout_ms: args
-                .get("timeout_ms")
-                .and_then(Value::as_u64)
-                .ok_or(CuaError::InvalidRequest)?,
         };
         value.validate()?;
         Ok(Some(value))
     }
     fn validate(&self) -> Result<()> {
-        if self.pid == 0
-            || self.window_id == 0
-            || !(1..=1024).contains(&self.max_image_dimension)
-            || !(100..=2000).contains(&self.timeout_ms)
-        {
+        if self.pid == 0 || self.window_id == 0 || !(1..=1024).contains(&self.max_image_dimension) {
             return Err(CuaError::InvalidRequest);
         }
         Ok(())

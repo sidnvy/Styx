@@ -12,7 +12,7 @@ fn independent_feature_families_never_synthesize_exec_support() {
     browser.push(BROWSER_HEADLESS_V1.into());
     assert!(!exec_negotiated(&browser, false, false, false));
     let mut computer = control;
-    computer.push(COMPUTER_V1.into());
+    computer.push(COMPUTER_V2.into());
     assert!(!exec_negotiated(&computer, true, true, false));
     let exec: Vec<String> = [
         crate::host::protocol::wire::HOST_EXEC_TASKS_V1,
@@ -40,7 +40,7 @@ fn independent_feature_families_never_synthesize_exec_support() {
     assert!(!exec_negotiated(&incomplete, true, true, false));
     let mut combined = exec;
     combined.push(BROWSER_HEADLESS_V1.into());
-    combined.push(COMPUTER_V1.into());
+    combined.push(COMPUTER_V2.into());
     assert!(exec_negotiated(&combined, true, true, false));
 }
 #[test]

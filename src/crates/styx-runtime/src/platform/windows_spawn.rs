@@ -102,9 +102,6 @@ fn wide(value: &OsStr) -> io::Result<Vec<u16>> {
     Ok(w)
 }
 fn environment(env: &BTreeMap<OsString, OsString>) -> io::Result<Vec<u16>> {
-    if env.len() > 64 {
-        return Err(lost());
-    }
     let mut sorted = BTreeMap::new();
     for (k, v) in env {
         let k = k.to_str().ok_or_else(lost)?;

@@ -138,9 +138,6 @@ impl<'a> HostProtocol<'a> {
             command_environment: &self.command_environment,
         }
     }
-    fn context(&self, revision: u64, timeout_ms: u32) -> Result<PreparedContext, ErrorCategory> {
-        self.exec_port().context(revision, timeout_ms)
-    }
     pub fn new(
         profile: TrustedProfile,
         coordinator: HostCoordinator,
@@ -513,7 +510,7 @@ impl<'a> HostProtocol<'a> {
                 {
                     let _ = (owner, grant_revision, timeout_ms, command);
                     Reply::Unsupported {
-                        feature: COMPUTER_V1.into(),
+                        feature: COMPUTER_V2.into(),
                     }
                 }
             }
@@ -675,7 +672,7 @@ impl<'a> HostProtocol<'a> {
         }
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         if self.paired && self.computer.is_some() {
-            features.push(COMPUTER_V1.into());
+            features.push(COMPUTER_V2.into());
         }
         if self.settings.is_some() {
             features.push(crate::host::settings::FEATURE.into());

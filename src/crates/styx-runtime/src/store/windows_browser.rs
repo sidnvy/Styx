@@ -1,5 +1,5 @@
-//! Runtime assets and explicitly selected local browser images. These are not
-//! publisher grants or configuration transactions. Retained Windows handles
+//! Runtime assets and installed App control files. These are not publisher
+//! grants or configuration transactions. Retained Windows handles
 //! prevent replacement; existing ACLs are inspected, never rewritten.
 use super::*;
 use styx_contracts::identity::Sha256Digest;
@@ -129,26 +129,6 @@ impl LocalFile {
     }
 }
 
-/// Local PE bytes selected through protected configuration, not a signed worker.
-/// Chrome's OS/vendor library closure remains in the same local-admin boundary.
-/// The PE64 restriction belongs to this launch boundary, not public data reads.
-pub(crate) struct LocalExecutable {
-    file: LocalFile,
-}
-impl LocalExecutable {
-    pub(crate) fn open(path: &Path) -> Result<Self> {
-        let file = LocalFile::open(path, 512 * 1024 * 1024)?;
-        payload_backend::check_pe64(&file.file, file.facts.observation.byte_len)?;
-        Ok(Self { file })
-    }
-    pub(crate) fn path(&self) -> &Path {
-        &self.file.path
-    }
-    pub(crate) fn revalidate(&self) -> Result<()> {
-        self.file.revalidate()
-    }
-}
-
 #[cfg(test)]
 mod public_file_tests {
     use super::*;
@@ -222,10 +202,6 @@ mod public_file_tests {
         assert_eq!(pinned.read_bytes(16384).unwrap(), bytes);
         assert!(pinned.digest() == Sha256Digest::of_bytes(bytes));
         assert!(matches!(pinned.read_bytes(4), Err(StoreError::TooLarge)));
-        assert!(
-            LocalExecutable::open(&metadata).is_err(),
-            "data is not a PE launch"
-        );
         // Original handles independently prevent overwrite and replacement.
         assert!(
             std::fs::OpenOptions::new()

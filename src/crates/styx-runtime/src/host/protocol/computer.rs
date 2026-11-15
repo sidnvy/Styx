@@ -176,21 +176,31 @@ impl HostProtocol<'_> {
         &self,
         reference: OwnerRef,
         revision: u64,
-        timeout: u32,
+        timeout: Option<u32>,
         command: ComputerCommand,
     ) -> Reply {
         if !self.paired || self.computer.is_none() {
             return Reply::Unsupported {
-                feature: COMPUTER_V1.into(),
+                feature: COMPUTER_V2.into(),
             };
         }
         let owner = match self.owner(&reference) {
             Ok(v) => v,
             Err(e) => return rejection(e),
         };
-        let mut context = match self.context(revision, timeout) {
-            Ok(v) => v,
-            Err(e) => return rejection(e),
+        if timeout == Some(0) {
+            return rejection(ErrorCategory::InvalidRequest);
+        }
+        let mut context = PreparedContext {
+            device_id: self.coordinator.bootstrap_identity().0.clone(),
+            grant_revision: revision,
+            session: None,
+            observation: None,
+            capability: CapabilityId::DesktopWindowsRead,
+            deadline: timeout.map(|timeout| {
+                MonotonicMillis(self.coordinator.now().0.saturating_add(u64::from(timeout)))
+            }),
+            disconnect_policy: DisconnectPolicy::RetainForOwner,
         };
         // Never import a SessionBinding/observation from the Gateway JSON. The
         // source-backed Host owns session selection, generation and evidence.
@@ -514,7 +524,7 @@ pub(crate) async fn assert_pending_factory_keeps_owner_control_live(
         protocol.handle(Call::Computer {
             owner: owner.clone(),
             grant_revision: 1,
-            timeout_ms: 1000,
+            timeout_ms: Some(1000),
             command: ComputerCommand::PrepareOpen,
         }),
     )
@@ -541,7 +551,7 @@ pub(crate) async fn assert_pending_factory_keeps_owner_control_live(
         .handle(Call::Computer {
             owner,
             grant_revision: 1,
-            timeout_ms: 1000,
+            timeout_ms: Some(1000),
             command: ComputerCommand::PrepareOpen,
         })
         .await;

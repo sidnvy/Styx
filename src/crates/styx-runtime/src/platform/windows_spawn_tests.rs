@@ -10,6 +10,14 @@ fn fixed_native_spawn_input_boundary() {
     env.insert(OsString::from("codex_home"), OsString::from("D:\\other"));
     assert!(environment(&env).is_err());
     env.clear();
+    for index in 0..65 {
+        env.insert(
+            OsString::from(format!("ENV_{index}")),
+            OsString::from("value"),
+        );
+    }
+    assert!(environment(&env).is_ok());
+    env.clear();
     env.insert(OsString::from("BAD=KEY"), OsString::from("value"));
     assert!(environment(&env).is_err());
     assert!(wide(OsStr::new("")).is_err());

@@ -641,7 +641,7 @@ impl BrowserOpenSlot {
             live.child = Some(command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn().map_err(|_|BrowserError::SpawnFailed)?);
             tokio::select! {
                 _=resource.stop.cancelled()=>return Err(BrowserError::Unknown),
-                result=live.scope.as_mut().ok_or(BrowserError::Unknown)?.attest_started(until)=>result?,
+                result=live.scope.as_mut().ok_or(BrowserError::Unknown)?.attest_started(Some(until))=>result?,
             }
             }
             #[cfg(target_os = "windows")]

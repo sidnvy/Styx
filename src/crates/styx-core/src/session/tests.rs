@@ -332,7 +332,7 @@ fn provider_loss_is_local_and_fresh_projection_reuses_existing_policy() {
         session: Some(a.clone()),
         observation: Some(pointer.clone()),
         capability: CapabilityId::DesktopPointer,
-        deadline: MonotonicMillis(90),
+        deadline: Some(MonotonicMillis(90)),
         disconnect_policy: DisconnectPolicy::RetainForOwner,
     };
     assert_eq!(
@@ -753,7 +753,7 @@ fn safety_review_regressions_revocation_incarnation_and_freshness() {
         session: Some(first_binding.clone()),
         observation: Some(old_observation.clone()),
         capability: CapabilityId::DesktopPointer,
-        deadline: MonotonicMillis(90),
+        deadline: Some(MonotonicMillis(90)),
         disconnect_policy: DisconnectPolicy::RetainForOwner,
     };
     assert!(

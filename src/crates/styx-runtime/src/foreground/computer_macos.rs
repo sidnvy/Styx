@@ -10,7 +10,6 @@ use std::{
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
 };
 use styx_contracts::{error::ErrorCategory, session::SessionBinding};
 use styx_core::operations::OwnerLease;
@@ -159,7 +158,7 @@ impl LocalComputer {
         .map_err(|_| ErrorCategory::IntegrityFailure)?;
         Ok(OwnedCuaConfig {
             launch,
-            rpc_timeout: Duration::from_secs(10),
+
             workspace: owner.workspace.path.clone(),
             home: owner.home.path.clone(),
         })

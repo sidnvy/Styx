@@ -28,7 +28,6 @@ use zbus::{
 const SYSTEM_BUS: &str = "/run/dbus/system_bus_socket";
 const LOGIN: &str = "org.freedesktop.login1";
 const SESSION_INTERFACE: &str = "org.freedesktop.login1.Session";
-const MAX_SESSIONS: usize = 32;
 const MAX_FIELD: usize = 256;
 const MAX_FACTS: usize = 64 * 1024;
 type ListedSession = (String, u32, String, String, OwnedObjectPath);
@@ -111,9 +110,6 @@ fn bounded(s: &str) -> Result<(), DiscoveryError> {
     }
 }
 fn checked_list(list: &[ListedSession]) -> Result<BTreeSet<(String, u32, String)>, DiscoveryError> {
-    if list.len() > MAX_SESSIONS {
-        return Err(DiscoveryError::Capacity);
-    }
     let mut set = BTreeSet::new();
     let mut ids = BTreeSet::new();
     for (id, uid, username, seat, path) in list {

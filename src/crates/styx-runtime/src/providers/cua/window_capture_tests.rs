@@ -28,7 +28,7 @@ fn request_is_explicit_bounded_window_capture_with_no_other_branch() {
             .unwrap()
             .is_some()
     );
-    for key in ["pid", "window_id", "max_image_dimension", "timeout_ms"] {
+    for key in ["pid", "window_id", "max_image_dimension"] {
         let mut bad = args.clone();
         bad.remove(key);
         assert!(WindowCaptureRequest::classify("get_window_state", &bad).is_err());
@@ -41,8 +41,6 @@ fn request_is_explicit_bounded_window_capture_with_no_other_branch() {
         ("screenshot_out_file", json!("/tmp/no")),
         ("max_image_dimension", json!(1025)),
         ("max_image_dimension", json!(0)),
-        ("timeout_ms", json!(2001)),
-        ("timeout_ms", json!(99)),
         ("pid", json!(0)),
     ] {
         let mut bad = args.clone();
@@ -238,7 +236,6 @@ fn minimal_explicit_read_modalities_get_bounded_public_defaults() {
         panic!("capture default was not classified")
     };
     assert_eq!(request.max_image_dimension, 1024);
-    assert_eq!(request.timeout_ms, 1000);
     let payload: Value = serde_json::from_slice(&capture.to_operation_payload().unwrap()).unwrap();
     assert!(payload["arguments"].get("tree_format").is_none());
     let tree = CuaAction::new(
@@ -253,10 +250,7 @@ fn minimal_explicit_read_modalities_get_bounded_public_defaults() {
         tree.desktop_read_request().unwrap(),
         Some(DesktopReadRequest::Accessibility(_))
     ));
-    for (key, value) in [
-        ("max_image_dimension", json!(0)),
-        ("timeout_ms", json!(2001)),
-    ] {
+    for (key, value) in [("max_image_dimension", json!(0))] {
         let mut args = json!({"pid":42,"window_id":1234,"include_accessibility_tree":false})
             .as_object()
             .unwrap()

@@ -18,7 +18,7 @@ fn context() -> PreparedContext {
         session: None,
         observation: None,
         capability: CapabilityId::ExecRun,
-        deadline: MonotonicMillis(1000),
+        deadline: Some(MonotonicMillis(1000)),
         disconnect_policy: DisconnectPolicy::RetainForOwner,
     }
 }
@@ -635,7 +635,7 @@ fn resource_access_uses_fresh_policy_without_rebinding_or_reusing_start_deadline
         .prepare(&a, context(), b"resource".to_vec(), MonotonicMillis(0))
         .unwrap();
     let mut fresh = context();
-    fresh.deadline = MonotonicMillis(3000);
+    fresh.deadline = Some(MonotonicMillis(3000));
     assert_eq!(
         l.authorize_resource_access(
             &a,
@@ -800,6 +800,28 @@ fn repeated_exit_observations_cannot_keep_ended_unknown_resources_forever() {
         assert_eq!(
             l.inspect(&a, &r.id, r.payload_digest),
             Err(ErrorCategory::StaleOperation)
+        );
+    }
+}
+
+#[test]
+fn exec_and_browser_keep_their_existing_deadline_requirement() {
+    let mut ledger = OperationLedger::new(id("deadline-host"));
+    let owner = ledger
+        .register_verified_owner(id("deadline-owner"), id("epoch"))
+        .unwrap();
+    for capability in [
+        CapabilityId::ExecRun,
+        CapabilityId::BrowserHeadless,
+        CapabilityId::BrowserHeaded,
+        CapabilityId::BrowserAttach,
+    ] {
+        let mut c = context();
+        c.capability = capability;
+        c.deadline = None;
+        assert_eq!(
+            ledger.prepare(&owner, c, vec![], MonotonicMillis(0)),
+            Err(ErrorCategory::InvalidRequest)
         );
     }
 }

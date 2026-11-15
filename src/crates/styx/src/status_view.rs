@@ -220,18 +220,11 @@ fn render(v: &Value, root: &Path, now_ms: u64) -> String {
                 .unwrap_or("unavailable")
         ));
     }
-    if let (Some(connected), Some(capacity)) = (
-        v["gateway"]["computers"]["connected"].as_u64(),
-        v["gateway"]["computers"]["capacity"].as_u64(),
-    ) {
-        lines.push(format!("Connected computers: {connected}/{capacity}"));
+    if let Some(connected) = v["gateway"]["computers"]["connected"].as_u64() {
+        lines.push(format!("Connected computers: {connected}"));
     }
-    if let Some(capacity) = v["gateway"]["mcp_sessions"]["capacity"].as_u64() {
-        let sessions = &v["gateway"]["mcp_sessions"];
-        lines.push(format!(
-            "MCP sessions: {}/{} open; {} expired; {} evicted",
-            sessions["open"], capacity, sessions["expired"], sessions["evicted"]
-        ));
+    if let Some(open) = v["gateway"]["mcp_sessions"]["open"].as_u64() {
+        lines.push(format!("MCP sessions: {open} open"));
     }
     let tunnel = v["tunnel"]["status"].as_str();
     lines.push(
@@ -288,11 +281,9 @@ fn render(v: &Value, root: &Path, now_ms: u64) -> String {
 mod tests {
     use super::*;
     #[test]
-    fn status_shows_connected_computers_and_hub_capacity() {
+    fn status_shows_connected_computers_without_quota() {
         let report = json!({"gateway":{"computers":{"connected":32,"capacity":32}}});
-        assert!(
-            render(&report, Path::new("/owned/styx"), 0).contains("Connected computers: 32/32")
-        );
+        assert!(render(&report, Path::new("/owned/styx"), 0).contains("Connected computers: 32"));
         assert!(!render(&json!({}), Path::new("/owned/styx"), 0).contains("Connected computers:"));
     }
     #[test]
@@ -316,13 +307,10 @@ mod tests {
         );
     }
     #[test]
-    fn status_shows_session_capacity_and_close_counters() {
+    fn status_shows_open_sessions_without_retired_quota_counters() {
         let value =
             json!({"gateway":{"mcp_sessions":{"open":17,"capacity":64,"expired":11,"evicted":29}}});
-        assert!(
-            render(&value, Path::new("/owned"), 0)
-                .contains("MCP sessions: 17/64 open; 11 expired; 29 evicted")
-        );
+        assert!(render(&value, Path::new("/owned"), 0).contains("MCP sessions: 17 open"));
     }
     #[test]
     fn status_distinguishes_off_from_disconnected_without_guessing_remote_settings() {

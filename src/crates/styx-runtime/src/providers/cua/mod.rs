@@ -40,6 +40,8 @@ pub(crate) mod probe_diagnostic;
 pub(crate) use macos::{MacProxySource, TrustedCuaLaunch};
 mod admission;
 mod click;
+#[cfg(test)]
+mod deadline_tests;
 mod driver_result;
 #[cfg(test)]
 pub(crate) mod fake_driver;
@@ -143,7 +145,6 @@ pub(crate) struct OwnedCuaConfig {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) driver: Arc<PinnedExecutable>,
     pub(crate) launch: TrustedCuaLaunch,
-    pub(crate) rpc_timeout: Duration,
     pub(crate) workspace: PathBuf,
     pub(crate) home: PathBuf,
     #[cfg(target_os = "windows")]
@@ -155,8 +156,6 @@ impl OwnedCuaConfig {
         if self.launch.uid != nix::unistd::Uid::current().as_raw()
             || self.launch.compositor_peer.0 == 0
             || self.launch.compositor_peer.1 == 0
-            || self.rpc_timeout.is_zero()
-            || self.rpc_timeout > Duration::from_secs(30)
         {
             return Err(CuaError::PermissionDenied);
         }
@@ -194,7 +193,7 @@ impl OwnedCuaConfig {
     #[cfg(target_os = "linux")]
     fn digest(&self) -> Result<Sha256Digest> {
         self.validate()?;
-        bounded_bytes(&serde_json::json!({"session":self.launch.session,"uid":self.launch.uid,"runtime":self.launch.runtime_dir,"wayland":self.launch.wayland_display,"hyprland":self.launch.hyprland_instance,"compositor_peer":self.launch.compositor_peer,"bus":self.launch.session_bus,"image":self.driver.launch_path().map_err(|_|CuaError::PermissionDenied)?,"timeout_ms":self.rpc_timeout.as_millis(),"workspace":self.workspace,"home":self.home}),REQUEST_BYTES).map(|v|Sha256Digest::of_bytes(&v))
+        bounded_bytes(&serde_json::json!({"session":self.launch.session,"uid":self.launch.uid,"runtime":self.launch.runtime_dir,"wayland":self.launch.wayland_display,"hyprland":self.launch.hyprland_instance,"compositor_peer":self.launch.compositor_peer,"bus":self.launch.session_bus,"image":self.driver.launch_path().map_err(|_|CuaError::PermissionDenied)?,"workspace":self.workspace,"home":self.home}),REQUEST_BYTES).map(|v|Sha256Digest::of_bytes(&v))
     }
     #[cfg(target_os = "macos")]
     fn validate(&self) -> Result<()> {
@@ -642,13 +641,14 @@ impl CuaOpenSlot {
         self,
         permit: DispatchPermit,
         config: OwnedCuaConfig,
+        until: Option<Instant>,
     ) -> std::result::Result<CuaOpenReceipt, CuaOpenFailure> {
         let operation = permit.id().clone();
         let worker = self.worker.clone();
         let lost = operation.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let _ = tx.send(self.open_inner(permit, config).await);
+            let _ = tx.send(self.open_inner(permit, config, until).await);
         });
         rx.await.unwrap_or_else(|_| {
             Err(CuaOpenFailure {
@@ -672,6 +672,7 @@ impl CuaOpenSlot {
         self,
         permit: DispatchPermit,
         config: OwnedCuaConfig,
+        until: Option<Instant>,
     ) -> std::result::Result<CuaOpenReceipt, CuaOpenFailure> {
         let operation = permit.id().clone();
         let validation = (|| {
@@ -793,69 +794,136 @@ impl CuaOpenSlot {
             worker: self.worker.inner.clone(),
         };
         let mut live = resource.live.clone().lock_owned().await;
-        let until = Instant::now() + config.rpc_timeout;
-        let result=async {
-   config.validate()?;
-   if resource.stop.is_cancelled(){return Err(CuaError::Unknown)}
-   #[cfg(target_os = "linux")]
-   let (stdin,stdout,mut stderr) = {
-   let path=config.driver.launch_path().map_err(|_|CuaError::PermissionDenied)?;
-   let launch=ScopeCommand::cua(path,config.workspace.clone(),config.home.clone(),config.launch.wayland_display.clone(),config.launch.hyprland_instance.clone(),config.launch.compositor_peer,until).await.map_err(CuaError::from)?;
-   let (mut cmd,scope)=LinuxOwnedScope::command(launch).map_err(CuaError::from)?;
-   // Scope is retained before any command spawn or await; failed attestation
-   // remains owned Unknown and is cleaned by that exact scope, never by name.
-   live.scope=Some(scope);
-   let child=cmd.spawn().map_err(|_|CuaError::Unknown)?;live.child=Some(child);
-   let pid=live.child.as_ref().and_then(Child::id).ok_or(CuaError::Unknown)?;live.identity=Some(ProcessIdentity::observe(pid).map_err(|_|CuaError::Unknown)?);
-   live.scope.as_mut().ok_or(CuaError::Unknown)?.attest_started(until).await.map_err(CuaError::from)?;
-   let child=live.child.as_mut().ok_or(CuaError::Unknown)?;let stdin=child.stdin.take().ok_or(CuaError::Unknown)?;let stdout=child.stdout.take().ok_or(CuaError::Unknown)?;
+        let result = async {
+            config.validate()?;
+            if resource.stop.is_cancelled() {
+                return Err(CuaError::Unknown);
+            }
+            #[cfg(target_os = "linux")]
+            let (stdin, stdout, mut stderr) = {
+                let path = config
+                    .driver
+                    .launch_path()
+                    .map_err(|_| CuaError::PermissionDenied)?;
+                let launch = ScopeCommand::cua(
+                    path,
+                    config.workspace.clone(),
+                    config.home.clone(),
+                    config.launch.wayland_display.clone(),
+                    config.launch.hyprland_instance.clone(),
+                    config.launch.compositor_peer,
+                    until,
+                )
+                .await
+                .map_err(CuaError::from)?;
+                let (mut cmd, scope) = LinuxOwnedScope::command(launch).map_err(CuaError::from)?;
+                // Scope is retained before any command spawn or await; failed attestation
+                // remains owned Unknown and is cleaned by that exact scope, never by name.
+                live.scope = Some(scope);
+                let child = cmd.spawn().map_err(|_| CuaError::Unknown)?;
+                live.child = Some(child);
+                let pid = live
+                    .child
+                    .as_ref()
+                    .and_then(Child::id)
+                    .ok_or(CuaError::Unknown)?;
+                live.identity = Some(ProcessIdentity::observe(pid).map_err(|_| CuaError::Unknown)?);
+                live.scope
+                    .as_mut()
+                    .ok_or(CuaError::Unknown)?
+                    .attest_started(until)
+                    .await
+                    .map_err(CuaError::from)?;
+                let child = live.child.as_mut().ok_or(CuaError::Unknown)?;
+                let stdin = child.stdin.take().ok_or(CuaError::Unknown)?;
+                let stdout = child.stdout.take().ok_or(CuaError::Unknown)?;
 
-   let stderr=child.stderr.take().ok_or(CuaError::Unknown)?;
-   (stdin,stdout,stderr)
-   };
-   #[cfg(target_os = "macos")]
-   let (stdin,stdout,mut stderr)=macos::start_proxy(&mut live,&config,until).await?;
-   #[cfg(target_os = "windows")]
-   let (stdin,stdout,mut stderr) = {
-     windows::start(&mut live,&config).await?;
-     let child=live.child.as_mut().ok_or(CuaError::Unknown)?;
-     (child.take_stdin().ok_or(CuaError::Unknown)?,child.take_stdout().ok_or(CuaError::Unknown)?,child.take_stderr().ok_or(CuaError::Unknown)?)
-   };
-   live.stderr=Some(tokio::spawn(async move{tokio::io::copy(&mut stderr,&mut tokio::io::sink()).await}));
-   #[cfg(target_os = "macos")]
-   let transport_stop=resource.transport_stop.clone();
-   #[cfg(not(target_os = "macos"))]
-   let transport_stop=resource.stop.clone();
-   let transport=transport::AdmittedTransport::from_io(stdout,stdin,transport_stop);
-   let handler=CuaClient{};let client=tokio::select!{_=resource.stop.cancelled()=>return Err(CuaError::Unknown),value=timeout_at(until,handler.serve(transport))=>value.map_err(|_|CuaError::Unknown)?.map_err(|_|CuaError::ProtocolMismatch)?};live.client=Some(client);
-   let peer=live.client.as_ref().ok_or(CuaError::Unknown)?.peer().clone();let info=peer.peer_info().ok_or(CuaError::ProtocolMismatch)?;
-   if !info.server_info.as_ref().is_some_and(|v|v.name=="cua-driver"&&v.version=="0.47.24"){return Err(CuaError::ProtocolMismatch)}
-   let catalog=tokio::select!{_=resource.stop.cancelled()=>return Err(CuaError::Unknown),v=timeout_at(until,peer.list_tools(None))=>v.map_err(|_|CuaError::Unknown)?.map_err(|_|CuaError::ProtocolMismatch)?};
-   if catalog.next_cursor.is_some(){return Err(CuaError::Unsupported)}live.ax_once_available=validate_catalog(&catalog.tools)?;
-   #[cfg(target_os = "macos")]
-   {
-     let session = format!("styx-{}", uuid::Uuid::new_v4());
-     live.mac_session = Some(session.clone());
-     live.mac_proxy.as_mut().ok_or(CuaError::ProtocolMismatch)?.mark_session_started();
-     let arguments = serde_json::json!({"session":session}).as_object().ok_or(CuaError::ProtocolMismatch)?.clone();
-     let request = CallToolRequestParams::new("start_session").with_arguments(arguments);
-     let reply = tokio::select! {
-         _=resource.stop.cancelled()=>return Err(CuaError::Unknown),
-         value=timeout_at(until,peer.call_tool(request))=>value.map_err(|_|CuaError::Unknown)?.map_err(|_|CuaError::Unknown)?
-     };
-     if reply.is_error == Some(true) || !reply.structured_content.as_ref().is_some_and(|value|
-         value.get("active").and_then(Value::as_bool)==Some(true)
-         && value.get("session").and_then(Value::as_str)==Some(session.as_str())) {
-         return Err(CuaError::ProtocolMismatch);
-     }
-   }
-   #[cfg(any(target_os = "linux", target_os = "windows"))]
-   {
-     live.permissions_available = catalog.tools.iter().any(|tool| tool.name == "check_permissions");
-     permissions::query(&mut live, &resource.stop, until).await?;
-   }
-   Ok(())
-  }.await;
+                let stderr = child.stderr.take().ok_or(CuaError::Unknown)?;
+                (stdin, stdout, stderr)
+            };
+            #[cfg(target_os = "macos")]
+            let (stdin, stdout, mut stderr) = macos::start_proxy(&mut live, &config, until).await?;
+            #[cfg(target_os = "windows")]
+            let (stdin, stdout, mut stderr) = {
+                windows::start(&mut live, &config).await?;
+                let child = live.child.as_mut().ok_or(CuaError::Unknown)?;
+                (
+                    child.take_stdin().ok_or(CuaError::Unknown)?,
+                    child.take_stdout().ok_or(CuaError::Unknown)?,
+                    child.take_stderr().ok_or(CuaError::Unknown)?,
+                )
+            };
+            live.stderr = Some(tokio::spawn(async move {
+                tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await
+            }));
+            #[cfg(target_os = "macos")]
+            let transport_stop = resource.transport_stop.clone();
+            #[cfg(not(target_os = "macos"))]
+            let transport_stop = resource.stop.clone();
+            let transport = transport::AdmittedTransport::from_io(stdout, stdin, transport_stop);
+            let handler = CuaClient {};
+            let client = tokio::select! {_=resource.stop.cancelled()=>return Err(CuaError::Unknown),value=within(until,handler.serve(transport))=>value.map_err(|_|CuaError::Unknown)?.map_err(|_|CuaError::ProtocolMismatch)?};
+            live.client = Some(client);
+            let peer = live
+                .client
+                .as_ref()
+                .ok_or(CuaError::Unknown)?
+                .peer()
+                .clone();
+            let info = peer.peer_info().ok_or(CuaError::ProtocolMismatch)?;
+            if !info
+                .server_info
+                .as_ref()
+                .is_some_and(|v| v.name == "cua-driver" && v.version == "0.47.24")
+            {
+                return Err(CuaError::ProtocolMismatch);
+            }
+            let catalog = tokio::select! {_=resource.stop.cancelled()=>return Err(CuaError::Unknown),v=within(until,peer.list_tools(None))=>v.map_err(|_|CuaError::Unknown)?.map_err(|_|CuaError::ProtocolMismatch)?};
+            if catalog.next_cursor.is_some() {
+                return Err(CuaError::Unsupported);
+            }
+            live.ax_once_available = validate_catalog(&catalog.tools)?;
+            #[cfg(target_os = "macos")]
+            {
+                let session = format!("styx-{}", uuid::Uuid::new_v4());
+                live.mac_session = Some(session.clone());
+                live.mac_proxy
+                    .as_mut()
+                    .ok_or(CuaError::ProtocolMismatch)?
+                    .mark_session_started();
+                let arguments = serde_json::json!({"session":session})
+                    .as_object()
+                    .ok_or(CuaError::ProtocolMismatch)?
+                    .clone();
+                let request = CallToolRequestParams::new("start_session").with_arguments(arguments);
+                let reply = tokio::select! {
+                    _=resource.stop.cancelled()=>return Err(CuaError::Unknown),
+                    value=within(until,peer.call_tool(request))=>value.map_err(|_|CuaError::Unknown)?.map_err(|_|CuaError::Unknown)?
+                };
+                if reply.is_error == Some(true)
+                    || !reply.structured_content.as_ref().is_some_and(|value| {
+                        value.get("active").and_then(Value::as_bool) == Some(true)
+                            && value.get("session").and_then(Value::as_str)
+                                == Some(session.as_str())
+                    })
+                {
+                    return Err(CuaError::ProtocolMismatch);
+                }
+            }
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            {
+                live.permissions_available = catalog
+                    .tools
+                    .iter()
+                    .any(|tool| tool.name == "check_permissions");
+                permissions::query(&mut live, &resource.stop, until).await?;
+            }
+            Ok(())
+        };
+        let result = tokio::select! {
+            _ = resource.stop.cancelled() => Err(CuaError::Unknown),
+            result = result => result,
+        };
         match result {
             Ok(()) => Ok(CuaOpenReceipt {
                 handle,
@@ -1011,31 +1079,25 @@ fn validate_native_catalog(
     Ok(strict.is_some())
 }
 impl CuaActionSlot {
-    pub async fn call_once(self, permit: DispatchPermit) -> CuaReceipt {
-        let budget = self.live.config.rpc_timeout;
-        self.call_once_with_budget(permit, budget).await
-    }
-    pub(crate) async fn call_once_with_budget(
+    pub(crate) async fn call_once_until(
         self,
         permit: DispatchPermit,
-        budget: Duration,
+        until: Option<Instant>,
     ) -> CuaReceipt {
-        let until = Instant::now() + budget.min(self.live.config.rpc_timeout);
         self.call_owned(permit, until, None).await
     }
     pub(crate) async fn call_once_until_with_write_gate(
         self,
         permit: DispatchPermit,
-        until: Instant,
+        until: Option<Instant>,
         gate: AxWriteGate,
     ) -> CuaReceipt {
-        let until = until.min(Instant::now() + self.live.config.rpc_timeout);
         self.call_owned(permit, until, Some(gate)).await
     }
     async fn call_owned(
         self,
         permit: DispatchPermit,
-        until: Instant,
+        until: Option<Instant>,
         write_gate: Option<AxWriteGate>,
     ) -> CuaReceipt {
         let operation = permit.id().clone();
@@ -1053,7 +1115,7 @@ impl CuaActionSlot {
     async fn call_inner(
         mut self,
         permit: DispatchPermit,
-        until: Instant,
+        until: Option<Instant>,
         write_gate: Option<AxWriteGate>,
     ) -> CuaReceipt {
         let operation = permit.id().clone();
@@ -1131,7 +1193,7 @@ impl CuaActionSlot {
                 cause: *cause,
             };
         }
-        if Instant::now() >= until
+        if until.is_some_and(|until| Instant::now() >= until)
             || self.live.retired
             || self.live.uncertain
             || self.resource.stop.is_cancelled()
@@ -1144,7 +1206,10 @@ impl CuaActionSlot {
         #[cfg(target_os = "macos")]
         if let Err(error) = {
             let config = self.live.config.clone();
-            macos::preflight(&mut self.live, &config, until).await
+            tokio::select! {
+                _ = self.resource.stop.cancelled() => Err(CuaError::Unknown),
+                result = macos::preflight(&mut self.live, &config, until) => result,
+            }
         } {
             return refused("native_preflight", error);
         }
@@ -1458,4 +1523,21 @@ async fn cleanup(live: &mut Live, budget: Duration) -> CuaCleanup {
         live.uncertain = true;
     }
     facts
+}
+
+/// Await normally unless the caller supplied an actual deadline.
+pub(crate) async fn within<T>(
+    until: Option<Instant>,
+    future: impl std::future::Future<Output = T>,
+) -> std::result::Result<T, tokio::time::error::Elapsed> {
+    match until {
+        Some(until) => timeout_at(until, future).await,
+        None => Ok(future.await),
+    }
+}
+pub(crate) async fn deadline_elapsed(until: Option<Instant>) {
+    match until {
+        Some(until) => tokio::time::sleep_until(until).await,
+        None => std::future::pending().await,
+    }
 }

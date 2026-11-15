@@ -253,7 +253,7 @@ fn spawn_image(
 ) -> Result<SuspendedChild, SpawnFailure> {
     // The only production caller supplies fixed executor arguments. Bound this
     // OS boundary before CString/environment allocation nevertheless.
-    if args.len() > 64 || env.len() > 64 || cwd.as_os_str().as_bytes().len() > 4096 {
+    if cwd.as_os_str().as_bytes().len() > 4096 {
         return Err(refused("invalid_spawn_input"));
     }
     let mut supplied_bytes = 0usize;

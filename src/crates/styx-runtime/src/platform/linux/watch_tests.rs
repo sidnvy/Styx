@@ -102,11 +102,7 @@ async fn watcher_deltas_signals_backpressure_and_cancel_are_fenced_batch() {
     assert!(receive.try_recv().is_err());
     assert!(
         current
-            .reconcile(
-                &events,
-                snapshot(vec![original.clone(); MAX_SESSIONS + 1]),
-                1000
-            )
+            .reconcile(&events, snapshot(vec![original.clone(); 96]), 1000)
             .is_err()
     );
     let mut other_owner = snapshot(vec![original.clone()]);
@@ -280,4 +276,35 @@ async fn unrelated_login_signals_do_not_revoke_the_selected_desktop() {
         panic!("lock");
     };
     assert_eq!(items[0].key, CandidateKey::from(&selected));
+}
+
+#[test]
+fn snapshot_accepts_all_distinct_session_candidates() {
+    let candidates = (0..96)
+        .map(|i| {
+            let mut candidate = candidate_sample();
+            candidate.session_id = format!("c{i}");
+            candidate
+        })
+        .collect();
+    assert!(validate_snapshot(&snapshot(candidates), 1000).is_ok());
+}
+
+#[test]
+fn larger_property_notifications_are_decoded_without_count_quota() {
+    let changed: HashMap<String, OwnedValue> = (0..96)
+        .map(|i| (format!("Metadata{i}"), OwnedValue::from(true)))
+        .collect();
+    let invalidated: Vec<String> = (0..96).map(|i| format!("OtherMetadata{i}")).collect();
+    let message = Message::signal(
+        "/org/freedesktop/login1/session/c7",
+        "org.freedesktop.DBus.Properties",
+        "PropertiesChanged",
+    )
+    .unwrap()
+    .sender(":1.7")
+    .unwrap()
+    .build(&(SESSION_INTERFACE, changed, invalidated))
+    .unwrap();
+    assert_eq!(signal_reason(&message, ":1.7").unwrap(), None);
 }

@@ -15,7 +15,7 @@ fn context(capability: CapabilityId) -> PreparedContext {
         }),
         observation: None,
         capability,
-        deadline: MonotonicMillis(1000),
+        deadline: Some(MonotonicMillis(1000)),
         disconnect_policy: DisconnectPolicy::RetainForOwner,
     }
 }
@@ -736,4 +736,88 @@ fn exact_ax_write_attempt_is_separate_once_purpose_and_never_an_os_grant() {
         ),
         Err(ErrorCategory::StateConflict)
     );
+}
+
+#[test]
+fn computer_without_caller_deadline_survives_time_but_can_still_be_cancelled() {
+    let mut ledger = OperationLedger::new("deadline-host".try_into().unwrap());
+    let owner = ledger
+        .register_verified_owner(
+            "deadline-owner".try_into().unwrap(),
+            "epoch".try_into().unwrap(),
+        )
+        .unwrap();
+    let mut c = context(CapabilityId::DesktopWindowsRead);
+    c.deadline = None;
+    let reserved = ledger
+        .prepare_desktop_agent(&owner, c, b"native read".to_vec(), MonotonicMillis(0))
+        .unwrap();
+    ledger.reap(MonotonicMillis(86_400_000));
+    assert_eq!(
+        ledger
+            .inspect(&owner, &reserved.id, reserved.payload_digest)
+            .unwrap()
+            .state,
+        OperationState::Reserved
+    );
+    let cancelled = ledger
+        .request_cancel(
+            &owner,
+            &reserved.id,
+            reserved.payload_digest,
+            MonotonicMillis(86_400_001),
+        )
+        .unwrap();
+    assert_eq!(cancelled.state, OperationState::Cancelled);
+    assert_eq!(cancelled.cancellation, Some(Cancellation::NotDispatched));
+}
+
+#[test]
+fn explicit_computer_deadline_still_expires() {
+    let mut ledger = OperationLedger::new("deadline-host".try_into().unwrap());
+    let owner = ledger
+        .register_verified_owner(
+            "deadline-owner".try_into().unwrap(),
+            "epoch".try_into().unwrap(),
+        )
+        .unwrap();
+    let reserved = ledger
+        .prepare_desktop_agent(
+            &owner,
+            context(CapabilityId::DesktopWindowsRead),
+            vec![],
+            MonotonicMillis(0),
+        )
+        .unwrap();
+    ledger.reap(MonotonicMillis(1000));
+    assert_eq!(
+        ledger
+            .inspect(&owner, &reserved.id, reserved.payload_digest)
+            .unwrap()
+            .state,
+        OperationState::Cancelled
+    );
+}
+
+#[test]
+fn ending_owner_cancels_computer_reservations_without_a_deadline() {
+    let mut ledger = OperationLedger::new("deadline-host".try_into().unwrap());
+    let owner = ledger
+        .register_verified_owner(
+            "deadline-owner".try_into().unwrap(),
+            "epoch".try_into().unwrap(),
+        )
+        .unwrap();
+    let mut c = context(CapabilityId::DesktopWindowsRead);
+    c.deadline = None;
+    ledger
+        .prepare_desktop_agent(&owner, c, vec![], MonotonicMillis(0))
+        .unwrap();
+    let cleanup = ledger
+        .fence_owner_for_cleanup(&owner, MonotonicMillis(86_400_000))
+        .unwrap();
+    let inventory = ledger.owner_cleanup_inventory(&cleanup).unwrap();
+    assert_eq!(inventory.len(), 1);
+    assert_eq!(inventory[0].state, OperationState::Cancelled);
+    assert_eq!(inventory[0].cancellation, Some(Cancellation::NotDispatched));
 }

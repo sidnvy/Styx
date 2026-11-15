@@ -13,14 +13,10 @@ use crate::{
 };
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::sync::{Arc, Mutex};
 use styx_contracts::{error::ErrorCategory, session::SessionBinding};
 use styx_core::operations::OwnerLease;
 
-const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 type Result<T> = std::result::Result<T, ErrorCategory>;
 struct OwnerDirectories {
     owner: OwnerLease,
@@ -172,7 +168,7 @@ impl LocalComputer {
                     .source_peer(),
                 session_bus: self.runtime_dir.join("bus"),
             },
-            rpc_timeout: RPC_TIMEOUT,
+
             workspace: owner.workspace.path().into(),
             home: owner.home.path().into(),
         })
@@ -219,7 +215,7 @@ impl LocalComputer {
                 session: self.binding.clone(),
                 source: self.source.clone(),
             },
-            rpc_timeout: RPC_TIMEOUT,
+
             workspace: owner.workspace.path().into(),
             home: owner.home.path().into(),
             environment,

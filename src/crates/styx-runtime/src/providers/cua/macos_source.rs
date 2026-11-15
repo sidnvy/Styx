@@ -266,13 +266,13 @@ impl MacSourceCandidate {
     /// Uses the caller's existing acquisition deadline, no hidden retry/backoff.
     pub(crate) async fn connect(
         self,
-        deadline: tokio::time::Instant,
+        deadline: impl Into<Option<tokio::time::Instant>>,
     ) -> Result<ConnectedCandidate> {
-        let stream =
-            tokio::time::timeout_at(deadline, tokio::net::UnixStream::connect(&self.socket_path))
-                .await
-                .map_err(|_| BindingError::Unavailable)?
-                .map_err(|_| BindingError::Unavailable)?;
+        let deadline = deadline.into();
+        let stream = super::within(deadline, tokio::net::UnixStream::connect(&self.socket_path))
+            .await
+            .map_err(|_| BindingError::Unavailable)?
+            .map_err(|_| BindingError::Unavailable)?;
         let stream = stream.into_std().map_err(|_| BindingError::Unavailable)?;
         Ok(ConnectedCandidate {
             candidate: Arc::new(self),
@@ -371,9 +371,13 @@ impl BoundMacSource {
     /// A second observation connection is authenticated against the retained
     /// source. The official proxy independently uses its private-path service
     /// connections; this observation is not an attestation of those call FDs.
-    pub(crate) async fn connect_same_peer(&mut self, until: tokio::time::Instant) -> Result<Self> {
+    pub(crate) async fn connect_same_peer(
+        &mut self,
+        until: impl Into<Option<tokio::time::Instant>>,
+    ) -> Result<Self> {
+        let until = until.into();
         self.fresh_binding()?;
-        let stream = tokio::time::timeout_at(
+        let stream = super::within(
             until,
             tokio::net::UnixStream::connect(&self.candidate.socket_path),
         )

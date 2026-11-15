@@ -74,8 +74,9 @@ impl BoundMacSource {
         &mut self,
         name: &str,
         mut args: serde_json::Value,
-        until: Instant,
+        until: impl Into<Option<Instant>>,
     ) -> Result<serde_json::Value> {
+        let until = until.into();
         if let Some(session) = &self.probe_session {
             args["session"] = serde_json::json!(session);
         }
@@ -86,7 +87,8 @@ impl BoundMacSource {
         request.push(b'\n');
         self.exchange_value(&request, until)
     }
-    fn ensure_probe_session(&mut self, until: Instant) -> Result<()> {
+    fn ensure_probe_session(&mut self, until: impl Into<Option<Instant>>) -> Result<()> {
+        let until = until.into();
         if self.probe_drained {
             return Err(BindingError::Fenced);
         }
@@ -110,16 +112,25 @@ impl BoundMacSource {
         }
         Ok(())
     }
-    pub(crate) fn observe_native(&mut self, until: Instant) -> Result<NativeObservation> {
+    pub(crate) fn observe_native(
+        &mut self,
+        until: impl Into<Option<Instant>>,
+    ) -> Result<NativeObservation> {
+        let until = until.into();
         self.observe_native_mode(until)
     }
     pub(in crate::providers::cua) fn observe_initial_native(
         &mut self,
-        until: Instant,
+        until: impl Into<Option<Instant>>,
     ) -> Result<NativeObservation> {
+        let until = until.into();
         self.observe_native_mode(until)
     }
-    fn observe_native_mode(&mut self, until: Instant) -> Result<NativeObservation> {
+    fn observe_native_mode(
+        &mut self,
+        until: impl Into<Option<Instant>>,
+    ) -> Result<NativeObservation> {
+        let until = until.into();
         self.fresh_binding()?;
         self.fenced = true;
         self.ensure_probe_session(until)?;
@@ -130,7 +141,7 @@ impl BoundMacSource {
         )?;
         let permissions = permissions_from_result(&response)?;
         self.check_binding()?;
-        if Instant::now() >= until {
+        if until.is_some_and(|until| Instant::now() >= until) {
             // The complete reply was consumed and the original peer revalidated.
             // Expired facts cannot authorize input, but do not retire that peer.
             self.fenced = false;
@@ -174,9 +185,10 @@ impl BoundMacSource {
         before: &NativeObservation,
         after: &NativeObservation,
         control_after: &NativeObservation,
-        until: Instant,
+        until: impl Into<Option<Instant>>,
     ) -> Result<bool> {
-        if Instant::now() >= until
+        let until = until.into();
+        if until.is_some_and(|until| Instant::now() >= until)
             || !before.observed_unlocked()
             || !after.observed_unlocked()
             || !control_after.observed_unlocked()
@@ -191,7 +203,13 @@ impl BoundMacSource {
         control.initial_provisional = false;
         Ok(false) // No independent IOKit epoch/seed qualification remains.
     }
-    fn exchange_frame(&self, request: &[u8], deadline: Instant, maximum: usize) -> Result<Vec<u8>> {
+    fn exchange_frame(
+        &self,
+        request: &[u8],
+        deadline: impl Into<Option<Instant>>,
+        maximum: usize,
+    ) -> Result<Vec<u8>> {
+        let deadline = deadline.into();
         let mut probe = [0u8; 1];
         match recv(
             self.stream.as_raw_fd(),
@@ -247,20 +265,30 @@ impl BoundMacSource {
     }
 }
 
-fn wait_fd(stream: &UnixStream, events: libc::c_short, deadline: Instant) -> Result<()> {
+fn wait_fd(
+    stream: &UnixStream,
+    events: libc::c_short,
+    deadline: impl Into<Option<Instant>>,
+) -> Result<()> {
+    let deadline = deadline.into();
     loop {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or(BindingError::NativeProtocol)?;
-        let millis = remaining
-            .as_millis()
-            .saturating_add(1)
-            .min(i32::MAX as u128) as i32;
         use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
         use std::os::fd::AsFd;
         let flags = PollFlags::from_bits(events).ok_or(BindingError::NativeProtocol)?;
         let mut descriptors = [PollFd::new(stream.as_fd(), flags)];
-        let timeout = PollTimeout::try_from(millis).map_err(|_| BindingError::NativeProtocol)?;
+        let timeout = match deadline {
+            None => PollTimeout::NONE,
+            Some(deadline) => {
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or(BindingError::NativeProtocol)?;
+                let millis = remaining
+                    .as_millis()
+                    .saturating_add(1)
+                    .min(i32::MAX as u128) as i32;
+                PollTimeout::try_from(millis).map_err(|_| BindingError::NativeProtocol)?
+            }
+        };
         let result = match poll(&mut descriptors, timeout) {
             Err(nix::errno::Errno::EINTR) => continue,
             Err(_) => return Err(BindingError::NativeProtocol),
@@ -272,7 +300,7 @@ fn wait_fd(stream: &UnixStream, events: libc::c_short, deadline: Instant) -> Res
         if result <= 0
             || revents.intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL)
             || !revents.intersects(flags)
-            || Instant::now() >= deadline
+            || deadline.is_some_and(|deadline| Instant::now() >= deadline)
         {
             return Err(BindingError::NativeProtocol);
         }
@@ -294,15 +322,21 @@ struct RawResponse {
     exit_code: Option<i32>,
 }
 impl BoundMacSource {
-    fn exchange_value(&mut self, request: &[u8], deadline: Instant) -> Result<serde_json::Value> {
+    fn exchange_value(
+        &mut self,
+        request: &[u8],
+        deadline: impl Into<Option<Instant>>,
+    ) -> Result<serde_json::Value> {
+        let deadline = deadline.into();
         self.exchange_value_diagnostic(request, deadline, None)
     }
     fn probe_protocol_failure(
         &mut self,
         probe: Option<(ProbeStage, Instant)>,
         cause: ProbeCause,
-        deadline: Instant,
+        deadline: impl Into<Option<Instant>>,
     ) -> BindingError {
+        let deadline = deadline.into();
         if let Some((stage, started)) = probe {
             self.remember_probe_failure(ProbeDiagnostic::observed(stage, cause, started, deadline));
         }
@@ -311,9 +345,10 @@ impl BoundMacSource {
     fn exchange_value_diagnostic(
         &mut self,
         request: &[u8],
-        deadline: Instant,
+        deadline: impl Into<Option<Instant>>,
         probe: Option<(ProbeStage, Instant)>,
     ) -> Result<serde_json::Value> {
+        let deadline = deadline.into();
         self.protocol_clean = false;
         let bytes = self.exchange_frame(request, deadline, 64 * 1024)?;
         self.protocol_clean = true;
@@ -331,7 +366,11 @@ impl BoundMacSource {
     }
     /// Fixed no-user-arguments acquisition on the SAME authenticated facts FD.
     /// This creates one private native read transport, retained until source stop.
-    pub(crate) fn probe_windows(&mut self, deadline: Instant) -> Result<WindowReadEvidence> {
+    pub(crate) fn probe_windows(
+        &mut self,
+        deadline: impl Into<Option<Instant>>,
+    ) -> Result<WindowReadEvidence> {
+        let deadline = deadline.into();
         let started = Instant::now();
         let mut stage = ProbeStage::SessionBinding;
         let result: Result<WindowReadEvidence> = (|| {
@@ -409,7 +448,7 @@ impl BoundMacSource {
             self.check_binding()?;
             stage = ProbeStage::ReadDeadline;
             self.fenced = false;
-            if Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Err(BindingError::ObservationExpired);
             }
             Ok(evidence)
@@ -424,7 +463,8 @@ impl BoundMacSource {
         }
         result
     }
-    pub(crate) fn drain_probe(&mut self, deadline: Instant) -> Result<bool> {
+    pub(crate) fn drain_probe(&mut self, deadline: impl Into<Option<Instant>>) -> Result<bool> {
+        let deadline = deadline.into();
         if self.probe_drained || self.probe_daemon_exited {
             return Ok(true);
         }

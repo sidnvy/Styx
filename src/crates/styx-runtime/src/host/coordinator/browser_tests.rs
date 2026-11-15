@@ -27,7 +27,7 @@ fn browser_context_cannot_be_replaced_with_exec_or_desktop_context() {
         session: None,
         observation: None,
         capability: CapabilityId::BrowserHeadless,
-        deadline: MonotonicMillis(100),
+        deadline: Some(MonotonicMillis(100)),
         disconnect_policy: DisconnectPolicy::RetainForOwner,
     };
     assert!(validate_context(&context).is_ok());
@@ -86,7 +86,7 @@ fn repeated_physical_settlement_is_idempotent_and_contradictory_exit_is_refused(
         session: None,
         observation: None,
         capability: CapabilityId::BrowserHeadless,
-        deadline: MonotonicMillis(1000),
+        deadline: Some(MonotonicMillis(1000)),
         disconnect_policy: DisconnectPolicy::RetainForOwner,
     };
     let open = ledger
@@ -175,7 +175,7 @@ fn browser_context(host: &HostCoordinator) -> PreparedContext {
         session: None,
         observation: None,
         capability: CapabilityId::BrowserHeadless,
-        deadline: MonotonicMillis(host.now().0 + 30000),
+        deadline: Some(MonotonicMillis(host.now().0 + 30000)),
         disconnect_policy: DisconnectPolicy::RetainForOwner,
     }
 }

@@ -453,7 +453,7 @@ impl OperationLedger {
         if self.maintenance_fenced {
             return Err(ErrorCategory::Busy);
         }
-        if now >= context.deadline {
+        if crate::policy::deadline_expired(&context, now)? {
             return Err(ErrorCategory::OperationTimeout);
         }
         if payload.len() > styx_contracts::DESKTOP_BROWSER_FRAME_BYTES {
@@ -930,7 +930,12 @@ impl OperationLedger {
     /// no active or liveness-Unknown record is evicted to admit new work.
     pub fn reap(&mut self, now: MonotonicMillis) -> usize {
         for record in self.records.values_mut() {
-            if record.snapshot.state == OperationState::Reserved && now >= record.context.deadline {
+            if record.snapshot.state == OperationState::Reserved
+                && record
+                    .context
+                    .deadline
+                    .is_some_and(|deadline| now >= deadline)
+            {
                 record.snapshot.state = OperationState::Cancelled;
                 record.snapshot.cancellation = Some(Cancellation::NotDispatched);
                 record.terminal_at = Some(now);

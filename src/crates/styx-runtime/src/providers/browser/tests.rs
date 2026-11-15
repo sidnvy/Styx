@@ -62,7 +62,7 @@ pub(super) fn permit(
         session: None,
         observation: None,
         capability,
-        deadline: MonotonicMillis(1000),
+        deadline: Some(MonotonicMillis(1000)),
         disconnect_policy: DisconnectPolicy::RetainForOwner,
     };
     let facts = AdmissionFacts {
@@ -430,17 +430,25 @@ fn frozen_tools_paths_and_snapshot_reference_policy_batch() {
     let mut args = json!({"paths":[upload]}).as_object().unwrap().clone();
     policy::check_files(&mut args, &config.workspace_dir, &config.output_dir).unwrap();
     let link = config.workspace_dir.join("escape.txt");
-    std::os::unix::fs::symlink("/etc/passwd", &link).unwrap();
+    std::os::unix::fs::symlink(&upload, &link).unwrap();
     for args in [
-        json!({"paths":[link]}),
+        json!({"paths":vec![link; 65]}),
         json!({"filename":"../other-owner.txt"}),
-        json!({"filename":"/etc/styx-no-write"}),
+        json!({"filename":upload}),
     ] {
+        policy::check_files(
+            &mut args.as_object().unwrap().clone(),
+            &config.workspace_dir,
+            &config.output_dir,
+        )
+        .unwrap();
+    }
+    for args in [json!({"paths":[42]}), json!({"filename":42})] {
         assert!(
             policy::check_files(
                 &mut args.as_object().unwrap().clone(),
                 &config.workspace_dir,
-                &config.output_dir
+                &config.output_dir,
             )
             .is_err()
         );

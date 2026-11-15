@@ -41,7 +41,6 @@ const MANAGER: &str = "org.freedesktop.systemd1";
 const LOGIN: &str = "org.freedesktop.login1";
 const UNIT: &str = "org.freedesktop.systemd1.Unit";
 const SERVICE: &str = "org.freedesktop.systemd1.Service";
-const MAX_ROWS: usize = 32;
 const MAX_FIELD: usize = 256;
 // Leave room for the schema/facts envelope and final newline in the64KiB pipe.
 const MAX_FACTS: usize = 64 * 1024 - 64;
@@ -341,7 +340,7 @@ fn decode_window_reply(query: WindowQuery, bytes: &[u8]) -> Result<QueryReadEvid
         WindowQuery::Monitors => {
             let monitors: Vec<ReadMonitor> =
                 serde_json::from_slice(bytes).map_err(|_| AssociationError::Untrusted)?;
-            if monitors.is_empty() || monitors.len() > 32 {
+            if monitors.is_empty() {
                 return Err(AssociationError::Untrusted);
             }
             for m in &monitors {
@@ -367,9 +366,6 @@ fn decode_window_reply(query: WindowQuery, bytes: &[u8]) -> Result<QueryReadEvid
         WindowQuery::Clients => {
             let clients: Vec<ReadClient> =
                 serde_json::from_slice(bytes).map_err(|_| AssociationError::Untrusted)?;
-            if clients.len() > 512 {
-                return Err(AssociationError::Capacity);
-            }
             let mut addresses = std::collections::BTreeSet::new();
             for c in &clients {
                 let address = c
@@ -411,9 +407,8 @@ fn validate_window_evidence(e: &WindowReadEvidence, endpoint: &EndpointFact) -> 
         || e.socket_device != endpoint.device
         || e.socket_inode != endpoint.inode
         || e.monitors.query != WindowQuery::Monitors
-        || !(1..=32).contains(&e.monitors.object_count)
+        || e.monitors.object_count == 0
         || e.clients.query != WindowQuery::Clients
-        || e.clients.object_count > 512
     {
         return Err(AssociationError::Untrusted);
     }
@@ -688,12 +683,9 @@ fn private_dir(path: &Path, uid: u32) -> Result<()> {
     }
     Ok(())
 }
-fn bounded_entries(path: &Path) -> Result<Vec<PathBuf>> {
+fn directory_entries(path: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for entry in std::fs::read_dir(path).map_err(|_| AssociationError::Unavailable)? {
-        if paths.len() >= 128 {
-            return Err(AssociationError::Capacity);
-        }
         paths.push(entry.map_err(|_| AssociationError::Changed)?.path());
     }
     paths.sort();
@@ -835,9 +827,6 @@ async fn unit(connection: &Connection, owner: &str, name: &str, service: bool) -
         &result.on_failure,
         &result.conflicts,
     ] {
-        if values.len() > 64 {
-            return Err(AssociationError::Capacity);
-        }
         for s in values {
             field(s)?;
         }
@@ -1164,9 +1153,6 @@ async fn collect(
         .list_units_by_patterns(&["active"], &["wayland-session-bindpid@*.service"])
         .await
         .map_err(|_| AssociationError::Unavailable)?;
-    if units.len() > MAX_ROWS {
-        return Err(AssociationError::Capacity);
-    }
     let mut matches = Vec::new();
     for row_unit in units {
         let anchor_pid = row_unit
@@ -1232,7 +1218,7 @@ async fn collect(
     }
     let (anchor, anchor_argv, bind, envelope, wm, wm_env, bind_process, wm_main) = one(matches)?;
     let mut displays = Vec::new();
-    for path in bounded_entries(runtime)? {
+    for path in directory_entries(runtime)? {
         let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
         if !name
             .strip_prefix("wayland-")
@@ -1248,7 +1234,7 @@ async fn collect(
     let wayland = one(displays)?;
     private_dir(&runtime.join("hypr"), uid)?;
     let mut ipc = Vec::new();
-    for dir in bounded_entries(&runtime.join("hypr"))? {
+    for dir in directory_entries(&runtime.join("hypr"))? {
         private_dir(&dir, uid)?;
         let (_a, a) = endpoint(&dir.join(".socket.sock"), uid, end).await?;
         let (_b, b) = endpoint(&dir.join(".socket2.sock"), uid, end).await?;

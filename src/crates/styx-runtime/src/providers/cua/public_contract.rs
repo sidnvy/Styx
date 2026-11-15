@@ -120,7 +120,7 @@ pub(super) fn canonicalize(name: &str, arguments: &mut Map<String, Value>) {
             arguments
                 .entry("include_screenshot")
                 .or_insert(Value::Bool(true));
-            for (key, default) in [("max_image_dimension", 1024), ("timeout_ms", 1000)] {
+            for (key, default) in [("max_image_dimension", 1024)] {
                 arguments.entry(key).or_insert(Value::from(default));
             }
         } else if arguments.get("include_screenshot") == Some(&Value::Bool(false))
@@ -129,13 +129,6 @@ pub(super) fn canonicalize(name: &str, arguments: &mut Map<String, Value>) {
             arguments
                 .entry("include_accessibility_tree")
                 .or_insert(Value::Bool(true));
-            for (key, default) in [
-                ("max_elements", 250),
-                ("max_depth", 25),
-                ("timeout_ms", 1000),
-            ] {
-                arguments.entry(key).or_insert(Value::from(default));
-            }
         }
     }
     if name == "click" && arguments.contains_key("element_token") {

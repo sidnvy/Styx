@@ -10,6 +10,13 @@ pub(crate) struct FakeDriver {
 }
 impl FakeDriver {
     pub(crate) async fn start(facts: Value, click_reply: CallToolResult) -> Self {
+        Self::start_delayed(facts, click_reply, Duration::ZERO).await
+    }
+    pub(crate) async fn start_delayed(
+        facts: Value,
+        click_reply: CallToolResult,
+        delay: Duration,
+    ) -> Self {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let seen = calls.clone();
         let (local, remote) = tokio::io::duplex(65536);
@@ -28,6 +35,7 @@ impl FakeDriver {
                     "tools/list" => serde_json::json!({"tools":[]}),
                     "tools/call" => {
                         seen.lock().unwrap().push(request["params"].clone());
+                        tokio::time::sleep(delay).await;
                         serde_json::to_value(if request["params"]["name"] == "check_permissions" {
                             CallToolResult::structured(facts.clone())
                         } else {
@@ -69,7 +77,7 @@ impl FakeDriver {
             CallToolRequestParams::new(action.name.clone())
                 .with_arguments(action.arguments.clone()),
             &CancellationToken::new(),
-            Instant::now() + Duration::from_secs(2),
+            Some(Instant::now() + Duration::from_secs(2)),
         )
         .await
     }

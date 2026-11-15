@@ -90,7 +90,7 @@ impl ScopeCommand {
         wayland_display: String,
         hyprland_instance: String,
         compositor_peer: (u32, u64),
-        until: Instant,
+        until: Option<Instant>,
     ) -> Result<Self> {
         // These bounded names come from the trusted association lease, not a
         // request/environment lookup. Shape checks do not authenticate a seat.
@@ -145,9 +145,9 @@ impl ScopeCommand {
 async fn selected_xwayland_display(
     directory: &Path,
     compositor_peer: (u32, u64),
-    until: Instant,
+    until: Option<Instant>,
 ) -> Option<String> {
-    let end = until.min(Instant::now() + Duration::from_secs(1));
+    let end = until;
     let (pid, birth) = compositor_peer;
     let identity = ProcessIdentity::observe(pid).ok()?;
     if !matches!(&identity, ProcessIdentity::Linux { start_ticks, .. } if *start_ticks == birth) {
@@ -157,7 +157,11 @@ async fn selected_xwayland_display(
     let uid = nix::unistd::Uid::current().as_raw();
     let mut selected = None;
     let mut count = 0;
-    while let Some(entry) = timeout_at(end, entries.next_entry()).await.ok()?.ok()? {
+    while let Some(entry) = crate::providers::cua::within(end, entries.next_entry())
+        .await
+        .ok()?
+        .ok()?
+    {
         count += 1;
         if count > 64 {
             return None;
@@ -183,7 +187,8 @@ async fn selected_xwayland_display(
         if !before.file_type().is_socket() || before.uid() != uid {
             continue;
         }
-        let Ok(Ok(socket)) = timeout_at(end, UnixStream::connect(&path)).await else {
+        let Ok(Ok(socket)) = crate::providers::cua::within(end, UnixStream::connect(&path)).await
+        else {
             continue;
         };
         if !same_compositor_peer(&socket, &identity, uid) {
@@ -203,7 +208,7 @@ async fn selected_xwayland_display(
             return None;
         }
     }
-    if Instant::now() >= end || !identity.still_current().ok()? {
+    if end.is_some_and(|end| Instant::now() >= end) || !identity.still_current().ok()? {
         return None;
     }
     selected
@@ -390,7 +395,7 @@ impl LinuxOwnedScope {
             },
         ))
     }
-    pub(crate) async fn attest_started(&mut self, end: Instant) -> Result<()> {
+    pub(crate) async fn attest_started(&mut self, end: Option<Instant>) -> Result<()> {
         if let Some(stamp) = &self.stamp {
             self.check_manager(end).await?;
             stamp.cgroup.attest_resource_limits()?;
@@ -401,12 +406,13 @@ impl LinuxOwnedScope {
             let properties = self.properties(end).await?;
             // The wrapper may not yet have sent StartTransientUnit when spawn
             // returns. Only observe the same owned unit until the original
-            // deadline; never resend its start or infer cleanup from absence.
+            // caller deadline, if supplied; never resend its start or infer cleanup from absence.
             if properties.load == "not-found" {
-                if Instant::now() >= end {
+                if end.is_some_and(|end| Instant::now() >= end) {
                     return Err(ScopeError::Unknown);
                 }
-                tokio::time::sleep_until(end.min(Instant::now() + Duration::from_millis(10))).await;
+                let next = Instant::now() + Duration::from_millis(10);
+                tokio::time::sleep_until(end.map_or(next, |end| end.min(next))).await;
                 continue;
             }
             // A loaded but failed/dead service is not an uncreated unit.
@@ -470,7 +476,7 @@ impl LinuxOwnedScope {
                     return Ok(());
                 }
             }
-            if Instant::now() >= end {
+            if end.is_some_and(|end| Instant::now() >= end) {
                 return Err(ScopeError::Unknown);
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -498,8 +504,8 @@ impl LinuxOwnedScope {
                 exit_success: self.wrapper_exit.map(|status| status.success()),
             });
         };
-        self.check_manager(end).await?;
-        let properties = self.properties(end).await?;
+        self.check_manager(Some(end)).await?;
+        let properties = self.properties(Some(end)).await?;
         if properties.load != "not-found" {
             if properties.invocation != stamp.invocation
                 || (!properties.control_group.is_empty()
@@ -526,7 +532,7 @@ impl LinuxOwnedScope {
                     self.unit.clone().into(),
                     "replace".into(),
                 ];
-                let stopped = tool("/usr/bin/busctl", args, &self.runtime, end).await;
+                let stopped = tool("/usr/bin/busctl", args, &self.runtime, Some(end)).await;
                 if !matches!(stopped, Ok(output) if output.status.success()) {
                     // A captured cgroup.kill file can only address the original
                     // kernel cgroup. Never reopen a path or kill a guessed PID.
@@ -537,7 +543,7 @@ impl LinuxOwnedScope {
             }
         }
         loop {
-            let properties = self.properties(end).await?;
+            let properties = self.properties(Some(end)).await?;
             let stamp = self.stamp.as_ref().ok_or(ScopeError::CleanupUnconfirmed)?;
             let gone = properties.load == "not-found";
             if !gone && properties.invocation != stamp.invocation {
@@ -545,7 +551,7 @@ impl LinuxOwnedScope {
             }
             let quiescent = gone || (inactive(&properties.active) && properties.main_pid == 0);
             if quiescent && stamp.cgroup.empty()? {
-                self.check_manager(end).await?;
+                self.check_manager(Some(end)).await?;
                 if let Ok(Ok(status)) = timeout_at(end, child.wait()).await {
                     self.wrapper_exit = Some(status);
                 }
@@ -596,7 +602,7 @@ impl LinuxOwnedScope {
         }
         Ok(())
     }
-    async fn check_manager(&self, end: Instant) -> Result<()> {
+    async fn check_manager(&self, end: Option<Instant>) -> Result<()> {
         let stamp = self.stamp.as_ref().ok_or(ScopeError::CleanupUnconfirmed)?;
         if stamp.manager.same(&self.manager(end).await?) {
             Ok(())
@@ -604,7 +610,7 @@ impl LinuxOwnedScope {
             Err(ScopeError::CleanupUnconfirmed)
         }
     }
-    async fn manager(&self, end: Instant) -> Result<Manager> {
+    async fn manager(&self, end: Option<Instant>) -> Result<Manager> {
         let dir = std::fs::symlink_metadata(&self.runtime).map_err(|_| ScopeError::Unsupported)?;
         if !dir.is_dir() || dir.uid() != self.uid || dir.mode() & 0o077 != 0 {
             return Err(ScopeError::Unsupported);
@@ -615,7 +621,7 @@ impl LinuxOwnedScope {
         if !before.file_type().is_socket() || before.uid() != self.uid {
             return Err(ScopeError::Unsupported);
         }
-        let stream = timeout_at(end, UnixStream::connect(&bus_path))
+        let stream = crate::providers::cua::within(end, UnixStream::connect(&bus_path))
             .await
             .map_err(|_| ScopeError::Unknown)?
             .map_err(|_| ScopeError::Unsupported)?;
@@ -675,7 +681,7 @@ impl LinuxOwnedScope {
         method: &str,
         signature: &str,
         value: &str,
-        end: Instant,
+        end: Option<Instant>,
     ) -> Result<String> {
         let args = [
             "--user",
@@ -698,7 +704,7 @@ impl LinuxOwnedScope {
             .map(|s| s.trim().to_owned())
             .map_err(|_| ScopeError::Unsupported)
     }
-    async fn properties(&self, end: Instant) -> Result<Properties> {
+    async fn properties(&self, end: Option<Instant>) -> Result<Properties> {
         let args = vec![
             "--user".into(),
             "show".into(),
@@ -975,9 +981,9 @@ async fn tool(
     binary: &'static str,
     args: Vec<OsString>,
     runtime: &Path,
-    end: Instant,
+    end: Option<Instant>,
 ) -> Result<ToolOutput> {
-    if Instant::now() >= end {
+    if end.is_some_and(|end| Instant::now() >= end) {
         return Err(ScopeError::CleanupUnconfirmed);
     }
     let mut command = Command::new(binary);
@@ -999,10 +1005,9 @@ async fn tool(
         let mut stderr = stderr;
         let mut out = vec![0u8; STDOUT_BYTES + 1];
         let mut err = vec![0u8; STDERR_BYTES + 1];
-        let until = end.min(Instant::now() + Duration::from_secs(2));
         let result = tokio::select! {
             _=stop.cancelled()=>Err(ScopeError::CleanupUnconfirmed),
-            result=timeout_at(until,async {
+            result=crate::providers::cua::within(end,async {
                 let (a,b,status)=tokio::join!(read_optional(&mut stdout,&mut out),read_optional(&mut stderr,&mut err),child.wait());
                 let used=a?;b?;let status=status.map_err(|_|ScopeError::Unknown)?;out.truncate(used);Ok(ToolOutput {status,stdout:out})
             })=>result.unwrap_or(Err(ScopeError::CleanupUnconfirmed)),
@@ -1140,7 +1145,11 @@ mod tests {
         let peer = process_peer(std::process::id());
         let end = || Instant::now() + Duration::from_secs(2);
         assert_eq!(
-            selected_xwayland_display(&directory.0, peer, end()).await,
+            selected_xwayland_display(&directory.0, peer, None).await,
+            None
+        );
+        assert_eq!(
+            selected_xwayland_display(&directory.0, peer, Some(end())).await,
             None
         );
         // socketpair provides real kernel credentials without binding a socket
@@ -1176,17 +1185,17 @@ mod tests {
             }
         }
         assert_eq!(
-            selected_xwayland_display(&directory.0, (peer.0, peer.1 + 1), end()).await,
+            selected_xwayland_display(&directory.0, (peer.0, peer.1 + 1), Some(end())).await,
             None
         );
         assert_eq!(
-            selected_xwayland_display(&directory.0, peer, Instant::now()).await,
+            selected_xwayland_display(&directory.0, peer, Some(Instant::now())).await,
             None
         );
         std::fs::write(directory.0.join("X0"), b"not a socket").unwrap();
         std::os::unix::fs::symlink(directory.0.join("X0"), directory.0.join("X1")).unwrap();
         assert_eq!(
-            selected_xwayland_display(&directory.0, peer, end()).await,
+            selected_xwayland_display(&directory.0, peer, Some(end())).await,
             None
         );
     }

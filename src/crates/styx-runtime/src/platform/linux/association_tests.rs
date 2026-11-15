@@ -365,3 +365,39 @@ fn monitor_read_accepts_explicit_unassigned_special_workspace_without_inventing_
         .is_err()
     );
 }
+
+#[test]
+fn complete_window_lists_use_byte_budget_not_object_count() {
+    let monitors: Vec<_> = (0..96)
+        .map(|id| {
+            serde_json::json!({
+                "id": id, "name": format!("monitor-{id}"), "width": 1920,
+                "height": 1080, "scale": 1.0, "activeWorkspace": {"id": 1},
+                "specialWorkspace": {"id": 0}
+            })
+        })
+        .collect();
+    let clients: Vec<_> = (1..=600)
+        .map(|id| {
+            serde_json::json!({
+                "address": format!("0x{id:x}"), "pid": 42, "mapped": true,
+                "hidden": false, "at": [0,0], "size": [100,100], "workspace": {"id": 1}
+            })
+        })
+        .collect();
+    assert_eq!(
+        decode_window_reply(
+            WindowQuery::Monitors,
+            &serde_json::to_vec(&monitors).unwrap()
+        )
+        .unwrap()
+        .object_count,
+        96
+    );
+    assert_eq!(
+        decode_window_reply(WindowQuery::Clients, &serde_json::to_vec(&clients).unwrap())
+            .unwrap()
+            .object_count,
+        600
+    );
+}

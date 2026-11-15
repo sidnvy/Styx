@@ -47,7 +47,7 @@ fn context(host: &HostCoordinator, revision: u64) -> PreparedContext {
         session: None,
         observation: None,
         capability: CapabilityId::ExecRun,
-        deadline: MonotonicMillis(host.now().0 + 10000),
+        deadline: Some(MonotonicMillis(host.now().0 + 10000)),
         disconnect_policy: DisconnectPolicy::RetainForOwner,
     }
 }
@@ -147,7 +147,7 @@ async fn real_owned_start_read_and_dropped_response_scenario() {
         .unwrap();
     let nonce = uuid::Uuid::new_v4().to_string();
     let mut short = context(&host, 1);
-    short.deadline = MonotonicMillis(host.now().0 + 1000);
+    short.deadline = Some(MonotonicMillis(host.now().0 + 1000));
     let first = host
         .prepare_start(&owner, short, &spec(&root, "normal.txt", &nonce))
         .unwrap();
@@ -491,7 +491,7 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
         let mut process = spec(&root, "unused", "unused");
         process.argv=vec!["/bin/sh".into(),"-c".into(),"read -r line; printf '%s\\n' \"$line\" >> host-action-effect; printf FIRST_ACK; read -r hold".into()];
         let mut short = context(&host, 1);
-        short.deadline = MonotonicMillis(host.now().0 + 500);
+        short.deadline = Some(MonotonicMillis(host.now().0 + 500));
         let start_deadline = short.deadline;
         let resource = host.prepare_start(&owner, short, &process).unwrap();
         assert_eq!(
@@ -510,12 +510,13 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
         ));
         tokio::time::sleep(Duration::from_millis(
             start_deadline
+                .unwrap()
                 .0
                 .saturating_add(5)
                 .saturating_sub(host.now().0),
         ))
         .await;
-        assert!(host.now() >= start_deadline);
+        assert!(host.now() >= start_deadline.unwrap());
         let nonce = uuid::Uuid::new_v4().to_string();
         let input = ProcessAction::WriteStdin {
             input_base64: STANDARD.encode(format!("{nonce}\n")),
@@ -729,7 +730,7 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
         let mut expired = context(&host, 1);
         // Long enough that preparation itself never races the deadline on a
         // loaded machine; dispatch happens well after it.
-        expired.deadline = MonotonicMillis(host.now().0 + 50);
+        expired.deadline = Some(MonotonicMillis(host.now().0 + 50));
         let expired = host
             .prepare_action(&owner, resource_target(&resource), expired, &no_send)
             .unwrap();
@@ -1374,8 +1375,14 @@ async fn collection_contention_waits_without_a_capacity_refusal() {
         facts(),
     )
     .unwrap();
-    let first = host.execution_before(MonotonicMillis(2000)).await.unwrap();
-    let second = host.execution_before(MonotonicMillis(2000)).await.unwrap();
+    let first = host
+        .execution_before(Some(MonotonicMillis(2000)))
+        .await
+        .unwrap();
+    let second = host
+        .execution_before(Some(MonotonicMillis(2000)))
+        .await
+        .unwrap();
     let gate = host.inner.execution_gate.clone();
     let collector = tokio::spawn(async move { gate.write_owned().await });
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -1385,7 +1392,7 @@ async fn collection_contention_waits_without_a_capacity_refusal() {
     })
     .await
     .unwrap();
-    let mut next = Box::pin(host.execution_before(MonotonicMillis(2000)));
+    let mut next = Box::pin(host.execution_before(Some(MonotonicMillis(2000))));
     assert!(
         tokio::time::timeout(Duration::from_millis(20), &mut next)
             .await
@@ -1400,7 +1407,7 @@ async fn collection_contention_waits_without_a_capacity_refusal() {
             .is_err()
     );
     assert!(matches!(
-        host.execution_before(MonotonicMillis(host.now().0 + 10))
+        host.execution_before(Some(MonotonicMillis(host.now().0 + 10)))
             .await,
         Err(CoordinatorError::Admission(ErrorCategory::OperationTimeout))
     ));

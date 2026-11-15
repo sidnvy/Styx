@@ -33,7 +33,7 @@ fn authority() -> (
         session: Some(session("generation-a")),
         observation: None,
         capability: CapabilityId::DesktopWindowsRead,
-        deadline: MonotonicMillis(1000),
+        deadline: Some(MonotonicMillis(1000)),
         disconnect_policy: DisconnectPolicy::RetainForOwner,
     };
     let facts = AdmissionFacts {
@@ -329,4 +329,23 @@ async fn exact_core_target_owner_and_session_are_required_without_exclusive_io_c
     drop(first);
     drop(second);
     assert!(worker.try_reserve_open().is_ok());
+}
+
+#[tokio::test]
+async fn caller_deadline_is_optional_and_never_replaced_by_provider_budget() {
+    let wait = within(None, std::future::pending::<()>());
+    tokio::pin!(wait);
+    assert!(futures_util::poll!(&mut wait).is_pending());
+    let until = Instant::now();
+    assert!(
+        within(Some(until), std::future::pending::<()>())
+            .await
+            .is_err()
+    );
+    let stop = CancellationToken::new();
+    stop.cancel();
+    tokio::select! {
+        _ = stop.cancelled() => {},
+        _ = within(None, std::future::pending::<()>()) => panic!("unbounded wait completed"),
+    }
 }

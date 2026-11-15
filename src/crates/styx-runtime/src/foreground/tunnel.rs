@@ -1022,12 +1022,19 @@ mod tests {
                 .lines()
                 .filter_map(|line| serde_json::from_str(line).ok())
                 .collect();
+            // A child that exits before the first health poll need not emit
+            // unavailable. Exit must still be reported on the correct stream.
             assert_eq!(
-                actual,
-                vec![
-                    serde_json::json!({"schema":1,"event":"tunnel_unavailable","exit_code":null}),
-                    serde_json::json!({"schema":1,"event":"tunnel_exited","exit_code":7}),
-                ]
+                actual.last(),
+                Some(&serde_json::json!({"schema":1,"event":"tunnel_exited","exit_code":7}))
+            );
+            assert!(
+                actual.len() == 1
+                    || actual
+                        == vec![
+                            serde_json::json!({"schema":1,"event":"tunnel_unavailable","exit_code":null}),
+                            serde_json::json!({"schema":1,"event":"tunnel_exited","exit_code":7}),
+                        ]
             );
         }
     }

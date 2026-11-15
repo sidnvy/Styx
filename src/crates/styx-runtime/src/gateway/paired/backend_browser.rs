@@ -59,16 +59,8 @@ impl PairedGatewayBackend {
         }
         let binding = match self.relay.bind_browser(owner, &device).await {
             Ok(b) => b,
-            Err(e) => {
-                return failure(
-                    e.code(),
-                    None,
-                    !matches!(
-                        e,
-                        super::super::RelayError::Busy | super::super::RelayError::NotSent
-                    ),
-                );
-            }
+            // Binding has not dispatched this browser command.
+            Err(e) => return failure(e.code(), None, false),
         };
         match self
             .relay

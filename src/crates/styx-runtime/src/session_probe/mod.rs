@@ -377,7 +377,6 @@ fn validate(
 ) -> Result<LinuxDiscoverySnapshot, ProbeError> {
     if snapshot.schema != 1
         || !snapshot.connection_closed
-        || snapshot.candidates.len() > 32
         || !field(&snapshot.login_unique_owner)
         || zbus::names::UniqueName::try_from(snapshot.login_unique_owner.as_str()).is_err()
     {

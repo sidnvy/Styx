@@ -500,6 +500,17 @@ impl RelayHandle {
         gate: Option<Arc<Mutex<bool>>>,
     ) -> Result<Reply, RelayError> {
         let response_budget = call.response_budget();
+        if response_budget.is_none() {
+            let (tx, rx) = oneshot::channel();
+            let reservation = queue.reserve().await.map_err(|_| RelayError::Offline)?;
+            reservation.send(Command {
+                call,
+                result: tx,
+                gate,
+            });
+            return rx.await.unwrap_or(Err(RelayError::Unknown));
+        }
+        let response_budget = response_budget.expect("bounded non-computer call");
         let (tx, rx) = oneshot::channel();
         let until = tokio::time::Instant::now() + response_budget;
         let command = Command {

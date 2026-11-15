@@ -16,7 +16,7 @@ fn context(capability: CapabilityId) -> PreparedContext {
         observation: (capability != CapabilityId::DesktopWindowsRead)
             .then(|| "observation".try_into().unwrap()),
         capability,
-        deadline: MonotonicMillis(1000),
+        deadline: Some(MonotonicMillis(1000)),
         disconnect_policy: DisconnectPolicy::RetainForOwner,
     }
 }

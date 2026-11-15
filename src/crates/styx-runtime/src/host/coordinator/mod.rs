@@ -427,13 +427,16 @@ impl HostCoordinator {
     // deadline. Another owner's collection is not a capacity refusal.
     async fn execution_before(
         &self,
-        deadline: MonotonicMillis,
+        deadline: Option<MonotonicMillis>,
     ) -> Result<OwnedRwLockReadGuard<()>, CoordinatorError> {
         if let Ok(guard) = self.inner.execution_gate.clone().try_read_owned() {
             return Ok(guard);
         }
-        let remaining = Duration::from_millis(deadline.0.saturating_sub(self.now().0));
-        tokio::time::timeout(remaining, self.inner.execution_gate.clone().read_owned())
+        let until = deadline.map(|deadline| {
+            tokio::time::Instant::now()
+                + Duration::from_millis(deadline.0.saturating_sub(self.now().0))
+        });
+        crate::providers::cua::within(until, self.inner.execution_gate.clone().read_owned())
             .await
             .map_err(|_| ErrorCategory::OperationTimeout.into())
     }
@@ -782,7 +785,13 @@ impl HostCoordinator {
             }
         }
 
-        let budget = Duration::from_millis(context.deadline.0.saturating_sub(now.0));
+        let budget = Duration::from_millis(
+            context
+                .deadline
+                .ok_or(ErrorCategory::InvalidRequest)?
+                .0
+                .saturating_sub(now.0),
+        );
         let output = tokio::time::timeout(budget, async {
             let handle = adapter.lookup_operation(owner, id).await?;
             if handle.operation() != id {

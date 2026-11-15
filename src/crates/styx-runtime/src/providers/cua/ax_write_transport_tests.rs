@@ -133,7 +133,7 @@ async fn standard_set_value_runs_gate_before_one_strict_call_and_never_replays()
             &mut uncertain,
             client.peer(),
             request,
-            Instant::now() + budget,
+            Some(Instant::now() + budget),
             gate,
             None,
         )
@@ -254,7 +254,7 @@ async fn strict_write_expired_or_cancelled_before_gate_sends_no_request() {
             &mut uncertain,
             client.peer(),
             request,
-            until,
+            Some(until),
             gate,
             None,
         )

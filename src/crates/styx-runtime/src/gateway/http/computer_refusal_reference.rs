@@ -60,7 +60,6 @@ impl Factory {
                 },
                 workspace: root.to_path_buf(),
                 home: root.to_path_buf(),
-                rpc_timeout: Duration::from_secs(2),
             },
             mode: AtomicU8::new(0),
             preparations: AtomicUsize::new(0),

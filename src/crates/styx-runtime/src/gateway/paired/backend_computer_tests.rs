@@ -108,3 +108,31 @@ fn inspecting_unknown_action_preserves_identity_and_original_outcome() {
     snapshot.operation_id.sequence += 1;
     assert!(!same_action(&snapshot, &action, &target));
 }
+
+#[test]
+fn computer_wire_preserves_explicit_timeout_and_has_no_default_response_budget() {
+    let call = Call::Computer {
+        owner: crate::host::protocol::wire::OwnerRef {
+            owner_id: "computer-owner".try_into().unwrap(),
+            owner_epoch: "computer-epoch".try_into().unwrap(),
+        },
+        grant_revision: 1,
+        timeout_ms: Some(90_000),
+        command: ComputerCommand::PrepareOpen,
+    };
+    let mut value = serde_json::to_value(&call).unwrap();
+    assert_eq!(value["computer"]["timeout_ms"], 90_000);
+    assert!(call.response_budget().is_none());
+    value["computer"]
+        .as_object_mut()
+        .unwrap()
+        .remove("timeout_ms");
+    let decoded: Call = serde_json::from_value(value).unwrap();
+    assert!(matches!(
+        decoded,
+        Call::Computer {
+            timeout_ms: None,
+            ..
+        }
+    ));
+}

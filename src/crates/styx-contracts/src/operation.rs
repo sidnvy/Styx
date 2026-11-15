@@ -68,7 +68,10 @@ pub struct PreparedContext {
     pub session: Option<SessionBinding>,
     pub observation: Option<ObservationId>,
     pub capability: CapabilityId,
-    pub deadline: MonotonicMillis,
+    /// Computer Use may defer timeout ownership to its native executor.
+    /// Exec and Browser retain their existing explicit deadline requirement.
+    #[serde(default)]
+    pub deadline: Option<MonotonicMillis>,
     pub disconnect_policy: DisconnectPolicy,
 }
 

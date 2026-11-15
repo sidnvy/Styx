@@ -34,9 +34,6 @@ fn current_interfaces() -> Result<Vec<Interface>, AppError> {
         .collect::<Vec<_>>();
     let mut seen = std::collections::BTreeSet::new();
     result.retain(|interface| seen.insert(interface.address));
-    if result.len() > 64 {
-        return Err(AppError("app_network_interfaces_unavailable"));
-    }
     // UDP connect asks the kernel for its current route/source selection. No
     // bytes are sent, DNS is not used, and the socket is immediately dropped.
     // An absent default route still permits a purely local/VPN network.

@@ -1090,15 +1090,13 @@ fn load_source_inner(
                 return Err(ProfileError::UnsupportedExecutorEnvironment);
             }
         }
-        if exec.env.len() > 64
-            || exec.env.iter().any(|(k, v)| {
-                k.is_empty()
-                    || k.len() > 128
-                    || k.contains(['=', '\0'])
-                    || v.len() > 16384
-                    || v.contains('\0')
-            })
-        {
+        if exec.env.iter().any(|(k, v)| {
+            k.is_empty()
+                || k.len() > 128
+                || k.contains(['=', '\0'])
+                || v.len() > 16384
+                || v.contains('\0')
+        }) {
             return Err(ProfileError::Invalid);
         }
     }

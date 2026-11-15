@@ -132,7 +132,11 @@ pub(super) fn query_allowed(name: &str, args: Option<&Map<String, Value>>) -> bo
         && args
             .is_some_and(|args| args.len() == 1 && args.get("prompt") == Some(&Value::Bool(false)))
 }
-pub(super) async fn query(live: &mut Live, stop: &CancellationToken, until: Instant) -> Result<()> {
+pub(super) async fn query(
+    live: &mut Live,
+    stop: &CancellationToken,
+    until: Option<Instant>,
+) -> Result<()> {
     live.permissions = None;
     if !live.permissions_available {
         return Ok(());
@@ -146,7 +150,7 @@ pub(super) async fn query(live: &mut Live, stop: &CancellationToken, until: Inst
     );
     let result = tokio::select! {
         _ = stop.cancelled() => return Err(CuaError::Unknown),
-        result = timeout_at(until, peer.call_tool_once(params)) => result,
+        result = within(until, peer.call_tool_once(params)) => result,
     };
     match result {
         Ok(Ok(CallToolResponse::Complete(reply))) => {
@@ -175,8 +179,7 @@ impl CuaHandle {
         if live.retired || live.uncertain || self.resource.stop.is_cancelled() {
             return Ok(None);
         }
-        let until = Instant::now() + live.config.rpc_timeout;
-        query(&mut live, &self.resource.stop, until).await?;
+        query(&mut live, &self.resource.stop, None).await?;
         Ok(live.permissions.clone())
     }
 }
@@ -207,7 +210,7 @@ mod tests {
                         .clone(),
                 ),
                 &CancellationToken::new(),
-                Instant::now() + Duration::from_secs(2),
+                Some(Instant::now() + Duration::from_secs(2)),
             )
             .await;
             let mut parsed = DriverPermissions::parse(Platform::Linux, &reply.unwrap()).unwrap();

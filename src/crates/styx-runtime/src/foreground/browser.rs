@@ -4,8 +4,6 @@
 //! All methods perform synchronous protected I/O: call only on bounded blocking
 //! workers. This directory binding is not an owner/admission/operation ledger.
 use super::profile::LoadedLegacyProfile;
-#[cfg(target_os = "windows")]
-use crate::store::WindowsLocalExecutable as LocalExecutable;
 use crate::{
     host::protocol::browser::BrowserBootstrap,
     providers::browser::{
@@ -15,26 +13,17 @@ use crate::{
     store::{PinnedExecutable, PrivateRoot},
 };
 use serde::Deserialize;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::{
-    fs::{File, OpenOptions},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
-};
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
 use styx_contracts::error::ErrorCategory;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use styx_contracts::identity::Sha256Digest;
 use styx_core::operations::OwnerLease;
 #[cfg(target_os = "windows")]
 #[path = "browser_windows.rs"]
 mod windows;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-const MAX_BROWSER_BYTES: u64 = 512 * 1024 * 1024;
 type Result<T> = std::result::Result<T, ErrorCategory>;
 
 #[derive(Deserialize)]
@@ -62,7 +51,7 @@ struct LocalBrowser {
     profile: Arc<LoadedLegacyProfile>,
     node: Arc<PinnedExecutable>,
     node_path: PathBuf,
-    browser: LocalExecutable,
+    browser: PathBuf,
     runtime: PrivateDirectory,
     assets: PreparedBrowserAssets,
     #[cfg(target_os = "linux")]
@@ -70,134 +59,6 @@ struct LocalBrowser {
     owners: Mutex<Vec<OwnerProfile>>,
 }
 
-/// Executable explicitly selected by protected local configuration. This pin
-/// establishes exact local bytes/identity, NOT a publisher signature for Chrome.
-/// The caller's ordinary same-UID administrative trust boundary is unchanged.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-struct LocalExecutable {
-    path: PathBuf,
-    file: File,
-    device: u64,
-    inode: u64,
-    uid: u32,
-    mode: u32,
-    bytes: u64,
-    // mtime and (Linux) ctime: any write or attribute change after the pin moves ctime.
-    times: (i64, i64, i64, i64),
-    digest: Sha256Digest,
-}
-#[cfg(target_os = "linux")]
-fn times(m: &std::fs::Metadata) -> (i64, i64, i64, i64) {
-    (m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec())
-}
-// macOS Chrome hard-links its own bundle into a per-launch code_sign_clone
-// directory and unlinks it on exit, so the executable's link count and ctime
-// change with every Chrome start, including the one Styx launches. The same
-// inode, owner, mode, size and mtime still bind the bytes hashed at pin time;
-// rewriting them and restoring mtime needs the bundle owner, who could equally
-// replace the bundle outright.
-#[cfg(target_os = "macos")]
-fn times(m: &std::fs::Metadata) -> (i64, i64, i64, i64) {
-    (m.mtime(), m.mtime_nsec(), 0, 0)
-}
-#[cfg(target_os = "linux")]
-fn single_link(m: &std::fs::Metadata) -> bool {
-    m.nlink() == 1
-}
-#[cfg(target_os = "macos")]
-fn single_link(_: &std::fs::Metadata) -> bool {
-    true
-}
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-impl LocalExecutable {
-    fn open(path: &Path) -> Result<Self> {
-        canonical(path)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)
-            .map_err(|_| ErrorCategory::PermissionDenied)?;
-        let m = file
-            .metadata()
-            .map_err(|_| ErrorCategory::IntegrityFailure)?;
-        let uid = nix::unistd::Uid::current().as_raw();
-        if !m.is_file()
-            || !single_link(&m)
-            || ![0, uid].contains(&m.uid())
-            || m.mode() & 0o111 == 0
-            || m.len() == 0
-            || m.len() > MAX_BROWSER_BYTES
-        {
-            return Err(ErrorCategory::PermissionDenied);
-        }
-        let mut pinned = Self {
-            path: path.into(),
-            digest: Sha256Digest::of_bytes(&[]),
-            device: m.dev(),
-            inode: m.ino(),
-            uid: m.uid(),
-            mode: m.mode(),
-            bytes: m.len(),
-            times: times(&m),
-            file,
-        };
-        pinned.digest = hash_file(&pinned.file, pinned.bytes)?;
-        pinned.revalidate()?;
-        Ok(pinned)
-    }
-    fn path(&self) -> &Path {
-        &self.path
-    }
-    /// The bytes were hashed once when pinned. Re-hashing a 300 MB browser on
-    /// every revalidation cost about 0.3 s per pass; an unchanged inode with
-    /// unchanged size, mtime and ctime cannot hold different bytes without a
-    /// clock-level ctime forgery, which needs privileges beyond this boundary.
-    fn revalidate(&self) -> Result<()> {
-        canonical(&self.path)?;
-        let current = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&self.path)
-            .map_err(|_| ErrorCategory::IntegrityFailure)?;
-        for f in [&current, &self.file] {
-            let m = f.metadata().map_err(|_| ErrorCategory::IntegrityFailure)?;
-            if !m.is_file()
-                || !single_link(&m)
-                || (m.dev(), m.ino(), m.uid(), m.mode(), m.len())
-                    != (self.device, self.inode, self.uid, self.mode, self.bytes)
-                || times(&m) != self.times
-            {
-                return Err(ErrorCategory::IntegrityFailure);
-            }
-        }
-        Ok(())
-    }
-}
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn hash_file(file: &File, expected: u64) -> Result<Sha256Digest> {
-    use sha2::{Digest, Sha256};
-    use std::os::unix::fs::FileExt;
-    let mut hasher = Sha256::new();
-    let mut offset = 0;
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let n = file
-            .read_at(&mut buffer, offset)
-            .map_err(|_| ErrorCategory::IntegrityFailure)?;
-        if n == 0 {
-            break;
-        }
-        offset += n as u64;
-        if offset > expected {
-            return Err(ErrorCategory::IntegrityFailure);
-        }
-        hasher.update(&buffer[..n]);
-    }
-    if offset != expected {
-        return Err(ErrorCategory::IntegrityFailure);
-    }
-    Ok(Sha256Digest::from_bytes(hasher.finalize().into()))
-}
 fn canonical(path: &Path) -> Result<()> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
@@ -212,6 +73,20 @@ fn canonical(path: &Path) -> Result<()> {
     assets::canonical_path(path).map_err(map_error)?;
     Ok(())
 }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn resolve_browser(path: &Path) -> Result<PathBuf> {
+    std::fs::canonicalize(path).map_err(|_| ErrorCategory::PermissionDenied)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn first_browser(paths: &[&str]) -> Result<PathBuf> {
+    paths
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+        .ok_or(ErrorCategory::CapabilityUnsupported)
+}
+
 fn selected(profile: &LoadedLegacyProfile) -> Result<Option<PathBuf>> {
     let source = profile.browser_source();
     let (deployment, host) = (source.deployment, source.host);
@@ -248,8 +123,6 @@ fn selected(profile: &LoadedLegacyProfile) -> Result<Option<PathBuf>> {
         let path = match d.executable {
             Some(path) => path,
             None => {
-                // The real binaries, not the /usr/bin wrapper scripts or links:
-                // the pinned executable must be its own canonical path.
                 let paths: &[&str] = match d.channel.as_deref().unwrap_or("auto") {
                     "chrome" => &["/opt/google/chrome/chrome"],
                     "msedge" => &["/opt/microsoft/msedge/msedge"],
@@ -260,15 +133,10 @@ fn selected(profile: &LoadedLegacyProfile) -> Result<Option<PathBuf>> {
                     ],
                     _ => return Err(ErrorCategory::CapabilityUnsupported),
                 };
-                paths
-                    .iter()
-                    .map(PathBuf::from)
-                    .find(|path| path.is_file())
-                    .ok_or(ErrorCategory::CapabilityUnsupported)?
+                first_browser(paths)?
             }
         };
-        canonical(&path)?;
-        Ok(Some(path))
+        Ok(Some(resolve_browser(&path)?))
     }
     #[cfg(target_os = "windows")]
     {
@@ -291,18 +159,10 @@ fn selected(profile: &LoadedLegacyProfile) -> Result<Option<PathBuf>> {
                     ],
                     _ => return Err(ErrorCategory::CapabilityUnsupported),
                 };
-                let existing: Vec<_> = paths
-                    .iter()
-                    .filter(|path| Path::new(path).exists())
-                    .collect();
-                if existing.len() != 1 {
-                    return Err(ErrorCategory::CapabilityUnsupported);
-                }
-                PathBuf::from(*existing[0])
+                first_browser(paths)?
             }
         };
-        canonical(&path)?;
-        Ok(Some(path))
+        Ok(Some(resolve_browser(&path)?))
     }
 }
 
@@ -359,24 +219,7 @@ pub(crate) fn prepare_browser_bootstrap(
     #[cfg(target_os = "windows")]
     let node_path = release.join("bin/node.exe");
     canonical(&node_path).map_err(|e| at("node_path", e))?;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let browser = LocalExecutable::open(&browser_path).map_err(|e| at("browser_pin", e))?;
-    #[cfg(target_os = "windows")]
-    let browser = LocalExecutable::open(&browser_path).map_err(|error| {
-        use crate::store::StoreError;
-        let category = match error {
-            StoreError::NotPrivate => ErrorCategory::PermissionDenied,
-            StoreError::Unsupported => ErrorCategory::CapabilityUnsupported,
-            StoreError::Io(error) => match error.kind() {
-                std::io::ErrorKind::NotFound => ErrorCategory::TargetNotFound,
-                std::io::ErrorKind::PermissionDenied => ErrorCategory::PermissionDenied,
-                _ if matches!(error.raw_os_error(), Some(32 | 33)) => ErrorCategory::Busy,
-                _ => ErrorCategory::IntegrityFailure,
-            },
-            _ => ErrorCategory::IntegrityFailure,
-        };
-        at("browser_pin", category)
-    })?;
+    let browser = browser_path;
     let runtime = assets::fresh_private_directory(profile.host_base_dir())
         .map_err(|e| at("private_runtime", map_error(e)))?;
     let staged = assets::prepare(
@@ -409,12 +252,6 @@ impl LocalBrowser {
         }
         .map_err(|_| ErrorCategory::IntegrityFailure)?;
         self.node
-            .revalidate()
-            .map_err(|_| ErrorCategory::IntegrityFailure)?;
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        self.browser.revalidate()?;
-        #[cfg(target_os = "windows")]
-        self.browser
             .revalidate()
             .map_err(|_| ErrorCategory::IntegrityFailure)?;
         self.runtime.revalidate().map_err(map_error)?;
@@ -465,7 +302,7 @@ impl BrowserBootstrap for LocalBrowser {
         let config = OwnedBrowserConfig {
             node_binary: self.node_path.clone(),
             worker_entry: self.assets.entry_path().into(),
-            browser_binary: self.browser.path().into(),
+            browser_binary: self.browser.clone(),
             #[cfg(target_os = "linux")]
             workspace_dir: self.workspace.clone(),
             #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -558,27 +395,40 @@ fn check_dependency_versions(release: &Path) -> Result<()> {
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-mod executable_tests {
+mod selection_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     #[test]
-    fn installed_browser_group_write_permission_does_not_prevent_pinning() {
+    fn installed_browser_aliases_and_multiple_candidates_follow_os_paths() {
         let directory = std::env::temp_dir()
             .canonicalize()
             .unwrap()
-            .join(format!("styx-browser-pin-{}", uuid::Uuid::new_v4()));
+            .join(format!("styx-browser-selection-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&directory).unwrap();
-        let path = directory.join("browser");
-        std::fs::write(&path, b"installed browser fixture").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o775)).unwrap();
-        let pinned = LocalExecutable::open(&path).unwrap();
-        pinned.revalidate().unwrap();
-        std::fs::rename(&path, directory.join("original")).unwrap();
-        std::fs::write(&path, b"replacement browser fixture").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o775)).unwrap();
-        assert!(pinned.revalidate().is_err());
-        drop(pinned);
+        let chrome = directory.join("chrome");
+        let edge = directory.join("edge");
+        for path in [&chrome, &edge] {
+            std::fs::write(path, b"installed browser fixture").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o775)).unwrap();
+        }
+        let alias = directory.join("chrome-alias");
+        let hard_link = directory.join("chrome-hard-link");
+        symlink(&chrome, &alias).unwrap();
+        std::fs::hard_link(&chrome, &hard_link).unwrap();
+        assert_eq!(resolve_browser(&alias).unwrap(), chrome);
+        assert_eq!(resolve_browser(&hard_link).unwrap(), hard_link);
+        assert_eq!(
+            first_browser(&[chrome.to_str().unwrap(), edge.to_str().unwrap()]).unwrap(),
+            chrome
+        );
+        std::fs::rename(&chrome, directory.join("chrome-before-update")).unwrap();
+        std::fs::write(&chrome, b"updated browser fixture").unwrap();
+        assert_eq!(resolve_browser(&alias).unwrap(), chrome);
+        assert_eq!(
+            first_browser(&[chrome.to_str().unwrap(), edge.to_str().unwrap()]).unwrap(),
+            chrome
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

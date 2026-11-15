@@ -81,12 +81,12 @@ pub(super) async fn invoke(
     peer: &rmcp::Peer<RoleClient>,
     params: CallToolRequestParams,
     stop: &CancellationToken,
-    until: Instant,
+    until: Option<Instant>,
 ) -> (CuaEvidence, Option<CallToolResult>, Option<CuaError>) {
     // One poll of one driver call. Unknown is terminal; there is no retry.
     let response = tokio::select! {
         _ = stop.cancelled() => None,
-        result = timeout_at(until, peer.call_tool_once(params)) => Some(result),
+        result = within(until, peer.call_tool_once(params)) => Some(result),
     };
     match response {
         Some(Ok(Ok(CallToolResponse::Complete(value)))) => outcome(value),

@@ -57,7 +57,9 @@ impl BrowserPort<'_> {
             session: None,
             observation: None,
             capability: CapabilityId::BrowserHeadless,
-            deadline: MonotonicMillis(self.coordinator.now().0.saturating_add(u64::from(timeout))),
+            deadline: Some(MonotonicMillis(
+                self.coordinator.now().0.saturating_add(u64::from(timeout)),
+            )),
             disconnect_policy: DisconnectPolicy::RetainForOwner,
         })
     }
@@ -194,8 +196,9 @@ impl BrowserPort<'_> {
             Err(e) => return rejection(e),
         };
         context.capability = CapabilityId::BrowserHeadless;
-        context.deadline =
-            MonotonicMillis(self.coordinator.now().0.saturating_add(u64::from(timeout)));
+        context.deadline = Some(MonotonicMillis(
+            self.coordinator.now().0.saturating_add(u64::from(timeout)),
+        ));
         match command {
             BrowserCommand::PrepareOpen => {
                 let bound = owner.clone();

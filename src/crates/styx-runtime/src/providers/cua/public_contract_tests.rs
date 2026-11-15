@@ -259,8 +259,7 @@ fn advertised_window_defaults_reach_the_exact_native_acquisition_branches() {
     assert_eq!(
         payload["arguments"],
         json!({"pid":42,"window_id":43,"include_screenshot":false,
-            "include_accessibility_tree":true,"tree_format":"elements",
-            "max_elements":250,"max_depth":25,"timeout_ms":1000})
+            "include_accessibility_tree":true,"tree_format":"elements"})
     );
 
     let screenshot = json!({"pid":42,"window_id":43,"include_accessibility_tree":false});
@@ -275,7 +274,7 @@ fn advertised_window_defaults_reach_the_exact_native_acquisition_branches() {
     assert_eq!(
         payload["arguments"],
         json!({"pid":42,"window_id":43,"include_screenshot":true,
-            "include_accessibility_tree":false,"max_image_dimension":1024,"timeout_ms":1000})
+            "include_accessibility_tree":false,"max_image_dimension":1024})
     );
     for value in [
         json!({"pid":1,"window_id":1,"include_screenshot":false,
@@ -302,10 +301,6 @@ fn old_sdk_options_and_mixed_window_modalities_are_rejected_before_operation_cre
         ("verbose", json!(false)),
         ("screenshot_out_file", json!("/tmp/unowned.png")),
         ("max_image_dimension", json!(32)),
-        ("max_elements", json!(2049)),
-        ("max_depth", json!(65)),
-        ("timeout_ms", json!(2001)),
-        ("timeout_ms", json!(99)),
         ("pid", json!(0)),
         ("pid", json!(2147483648u64)),
         ("window_id", json!(9007199254740992u64)),

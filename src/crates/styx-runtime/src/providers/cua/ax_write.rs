@@ -222,23 +222,24 @@ pub(super) async fn invoke(
     uncertain: &mut bool,
     peer: &rmcp::service::Peer<RoleClient>,
     request: AxWriteRequest,
-    until: Instant,
+    until: Option<Instant>,
     gate: AxWriteGate,
     session: Option<&str>,
 ) -> (CuaEvidence, Option<CallToolResult>, Option<CuaError>) {
     // No acquisition RPC or native cache exists here. A refused/expired Core
     // gate therefore has sent no native request at all.
-    if stop.is_cancelled() || Instant::now() >= until {
+    if stop.is_cancelled() || until.is_some_and(|until| Instant::now() >= until) {
         return (CuaEvidence::NotDispatched, None, Some(CuaError::Unknown));
     }
     let authorized = tokio::select! {
         biased;
         _ = stop.cancelled() => None,
-        _ = tokio::time::sleep_until(until) => None,
+        _ = deadline_elapsed(until) => None,
         result = gate() => Some(result),
     };
     match authorized {
-        Some(Ok(())) if !stop.is_cancelled() && Instant::now() < until => {}
+        Some(Ok(()))
+            if !stop.is_cancelled() && until.is_none_or(|until| Instant::now() < until) => {}
         Some(Err(cause)) => {
             diagnostic("late_write_gate", cause.code());
             return (CuaEvidence::NotDispatched, None, Some(cause));
@@ -263,7 +264,7 @@ pub(super) async fn invoke(
     let response = tokio::select! {
         biased;
         _ = stop.cancelled() => None,
-        _ = tokio::time::sleep_until(until) => None,
+        _ = deadline_elapsed(until) => None,
         result = peer.call_tool_once(write) => Some(result),
     };
     let result = match response {

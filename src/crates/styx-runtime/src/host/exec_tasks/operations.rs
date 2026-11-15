@@ -24,13 +24,11 @@ impl ExecPort<'_> {
             }
         };
         let mut names = BTreeSet::new();
-        if spec.environment.len() > 64
-            || spec.environment.keys().any(|key| {
-                key.is_empty()
-                    || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                    || !names.insert(fold(key))
-            })
-        {
+        if spec.environment.keys().any(|key| {
+            key.is_empty()
+                || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                || !names.insert(fold(key))
+        }) {
             return Err(ErrorCategory::InvalidRequest);
         }
         for (key, value) in self.command_environment {
@@ -74,8 +72,13 @@ impl ExecPort<'_> {
             // Release provider storage before reporting terminal success. This
             // uses the existing fair quiescence gate and Core release proofs;
             // it neither fences the still-open owner nor cancels live work.
-            let remaining =
-                Duration::from_millis(context.deadline.0.saturating_sub(self.coordinator.now().0));
+            let remaining = Duration::from_millis(
+                context
+                    .deadline
+                    .ok_or(ErrorCategory::InvalidRequest)?
+                    .0
+                    .saturating_sub(self.coordinator.now().0),
+            );
             self.authority.collect_provider_retention(remaining).await?;
             self.coordinator
                 .validate_settled_exec_delivery(owner, id, digest, context)?;
@@ -96,12 +99,12 @@ impl ExecPort<'_> {
             session: None,
             observation: None,
             capability: CapabilityId::ExecRun,
-            deadline: MonotonicMillis(
+            deadline: Some(MonotonicMillis(
                 self.coordinator
                     .now()
                     .0
                     .saturating_add(u64::from(timeout_ms)),
-            ),
+            )),
             disconnect_policy: DisconnectPolicy::RetainForOwner,
         })
     }

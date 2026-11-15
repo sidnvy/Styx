@@ -186,7 +186,6 @@ impl Validator {
                         .owner
                         .as_ref()
                         .is_some_and(|old| old != login_unique_owner)
-                    || candidates.len() > 32
                 {
                     return Err(ParentStop::InvalidFrame);
                 }
@@ -218,7 +217,7 @@ impl Validator {
                 self.invalidated.clear();
             }
             WatchChange::Invalidations { items } => {
-                if items.is_empty() || items.len() > 32 {
+                if items.is_empty() {
                     return Err(ParentStop::InvalidFrame);
                 }
                 let mut keys = BTreeSet::new();
@@ -456,5 +455,70 @@ fn send(reply: &mut Reply, mut value: WatchReport) {
     value.owned_worker_identity = reply.identity.clone();
     if let Some(tx) = reply.tx.take() {
         let _ = tx.send(value);
+    }
+}
+
+#[cfg(test)]
+mod collection_tests {
+    use super::*;
+
+    #[test]
+    fn larger_snapshots_and_invalidation_batches_keep_all_candidates() {
+        let candidates: Vec<_> = (0..96)
+            .map(|i| LinuxCandidate {
+                session_id: format!("c{i}"),
+                uid: 1000,
+                seat: Some("seat0".into()),
+                leader_pid: 1234,
+                leader_birth: 9876,
+                login_timestamp_monotonic: 4567,
+                backend: "wayland".into(),
+                active: true,
+                state: "active".into(),
+                locked_hint: false,
+                compositor_association: Association::Unknown,
+                agent_association: Association::Unknown,
+            })
+            .collect();
+        let snapshot = LinuxDiscoverySnapshot {
+            schema: 1,
+            login_unique_owner: ":1.7".into(),
+            candidates: candidates.clone(),
+            connection_closed: true,
+        };
+        assert_eq!(
+            super::super::validate(snapshot, 1000)
+                .unwrap()
+                .candidates
+                .len(),
+            96
+        );
+        let mut validator = Validator::new(1000);
+        validator
+            .event(&WatchEvent {
+                schema: 1,
+                sequence: 1,
+                change: WatchChange::Snapshot {
+                    login_unique_owner: ":1.7".into(),
+                    candidates: candidates.clone(),
+                },
+            })
+            .unwrap();
+        validator
+            .event(&WatchEvent {
+                schema: 1,
+                sequence: 2,
+                change: WatchChange::Invalidations {
+                    items: candidates
+                        .iter()
+                        .map(|candidate| Invalidation {
+                            key: candidate.into(),
+                            reason: InvalidationReason::SourceLost,
+                        })
+                        .collect(),
+                },
+            })
+            .unwrap();
+        assert_eq!(validator.invalidated.len(), 96);
     }
 }

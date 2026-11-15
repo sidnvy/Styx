@@ -6,7 +6,6 @@ use crate::{
     providers::cua::{CuaAction, public_contract},
 };
 use styx_contracts::error::{ErrorCategory, ExecutionCertainty};
-const COMPUTER_STARTUP_WAIT: Duration = Duration::from_secs(20);
 const MAX_COMPUTER_RESULT_BYTES: usize = styx_contracts::DESKTOP_BROWSER_FRAME_BYTES;
 
 /// Route only the supported Styx surface. The wider pinned native catalog is
@@ -14,23 +13,9 @@ const MAX_COMPUTER_RESULT_BYTES: usize = styx_contracts::DESKTOP_BROWSER_FRAME_B
 pub(super) fn is_public_computer_tool(name: &str) -> bool {
     public_contract::route(name).is_some() && PUBLIC.iter().any(|tool| tool.name == name)
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ComputerBudget {
-    host_timeout_ms: u32,
-    response_secs: u64,
-}
-impl ComputerBudget {
-    fn for_tool(_name: &str) -> Self {
-        Self {
-            host_timeout_ms: 10_000,
-            response_secs: 12,
-        }
-    }
-}
 struct ComputerRequest {
     environment_id: Option<String>,
     action: CuaAction,
-    budget: ComputerBudget,
 }
 impl ComputerRequest {
     fn parse(name: &str, args: Option<Map<String, Value>>) -> Result<Self, &'static str> {
@@ -45,7 +30,6 @@ impl ComputerRequest {
         };
         let value = Self {
             environment_id,
-            budget: ComputerBudget::for_tool(name),
             action: public_contract::decode(name, arguments)
                 .map_err(|_| "unsupported_or_invalid_computer_arguments")?,
         };
@@ -243,51 +227,24 @@ impl PairedGatewayBackend {
         &self,
         binding: &BoundOwner,
         command: ComputerCommand,
-        budget: ComputerBudget,
     ) -> Result<Reply, super::super::RelayError> {
-        tokio::time::timeout(
-            Duration::from_secs(budget.response_secs),
-            self.relay.call(
+        self.relay
+            .call(
                 binding,
                 Call::Computer {
                     owner: binding.owner_ref(),
                     grant_revision: binding.grant_revision(),
-                    timeout_ms: budget.host_timeout_ms,
+                    timeout_ms: None,
                     command,
                 },
-            ),
-        )
-        .await
-        .unwrap_or(Err(super::super::RelayError::Unknown))
+            )
+            .await
     }
-    /// Right after a Host connects its desktop may still be starting. A Busy
-    /// refusal at preparation is proven not dispatched and its record retired,
-    /// so the same request is issued again for a bounded time instead of
-    /// handing the client a Busy to poll on. Nothing dispatched is repeated.
     pub(super) async fn computer_call(
         &self,
         owner: &VerifiedGatewayOwner,
         name: &str,
         args: Option<Map<String, Value>>,
-    ) -> CallToolResult {
-        let deadline = tokio::time::Instant::now() + COMPUTER_STARTUP_WAIT;
-        loop {
-            let mut startup_busy = false;
-            let result = self
-                .computer_call_once(owner, name, args.clone(), &mut startup_busy)
-                .await;
-            if !startup_busy || tokio::time::Instant::now() >= deadline {
-                return result;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }
-    async fn computer_call_once(
-        &self,
-        owner: &VerifiedGatewayOwner,
-        name: &str,
-        args: Option<Map<String, Value>>,
-        startup_busy: &mut bool,
     ) -> CallToolResult {
         let request = match ComputerRequest::parse(name, args) {
             Ok(v) => v,
@@ -343,7 +300,6 @@ impl PairedGatewayBackend {
                             payload_digest: action.payload_digest,
                         },
                     },
-                    request.budget,
                 )
                 .await
             {
@@ -356,24 +312,12 @@ impl PairedGatewayBackend {
             record.pending_action = None;
         }
         if record.binding.is_none() {
-            let binding = match tokio::time::timeout(
-                Duration::from_secs(5),
-                self.relay.bind_computer(owner, &device),
-            )
-            .await
-            {
-                Ok(Ok(b)) => b,
-                Ok(Err(e)) => {
-                    if !matches!(e, super::super::RelayError::Unknown) {
-                        self.retire_computer(owner, &device, &cell);
-                    }
-                    return failure(
-                        e.code(),
-                        None,
-                        matches!(e, super::super::RelayError::Unknown),
-                    );
+            let binding = match self.relay.bind_computer(owner, &device).await {
+                Ok(binding) => binding,
+                Err(error) => {
+                    self.retire_computer(owner, &device, &cell);
+                    return failure(error.code(), None, false);
                 }
-                Err(_) => return failure("outcome_unknown", None, true),
             };
             if !binding.defaults().computer_approved {
                 return failure("permission_denied", None, false);
@@ -390,7 +334,7 @@ impl PairedGatewayBackend {
             // and dropped futures cannot cause a later automatic reopen.
             record.phase = Phase::Opening;
             let prepared = self
-                .computer_exchange(&binding, ComputerCommand::PrepareOpen, request.budget)
+                .computer_exchange(&binding, ComputerCommand::PrepareOpen)
                 .await;
             let snapshot = match prepared {
                 Ok(Reply::Prepared { snapshot }) => snapshot,
@@ -398,7 +342,6 @@ impl PairedGatewayBackend {
                     if let Some((category, certainty)) = typed_error(&reply) {
                         if certainty == ExecutionCertainty::NotDispatched {
                             self.retire_computer(owner, &device, &cell);
-                            *startup_busy = category == ErrorCategory::Busy;
                         }
                         return computer_error(category, certainty);
                     }
@@ -427,7 +370,6 @@ impl PairedGatewayBackend {
                     ComputerCommand::DispatchOpen {
                         target: target.clone(),
                     },
-                    request.budget,
                 )
                 .await
             {
@@ -486,7 +428,6 @@ impl PairedGatewayBackend {
                     target: target.clone(),
                     action: raw,
                 },
-                request.budget,
             )
             .await;
         let snapshot = match prepared {
@@ -527,11 +468,7 @@ impl PairedGatewayBackend {
             return failure("permission_denied", None, true);
         }
         let reply = self
-            .computer_exchange(
-                &binding,
-                ComputerCommand::DispatchAction { action },
-                request.budget,
-            )
+            .computer_exchange(&binding, ComputerCommand::DispatchAction { action })
             .await;
         if !self.active(owner) {
             return failure("permission_denied", None, true);

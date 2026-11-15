@@ -59,10 +59,17 @@ fn fake_protocol_same_uid_and_multiple_candidates_never_create_authority() {
 #[test]
 fn fake_protocol_capacity_identity_and_owner_changes_reject_whole_snapshot() {
     let (row, _) = fake_protocol_facts();
-    assert_eq!(
-        checked_list(&vec![row.clone(); 33]),
-        Err(DiscoveryError::Capacity)
-    );
+    let many = (0..96)
+        .map(|i| {
+            let mut item = row.clone();
+            item.0 = format!("c{i}");
+            item.4 = format!("/org/freedesktop/login1/session/c{i}")
+                .try_into()
+                .unwrap();
+            item
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checked_list(&many).unwrap().len(), 96);
     assert_eq!(
         checked_list(&[row.clone(), row.clone()]),
         Err(DiscoveryError::InvalidFacts)

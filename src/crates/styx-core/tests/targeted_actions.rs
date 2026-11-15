@@ -17,7 +17,7 @@ fn context() -> PreparedContext {
         session: None,
         observation: None,
         capability: CapabilityId::ExecRun,
-        deadline: MonotonicMillis(1000),
+        deadline: Some(MonotonicMillis(1000)),
         disconnect_policy: DisconnectPolicy::RetainForOwner,
     }
 }

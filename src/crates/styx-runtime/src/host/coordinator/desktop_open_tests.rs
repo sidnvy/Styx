@@ -92,7 +92,7 @@ fn prepare(host: &HostCoordinator, owner: &OwnerLease, budget: Duration) -> Oper
         session: Some(desktop(&state).unwrap().binding.clone()),
         observation: None,
         capability: CapabilityId::DesktopWindowsRead,
-        deadline: MonotonicMillis(host.now().0 + budget.as_millis() as u64),
+        deadline: Some(MonotonicMillis(host.now().0 + budget.as_millis() as u64)),
         disconnect_policy: DisconnectPolicy::RetainForOwner,
     };
     state

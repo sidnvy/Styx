@@ -71,14 +71,15 @@ pub(crate) struct MacProxySource {
 impl MacProxySource {
     /// Trusted supervisor setup only. No operation/grant/session can be minted by
     /// this function. It never starts the App/daemon or repairs an old endpoint.
-    pub(crate) async fn discover(until: Instant) -> Result<Arc<Self>> {
+    pub(crate) async fn discover(until: impl Into<Option<Instant>>) -> Result<Arc<Self>> {
+        let until = until.into();
         // Headless/no-daemon is an immediate typed absence, not a ten-second
         // socket retry or an expensive full installed-image inventory first.
         tokio::task::spawn_blocking(MacSourceCandidate::check_discovery_presence)
             .await
             .map_err(|_| CuaError::Unknown)?
             .map_err(|_| CuaError::PermissionDenied)?;
-        if Instant::now() >= until {
+        if until.is_some_and(|until| Instant::now() >= until) {
             return Err(CuaError::Unknown);
         }
         let images = tokio::task::spawn_blocking(MacAppImages::open_fixed)
@@ -99,7 +100,7 @@ impl MacProxySource {
             .map_err(|_| CuaError::PermissionDenied)?;
         let mut control = tokio::task::spawn_blocking(move || {
             let facts = control
-                .observe_native(until.into_std())
+                .observe_native(until.map(Instant::into_std))
                 .map_err(|_| CuaError::PermissionDenied)?;
             // Unknown lock evidence remains unavailable; no missing-key/permission lift.
             if !facts.observed_unlocked() {
@@ -159,8 +160,9 @@ impl MacProxySource {
     /// source sessions remain owned until stop; no action target is published.
     pub(crate) fn observe_preparation(
         &self,
-        until: std::time::Instant,
+        until: impl Into<Option<std::time::Instant>>,
     ) -> Result<NativeObservation> {
+        let until = until.into();
         self.advance(SourcePhase::Unqualified, SourcePhase::Preparing)?;
         let result = self
             .observe_current_at(until, std::time::Instant::now(), false, true)
@@ -208,13 +210,17 @@ impl MacProxySource {
         stage: ProbeStage,
         cause: ProbeCause,
         started: std::time::Instant,
-        until: std::time::Instant,
+        until: Option<std::time::Instant>,
     ) {
         self.remember_probe_diagnostic(ProbeDiagnostic::observed(stage, cause, started, until));
     }
     /// Caller owns and joins the blocking job. Console availability belongs to
     /// the authenticated App bridge; live TCC comes from the daemon tool result.
-    pub(crate) fn observe_current(&self, until: std::time::Instant) -> Result<NativeObservation> {
+    pub(crate) fn observe_current(
+        &self,
+        until: impl Into<Option<std::time::Instant>>,
+    ) -> Result<NativeObservation> {
+        let until = until.into();
         if !self.ready() {
             return Err(CuaError::PermissionDenied);
         }
@@ -229,11 +235,12 @@ impl MacProxySource {
     }
     fn observe_current_at(
         &self,
-        until: std::time::Instant,
+        until: impl Into<Option<std::time::Instant>>,
         started: std::time::Instant,
         after: bool,
         qualifying: bool,
     ) -> Result<NativeObservation> {
+        let until = until.into();
         let (binding, observation, final_binding) = if after {
             (
                 ProbeStage::NativeAfterBinding,
@@ -337,8 +344,9 @@ impl MacProxySource {
     /// neither a caller retry nor any strict window read can reopen it.
     pub(crate) fn observe_initial_with_windows(
         &self,
-        until: std::time::Instant,
+        until: impl Into<Option<std::time::Instant>>,
     ) -> Result<(NativeObservation, super::macos_source::WindowReadEvidence)> {
+        let until = until.into();
         self.advance(SourcePhase::Prepared, SourcePhase::Probing)?;
         self.observe_windows_mode(until, true).and_then(|value| {
             if let Err(error) = self.advance(SourcePhase::Probing, SourcePhase::Ready) {
@@ -354,8 +362,9 @@ impl MacProxySource {
     }
     pub(crate) fn observe_with_windows(
         &self,
-        until: std::time::Instant,
+        until: impl Into<Option<std::time::Instant>>,
     ) -> Result<(NativeObservation, super::macos_source::WindowReadEvidence)> {
+        let until = until.into();
         if !self.ready() {
             return Err(CuaError::PermissionDenied);
         }
@@ -369,9 +378,10 @@ impl MacProxySource {
     }
     fn observe_windows_mode(
         &self,
-        until: std::time::Instant,
+        until: impl Into<Option<std::time::Instant>>,
         initial: bool,
     ) -> Result<(NativeObservation, super::macos_source::WindowReadEvidence)> {
+        let until = until.into();
         let started = std::time::Instant::now();
         let result = (|| {
             let before = self.observe_current_at(until, started, false, initial)?;
@@ -519,7 +529,11 @@ impl MacProxySource {
             .fence_initial_native();
     }
 
-    pub(crate) fn drain_source_probe(&self, until: std::time::Instant) -> Result<bool> {
+    pub(crate) fn drain_source_probe(
+        &self,
+        until: impl Into<Option<std::time::Instant>>,
+    ) -> Result<bool> {
+        let until = until.into();
         self.fence();
         let result = self
             .observations
@@ -578,9 +592,7 @@ impl TrustedCuaLaunch {
 }
 
 pub(super) fn validate_config(config: &OwnedCuaConfig) -> Result<()> {
-    if config.rpc_timeout.is_zero()
-        || config.rpc_timeout > std::time::Duration::from_secs(30)
-        || !config.workspace.is_absolute()
+    if !config.workspace.is_absolute()
         || !config.home.is_absolute()
         || config.workspace != config.launch.workspace_path
         || config.home != config.launch.home_path
@@ -594,13 +606,14 @@ pub(super) fn validate_config(config: &OwnedCuaConfig) -> Result<()> {
 }
 pub(super) fn config_digest(config: &OwnedCuaConfig) -> Result<Sha256Digest> {
     validate_config(config)?;
-    super::bounded_bytes(&serde_json::json!({"schema":1,"platform":"macos_app_owned","session":config.launch.session,"source":config.launch.source.fingerprint(),"workspace":config.workspace,"home":config.home,"timeout_ms":config.rpc_timeout.as_millis()}),super::REQUEST_BYTES).map(|bytes|Sha256Digest::of_bytes(&bytes))
+    super::bounded_bytes(&serde_json::json!({"schema":1,"platform":"macos_app_owned","session":config.launch.session,"source":config.launch.source.fingerprint(),"workspace":config.workspace,"home":config.home}),super::REQUEST_BYTES).map(|bytes|Sha256Digest::of_bytes(&bytes))
 }
 pub(super) async fn preflight(
     live: &mut super::Live,
     config: &OwnedCuaConfig,
-    until: Instant,
+    until: impl Into<Option<Instant>>,
 ) -> Result<()> {
+    let until = until.into();
     validate_config(config)?;
     // If an earlier public waiter disappeared, join its ORIGINAL read task and
     // discard those old facts. Do not turn an old observation into new admission.
@@ -609,7 +622,7 @@ pub(super) async fn preflight(
         live.mac_probe.take();
         result.map_err(|_| CuaError::Unknown)??;
     }
-    if Instant::now() >= until {
+    if until.is_some_and(|until| Instant::now() >= until) {
         return Err(CuaError::Unknown);
     }
     let source = config.launch.source.clone();
@@ -620,13 +633,13 @@ pub(super) async fn preflight(
     live.mac_probe = Some(tokio::task::spawn_blocking(move || {
         let workspace = PrivateRoot::open(&workspace).map_err(|_| CuaError::PermissionDenied)?;
         let home = PrivateRoot::open(&home).map_err(|_| CuaError::PermissionDenied)?;
-        source.observe_current(until.into_std())?;
+        source.observe_current(until.map(Instant::into_std))?;
         if workspace.identity() != workspace_pin.identity()
             || home.identity() != home_pin.identity()
         {
             return Err(CuaError::PermissionDenied);
         }
-        if std::time::Instant::now() >= until.into_std() {
+        if until.is_some_and(|until| std::time::Instant::now() >= until.into_std()) {
             return Err(CuaError::Unknown);
         }
         Ok(())
@@ -738,8 +751,9 @@ pub(super) async fn start_proxy(
     live: &mut super::Live,
     config: &Arc<OwnedCuaConfig>,
 
-    until: Instant,
+    until: impl Into<Option<Instant>>,
 ) -> Result<(ChildStdin, ChildStdout, ChildStderr)> {
+    let until = until.into();
     preflight(live, config, until).await?;
     let source = config.launch.source.clone();
     let anchor = source.clone();

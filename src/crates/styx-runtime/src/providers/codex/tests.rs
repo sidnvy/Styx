@@ -65,7 +65,7 @@ impl Authority {
             session: None,
             observation: None,
             capability: CapabilityId::ExecRun,
-            deadline: MonotonicMillis(100000),
+            deadline: Some(MonotonicMillis(100000)),
             disconnect_policy: DisconnectPolicy::RetainForOwner,
         };
         let snapshot = self
@@ -911,7 +911,7 @@ async fn targeted_action_permit_cannot_start_another_process_even_with_valid_sta
                 session: None,
                 observation: None,
                 capability: CapabilityId::ExecRun,
-                deadline: MonotonicMillis(100000),
+                deadline: Some(MonotonicMillis(100000)),
                 disconnect_policy: DisconnectPolicy::RetainForOwner,
             },
             start_spec.to_operation_payload().unwrap(),
@@ -974,7 +974,7 @@ impl Authority {
                     session: None,
                     observation: None,
                     capability: CapabilityId::ExecRun,
-                    deadline: MonotonicMillis(100000),
+                    deadline: Some(MonotonicMillis(100000)),
                     disconnect_policy: DisconnectPolicy::RetainForOwner,
                 },
                 action.to_operation_payload().unwrap(),

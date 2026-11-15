@@ -519,17 +519,19 @@ impl HostCoordinator {
             let state = self.inner.state.lock().expect("Host state mutex");
             state.ledger.inspect_context(owner, id, digest)?.deadline
         };
-        if self.now().0 >= deadline.0 {
+        if deadline.is_some_and(|deadline| self.now().0 >= deadline.0) {
             return Err(CoordinatorError::Busy);
         }
-        let until = tokio::time::Instant::now()
-            + Duration::from_millis(deadline.0.saturating_sub(self.now().0));
+        let until = deadline.map(|deadline| {
+            tokio::time::Instant::now()
+                + Duration::from_millis(deadline.0.saturating_sub(self.now().0))
+        });
         let mut waited = false;
         let execution = match self.inner.execution_gate.clone().try_read_owned() {
             Ok(execution) => execution,
             Err(_) => {
                 waited = true;
-                tokio::time::timeout_at(until, self.inner.execution_gate.clone().read_owned())
+                crate::providers::cua::within(until, self.inner.execution_gate.clone().read_owned())
                     .await
                     .map_err(|_| CoordinatorError::Busy)?
             }
@@ -538,7 +540,7 @@ impl HostCoordinator {
         let context = state.ledger.inspect_context(owner, id, digest)?;
         let lane = desktop(&state)?;
         validate_context(lane, &context)?;
-        if state.shutting_down || self.now().0 >= deadline.0 {
+        if state.shutting_down || deadline.is_some_and(|deadline| self.now().0 >= deadline.0) {
             return Err(CoordinatorError::Busy);
         }
         Ok(DesktopOpenAdmission {
@@ -587,6 +589,10 @@ impl HostCoordinator {
                 return Err(CoordinatorError::Busy);
             }
             let config = profile(desktop(&state)?, owner)?.config.clone();
+            let until = context.deadline.map(|deadline| {
+                tokio::time::Instant::now()
+                    + Duration::from_millis(deadline.0.saturating_sub(self.now().0))
+            });
             let admission = facts(&state, CapabilityId::DesktopWindowsRead)?;
             let slot = match slot {
                 Ok(slot) => slot,
@@ -635,10 +641,11 @@ impl HostCoordinator {
             while jobs.try_join_next().is_some() {}
             jobs.spawn_on(
                 async move {
-                    let (evidence, cause, opened) = match slot.spawn_owned(permit, config).await {
-                        Ok(r) => (r.evidence, None, Some(r.handle)),
-                        Err(r) => (r.evidence, Some(r.cause), r.handle),
-                    };
+                    let (evidence, cause, opened) =
+                        match slot.spawn_owned(permit, config, until).await {
+                            Ok(r) => (r.evidence, None, Some(r.handle)),
+                            Err(r) => (r.evidence, Some(r.cause), r.handle),
+                        };
                     let mut state = inner.state.lock().expect("Host state mutex");
                     if let (Some(h), Some(lane)) = (opened, state.desktop.as_mut()) {
                         lane.handles.insert(operation.clone(), h);
@@ -908,8 +915,10 @@ impl HostCoordinator {
                 None
             };
             let delivery_context = permit.context().clone();
-            let write_until = tokio::time::Instant::now()
-                + Duration::from_millis(delivery_context.deadline.0.saturating_sub(self.now().0));
+            let write_until = delivery_context.deadline.map(|deadline| {
+                tokio::time::Instant::now()
+                    + Duration::from_millis(deadline.0.saturating_sub(self.now().0))
+            });
             let gate_owner = owner.clone();
             let operation = id.clone();
             let inner = self.inner.clone();
@@ -973,7 +982,7 @@ impl HostCoordinator {
                         slot.call_once_until_with_write_gate(permit, write_until, gate)
                             .await
                     } else {
-                        slot.call_once(permit).await
+                        slot.call_once_until(permit, write_until).await
                     };
                     // A late response cannot mint observations or be delivered into a
                     // replaced/locked source, even if the original native call ACKed.

@@ -47,16 +47,8 @@ impl AxReadRequest {
             .and_then(Value::as_u64)
             .filter(|v| *v > 0)
             .ok_or(CuaError::InvalidRequest)?;
-        for (name, maximum) in [
-            ("max_elements", 2048),
-            ("max_depth", 64),
-            ("timeout_ms", 2000),
-        ] {
-            let n = args
-                .get(name)
-                .and_then(Value::as_u64)
-                .ok_or(CuaError::InvalidRequest)?;
-            if n == 0 || n > maximum || (name == "timeout_ms" && n < 100) {
+        for name in ["max_elements", "max_depth", "timeout_ms"] {
+            if args.get(name).is_some_and(|value| value.as_u64().is_none()) {
                 return Err(CuaError::InvalidRequest);
             }
         }
@@ -182,7 +174,7 @@ impl DesktopReadTarget {
 mod tests {
     use super::*;
     #[test]
-    fn acquisition_is_only_exact_bounded_screenshot_free_read() {
+    fn acquisition_preserves_optional_native_read_settings() {
         let good = serde_json::json!({"pid":42,"window_id":1234,"include_screenshot":false,"include_accessibility_tree":true,"tree_format":"elements","max_elements":64,"max_depth":8,"timeout_ms":2000});
         let args = good.as_object().unwrap();
         assert!(
@@ -190,13 +182,7 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        for key in [
-            "pid",
-            "window_id",
-            "max_elements",
-            "max_depth",
-            "timeout_ms",
-        ] {
+        for key in ["pid", "window_id"] {
             let mut bad = args.clone();
             bad.remove(key);
             assert!(AxReadRequest::classify("get_window_state", &bad).is_err());
@@ -206,8 +192,8 @@ mod tests {
             ("since", Value::String("latest".into())),
             ("session", Value::String("foreign".into())),
             ("screenshot_out_file", Value::String("/tmp/no".into())),
-            ("max_elements", Value::from(2049)),
-            ("timeout_ms", Value::from(2001)),
+            ("max_elements", Value::String("many".into())),
+            ("timeout_ms", Value::String("long".into())),
         ] {
             let mut bad = args.clone();
             bad.insert(key.into(), value);

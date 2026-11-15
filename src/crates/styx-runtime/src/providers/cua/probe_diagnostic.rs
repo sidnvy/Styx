@@ -71,13 +71,14 @@ impl ProbeDiagnostic {
         stage: ProbeStage,
         cause: ProbeCause,
         started: Instant,
-        until: Instant,
+        until: impl Into<Option<Instant>>,
     ) -> Self {
+        let until = until.into();
         Self {
             stage,
             cause,
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            deadline_expired: Instant::now() >= until,
+            deadline_expired: until.is_some_and(|until| Instant::now() >= until),
         }
     }
 }

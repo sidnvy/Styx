@@ -84,7 +84,8 @@ pub enum Call {
     Computer {
         owner: OwnerRef,
         grant_revision: u64,
-        timeout_ms: u32,
+        #[serde(default)]
+        timeout_ms: Option<u32>,
         command: ComputerCommand,
     },
     /// Same authenticated connection only; the Host first advertises support.
@@ -152,7 +153,7 @@ pub struct ExecTaskResult {
     pub value: serde_json::Value,
     pub is_error: bool,
 }
-pub const COMPUTER_V1: &str = "computer_v1";
+pub const COMPUTER_V2: &str = "computer_v2";
 pub const TRANSPORT_DRAIN_V1: &str = "transport_drain_v1";
 /// Private negotiated total stop budget, not a business-operation deadline.
 pub(crate) const TRANSPORT_DRAIN_TIMEOUT_MS: u32 = 15_000;
@@ -180,8 +181,11 @@ pub enum TransportDrainOutcome {
 /// for provider settlement; ordinary operations and owner cleanup are unchanged.
 pub(crate) const BROWSER_WAIT_PREPARE_TIMEOUT_MS: u32 = 35_000;
 impl Call {
-    pub(crate) fn response_budget(&self) -> std::time::Duration {
-        match self {
+    pub(crate) fn response_budget(&self) -> Option<std::time::Duration> {
+        if self.is_computer() {
+            return None;
+        }
+        Some(match self {
             Self::BrowserSession { .. } => std::time::Duration::from_secs(85),
             Self::SetCapabilities { .. } => std::time::Duration::from_secs(75),
             Self::Browser { timeout_ms, .. } if *timeout_ms > 10_000 => {
@@ -190,7 +194,7 @@ impl Call {
                 )
             }
             _ => std::time::Duration::from_secs(35),
-        }
+        })
     }
     pub(crate) fn is_browser(&self) -> bool {
         matches!(self, Self::Browser { .. } | Self::BrowserSession { .. })
