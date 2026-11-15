@@ -92,6 +92,8 @@ pub(super) struct Answers {
     pub label: String,
     pub workspace: PathBuf,
     pub shell: PathBuf,
+    #[serde(default = "default_exec")]
+    pub exec: bool,
     #[serde(default)]
     pub browser: bool,
     pub browser_executable: Option<PathBuf>,
@@ -106,6 +108,9 @@ pub(super) struct Answers {
     pub plugin: Option<Plugin>,
     #[serde(default, skip_serializing)]
     pub approve: BTreeSet<String>,
+}
+fn default_exec() -> bool {
+    true
 }
 fn default_port() -> u16 {
     22022
@@ -523,8 +528,14 @@ fn interactive(root: &Path) -> Result<(Answers, Option<String>)> {
     }
     prompt::section("Computer name");
     let label = prompt::line("This computer's label", Some(&hostname()))?;
-    let (workspace, browser_executable, browser, computer) = if role == Role::Gateway {
-        (root.join("unused-host-workspace"), None, false, false)
+    let (workspace, exec, browser_executable, browser, computer) = if role == Role::Gateway {
+        (
+            root.join("unused-host-workspace"),
+            false,
+            None,
+            false,
+            false,
+        )
     } else {
         println!(
             "Choose a folder for commands and Browser Automation. Use a dedicated folder such as ~/Styx so Browser Automation can keep your private Styx files separate."
@@ -533,6 +544,7 @@ fn interactive(root: &Path) -> Result<(Answers, Option<String>)> {
             "Workspace folder",
             home()?.join("Styx").to_str(),
         )?);
+        let exec = prompt::confirm_default("Enable commands for this computer?", true)?;
         let browser_executable = browser_default();
         let browser = if let Some(path) = &browser_executable {
             println!("Detected browser: {}", path.display());
@@ -547,7 +559,7 @@ fn interactive(root: &Path) -> Result<(Answers, Option<String>)> {
             "Computer Use can observe and act on your desktop after the platform's permission checks. Enable it only for a desktop session you intend to share."
         );
         let computer = prompt::confirm("Enable Computer Use for this computer?")?;
-        (workspace, browser_executable, browser, computer)
+        (workspace, exec, browser_executable, browser, computer)
     };
     let answers = Answers {
         schema: 1,
@@ -556,6 +568,7 @@ fn interactive(root: &Path) -> Result<(Answers, Option<String>)> {
         label,
         workspace,
         shell: shell_default(),
+        exec,
         browser,
         browser_executable,
         computer,
@@ -906,8 +919,7 @@ pub(super) async fn wait_computer(
 }
 fn deployment_host(session: &Session, origin: &str, ca_hash: &str) -> Value {
     let a = &session.answers;
-    let mut host =
-        json!({"label":a.label, "cwd":a.workspace, "shell":a.shell, "computer":a.computer});
+    let mut host = json!({"label":a.label, "cwd":a.workspace, "shell":a.shell, "exec":{"enabled":a.exec}, "computer":a.computer});
     if a.browser {
         host["browser"] = json!({"enabled":true,"headless":true,"persistLogin":false,"channel":"chrome","executablePath":a.browser_executable});
     }
@@ -963,8 +975,9 @@ fn plan_steps(answers: &Answers, foreground: bool, root: &Path) -> Vec<String> {
     }
     if answers.role != Role::Gateway {
         steps.push(format!(
-            "Enable commands for “{}”; Browser Automation {}; Computer Use {}.",
+            "For “{}”: commands {}; Browser Automation {}; Computer Use {}.",
             answers.label,
+            if answers.exec { "on" } else { "off" },
             if answers.browser { "on" } else { "off" },
             if answers.computer { "on" } else { "off" }
         ));
@@ -1470,9 +1483,9 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
     }
     if a.role.owns_gateway() {
         println!(
-            "Waiting for the hub to see this computer connected for commands{}…",
+            "Waiting for the hub to see this computer connected{}…",
             if a.browser {
-                " and Browser Automation"
+                " with Browser Automation"
             } else {
                 ""
             }
@@ -1495,7 +1508,8 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
         }
     );
     println!(
-        "Commands: on · Browser Automation: {} · Computer Use: {}",
+        "Commands: {} · Browser Automation: {} · Computer Use: {}",
+        if a.exec { "on" } else { "off" },
         if a.browser { "on" } else { "off" },
         if a.computer { "on" } else { "off" }
     );
@@ -1846,6 +1860,7 @@ pub(super) async fn run(
             || existing.browser_executable != session.answers.browser_executable
             || existing.label != session.answers.label
             || existing.workspace != session.answers.workspace
+            || existing.exec != session.answers.exec
             || existing.browser != session.answers.browser
             || existing.computer != session.answers.computer
             || existing.port != session.answers.port
@@ -2467,6 +2482,68 @@ mod tests {
             assert_eq!(error.code, "setup_previous_outcome_unknown");
             assert_eq!(std::fs::read(path.join("state.json")).unwrap(), before);
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn first_setup_exec_choice_reaches_deployment_and_review() {
+        let legacy: Answers = serde_json::from_value(valid()).unwrap();
+        assert!(
+            legacy.exec,
+            "old saved choices retain their original Exec default"
+        );
+        for enabled in [false, true] {
+            let mut value = valid();
+            value["exec"] = json!(enabled);
+            let answers: Answers = serde_json::from_value(value).unwrap();
+            answers.validate().unwrap();
+            let saved = serde_json::to_vec(&answers).unwrap();
+            let answers: Answers = serde_json::from_slice(&saved).unwrap();
+            assert_eq!(answers.exec, enabled, "resume retains the explicit choice");
+            let session = Session {
+                root: PathBuf::from("/p/setup"),
+                answers,
+                automated: true,
+                plan_approved: false,
+                mutation: Default::default(),
+            };
+            assert_eq!(
+                deployment_host(&session, "https://127.0.0.1:22022", &"a".repeat(64))["host"]["exec"]
+                    ["enabled"],
+                enabled
+            );
+            let plan = plan_steps(&session.answers, true, &session.root).join("\n");
+            assert!(plan.contains(if enabled {
+                "commands on"
+            } else {
+                "commands off"
+            }));
+        }
+    }
+    #[tokio::test]
+    async fn resume_does_not_replace_disabled_exec_with_default_answers() {
+        let root = std::env::temp_dir().join(format!(
+            "styx-exec-choice-{}-{}",
+            std::process::id(),
+            now_ms().unwrap()
+        ));
+        inputs::private_directory(&root.join("inputs")).unwrap();
+        let mut disabled = valid();
+        disabled["exec"] = json!(false);
+        let saved = serde_json::to_vec(&disabled).unwrap();
+        let intent = root.join("inputs/setup-intent.json");
+        inputs::write_new(&intent, &saved).unwrap();
+        let answers = root.join("answers.json");
+        inputs::write_new(&answers, &serde_json::to_vec(&valid()).unwrap()).unwrap();
+        let error = run(Some(root.clone()), Some(answers), true, true)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            "setup_existing_choices_differ_retire_role_explicitly"
+        );
+        assert_eq!(std::fs::read(&intent).unwrap(), saved);
+        assert!(!root.join("host").exists());
+        assert!(!root.join("gateway").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

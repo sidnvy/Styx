@@ -101,6 +101,16 @@ fn setup_tunnel_observation_ignores_foreign_markers_and_contains_only_metadata()
 #[tokio::test]
 #[ignore = "requires sockets, a built CLI, and STYX_SETUP_TEST_PAYLOAD/PUBLISHER/PIN; no systemd"]
 async fn setup_hub_answers_foreground_connects_and_resumes_without_pairing_requires_sockets() {
+    setup_hub_foreground_roundtrip(true).await;
+}
+
+#[tokio::test]
+#[ignore = "requires sockets, a built CLI, and STYX_SETUP_TEST_PAYLOAD/PUBLISHER/PIN; no systemd"]
+async fn setup_hub_exec_disabled_connects_and_preserves_choice_on_resume_requires_sockets() {
+    setup_hub_foreground_roundtrip(false).await;
+}
+
+async fn setup_hub_foreground_roundtrip(exec: bool) {
     let (Some(payload), Some(publisher), Some(pin)) = (
         std::env::var_os("STYX_SETUP_TEST_PAYLOAD"),
         std::env::var_os("STYX_SETUP_TEST_PUBLISHER"),
@@ -146,7 +156,7 @@ async fn setup_hub_answers_foreground_connects_and_resumes_without_pairing_requi
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let answers = json!({"schema":1,"role":"hub","payload":{"payload_dir":payload,"publisher_file":publisher,"expected_publisher":pin},"label":"setup-fixture","workspace":root.join("work"),"shell":"/bin/bash","port":port,"approve":["inputs","payload","workspace","gateway","gateway-run","invite","trust","request","approve","claim","host-run"]});
+    let answers = json!({"schema":1,"role":"hub","payload":{"payload_dir":payload,"publisher_file":publisher,"expected_publisher":pin},"label":"setup-fixture","exec":exec,"workspace":root.join("work"),"shell":"/bin/bash","port":port,"approve":["inputs","payload","workspace","gateway","gateway-run","invite","trust","request","approve","claim","host-run"]});
     let file = root.join("answers.json");
     write_new(&file, &serde_json::to_vec_pretty(&answers).unwrap()).unwrap();
     let state = root.join("state");
@@ -179,6 +189,9 @@ async fn setup_hub_answers_foreground_connects_and_resumes_without_pairing_requi
         String::from_utf8_lossy(&first.stdout)
             .contains("This computer connected (confirmed by the hub).")
     );
+    let host_deployment = read_private(&state.join("host/deployment.json"), 1024 * 1024).unwrap();
+    let deployment: Value = serde_json::from_slice(&host_deployment).unwrap();
+    assert_eq!(deployment["host"]["exec"]["enabled"], exec);
     let seed = read_private(&state.join("host/host-join-seed-v1.json"), 1024 * 1024).unwrap();
     // Capture all enrollment material using existing fixed names from the store.
     let ready = read_private(&state.join("host/host-ready-v1.json"), 1024 * 1024).unwrap();
@@ -192,6 +205,11 @@ async fn setup_hub_answers_foreground_connects_and_resumes_without_pairing_requi
         "{}\n{}",
         String::from_utf8_lossy(&second.stdout),
         String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        host_deployment,
+        read_private(&state.join("host/deployment.json"), 1024 * 1024).unwrap(),
+        "resume must preserve the original Exec choice"
     );
     let resumed = String::from_utf8_lossy(&second.stdout);
     assert!(resumed.contains("Computer pairing: already complete"));
