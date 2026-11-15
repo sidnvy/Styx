@@ -34,8 +34,8 @@ pub(super) fn selected_channel(channel: &str) -> Result<PathBuf> {
         .into_iter()
         .next()
         .ok_or(ErrorCategory::CapabilityUnsupported)?;
-    canonical(&path)?;
-    Ok(path)
+    // Windows accepts mixed separators; pass the OS-resolved spelling to Node.
+    assets::canonical_path(&path).map_err(map_error)
 }
 #[allow(unsafe_code)]
 mod known {
