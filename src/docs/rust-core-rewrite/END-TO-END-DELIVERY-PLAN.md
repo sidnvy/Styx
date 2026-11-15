@@ -20,7 +20,14 @@ Gateway 身份、配对与 Tunnel 配置摘要不变，旧 22026 服务未动。
 1024×611 PNG（响应 357646 bytes，超过旧限制）、截图后同会话再次读窗口、浏览器写入文字并独立
 snapshot 读回、关闭自有浏览器会话。截图已视觉检查。证据目录：
 `/home/sid/Developer/Artifacts/Styx/niuda-capabilities-20261115/result.json`。
-这是直接 MCP 验证，不代替用户 ChatGPT 账号路线和长驻观察；跨平台 Stable 仍为 NO-GO。
+随后按用户授权在 ChatGPT 正常创建并 Connect「Styx moedeu-apps」，复用原 Tunnel，
+没有改安装、配对或 Gateway 密钥。账号对话 `6af85143-d800-83ec-98c2-6538d0609351`
+实际发现 niuda、读 4 个窗口、返回 1024×611 PNG、截图后再读窗口；Browser evaluate 写入
+`Styx-ChatGPT-acceptance-20261115` 后由 snapshot 独立读回并关闭测试会话。
+账号验收回复保存在同目录 `chatgpt-account-result.json`；Gateway 的 ChatGPT last seen 已刷新，
+Host 仍为 PID 929414。此项不含 Computer 点击/输入、双对话或长驻验收，Stable 仍为 NO-GO。
+用户要求清理旧同名插件：旧 0.1.0 已删除；旧 1.0.1 App-backed「Styx」两次返回
+`Couldn't delete plugin. Try again`，仍未删除。新连接可用，不因清理错误重建或改配设备。
 
 ## Linux 双形态安装交付（0.4.1-preview.2）
 
