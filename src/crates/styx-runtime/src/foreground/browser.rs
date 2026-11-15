@@ -124,7 +124,6 @@ impl LocalExecutable {
         if !m.is_file()
             || !single_link(&m)
             || ![0, uid].contains(&m.uid())
-            || m.mode() & 0o022 != 0
             || m.mode() & 0o111 == 0
             || m.len() == 0
             || m.len() > MAX_BROWSER_BYTES
@@ -556,4 +555,30 @@ fn check_dependency_versions(release: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod executable_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn installed_browser_group_write_permission_does_not_prevent_pinning() {
+        let directory = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("styx-browser-pin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("browser");
+        std::fs::write(&path, b"installed browser fixture").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let pinned = LocalExecutable::open(&path).unwrap();
+        pinned.revalidate().unwrap();
+        std::fs::rename(&path, directory.join("original")).unwrap();
+        std::fs::write(&path, b"replacement browser fixture").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(pinned.revalidate().is_err());
+        drop(pinned);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
