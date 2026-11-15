@@ -51,15 +51,29 @@ Windows/Mac 当前离线，
 | --- | --- | --- |
 | Windows Host-only | 历史“更新完成后的所有权释放与 Windows 实机闭环”：正常短码自动加入、更新后改配、原配置退出重开；“取消运行时配额与双对话实机验证”：d1cb41c 双对话独立效果 | C1 改动后需原生编译及主窗口/设置/托盘验证；设备离线 |
 | Mac Host-only | 历史“本机测试 Gateway 与 Mac 能力开关”：正常短码自动加入，三项能力关闭/重开及原配置恢复；“桌面统一入口与单窗口收敛”：用户确认单窗口、正常更新退出重开 | 最新配额与 C2 清理尚未完成安装/双对话验证 |
-| 桌面 Gateway+Host（Mac/Windows） | 历史“已完成的设备选择基础”记录 GUI Tunnel 配置；`app/runtime_bootstrap_tests.rs::desktop_gateway_setup_requires_tunnel_before_pairing_local_host` 覆盖必配 Tunnel；更早平台矩阵有组合角色运行记录 | 当前组合模式首次设置、本机自动加入及最终版本绑定待核实；不能用 Host-only 通过代替 |
+| 桌面 Gateway+Host（Mac/Windows） | 历史“已完成的设备选择基础”记录 GUI Tunnel 配置；`app/runtime_bootstrap_tests.rs::desktop_gateway_setup_requires_tunnel_before_pairing_local_host` 覆盖必配 Tunnel；更早平台矩阵有组合角色运行记录 | 本轮共用 Core 的必配 Tunnel、本机自动配对及正常清理回归通过；两端实际 GUI 首设与最终版本绑定仍待核实 |
 | Linux headless Gateway-only | 历史“本机测试 Gateway 与 Mac 能力开关”明确本机无 Host、无 Tunnel 的 Gateway，随后独立账号路线接入测试 Tunnel | CLI 可先运行再接入 ChatGPT 有实际记录；本次未替换该 Gateway |
-| Linux 桌面角色 | 当前 Linux Host 有 d1cb41c 窗口读取、双对话 Exec/Browser 记录 | 不等同 Linux 桌面 GUI 组合角色首次设置已验收，入口覆盖待核实 |
+| Linux 桌面角色 | 当前 Linux Host 有 d1cb41c 窗口读取、双对话 Exec/Browser 记录 | 实际入口是 CLI 桌面向导；本轮隔离组合角色设置及原配置恢复通过，不代表 GUI 验收。首次 Exec 可取消遗漏已修复并通过真实开/关两条设置及重开场景 |
 | 能力关闭、明确撤销、断线恢复 | 历史 Mac 能力开关、Windows 原生验证记录本机关闭只停止该能力；“Host 运行期与连接生命周期分离”记录真实 CLI 在线撤销停止任务、Gateway 重启后原任务继续 | 保留不受影响证据；C2 的执行器生命周期以本轮真实场景复核，原生端仍待补 |
+
+本轮补验（2026-11-15）：`refactor-desktop-setup-exact.log` 的共用 Core 场景 1 项通过，
+`refactor-cli-hub-setup.log` 的真实 CLI 组合角色首次设置、原配置恢复不重新配对场景 1 项通过。
+`refactor-join-recovery.log` 的短码一次消费、Gateway 重启领取与未知结果不重放场景 1 项通过。
+日志在原 `computer-concurrency` 证据目录。CLI 使用本轮已构建的 debug CLI 与原 d1cb41c
+签名 payload；这是入口与恢复验证，不宣称最终同版本发布包已验收。第一次 Core 测试过滤
+未匹配（0 tests）的记录保留，正确模块路径执行后才计通过。
+Linux 桌面现有 CLI 首设缺 Exec 可取消选项，违反 REFACTOR-PLAN 的初始能力规则。
+源码 `96aa1eb` 已补齐默认开启且可取消、部署传递与重开保持；CLI 局部 15 项测试和
+all-targets Clippy 通过；整合后 `refactor-role-quality/receipt.json` 的 20 项标准质量门全部 PASS，
+绑定源码 `96aa1eb1153ebab60547ccc0c74ef695d39f8d7b`。`refactor-cli-exec-roundtrip.log` 中两个真实隔离场景并行通过：
+Exec 开启/关闭均连接成功，正常结束后原配置重开，部署与配对文件保持不变。无新增 GUI。
+Windows/Mac 的 SSH 及独立验收插件均再次确认离线，未派发远端构建或更新；不能以本机
+测试替代两端验收。
 
 ## 唯一剩余清单与顺序
 
 1. **C1、C2 验证收尾。** 源码清理、Linux 局部回归与整合质量门已完成；设备恢复后补两端原生编译和 Windows 正常页面路径。
-2. **角色/入口剩余证据。** 上表已归并已有记录；核实桌面组合角色首次设置和 Linux 桌面入口覆盖，绑定最终版本。未核实项不等同失败，不重跑已经通过且不受修改影响的整套拓扑。
+2. **角色/入口剩余证据。** 上表已归并已有记录；核实 Mac/Windows 组合角色实际 GUI 首次设置，绑定最终版本；Linux 现有 CLI 入口已补验，非新增 GUI 项。未核实项不等同失败，不重跑已经通过且不受修改影响的整套拓扑。
 3. **Mac 最终更新与受影响场景。** 当前最新配额修正只验证了 Mac 编译，正常更新后核对
    安装/选定/实际组件，再验证双对话读取及退出后继续。复用原配置、签名和安装路径。
 4. **账号缺口。** Mac 后来的本机窗口/截图恢复已有证据，但不代替原 ChatGPT 账号路线的
