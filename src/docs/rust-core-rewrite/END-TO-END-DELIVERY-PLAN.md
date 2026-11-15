@@ -6,7 +6,7 @@
 `ea84ac7f3abba4f7d7f34f0bb47df996c5aea805` 的 macOS 条件编译并发修复，不能将其他
 平台包重标为该 SHA。moedeu-apps Gateway、niuda 和 NAB5 已原配置更新并实际验证。
 四项最终下载资产、公钥、安装说明和校验文件已齐，Mac 新修复安装及双 owner 实测通过。
-**Stable：GO。** 本轮技术与验收门槛已关闭；发布尚未发生，发布动作单列，不混同验收结果。
+**Stable：GO，已发布。** [Styx 0.4.1](https://github.com/sidnvy/Styx/releases/tag/v0.4.1) 于 2026-11-15 正式公开。
 
 ## 当前桌面更新与账号验收（2026-11-15）
 
@@ -229,8 +229,10 @@ Exec 开启/关闭均连接成功，正常结束后原配置重开，部署与�
 安装、正常退出重开、双 owner 独立效果均已通过。最终四包、公钥、安装说明和刷新后的
 SHA256SUMS 已准备，不新增测试门槛。
 
-尚未发生的动作仅为正式发布：核对发布绑定记录，发布最终四包及校验/安装材料，随后
-记录实际 tag、Release 链接和资产结果。此处 GO 是验收决定，不等于已发布。
+正式版本 `v0.4.1` 已于 2026-11-15 14:31:16 UTC 公开，非草稿、非预发布。
+[Release](https://github.com/sidnvy/Styx/releases/tag/v0.4.1) 的四项下载、公钥、安装说明及
+SHA256SUMS 共七项均已上传，GitHub 服务端摘要与本地已验收资产逐一一致。
+证据：`release-0.4.1/final/github-upload-verification.json`；本轮无剩余发布阻塞。
 Linux/Windows/Gateway 实际源码为 `d34887c`，Mac 为 `ea84ac7`；保留 macOS-only
 条件编译差分依据及未受影响平台证据，不将所有包标成同一源码 SHA。
 
