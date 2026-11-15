@@ -252,7 +252,7 @@ impl NativeTransactions {
         scope: Option<std::sync::Arc<crate::app::HostScope>>,
         observer: &dyn Fn(&str, &str),
     ) -> Result<NativeCommitResult, NativeTransactionError> {
-        self.retain_update(previous, candidate, id.clone(), scope)?;
+        self.retain_update(previous, candidate, id.clone(), scope, None)?;
         self.apply_retained_runtime_update(id, sequence, observer)
     }
     fn apply_retained_runtime_update(
@@ -478,12 +478,14 @@ impl NativeTransactions {
         let target = candidate
             .runtime_selection()
             .map_err(|_| NativeTransactionError::InvalidInput)?;
-        let trusted = before
-            == *proof
+        let before = retain_recorded_selection(before, selection(self.readstate()?.state())?)?;
+        let trusted = crate::release::same_persisted_selection(
+            &before,
+            proof
                 .original_definition()
                 .runtime_selection()
-                .map_err(|_| NativeTransactionError::Conflict)?
-            && before.publisher_spki_sha256 == target.publisher_spki_sha256
+                .map_err(|_| NativeTransactionError::Conflict)?,
+        ) && before.publisher_spki_sha256 == target.publisher_spki_sha256
             && previous.manifest().target == candidate.manifest().target
             && candidate
                 .supports_state_reader(ReaderContract::NativeServiceRuntimeSelectedStateV1)
@@ -604,12 +606,12 @@ impl NativeTransactions {
         let target = candidate
             .runtime_selection()
             .map_err(|_| NativeTransactionError::InvalidInput)?;
-        if before != selection(original.before())?
-            || target != selection(original.target())?
-            || proof
-                .repair_binding()
-                .map_err(|_| NativeTransactionError::UnknownInspect)?
-                != *original.binding()
+        let before = retain_recorded_selection(before, selection(original.before())?)?;
+        let target = retain_recorded_selection(target, selection(original.target())?)?;
+        if proof
+            .repair_binding()
+            .map_err(|_| NativeTransactionError::UnknownInspect)?
+            != *original.binding()
             || before.publisher_spki_sha256 != target.publisher_spki_sha256
             || previous.manifest().target != candidate.manifest().target
             || !previous
@@ -671,7 +673,10 @@ impl NativeTransactions {
         candidate: VerifiedNativeRelease,
         id: &TransactionId,
     ) -> Result<NativeCommitResult, NativeTransactionError> {
-        self.retain_update(previous, candidate, id.clone(), None)?;
+        let recorded = self
+            .runtime_update_selections(id)?
+            .ok_or(NativeTransactionError::InvalidInput)?;
+        self.retain_update(previous, candidate, id.clone(), None, Some(recorded))?;
         let result = (|| {
             let expected = self
                 .runtime_update_selections(id)?
@@ -697,7 +702,16 @@ impl NativeTransactions {
         id: &TransactionId,
         scope: std::sync::Arc<crate::app::HostScope>,
     ) -> Result<NativeCommitResult, NativeTransactionError> {
-        self.retain_update(previous, candidate, id.clone(), Some(scope.clone()))?;
+        let recorded = self
+            .runtime_update_selections(id)?
+            .ok_or(NativeTransactionError::InvalidInput)?;
+        self.retain_update(
+            previous,
+            candidate,
+            id.clone(),
+            Some(scope.clone()),
+            Some(recorded),
+        )?;
         self.recover_retained_runtime_update_for_app(&scope, id)
     }
     pub(crate) fn recover_retained_runtime_update_for_app(
@@ -790,6 +804,7 @@ impl NativeTransactions {
         candidate: VerifiedNativeRelease,
         id: TransactionId,
         scope: Option<std::sync::Arc<crate::app::HostScope>>,
+        recorded: Option<(NativeRuntimeSelection, NativeRuntimeSelection)>,
     ) -> Result<(), NativeTransactionError> {
         if let Some(scope) = &scope {
             self.validate_runtime_app_scope(scope)?;
@@ -803,6 +818,12 @@ impl NativeTransactions {
         let target = candidate
             .runtime_selection()
             .map_err(|_| NativeTransactionError::InvalidInput)?;
+        let (recorded_before, recorded_target) = match recorded {
+            Some(pair) => pair,
+            None => (selection(self.readstate()?.state())?, target.clone()),
+        };
+        let before = retain_recorded_selection(before, recorded_before)?;
+        let target = retain_recorded_selection(target, recorded_target)?;
         let trusted = before.publisher_spki_sha256 == target.publisher_spki_sha256
             && previous.manifest().target == candidate.manifest().target
             && candidate
@@ -1004,3 +1025,15 @@ mod tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "native_service_repair_tests.rs"]
 mod service_repair_tests;
+
+/// Keep the original journal selection bytes after verifying the freshly opened
+/// release. A Darwin mount number must not manufacture a different transaction.
+fn retain_recorded_selection(
+    observed: NativeRuntimeSelection,
+    recorded: NativeRuntimeSelection,
+) -> Result<NativeRuntimeSelection, NativeTransactionError> {
+    if !crate::release::same_persisted_selection(&observed, &recorded) {
+        return Err(NativeTransactionError::Conflict);
+    }
+    Ok(recorded)
+}

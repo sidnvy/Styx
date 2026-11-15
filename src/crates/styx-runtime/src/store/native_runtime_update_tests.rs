@@ -917,3 +917,31 @@ async fn status_selection_reads_committed_update_while_setup_copy_stays_old() {
     );
     fs::remove_dir_all(base).unwrap();
 }
+
+#[test]
+fn mac_mount_change_retains_original_update_and_recovery_selections() {
+    let recorded: NativeRuntimeSelection = serde_json::from_value(serde_json::json!({
+        "schema":1,"payload_path":"/Applications/Styx.app/runtime", "payload_root":{"platform":"macos","device":16777229,"inode":25590241,"uid":501},
+        "manifest_sha256":"a".repeat(64),"publisher_file":"/Applications/Styx.app/publisher.pem","publisher_spki_sha256":"b".repeat(64)
+    })).unwrap();
+    let mut observed = recorded.clone();
+    observed.payload_root = NativeRootIdentity::Macos {
+        device: 16777231,
+        inode: 25590241,
+        uid: 501,
+    };
+    assert_ne!(observed, recorded);
+    let held = retain_recorded_selection(observed.clone(), recorded.clone()).unwrap();
+    assert_eq!(held, recorded, "stop then select retains canonical before");
+    let recovered = retain_recorded_selection(observed.clone(), held.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&recovered).unwrap(),
+        serde_json::to_vec(&recorded).unwrap(),
+        "resume preserves original transaction bytes"
+    );
+    observed.manifest_sha256 = Sha256Digest::of_bytes(b"different release");
+    assert!(matches!(
+        retain_recorded_selection(observed, recorded),
+        Err(NativeTransactionError::Conflict)
+    ));
+}

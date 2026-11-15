@@ -875,7 +875,7 @@ pub(crate) use stage::stage_installed;
 #[cfg(test)]
 mod stage_tests;
 
-fn same_persisted_selection(
+pub(crate) fn same_persisted_selection(
     actual: &NativeRuntimeSelection,
     recorded: &NativeRuntimeSelection,
 ) -> bool {
