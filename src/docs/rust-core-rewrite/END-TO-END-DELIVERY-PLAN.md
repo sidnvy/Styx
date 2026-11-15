@@ -2,9 +2,44 @@
 
 更新：2026-11-15。唯一当前待办入口；产品规则以 [REFACTOR-PLAN](REFACTOR-PLAN.md)
 为准。初次审核源码 `5c39783`；结构清理 `efab8be`，旧测试修正 `8f8d278`。
-已安装实机仍为上一轮版本，Windows/Linux 最近实际验收产品源码 `d1cb41c`。
-本页记录源码审核与验证；本次 C1/C2 清理已通过 Linux 本机检查，尚未更新实机组件。
+Gateway 先行包 `2d3fe69` 已发布并更新本机与 moedeu-apps；Windows/Linux Host 仍为上一轮 `d1cb41c`，
+Mac 保留原版。桌面 App/Host 的 C1/C2 原生更新验证仍未关闭。
 历史正式 0.4.0 已发布；本轮重构版尚未正式放行。
+
+## 已发布的 Linux Gateway 先行版
+
+2026-11-15 按所有者要求先交付 Gateway：
+[0.4.1-gateway.1](https://github.com/sidnvy/Styx/releases/tag/gateway-v0.4.1-gateway.1)，
+源码 `2d3fe693a4b38a75974cc972f2ee8d4af4bd784b`。仅 Linux Gateway/Core + Tunnel，
+不包含桌面 App/Host 执行器，不将跨平台重构版 Stable 标为通过。
+
+- 同源 20 项质量门 PASS，Debian 12 原生构建与签名 PASS；GitHub 三项资产摘要逐一匹配。
+- 本机 38443 原配置更新，实际 Core/选定 manifest 与包一致；原 Linux Host PID 469180、
+  身份及配对不变。双独立 MCP 的 Exec/Browser 与 A 退出后 B 继续通过。
+- moedeu-apps 22027 原配置更新及新版正常退出重开通过，revision 7；新 Core PID 2611732，
+  TLSv1.3/认证管理查询通过，身份/配对/Tunnel 配置保持，旧 22026 服务未修改。
+- manifest `5cea14d3ca06a012924671b4c9fb399265cfc891f9c1bad9511c611db9cdac9a`，
+  Core `9300e96c32f6223c979d46e6a55342f7c60eb3b9c2a90f2457f74ee51112f571`。
+- moedeu 原旧版退出 4/两个远端 owner 未确认完整保留；独立确认本地所有组件退出后继续，
+  没有重放 stop。新版再次正常退出为 0，owner/transport 未确认数均为 0。
+- 本机第一次即时读取新进程 `/proc/exe` 权限失败；独立读取确认实际新 Core 后补记，未重放更新。
+  时钟下界与 Tunnel 运行期临时头/健康文件正常刷新，不把它们当持久身份变化。
+
+最终证据 `/home/sid/Developer/Artifacts/Styx/gateway-preview-0.4.1-gateway.1/release-verification.json`。
+moedeu 原四个 Host 当前离线，原本机日常 Host profile 已于 11/13 清理删除；不能宣称
+原身份已恢复或当前 ChatGPT 账号已可用。现有 38443 测试 Host 的原配对保持不变。
+
+## 新发现的 Host 配额遗漏
+
+本机 Computer Use 返回 `SESSION_DISCONNECTED`。独立系统日志证明旧 Host 的
+`__linux-desktop-watch` PID 469223 在 11:20:23 因 SIGXCPU 退出，早于 Gateway 更新
+15:29。原因是 hidden worker 仍有累计 CPU 2/3 秒以及 AS/DATA/NOFILE 自设配额。
+
+`6c97598` 删除这些配额及 watcher 以低内存额度判断身份的旧检查；保留原父进程身份、
+父进程退出清理、请求期限与禁止 core dump。实际子进程超过 3.25 秒 CPU、128MiB 分配、
+64 个文件句柄后正常退出，以及 3 项来源/并发/取消清理回归通过；整合后 20 项标准质量门
+PASS（`computer-concurrency/host-worker-resource-quality/receipt.json`）。原 Host 未重启，
+修复未包含在上述已冻结 Gateway 包中，仍需正常 Host 更新与实机长驻观察。
 
 ## 已完成，勿重新列为待办
 
@@ -72,7 +107,7 @@ Windows/Mac 的 SSH 及独立验收插件均再次确认离线，未派发远端
 
 ## 唯一剩余清单与顺序
 
-1. **C1、C2 验证收尾。** 源码清理、Linux 局部回归与整合质量门已完成；设备恢复后补两端原生编译和 Windows 正常页面路径。
+1. **Host 配额遗漏与 C1、C2 验证收尾。** 先用正常更新恢复本机 Host 桌面来源并验证长驻 watcher； 源码清理、Linux 局部回归与整合质量门已完成；设备恢复后补两端原生编译和 Windows 正常页面路径。
 2. **角色/入口剩余证据。** 上表已归并已有记录；核实 Mac/Windows 组合角色实际 GUI 首次设置，绑定最终版本；Linux 现有 CLI 入口已补验，非新增 GUI 项。未核实项不等同失败，不重跑已经通过且不受修改影响的整套拓扑。
 3. **Mac 最终更新与受影响场景。** 当前最新配额修正只验证了 Mac 编译，正常更新后核对
    安装/选定/实际组件，再验证双对话读取及退出后继续。复用原配置、签名和安装路径。
