@@ -184,7 +184,8 @@ def bundle(args):
 
 def checksums(args):
     expected = [f'Styx-{args.version}-windows-x64.exe', f'Styx-{args.version}-macos-arm64.dmg',
-                f'Styx-{args.version}-linux-x64.tar.gz', f'Styx-{args.version}-gateway-debian12-x64.tar.gz']
+                f'styx-{args.version}-linux-x86_64-desktop.tar.gz',
+                f'styx-{args.version}-linux-x86_64-gateway-only.tar.gz']
     require(sorted(p.name for p in args.output.iterdir()) == sorted(expected), 'release assets missing or unexpected')
     (args.output / 'SHA256SUMS').write_text(''.join(f'{digest(args.output / name)}  {name}\n' for name in expected))
     shutil.copyfile(ROOT / 'src/release-publisher.pub', args.output / 'styx-publisher.pub')
@@ -192,26 +193,20 @@ def checksums(args):
 
 def linux_assets(args):
     args.output.mkdir(mode=0o700)
-    for name, suffix, role in [('linux', 'linux-x64', 'Join an existing Gateway'),
-                               ('linux-gateway', 'gateway-debian12-x64', 'Gateway only on moedeu-apps')]:
+    verifier = args.sealed / 'linux/payload/bin/styx'
+    for name, mode, flavor in [('linux', 'desktop', 'desktop'),
+                               ('linux-gateway', 'gateway', 'gateway-only')]:
         source = args.sealed / name
         receipt = json.loads((source / 'build-receipt.json').read_text())
         require(receipt.get('status') == 'PASS' and receipt.get('version') == args.version,
                 'matching signed Runtime receipt required')
         with tempfile.TemporaryDirectory(dir=args.output.parent) as temporary:
-            root = Path(temporary)
-            shutil.copytree(source / 'payload', root / 'payload')
-            shutil.copyfile(source / 'publisher.pem', root / 'publisher.pem')
-            (root / 'README.txt').write_text(
-                'Styx ' + args.version + '\n\nExtract into a permanent owner-private directory.\n'
-                'From this directory run: ./payload/bin/styx setup\n'
-                'Choose: ' + role + '.\n'
-                'When setup asks for signed files, use the absolute path to ./payload,\n'
-                'the absolute path to ./publisher.pem, and the public publisher fingerprint:\n' + PIN + '\n'
-                'Compare the fingerprint with the trusted release source before first use.\n'
-                'Keep configuration, pairing and identities when upgrading.\n'
-                'No profile or identity is included in this package.\n')
-            bundle(argparse.Namespace(source=root, output=args.output / f'Styx-{args.version}-{suffix}.tar.gz'))
+            output = Path(temporary) / 'distribution'
+            run(sys.executable, '-I', '-B', ROOT / 'src/ci/release-linux.py', 'distribution',
+                '--runtime-dir', source.resolve(), '--verifier', verifier.resolve(),
+                '--expected-publisher', PIN, '--mode', mode, '--output', output.resolve())
+            asset = f'styx-{args.version}-linux-x86_64-{flavor}.tar.gz'
+            shutil.copyfile(output / asset, args.output / asset)
 
 
 def publisher_key(args):

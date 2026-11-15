@@ -87,9 +87,11 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse((self.root / 'SHA256SUMS').exists())
 
     def test_checksums_cover_all_four_assets(self):
-        names = ['windows-x64.exe', 'macos-arm64.dmg', 'linux-x64.tar.gz', 'gateway-debian12-x64.tar.gz']
+        names = ['Styx-1.2.3-windows-x64.exe', 'Styx-1.2.3-macos-arm64.dmg',
+                 'styx-1.2.3-linux-x86_64-desktop.tar.gz',
+                 'styx-1.2.3-linux-x86_64-gateway-only.tar.gz']
         for name in names:
-            (self.root / ('Styx-1.2.3-' + name)).write_bytes(name.encode())
+            (self.root / name).write_bytes(name.encode())
         ci.checksums(argparse.Namespace(output=self.root, version='1.2.3'))
         rows = (self.root / 'SHA256SUMS').read_text().splitlines()
         self.assertEqual(len(rows), 4)
@@ -97,23 +99,38 @@ class ReleaseTests(unittest.TestCase):
             digest, name = row.split('  ')
             self.assertEqual(digest, ci.digest(self.root / name))
 
-    def test_linux_distribution_retains_signed_payload_and_includes_public_setup_inputs(self):
+    def test_linux_assets_delegate_both_modes_to_the_distribution_producer(self):
         sealed = self.root / 'sealed'
         for name in ['linux', 'linux-gateway']:
             folder = sealed / name
-            (folder / 'payload/bin').mkdir(parents=True)
-            (folder / 'payload/bin/styx').write_bytes(b'native fixture')
-            (folder / 'payload/bin/styx').chmod(0o700)
-            (folder / 'payload/manifest.sig').write_bytes(b'exact signed bytes')
-            (folder / 'publisher.pem').write_bytes(b'public pin fixture')
+            folder.mkdir(parents=True)
             (folder / 'build-receipt.json').write_text('{"status":"PASS","version":"1.2.3"}')
         assets = self.root / 'assets'
-        ci.linux_assets(argparse.Namespace(sealed=sealed, output=assets, version='1.2.3'))
-        for file in assets.iterdir():
-            with tarfile.open(file) as archive:
-                self.assertEqual(archive.extractfile('payload/manifest.sig').read(), b'exact signed bytes')
-                self.assertEqual(archive.extractfile('publisher.pem').read(), b'public pin fixture')
-                self.assertIn(b'./payload/bin/styx setup', archive.extractfile('README.txt').read())
+        calls = []
+
+        def producer(*argv):
+            self.assertEqual(argv[1:5], ('-I', '-B', ci.ROOT / 'src/ci/release-linux.py', 'distribution'))
+            flags = dict(zip(argv[5::2], argv[6::2]))
+            self.assertEqual(flags['--verifier'], sealed / 'linux/payload/bin/styx')
+            self.assertEqual(flags['--expected-publisher'], ci.PIN)
+            mode = flags['--mode']
+            source = 'linux' if mode == 'desktop' else 'linux-gateway'
+            self.assertEqual(flags['--runtime-dir'], sealed / source)
+            output = flags['--output']
+            self.assertEqual(output.parent.parent, assets.parent)
+            self.assertFalse(output.exists())
+            output.mkdir()
+            flavor = 'desktop' if mode == 'desktop' else 'gateway-only'
+            (output / f'styx-1.2.3-linux-x86_64-{flavor}.tar.gz').write_bytes(mode.encode())
+            calls.append(mode)
+
+        with patch.object(ci, 'run', side_effect=producer):
+            ci.linux_assets(argparse.Namespace(sealed=sealed, output=assets, version='1.2.3'))
+        self.assertEqual(calls, ['desktop', 'gateway'])
+        self.assertEqual({p.name: p.read_bytes() for p in assets.iterdir()}, {
+            'styx-1.2.3-linux-x86_64-desktop.tar.gz': b'desktop',
+            'styx-1.2.3-linux-x86_64-gateway-only.tar.gz': b'gateway',
+        })
 
     def test_disposable_runner_cleanup_does_not_wait_for_security_dialogs(self):
         folder = self.root / 'signing'

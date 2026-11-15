@@ -17,6 +17,21 @@ Native owners reuse their existing project, source checkout and chat; Git synchr
 Do not create a checkout, toolchain or cache per candidate. Frozen outputs belong in artifacts.
 Use the newest relocation receipts when an old artifact references a former path.
 
+## Output storage
+
+Keep worker inputs, signed runtimes, installers, native build outputs and acceptance
+receipts under `/home/sid/Developer/Artifacts/Styx`. Do not use `/tmp` for these
+large or reusable files; tmpfs consumes memory and has a separate user quota.
+Use `/tmp` only for small disposable files. Native service fixtures also need
+short socket paths; use a short fixture directory under the artifact root rather
+than placing persistent test data in tmpfs.
+
+The 2026-11-15 retirement of inactive `/tmp` outputs is recorded in
+`/home/sid/Developer/Archives/Styx/tmp-20261115/relocation.json`. Historical paths
+in old receipts are not current output instructions; use the recorded destination.
+The existing test Gateway profile under `/tmp/styx-host-capabilities-native-20261114/test-gateway`
+remains in place while its owner runs. Do not move live profiles to reclaim space.
+
 ## Local development
 
 On the workstation, use the existing wrapper; it sets cwd and the canonical native target:

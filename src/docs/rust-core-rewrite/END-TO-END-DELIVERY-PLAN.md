@@ -6,7 +6,36 @@ Gateway 先行包 `2d3fe69` 已发布并更新本机与 moedeu-apps；Windows Ho
 Mac 保留原版。桌面 App/Host 的 C1/C2 原生更新验证仍未关闭。
 历史正式 0.4.0 已发布；本轮重构版尚未正式放行。
 
-## Linux 用户首次安装验收交接
+## Linux 双形态安装交付（0.4.1-preview.2）
+
+[双形态预览版已公开发布](https://github.com/sidnvy/Styx/releases/tag/linux-v0.4.1-preview.2)，四项资产摘要匹配。
+源码 `27a61d61107b56e328001e011ad8f379750a50e1`；完整材料在
+`/home/sid/Developer/Artifacts/Styx/linux-install-preview-0.4.1-preview.2`。
+Gateway-only、Desktop（Host＋可选 Gateway）两个包均带单一 `./install.sh`：
+安装验证并复制至持久用户目录，注册固定命令，再进入原设置或更新流程。
+Gateway-only 通过明确确认及系统授权处理已有 user manager 的 linger；桌面不改 linger。
+Linux `styx quit`/`styx start` 复用原 service authority，不增加后台进程或持久管理层。
+
+- 20 项最终整合检查 PASS，Debian 12 构建与两套原发布身份签名、分发校验 PASS。
+- Desktop 最终包真实安装、下载目录移走后运行、同版本重装不改变进程/配对、
+  原进程退出、原身份重开、卸载服务 PASS：`Artifacts/Styx/it2/result.json`。
+- Gateway-only 最终包安装、systemd 启停/卸载 PASS，未创建 Host：
+  `Artifacts/Styx/ig2/result.json`。两份结果已复制到本版本交付目录。
+- 两次测试环境失败完整保留：第一次测试路径超过 Unix socket 长度限制（155字节），
+  第二次 tmpfs 用户配额阻断复制；没有据此报告产品验收通过或重放未知服务动作。
+  最终测试使用持久磁盘上的短测试目录。默认用户配置未创建，moedeu-apps 未改配。
+- 独立代码审核发现并修复连续升级 CLI 链接及未完成升级恢复问题；
+  当前安装入口委托既有 updater 处理原步骤，只在其确认完成后补齐命令入口。
+- 正常 CI 的 Linux assets 已改为同一 distribution producer；其 9 项局部测试 PASS，
+  不再保留第二套手工 README 包装。
+- 用户本人首次安装、ChatGPT Exec/Browser/Computer 与双对话使用、长驻观察待完成。
+  跨平台 Stable 仍为 NO-GO。不要替用户预配对再声称其首次安装已通过。
+
+`/tmp` 历史材料已迁移至 `/home/sid/Developer/Archives/Styx/tmp-20261115`，
+记录见 `relocation.json`；当次占用由约23GB降至8.7GB，运行中的测试 Gateway 配置保持原位置。
+后续大文件与证据统一走 WORKSPACE.md 的持久目录。
+
+## 前一轮安装交接（已由 preview.2 替代）
 
 所有者要求：开发验证完成后，由用户亲自从完整安装包走首次安装、配置、加入
 moedeu-apps Gateway 和 ChatGPT 验收；不得预先配置后宣称用户流程通过。

@@ -10,6 +10,7 @@
 ## Default development loop
 
 - Work in the existing project and native cache. WORKSPACE.md maps paths and commands; read only the relevant section. On the workstation, integrate into /home/sid/Developer/Styx on develop; origin is GitHub.
+- Keep reusable worker inputs, runtimes, packages and acceptance evidence in the persistent artifact locations in WORKSPACE.md; `/tmp` is only for small disposable files. Check active owners before retiring outputs.
 - Reuse the existing development command and cache in WORKSPACE.md. Match build settings to the warm artifacts and size parallelism to observed resources.
 - Develop and reproduce locally before release production: incremental affected-crate check, the changed scenario, and actual native execution when runtime behavior needs it. A typecheck is sufficient for a typecheck task, not for a startup/recovery fix.
 - For a product behavior change, trace every existing user entry point (main window, settings, menu/tray, CLI). Remove superseded controls and their dedicated callbacks; checking one surface or the shared Core is not proof that the other surfaces agree. When changing a shared executor interface, inspect its platform-gated consumers and compile the affected native targets. Update affected tool contracts and test inventories before the full integration gate.
