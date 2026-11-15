@@ -624,11 +624,8 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
                 .unwrap()
                 .is_none()
         );
-        assert!(matches!(
-            host.dispatch_action(&owner, &pending.id, pending.payload_digest)
-                .await,
-            Err(CoordinatorError::Busy)
-        ));
+        // No slot quota: keep this prepared action undispatched while checking
+        // that losing the first ticket does not cancel its native job.
         assert_eq!(
             host.inspect_action(&owner, &pending.id, pending.payload_digest)
                 .unwrap()
@@ -898,7 +895,7 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
             "HOST_ACTION_OBSERVATION {}",
             serde_json::json!({"root":root,"nonce":nonce,"effectCount":1,"startDeadlineExpiredBeforeFreshAction":true,
             "droppedLocalTicketJobCompleted":true,"nativeAckLossInjected":false,"writeAction":write.id,"writeId":acknowledged.write_id,
-            "slotRefusalPreservedReservation":true,"changedGrantTargetDigestOwnerDenied":true,"terminateAction":terminate.id,"nativeExitAfterIndependentRead":exit,
+            "undispatchedActionPreservedReservation":true,"changedGrantTargetDigestOwnerDenied":true,"terminateAction":terminate.id,"nativeExitAfterIndependentRead":exit,
             "terminateAckDidNotAlterParent":true,"ownerRevocationFencedQueriesAndActions":true})
         );
     });
