@@ -10,7 +10,7 @@ import {buildWindowsApp,createNativeOutputDirectory,windowsNativeOutputCommand} 
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 function fixture(t){
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'styx-windows-builder-')));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
- const sourceRoot=path.join(dir,'source'),sourceFiles=['host/windows/Styx.cs','host/windows/SessionProbe.cs','host/windows/PrivateStorage.cs','assets/brand/styx-logo.png','assets/brand/styx-custom-mcp-icon.png'];
+ const sourceRoot=path.join(dir,'source'),sourceFiles=['host/windows/Styx.cs','host/windows/SessionProbe.cs','host/windows/PrivateStorage.cs','assets/brand/styx-logo.png','assets/brand/styx.ico','assets/brand/styx-custom-mcp-icon.png'];
  for(const name of sourceFiles){const file=path.join(sourceRoot,...name.split('/'));fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,'public source fixture');}
  const {privateKey,publicKey}=generateKeyPairSync('ed25519'),publisherKeyFile=path.join(dir,'publisher.pem');fs.writeFileSync(publisherKeyFile,publicKey.export({type:'spki',format:'pem'}));
  return {dir,privateKey,sourceFiles,config:{sourceRoot,output:path.join(dir,'output'),publisherKeyFile,publisherSha256:digest(publicKey.export({type:'spki',format:'der'}))}};

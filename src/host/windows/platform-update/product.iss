@@ -21,6 +21,7 @@ OutputBaseFilename=StyxSetup-{#ProductVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile={#SourceDir}\styx.ico
 CloseApplications=no
 RestartApplications=no
 ; Serialize this product's setup UI independently of its not-yet-selected path.
