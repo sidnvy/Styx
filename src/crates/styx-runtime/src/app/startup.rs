@@ -1,6 +1,8 @@
 //! Current read-only startup observation. Recovery and mutations keep their
 //! original coordinators; a historical observation never resumes a transaction.
-use super::runtime_update::{OriginalInput, SelectionPin, root_digest, same_file};
+#[cfg(test)]
+use super::runtime_update::root_digest;
+use super::runtime_update::{OriginalInput, SelectionPin, root_digest_matches, same_file};
 use super::*;
 use crate::store::{
     ExecutionLeaseGuard, RawFile, management::ManagementInventory,
@@ -146,8 +148,8 @@ struct RetiredHistoryPair {
 impl RetiredHistoryPair {
     fn matches(&self, input: &OriginalInput) -> Result<bool, AppError> {
         Ok(input.roles.len() == 2
-            && root_digest(&self.host.root)? == input.roles[0].root_sha256
-            && root_digest(&self.gateway.root)? == input.roles[1].root_sha256)
+            && root_digest_matches(&self.host.root, input.roles[0].root_sha256, input)?
+            && root_digest_matches(&self.gateway.root, input.roles[1].root_sha256, input)?)
     }
     fn prove(&self, input: &OriginalInput) -> Result<(), AppError> {
         if !self.matches(input)?
@@ -190,13 +192,11 @@ impl HostApp {
         let inventory = profile
             .management_inventory()
             .map_err(|_| AppError("app_startup_observation_changed"))?;
-        let container = root_digest(&self.scope.container.parent)?;
-        let root = root_digest(
-            self.scope
-                .root
-                .get()
-                .ok_or(AppError("app_not_configured"))?,
-        )?;
+        let root = self
+            .scope
+            .root
+            .get()
+            .ok_or(AppError("app_not_configured"))?;
         let mut inputs = Vec::new();
         let mut selections = Vec::new();
         let mut retired: Vec<RetiredHistoryPair> = Vec::new();
@@ -215,7 +215,7 @@ impl HostApp {
             let input: OriginalInput = serde_json::from_slice(raw.bytes())
                 .map_err(|_| AppError("app_runtime_original_input_invalid"))?;
             input.validate_shape(&id)?;
-            if input.container_sha256 != container {
+            if !root_digest_matches(&self.scope.container.parent, input.container_sha256, &input)? {
                 return Err(AppError("app_runtime_original_input_changed"));
             }
             let selection = SelectionPin::open(
@@ -234,7 +234,7 @@ impl HostApp {
             }
             if input.roles.len() == 1 {
                 let role = &input.roles[0];
-                if role.root_sha256 != root || role.gateway {
+                if !root_digest_matches(root, role.root_sha256, &input)? || role.gateway {
                     return Err(AppError("app_runtime_original_input_changed"));
                 }
                 if !committed(&inventory, &role.select_transaction, role.select_sequence) {
@@ -245,7 +245,7 @@ impl HostApp {
                 if self.scope.gateway_sibling()?.root.get().is_some() {
                     return Ok(false);
                 }
-                if input.roles[0].root_sha256 == root {
+                if root_digest_matches(root, input.roles[0].root_sha256, &input)? {
                     return Err(AppError("app_runtime_original_input_changed"));
                 }
                 if !retired
@@ -282,8 +282,8 @@ impl HostApp {
                         let Ok(gateway) = PrivateRoot::open(&gateway_path) else {
                             continue;
                         };
-                        if root_digest(&host)? != input.roles[0].root_sha256
-                            || root_digest(&gateway)? != input.roles[1].root_sha256
+                        if !root_digest_matches(&host, input.roles[0].root_sha256, &input)?
+                            || !root_digest_matches(&gateway, input.roles[1].root_sha256, &input)?
                         {
                             continue;
                         }

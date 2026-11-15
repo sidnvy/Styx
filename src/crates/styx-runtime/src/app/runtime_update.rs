@@ -117,11 +117,65 @@ pub(super) fn same_file(root: &PrivateRoot, file: &RawFile) -> Result<(), AppErr
     }
     Ok(())
 }
-pub(super) fn root_digest(root: &PrivateRoot) -> Result<Sha256Digest, AppError> {
-    serde_json::to_vec(&root.identity())
+fn identity_digest(mut identity: serde_json::Value) -> Result<Sha256Digest, AppError> {
+    if identity["platform"] == "macos" {
+        identity
+            .as_object_mut()
+            .ok_or(AppError("app_runtime_input_invalid"))?
+            .remove("device");
+    }
+    serde_json::to_vec(&identity)
         .map(|raw| Sha256Digest::of_bytes(&raw))
         .map_err(|_| AppError("app_runtime_input_invalid"))
 }
+pub(super) fn root_digest(root: &PrivateRoot) -> Result<Sha256Digest, AppError> {
+    let identity = root.identity();
+    let value =
+        serde_json::to_value(&identity).map_err(|_| AppError("app_runtime_input_invalid"))?;
+    if value["platform"] == "macos" {
+        identity_digest(value)
+    } else {
+        serde_json::to_vec(&identity)
+            .map(|raw| Sha256Digest::of_bytes(&raw))
+            .map_err(|_| AppError("app_runtime_input_invalid"))
+    }
+}
+fn legacy_mac_digest(identity: &serde_json::Value, device: u64) -> Result<Sha256Digest, AppError> {
+    let legacy = styx_contracts::native_management::NativeRootIdentity::Macos {
+        device,
+        inode: identity["inode"]
+            .as_u64()
+            .ok_or(AppError("app_runtime_input_invalid"))?,
+        uid: identity["uid"]
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or(AppError("app_runtime_input_invalid"))?,
+    };
+    serde_json::to_vec(&legacy)
+        .map(|raw| Sha256Digest::of_bytes(&raw))
+        .map_err(|_| AppError("app_runtime_input_invalid"))
+}
+pub(super) fn root_digest_matches(
+    root: &PrivateRoot,
+    expected: Sha256Digest,
+    input: &OriginalInput,
+) -> Result<bool, AppError> {
+    if root_digest(root)? == expected {
+        return Ok(true);
+    }
+    let identity =
+        serde_json::to_value(root.identity()).map_err(|_| AppError("app_runtime_input_invalid"))?;
+    if identity["platform"] != "macos" {
+        return Ok(false);
+    }
+    let styx_contracts::native_management::NativeRootIdentity::Macos { device, .. } =
+        &input.selection.payload_root
+    else {
+        return Ok(false);
+    };
+    Ok(legacy_mac_digest(&identity, *device)? == expected)
+}
+
 struct Role {
     scope: Arc<HostScope>,
     retained: Option<native::NativeManagementError>,
@@ -185,7 +239,11 @@ impl Work {
         }
         if let Some(input) = &self.original {
             if input.schema != 1
-                || input.container_sha256 != root_digest(&self.scope.container.parent)?
+                || !root_digest_matches(
+                    &self.scope.container.parent,
+                    input.container_sha256,
+                    input,
+                )?
                 || input.roles.len() != self.roles.len()
             {
                 return Err(AppError("app_runtime_input_changed"));
@@ -200,14 +258,14 @@ impl Work {
             )?;
             for (binding, role) in input.roles.iter().zip(&self.roles) {
                 role.scope.validate()?;
-                if binding.root_sha256
-                    != root_digest(
-                        role.scope
-                            .root
-                            .get()
-                            .ok_or(AppError("app_not_configured"))?,
-                    )?
-                {
+                if !root_digest_matches(
+                    role.scope
+                        .root
+                        .get()
+                        .ok_or(AppError("app_not_configured"))?,
+                    binding.root_sha256,
+                    input,
+                )? {
                     return Err(AppError("app_runtime_input_changed"));
                 }
             }
@@ -1185,5 +1243,28 @@ impl HostApp {
                 self.input_writer = Some(work.writer);
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn mac_update_history_digest_survives_mount_change_but_not_root_replacement() {
+    let old = serde_json::json!({"platform":"macos","device":16777229,"inode":25590241,"uid":501});
+    let mut now = old.clone();
+    now["device"] = serde_json::json!(16777231);
+    assert_eq!(
+        identity_digest(old.clone()).unwrap(),
+        identity_digest(now.clone()).unwrap()
+    );
+    let legacy = legacy_mac_digest(&old, 16777229).unwrap();
+    assert_eq!(legacy_mac_digest(&now, 16777229).unwrap(), legacy);
+    for key in ["inode", "uid"] {
+        let mut changed = now.clone();
+        changed[key] = serde_json::json!(999);
+        assert_ne!(
+            identity_digest(changed.clone()).unwrap(),
+            identity_digest(old.clone()).unwrap()
+        );
+        assert_ne!(legacy_mac_digest(&changed, 16777229).unwrap(), legacy);
     }
 }
