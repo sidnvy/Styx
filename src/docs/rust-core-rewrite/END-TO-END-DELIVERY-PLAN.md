@@ -2,9 +2,35 @@
 
 更新：2026-11-15。唯一当前待办入口；产品规则以 [REFACTOR-PLAN](REFACTOR-PLAN.md)
 为准。初次审核源码 `5c39783`；结构清理 `efab8be`，旧测试修正 `8f8d278`。
-Gateway 先行包 `2d3fe69` 已发布并更新本机与 moedeu-apps；Windows/Linux Host 仍为上一轮 `d1cb41c`，
+Gateway 先行包 `2d3fe69` 已发布并更新本机与 moedeu-apps；Windows Host 仍为上一轮 `d1cb41c`，本机 Linux 测试 Host 已正常退出，
 Mac 保留原版。桌面 App/Host 的 C1/C2 原生更新验证仍未关闭。
 历史正式 0.4.0 已发布；本轮重构版尚未正式放行。
+
+## Linux 用户首次安装验收交接
+
+所有者要求：开发验证完成后，由用户亲自从完整安装包走首次安装、配置、加入
+moedeu-apps Gateway 和 ChatGPT 验收；不得预先配置后宣称用户流程通过。
+
+- 完整 Linux 包 `0.4.1-preview.1`，源码 `61101aa5e0334bea3b3a08d99e0a12ed950206eb`，
+  包含 `6c97598` 的 worker 配额修复。20 项质量门、Debian 12 构建、原发布身份签名、
+  实际 CLI release verify 均 PASS。非 Stable 放行，不代表已安装或账号端到端通过。
+- 包与证据：`/home/sid/Developer/Artifacts/Styx/linux-user-preview-0.4.1-preview.1`。
+- 旧测试 Host PID 469180 已单次 SIGTERM 正常退出，服务 inactive/dead、Result=success；
+  原文件保留，退出前后快照位于该目录的 `test-host-backup/`。未替用户建立默认配置、
+  执行 setup 或生成新配对；moedeu-apps Gateway 保持原配置。
+- Linux 入口仍为 CLI。完整包解压到持久目录，用户用 `styx install` 注册命令，
+  在本机图形桌面终端运行 `styx setup`，选择 Join an existing Gateway，填地址及短码。
+- 发布暂缓：所有者再次明确 Linux 必须交付 Gateway-only 与桌面 Host＋可选 Gateway 两种包，
+  并把正式安装方式纳入验收。完整包已经包含组合角色，但当前手动解压、注册链接和
+  setup 分离的入口仍需收敛；不能把本地预览包当作正式交付。自动审批在执行前拒绝了
+  tag/公开 Release 发布，尚未重新提交。
+- systemd 现状：两种角色都使用现有 user service，setup 安装/enable/start，
+  `WantedBy=default.target`、`Restart=no`；不自动 sudo 或开启 linger。
+  Gateway-only 必须明确无人登录时的持久运行方案；沿用原 user manager 的实现时，
+  由安装流程明确处理服务用户与 linger，而不是声称 login service 就等于开机常驻。
+  桌面包使用当前用户，Computer Use 跟随实际图形会话；不把整台 Host 绑定某个桌面窗口。
+- 待用户完成：首次安装与加入、ChatGPT Exec/Browser/Computer 独立效果，
+  双对话并行与其中一个退出后另一个继续，以及修复后桌面 watcher 长驻观察。
 
 ## 已发布的 Linux Gateway 先行版
 
@@ -38,8 +64,8 @@ moedeu 原四个 Host 当前离线，原本机日常 Host profile 已于 11/13 �
 `6c97598` 删除这些配额及 watcher 以低内存额度判断身份的旧检查；保留原父进程身份、
 父进程退出清理、请求期限与禁止 core dump。实际子进程超过 3.25 秒 CPU、128MiB 分配、
 64 个文件句柄后正常退出，以及 3 项来源/并发/取消清理回归通过；整合后 20 项标准质量门
-PASS（`computer-concurrency/host-worker-resource-quality/receipt.json`）。原 Host 未重启，
-修复未包含在上述已冻结 Gateway 包中，仍需正常 Host 更新与实机长驻观察。
+PASS（`computer-concurrency/host-worker-resource-quality/receipt.json`）。修复已纳入上述完整 Linux
+预览包，旧测试 Host 已退出；仍待用户安装及实机长驻观察。Gateway 先行包不含此修复。
 
 ## 已完成，勿重新列为待办
 
@@ -107,7 +133,7 @@ Windows/Mac 的 SSH 及独立验收插件均再次确认离线，未派发远端
 
 ## 唯一剩余清单与顺序
 
-1. **Host 配额遗漏与 C1、C2 验证收尾。** 先用正常更新恢复本机 Host 桌面来源并验证长驻 watcher； 源码清理、Linux 局部回归与整合质量门已完成；设备恢复后补两端原生编译和 Windows 正常页面路径。
+1. **Host 配额遗漏与 C1、C2 验证收尾。** 本机按上面的用户首次安装交接继续，验证桌面来源及长驻 watcher； 源码清理、Linux 局部回归与整合质量门已完成；设备恢复后补两端原生编译和 Windows 正常页面路径。
 2. **角色/入口剩余证据。** 上表已归并已有记录；核实 Mac/Windows 组合角色实际 GUI 首次设置，绑定最终版本；Linux 现有 CLI 入口已补验，非新增 GUI 项。未核实项不等同失败，不重跑已经通过且不受修改影响的整套拓扑。
 3. **Mac 最终更新与受影响场景。** 当前最新配额修正只验证了 Mac 编译，正常更新后核对
    安装/选定/实际组件，再验证双对话读取及退出后继续。复用原配置、签名和安装路径。
