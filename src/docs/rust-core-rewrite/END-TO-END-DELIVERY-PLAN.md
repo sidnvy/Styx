@@ -2,9 +2,25 @@
 
 更新：2026-11-15。唯一当前待办入口；产品规则以 [REFACTOR-PLAN](REFACTOR-PLAN.md)
 为准。初次审核源码 `5c39783`；结构清理 `efab8be`，旧测试修正 `8f8d278`。
-Gateway 先行包 `2d3fe69` 已发布并更新本机与 moedeu-apps；Windows Host 仍为上一轮 `d1cb41c`，本机 Linux 测试 Host 已正常退出，
-Mac 保留原版。桌面 App/Host 的 C1/C2 原生更新验证仍未关闭。
+moedeu-apps Gateway 已原配置更新至 `0.4.1-gateway.2`（源码 `70e634a`）；本机由用户
+自行安装 Linux Desktop `0.4.1-preview.2` 并加入 moedeu-apps，设备名 niuda。
+Windows Host 仍为上一轮 `d1cb41c`，Mac 保留原版；桌面 App/Host 的 C1/C2 原生更新验证仍未关闭。
 历史正式 0.4.0 已发布；本轮重构版尚未正式放行。
+
+## 用户安装后的 niuda 能力修复与验证
+
+用户原安装和配对保留，Host PID 929414 未变，配置摘要前后相同；没有重装或重新配对。
+修复源码 `70e634a2aaff2aadfc135c40c59583a2e0409a8b`：管理列表改用实际共享连接状态，
+删除 MCP 出站 256 KiB 限制及其关闭会话路径。保留入站请求边界，没有增加会话/能力配额。
+完整整合质量门与官方 SDK 大图片后同会话继续调用回归 PASS；Debian 12 构建及原身份签名 PASS。
+moedeu-apps 通过正常退出、备份、发布选择、重开更新为 `0.4.1-gateway.2`，选定与运行组件一致，
+Gateway 身份、配对与 Tunnel 配置摘要不变，旧 22026 服务未动。
+
+原 niuda Host 经 moedeu-apps 的认证 MCP 实际通过：三项连接 connected、4 个真实窗口、
+1024×611 PNG（响应 357646 bytes，超过旧限制）、截图后同会话再次读窗口、浏览器写入文字并独立
+snapshot 读回、关闭自有浏览器会话。截图已视觉检查。证据目录：
+`/home/sid/Developer/Artifacts/Styx/niuda-capabilities-20261115/result.json`。
+这是直接 MCP 验证，不代替用户 ChatGPT 账号路线和长驻观察；跨平台 Stable 仍为 NO-GO。
 
 ## Linux 双形态安装交付（0.4.1-preview.2）
 
@@ -33,7 +49,7 @@ Linux `styx quit`/`styx start` 复用原 service authority，不增加后台进�
   当前安装入口委托既有 updater 处理原步骤，只在其确认完成后补齐命令入口。
 - 正常 CI 的 Linux assets 已改为同一 distribution producer；其 9 项局部测试 PASS，
   不再保留第二套手工 README 包装。
-- 用户本人首次安装、ChatGPT Exec/Browser/Computer 与双对话使用、长驻观察待完成。
+- 用户本人首次安装与加入已完成；直接 MCP Browser/Computer 验证见上。ChatGPT 账号路线、双对话使用及长驻观察仍待完成。
   跨平台 Stable 仍为 NO-GO。不要替用户预配对再声称其首次安装已通过。
 
 `/tmp` 历史材料已迁移至 `/home/sid/Developer/Archives/Styx/tmp-20261115`，
