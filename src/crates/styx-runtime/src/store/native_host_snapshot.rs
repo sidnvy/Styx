@@ -780,13 +780,17 @@ fn matches_root(actual: &RootIdentity, marker: &NativeRootIdentity) -> bool {
         ) => device == expected_device && inode == expected_inode && uid == expected_uid,
         #[cfg(target_os = "macos")]
         (
-            RootIdentity::Macos { device, inode, uid },
+            RootIdentity::Macos {
+                device: _,
+                inode,
+                uid,
+            },
             NativeRootIdentity::Macos {
-                device: expected_device,
+                device: _,
                 inode: expected_inode,
                 uid: expected_uid,
             },
-        ) => device == expected_device && inode == expected_inode && uid == expected_uid,
+        ) => inode == expected_inode && uid == expected_uid,
         #[cfg(target_os = "windows")]
         (
             RootIdentity::Windows {

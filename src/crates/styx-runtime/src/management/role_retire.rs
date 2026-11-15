@@ -595,6 +595,33 @@ fn app_retire_names(path: &Path) -> Result<std::collections::BTreeSet<String>, (
     }
     Ok(names)
 }
+/// Completed retirement history survives Darwin mount-device renumbering.
+/// This is not a live descriptor comparison or authority to resume a retirement.
+fn same_retired_container(recorded: &serde_json::Value, current: &serde_json::Value) -> bool {
+    if recorded == current {
+        return true;
+    }
+    if recorded["platform"] != "macos" || current["platform"] != "macos" {
+        return false;
+    }
+    let (Some(mut old), Some(mut now)) =
+        (recorded.as_object().cloned(), current.as_object().cloned())
+    else {
+        return false;
+    };
+    if old.len() != 4
+        || now.len() != 4
+        || ["device", "inode", "uid"].iter().any(|key| {
+            old.get(*key).and_then(serde_json::Value::as_u64).is_none()
+                || now.get(*key).and_then(serde_json::Value::as_u64).is_none()
+        })
+    {
+        return false;
+    }
+    old.remove("device");
+    now.remove("device");
+    old == now
+}
 /// Existing-only check. Empty ledger is neutral; a started but incomplete or
 /// unrecognised entry permanently fences new setup until separately repaired.
 pub(crate) fn check_app_retire_journal(parent: &PrivateRoot, parent_path: &Path) -> Result<(), ()> {
@@ -623,7 +650,10 @@ pub(crate) fn check_app_retire_journal(parent: &PrivateRoot, parent_path: &Path)
         let completed: AppRetireDone = serde_json::from_slice(done.bytes()).map_err(|_| ())?;
         if record.schema != 1
             || completed.schema != 1
-            || record.container != serde_json::to_value(parent.identity()).map_err(|_| ())?
+            || !same_retired_container(
+                &record.container,
+                &serde_json::to_value(parent.identity()).map_err(|_| ())?,
+            )
             || record.suffix != format!(".retired-{name}")
             || record.entries.is_empty()
             || record.entries.len() > 7

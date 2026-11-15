@@ -187,7 +187,7 @@ impl VerifiedNativeRelease {
         expected: &NativeRuntimeSelection,
     ) -> Result<()> {
         self.revalidate()?;
-        if self.selection_metadata()? != *expected {
+        if !same_persisted_selection(&self.selection_metadata()?, expected) {
             return Err(ReleaseError::Changed);
         }
         Ok(())
@@ -529,7 +529,7 @@ fn selected(
         &expected,
         verify_payload,
     )?;
-    if verified.selection_metadata()? != *selection {
+    if !same_persisted_selection(&verified.selection_metadata()?, selection) {
         return Err(ReleaseError::Changed);
     }
     verified.revalidate()?;
@@ -874,3 +874,77 @@ pub use stage::stage;
 pub(crate) use stage::stage_installed;
 #[cfg(test)]
 mod stage_tests;
+
+fn same_persisted_selection(
+    actual: &NativeRuntimeSelection,
+    recorded: &NativeRuntimeSelection,
+) -> bool {
+    if !crate::store::native_root::same_persisted_identity(
+        &actual.payload_root,
+        &recorded.payload_root,
+    ) {
+        return false;
+    }
+    let mut normalized = actual.clone();
+    normalized.payload_root = recorded.payload_root.clone();
+    normalized == *recorded
+}
+
+#[cfg(test)]
+#[test]
+fn persisted_macos_selection_accepts_only_mount_device_change() {
+    let recorded: NativeRuntimeSelection = serde_json::from_value(serde_json::json!({
+        "schema":1,"payload_path":"/Applications/Styx.app/runtime", "payload_root":{"platform":"macos","device":16777229,"inode":25590241,"uid":501},
+        "manifest_sha256":"a".repeat(64),"publisher_file":"/Applications/Styx.app/publisher.pem","publisher_spki_sha256":"b".repeat(64)
+    })).unwrap();
+    let mut actual = recorded.clone();
+    actual.payload_root = NativeRootIdentity::Macos {
+        device: 16777231,
+        inode: 25590241,
+        uid: 501,
+    };
+    assert!(same_persisted_selection(&actual, &recorded));
+    let mut changed = actual.clone();
+    changed.payload_path.push_str("-other");
+    assert!(!same_persisted_selection(&changed, &recorded));
+    changed = actual.clone();
+    changed.publisher_file.push_str("-other");
+    assert!(!same_persisted_selection(&changed, &recorded));
+    changed = actual.clone();
+    changed.manifest_sha256 = styx_contracts::identity::Sha256Digest::of_bytes(b"changed");
+    assert!(!same_persisted_selection(&changed, &recorded));
+    for root in [
+        NativeRootIdentity::Macos {
+            device: 16777231,
+            inode: 25590242,
+            uid: 501,
+        },
+        NativeRootIdentity::Macos {
+            device: 16777231,
+            inode: 25590241,
+            uid: 502,
+        },
+        NativeRootIdentity::Linux {
+            device: 16777231,
+            inode: 25590241,
+            uid: 501,
+        },
+    ] {
+        changed = actual.clone();
+        changed.payload_root = root;
+        assert!(!same_persisted_selection(&changed, &recorded));
+    }
+    let mut linux = recorded.clone();
+    linux.payload_root = NativeRootIdentity::Linux {
+        device: 1,
+        inode: 2,
+        uid: 501,
+    };
+    let mut next = linux.clone();
+    next.payload_root = NativeRootIdentity::Linux {
+        device: 2,
+        inode: 2,
+        uid: 501,
+    };
+    assert!(!same_persisted_selection(&next, &linux));
+}

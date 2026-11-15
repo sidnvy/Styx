@@ -241,13 +241,17 @@ fn validate_locked_native_tip(
         ) => device == *d && inode == *i && uid == *u,
         #[cfg(target_os = "macos")]
         (
-            RootIdentity::Macos { device, inode, uid },
+            RootIdentity::Macos {
+                device: _,
+                inode,
+                uid,
+            },
             NativeRootIdentity::Macos {
-                device: d,
+                device: _,
                 inode: i,
                 uid: u,
             },
-        ) => device == *d && inode == *i && uid == *u,
+        ) => inode == *i && uid == *u,
         #[cfg(target_os = "windows")]
         (
             RootIdentity::Windows {

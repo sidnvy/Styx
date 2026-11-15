@@ -488,3 +488,79 @@ fn retire_revoked_devices_do_not_require_confirmation() {
     let report = retire_role(&host, Some(&gateway), RetireOptions::default()).unwrap();
     assert!(report.other_devices.is_empty());
 }
+
+#[test]
+fn completed_retire_container_allows_only_macos_mount_device_change() {
+    let old = serde_json::json!({"platform":"macos","device":16777229,"inode":25590241,"uid":501});
+    let mut now = old.clone();
+    now["device"] = serde_json::json!(16777231);
+    assert!(same_retired_container(&old, &now));
+    for (key, value) in [
+        ("inode", serde_json::json!(25590242)),
+        ("uid", serde_json::json!(502)),
+        ("device", serde_json::json!(null)),
+        ("platform", serde_json::json!("linux")),
+    ] {
+        let mut changed = now.clone();
+        changed[key] = value;
+        assert!(!same_retired_container(&old, &changed));
+    }
+    for platform in ["linux", "windows"] {
+        let mut a = old.clone();
+        a["platform"] = serde_json::json!(platform);
+        let mut b = a.clone();
+        b["device"] = serde_json::json!(16777231);
+        assert!(!same_retired_container(&a, &b));
+    }
+    let mut extra = now.clone();
+    extra["extra"] = serde_json::json!(true);
+    assert!(!same_retired_container(&old, &extra));
+}
+
+#[test]
+fn completed_retire_journal_still_requires_done_digest_and_structure() {
+    let temp = Temp::new();
+    let parent = PrivateRoot::open(&temp.0).unwrap();
+    let ledger = temp.child(APP_RETIRE_JOURNAL);
+    let name = "20261118T010203Z";
+    let entry = ledger.join(name);
+    fs::DirBuilder::new().mode(0o700).create(&entry).unwrap();
+    let begin = serde_json::to_vec(&AppRetireBegin {
+        schema: 1,
+        container: serde_json::to_value(parent.identity()).unwrap(),
+        suffix: format!(".retired-{name}"),
+        host_name: "host".into(),
+        entries: vec![AppRetireEntry {
+            old: "host".into(),
+            new: format!("host.retired-{name}"),
+            identity: serde_json::json!({"retained":"fixture"}),
+        }],
+        absent: [
+            "gateway",
+            "runtime-updates",
+            "app-join-input-v1.json",
+            "app-join-ca-v1.pem",
+            "app-join-invitation-v1",
+            "app-local-gateway-input-v1.json",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+    })
+    .unwrap();
+    file(&entry.join("begin"), &begin);
+    assert!(check_app_retire_journal(&parent, &temp.0).is_err());
+    let done = serde_json::to_vec(&AppRetireDone {
+        schema: 1,
+        begin_sha256: Sha256Digest::of_bytes(&begin).to_hex(),
+    })
+    .unwrap();
+    file(&entry.join("done"), &done);
+    assert!(check_app_retire_journal(&parent, &temp.0).is_ok());
+    let mut changed_bytes = begin.clone();
+    changed_bytes.push(b' ');
+    fs::write(entry.join("begin"), &changed_bytes).unwrap();
+    assert!(check_app_retire_journal(&parent, &temp.0).is_err());
+    fs::write(entry.join("begin"), &begin).unwrap();
+    file(&entry.join("unexpected"), b"kept");
+    assert!(check_app_retire_journal(&parent, &temp.0).is_err());
+}

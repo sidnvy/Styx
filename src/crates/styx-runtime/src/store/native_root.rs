@@ -361,6 +361,25 @@ impl NativeRootBinding {
         })
     }
 }
+/// Compare persisted root identity across opens. Darwin st_dev is a mount
+/// observation, not a reboot-stable identity. Live descriptor pins stay exact.
+pub(crate) fn same_persisted_identity(
+    actual: &styx_contracts::native_management::NativeRootIdentity,
+    recorded: &styx_contracts::native_management::NativeRootIdentity,
+) -> bool {
+    use styx_contracts::native_management::NativeRootIdentity;
+    match (actual, recorded) {
+        (
+            NativeRootIdentity::Macos {
+                inode: a, uid: u, ..
+            },
+            NativeRootIdentity::Macos {
+                inode: b, uid: v, ..
+            },
+        ) => a == b && u == v,
+        _ => actual == recorded,
+    }
+}
 pub(super) fn same_identity(root: &RootIdentity, marker: &NativeRootMarker) -> bool {
     match root {
         RootIdentity::Linux { device, inode, uid } => {
@@ -372,14 +391,14 @@ pub(super) fn same_identity(root: &RootIdentity, marker: &NativeRootMarker) -> b
                 }
         }
         #[cfg(target_os = "macos")]
-        RootIdentity::Macos { device, inode, uid } => {
-            marker.root_identity
-                == styx_contracts::native_management::NativeRootIdentity::Macos {
-                    device: *device,
-                    inode: *inode,
-                    uid: *uid,
-                }
-        }
+        RootIdentity::Macos { device, inode, uid } => same_persisted_identity(
+            &styx_contracts::native_management::NativeRootIdentity::Macos {
+                device: *device,
+                inode: *inode,
+                uid: *uid,
+            },
+            &marker.root_identity,
+        ),
         #[cfg(target_os = "windows")]
         RootIdentity::Windows {
             volume_serial,

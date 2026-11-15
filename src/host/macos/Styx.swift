@@ -603,7 +603,20 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
                 setupStatusLine?.title = "Native Host settings ready"
                 if setupOpenRequested { setupWindow?.present(); setupOpenRequested = false }
                 else if menuOpenRequested { toggleProductPanel() }
-            } catch { ProductNativeDiagnostics.lifecycle(.bootstrapFailed); setupStatusLine?.title = "Native package unavailable; original identity retained" }
+            } catch {
+                ProductNativeDiagnostics.lifecycle(.bootstrapFailed)
+                setupStatusLine?.title = "Native package unavailable; original identity retained"
+                // A status item without its panel must not hide startup failure.
+                // AppKit owns this feedback; no Core connection is required.
+                let alert = NSAlert()
+                alert.messageText = productText("无法启动 Styx", "Styx could not start")
+                alert.informativeText = productText(
+                    "无法加载现有设置。你的配置和配对已保留，请勿删除或重新配对。",
+                    "Your existing settings could not be loaded. Configuration and pairing have been preserved; do not delete them or pair again.")
+                alert.addButton(withTitle: productText("好", "OK"))
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            }
         }
         return
         #else
