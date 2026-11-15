@@ -29,8 +29,11 @@ than placing persistent test data in tmpfs.
 The 2026-11-15 retirement of inactive `/tmp` outputs is recorded in
 `/home/sid/Developer/Archives/Styx/tmp-20261115/relocation.json`. Historical paths
 in old receipts are not current output instructions; use the recorded destination.
-The existing test Gateway profile under `/tmp/styx-host-capabilities-native-20261114/test-gateway`
-remains in place while its owner runs. Do not move live profiles to reclaim space.
+The old local test Gateway and Host services have been stopped and removed. Their
+profiles are retained under the same archive root in
+`styx-host-capabilities-native-20261114/test-gateway`. The default user installation
+is intentionally unconfigured for owner-led first installation. Do not move live
+profiles to reclaim space.
 
 ## Local development
 

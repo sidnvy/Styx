@@ -8,6 +8,11 @@ Mac 保留原版。桌面 App/Host 的 C1/C2 原生更新验证仍未关闭。
 
 ## Linux 双形态安装交付（0.4.1-preview.2）
 
+本机首次安装前清场已完成：旧测试 Gateway PID 860339 正常退出，临时 unit 已回收，
+38443 端口释放，本机无 Styx 用户服务/进程，默认配置与命令入口未创建。剩余测试配置
+已迁入既有归档；moedeu-apps Gateway 只读认证查询成功、未修改。证据见本版
+`local-test-retirement.json`。
+
 [双形态预览版已公开发布](https://github.com/sidnvy/Styx/releases/tag/linux-v0.4.1-preview.2)，四项资产摘要匹配。
 源码 `27a61d61107b56e328001e011ad8f379750a50e1`；完整材料在
 `/home/sid/Developer/Artifacts/Styx/linux-install-preview-0.4.1-preview.2`。
