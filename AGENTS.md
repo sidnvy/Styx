@@ -28,7 +28,7 @@ Read a skill only when its trigger applies; do not load all references or histor
 | Native GUI/Core behavior, lifecycle bugs, or desktop build/run wiring | .agents/skills/styx-native-development/SKILL.md |
 | Release freeze, signing/packaging, installation or cross-device/account acceptance | .agents/skills/styx-release-acceptance/SKILL.md |
 | Architecture or interface changes | [Confirmed product behavior and role ownership](src/docs/rust-core-rewrite/REFACTOR-PLAN.md); the [architecture index](src/docs/rust-core-rewrite/README.md) routes to implementation contracts |
-| Delivery status or next acceptance exit | Latest checkpoint in src/docs/rust-core-rewrite/END-TO-END-DELIVERY-PLAN.md |
+| Delivery status or next acceptance exit | Current checklist in src/docs/rust-core-rewrite/END-TO-END-DELIVERY-PLAN.md |
 
 ## Ownership and safety
 
@@ -39,5 +39,7 @@ Read a skill only when its trigger applies; do not load all references or histor
 - Do not automatically replay a state-changing operation with an unknown outcome. Resolve it with fresh read-only evidence; an established not-dispatched result permits a fresh authorized attempt. This does not prohibit read-only diagnosis or rerunning isolated local tests. Native actions need a fresh target-bound observation.
 
 ## Evidence
+
+Use the current delivery checklist, not historical checkpoints, to choose remaining work. Before adding a blocker, check the confirmed product scope and existing evidence. Record structural cleanup with concrete callers and a deletion target; do not invent a new manager or compatibility layer to make old paths coexist. Keep historical results separate from current acceptance, and do not promote deferred features into release gates.
 
 Report what changed, what actually ran, and the remaining blocker. Separate checks, packages, installation and real independent effects. Keep plans and history out of completion claims. Stable remains NO-GO until its explicit gates close.

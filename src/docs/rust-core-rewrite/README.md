@@ -9,7 +9,7 @@ Read only the material needed for the task. This index is not a mandatory readin
 | Need | Reference |
 | --- | --- |
 | Product architecture, process ownership and agent guidance | [REFACTOR-PLAN.md](REFACTOR-PLAN.md) |
-| Current delivery exits, owners, verified results and remaining failures | Latest checkpoint in [END-TO-END-DELIVERY-PLAN.md](END-TO-END-DELIVERY-PLAN.md) |
+| Current delivery exits, owners, verified results and remaining failures | Current checklist in [END-TO-END-DELIVERY-PLAN.md](END-TO-END-DELIVERY-PLAN.md) |
 | v1 scope, exclusions and deferred features | [REDUCED-SCOPE.md](REDUCED-SCOPE.md), which overrides conflicting earlier scope |
 | Service responsibilities and architecture | [SPEC.md](SPEC.md) |
 | Identity, capability, session, operation, IPC and package contracts | [CONTRACTS.md](CONTRACTS.md) and [CONTRACT-V1.json](CONTRACT-V1.json) |

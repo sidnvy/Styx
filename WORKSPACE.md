@@ -72,7 +72,7 @@ live runtime data and process-referenced paths; Git does not recover all of thos
 
 ## Task context
 
-- Current delivery exits and verified evidence: newest checkpoint in
+- Current delivery exits and verified evidence: current checklist in
   [END-TO-END-DELIVERY-PLAN.md](src/docs/rust-core-rewrite/END-TO-END-DELIVERY-PLAN.md).
   Stable remains NO-GO until explicit release gates close.
 - Architecture and scope: [Rust baseline](src/docs/rust-core-rewrite/README.md).

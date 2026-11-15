@@ -1,5 +1,18 @@
 # Reduced release scope (2026-10-27)
 
+## Current interpretation (2026-11-15)
+
+The 2026-10-27 migration cuts, stop conditions and execution sequence below describe the
+original v1 delivery, which has since shipped. They are not instructions to reset current
+Rust profiles, re-pair devices, restart that sequence or stop authorized refactor work.
+Current refactor implementation preserves installed profiles and pairing, follows
+[REFACTOR-PLAN.md](REFACTOR-PLAN.md), and uses only the remaining work in
+[END-TO-END-DELIVERY-PLAN.md](END-TO-END-DELIVERY-PLAN.md). The explicit deferred-feature
+list remains a scope boundary unless the owner changes it; absence of new acceptance is
+not permission to promote a deferred feature into a blocking gate.
+
+## Historical v1 baseline
+
 Owner decision, 2026-10-27: Styx is installed only on the owner's own devices. Re-pairing them is acceptable. **Legacy migration is out of the release scope.** Existing installs are retired by hand and replaced by a fresh Rust install plus a new pairing.
 
 ## Deployment roles (owner decision, 2026-11-14)
