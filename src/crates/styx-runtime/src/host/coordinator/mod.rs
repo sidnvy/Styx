@@ -5,8 +5,6 @@
 mod browser;
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub use browser::*;
-#[cfg(test)]
-use tokio::sync::Semaphore;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod desktop;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]

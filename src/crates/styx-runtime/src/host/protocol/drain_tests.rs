@@ -213,7 +213,6 @@ async fn fault_case(mode: Fault) {
             format!("drain-link-{}", uuid::Uuid::new_v4())
                 .try_into()
                 .unwrap(),
-            host.link_budget(),
         )
         .await
         .unwrap();

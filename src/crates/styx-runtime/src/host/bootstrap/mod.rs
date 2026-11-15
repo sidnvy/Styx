@@ -1,57 +1,24 @@
-//! Optional Exec Host composition, with one shared logical queued-I/O budget.
+//! Optional Exec Host composition; transports own their existing buffers.
 //! This is not a process RSS/native-executor limit or the persistent service manager.
 use super::{
     coordinator::{CoordinatorError, HostAuthority, HostCleanup, HostCoordinator},
-    link::{HostLinkBudget, LINK_BYTES},
     protocol::{HostProtocol, PairedTrustedProfile, ProtocolError, TrustedProfile},
 };
 use crate::providers::codex::{CodexStdio, ExecError, OwnedExecutorConfig};
-use std::{sync::Arc, time::Duration};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::sync::Arc;
+use std::time::Duration;
 use styx_contracts::{capability::CapabilityId, identity::HostGeneration};
 use styx_core::{operations::OperationLedger, policy::AdmissionFacts};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-
-const RPC_BYTES: usize = 16 * 1024 * 1024;
-const PROTOCOL_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BootstrapError {
     #[error("invalid Exec Host bootstrap configuration")]
     InvalidConfiguration,
-    #[error("Host queued-I/O budget exhausted")]
-    Capacity,
     #[error(transparent)]
     Executor(#[from] ExecError),
     #[error(transparent)]
     Coordinator(#[from] CoordinatorError),
-}
-
-struct Partitions {
-    source: Arc<Semaphore>,
-    rpc: OwnedSemaphorePermit,
-    link: Arc<HostLinkBudget>,
-    protocol: OwnedSemaphorePermit,
-}
-impl Partitions {
-    fn reserve() -> Result<Self, BootstrapError> {
-        let source = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
-        let reserve = |bytes: usize| {
-            source
-                .clone()
-                .try_acquire_many_owned(bytes as u32)
-                .map_err(|_| BootstrapError::Capacity)
-        };
-        let rpc = reserve(RPC_BYTES)?;
-        let protocol = reserve(PROTOCOL_BYTES)?;
-        let link = HostLinkBudget::from_reserved_partition(reserve(LINK_BYTES)?)
-            .map_err(|_| BootstrapError::Capacity)?;
-        Ok(Self {
-            source,
-            rpc,
-            link,
-            protocol,
-        })
-    }
 }
 
 /// Bootstrap/control handle. Never put this in network-request state; pass the
@@ -61,9 +28,6 @@ impl Partitions {
 pub struct OwnedExecHost {
     coordinator: HostCoordinator,
     authority: HostAuthority,
-    link: Arc<HostLinkBudget>,
-    _protocol: OwnedSemaphorePermit,
-    budget: Arc<Semaphore>,
 }
 impl OwnedExecHost {
     pub async fn spawn(
@@ -75,8 +39,7 @@ impl OwnedExecHost {
             .spawn(executor)
             .await
     }
-    /// Reserve all partitions before connecting. A strict TLS/WSS rejection can
-    /// therefore occur before spawning native code, without a second byte budget.
+    /// Validate composition before connecting or spawning native code.
     pub fn reserve(
         generation: HostGeneration,
         trusted_facts: AdmissionFacts,
@@ -89,7 +52,6 @@ impl OwnedExecHost {
             return Err(BootstrapError::InvalidConfiguration);
         }
         Ok(ExecHostReservation {
-            partitions: Partitions::reserve()?,
             generation,
             trusted_facts,
         })
@@ -105,15 +67,10 @@ impl OwnedExecHost {
         if self.coordinator.exec_configured() {
             return Ok(());
         }
-        let budget = self
-            .budget
-            .clone()
-            .try_acquire_many_owned(RPC_BYTES as u32)
-            .map_err(|_| BootstrapError::Capacity)?;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let adapter = CodexStdio::spawn_pinned_with_reserved_budget(config, budget, image).await?;
+        let adapter = CodexStdio::spawn_pinned(config, image).await?;
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let adapter = CodexStdio::spawn_owned_with_reserved_budget(config, budget).await?;
+        let adapter = CodexStdio::spawn_owned(config).await?;
         self.authority.attach_executor(adapter, facts)?;
         Ok(())
     }
@@ -123,11 +80,7 @@ impl OwnedExecHost {
     pub fn authority(&self) -> &HostAuthority {
         &self.authority
     }
-    pub fn link_budget(&self) -> Arc<HostLinkBudget> {
-        self.link.clone()
-    }
-    /// Borrowing control authority also pins the protocol heap reservation to
-    /// this Host. A protocol cannot outlive its bootstrap's reserved partition.
+    /// A protocol borrows the existing Host control authority.
     pub fn protocol(&self, profile: TrustedProfile) -> Result<HostProtocol<'_>, ProtocolError> {
         HostProtocol::new(profile, self.coordinator.clone(), &self.authority)
     }
@@ -138,25 +91,6 @@ impl OwnedExecHost {
     ) -> Result<HostProtocol<'_>, ProtocolError> {
         HostProtocol::new_paired(profile, self.coordinator.clone(), &self.authority)
     }
-    /// Explicit Browser lane allocation from this SAME Host budget. This does
-    /// not enable a capability or create a worker; trusted policy does that.
-    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-    pub fn reserve_browser_io(
-        &self,
-    ) -> Result<Arc<crate::providers::browser::BrowserIoBudget>, BootstrapError> {
-        Ok(crate::providers::browser::BrowserIoBudget::platform_managed())
-    }
-    /// Computer transports own their bounded buffers and native process lifetime.
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    pub(crate) fn reserve_computer_io(
-        &self,
-    ) -> Result<Arc<crate::providers::cua::CuaIoBudget>, BootstrapError> {
-        Ok(crate::providers::cua::CuaIoBudget::platform_managed())
-    }
-    /// Remaining logical queued-I/O capacity, never total resident memory.
-    pub fn unreserved_queued_bytes(&self) -> usize {
-        self.budget.available_permits()
-    }
     pub async fn shutdown_owned(&self, budget: Duration) -> Result<HostCleanup, CoordinatorError> {
         self.authority.shutdown_owned(budget).await
     }
@@ -165,17 +99,12 @@ impl OwnedExecHost {
 /// Move-only bootstrap resources; neither a transport nor a request can create
 /// another executor from this reservation.
 pub struct ExecHostReservation {
-    partitions: Partitions,
     generation: HostGeneration,
     trusted_facts: AdmissionFacts,
 }
 impl ExecHostReservation {
-    pub fn link_budget(&self) -> Arc<HostLinkBudget> {
-        self.partitions.link.clone()
-    }
     /// Explicit protected configuration selected no Exec; not a spawn-failure fallback.
     pub fn without_executor(self) -> Result<OwnedExecHost, BootstrapError> {
-        drop(self.partitions.rpc);
         let (coordinator, authority) = HostCoordinator::new_without_executor(
             OperationLedger::new(self.generation),
             self.trusted_facts,
@@ -183,9 +112,6 @@ impl ExecHostReservation {
         Ok(OwnedExecHost {
             coordinator,
             authority,
-            link: self.partitions.link,
-            _protocol: self.partitions.protocol,
-            budget: self.partitions.source,
         })
     }
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -199,9 +125,7 @@ impl ExecHostReservation {
             (Some(executor), Some(image)) => (executor, image),
             _ => return Err(BootstrapError::InvalidConfiguration),
         };
-        let adapter =
-            CodexStdio::spawn_pinned_with_reserved_budget(executor, self.partitions.rpc, image)
-                .await?;
+        let adapter = CodexStdio::spawn_pinned(executor, image).await?;
         let (coordinator, authority) = HostCoordinator::new_owned(
             adapter,
             OperationLedger::new(self.generation),
@@ -210,9 +134,6 @@ impl ExecHostReservation {
         Ok(OwnedExecHost {
             coordinator,
             authority,
-            link: self.partitions.link,
-            _protocol: self.partitions.protocol,
-            budget: self.partitions.source,
         })
     }
     pub async fn spawn_optional(
@@ -228,8 +149,7 @@ impl ExecHostReservation {
         self,
         executor: OwnedExecutorConfig,
     ) -> Result<OwnedExecHost, BootstrapError> {
-        let adapter =
-            CodexStdio::spawn_owned_with_reserved_budget(executor, self.partitions.rpc).await?;
+        let adapter = CodexStdio::spawn_owned(executor).await?;
         let (coordinator, authority) = HostCoordinator::new_owned(
             adapter,
             OperationLedger::new(self.generation),
@@ -238,38 +158,6 @@ impl ExecHostReservation {
         Ok(OwnedExecHost {
             coordinator,
             authority,
-            link: self.partitions.link,
-            _protocol: self.partitions.protocol,
-            budget: self.partitions.source,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[tokio::test]
-    async fn reservations_share_one_source_and_cannot_be_double_spent() {
-        let partitions = Partitions::reserve().unwrap();
-        assert_eq!(partitions.rpc.num_permits(), RPC_BYTES);
-        assert_eq!(partitions.protocol.num_permits(), PROTOCOL_BYTES);
-        assert_eq!(
-            partitions.source.available_permits(),
-            styx_contracts::HOST_QUEUED_BYTES - RPC_BYTES - PROTOCOL_BYTES - LINK_BYTES
-        );
-        // Two additional full WSS partitions would overspend the remaining24MiB.
-        assert!(
-            partitions
-                .source
-                .clone()
-                .try_acquire_many_owned((2 * LINK_BYTES) as u32)
-                .is_err()
-        );
-        let source = partitions.source.clone();
-        drop(partitions);
-        assert_eq!(
-            source.available_permits(),
-            styx_contracts::HOST_QUEUED_BYTES
-        );
     }
 }

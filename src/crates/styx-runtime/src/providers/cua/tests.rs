@@ -321,14 +321,7 @@ async fn exact_core_target_owner_and_session_are_required_without_exclusive_io_c
         .is_err()
     );
     drop(permit);
-    let allocator = Arc::new(tokio::sync::Semaphore::new(IO_BYTES));
-    let partition = allocator
-        .clone()
-        .acquire_many_owned(IO_BYTES as u32)
-        .await
-        .unwrap();
-    let budget = CuaIoBudget::from_reserved(partition).unwrap();
-    let worker = CuaWorker::new(budget);
+    let worker = CuaWorker::new();
     let first = worker.try_reserve_open().unwrap();
     let second = worker
         .try_reserve_open()
@@ -336,5 +329,4 @@ async fn exact_core_target_owner_and_session_are_required_without_exclusive_io_c
     drop(first);
     drop(second);
     assert!(worker.try_reserve_open().is_ok());
-    assert_eq!(allocator.available_permits(), IO_BYTES);
 }

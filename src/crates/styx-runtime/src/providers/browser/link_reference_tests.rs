@@ -22,11 +22,7 @@ async fn trusted_link_boundary_blocks_reserved_and_late_snapshot_remint() {
         operation_id: parent.id().clone(),
         payload_digest: Sha256Digest::of_bytes(parent.payload()),
     };
-    let source = Arc::new(Semaphore::new(IO_BYTES));
-    let worker = BrowserWorker::new(
-        BrowserIoBudget::from_reserved(source.acquire_many_owned(IO_BYTES as u32).await.unwrap())
-            .unwrap(),
-    );
+    let worker = BrowserWorker::new();
     let mut live = Live {
         child: None,
         client: None,

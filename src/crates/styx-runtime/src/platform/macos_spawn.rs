@@ -66,10 +66,7 @@ enum LaunchImage {
     Native(Arc<PinnedExecutable>),
     // Constructed only by the fixed App-member proxy wrapper below. This does
     // not turn readonly members into ordinary PinnedExecutable/path authority.
-    InstalledProxy {
-        member: Arc<SignedAppMember>,
-        _custody: Arc<dyn Send + Sync>,
-    },
+    InstalledProxy { member: Arc<SignedAppMember> },
 }
 impl LaunchImage {
     fn revalidate(&self) -> crate::store::Result<()> {
@@ -215,7 +212,6 @@ pub(crate) fn spawn_installed_proxy_suspended(
     socket: PathBuf,
     workspace: PathBuf,
     home: PathBuf,
-    custody: Arc<dyn Send + Sync>,
 ) -> Result<SuspendedChild, SpawnFailure> {
     if !socket.is_absolute() || !home.is_absolute() || !workspace.is_absolute() {
         return Err(refused("invalid_proxy_source"));
@@ -236,10 +232,7 @@ pub(crate) fn spawn_installed_proxy_suspended(
         ),
     ]);
     spawn_image(
-        LaunchImage::InstalledProxy {
-            member,
-            _custody: custody,
-        },
+        LaunchImage::InstalledProxy { member },
         vec![
             OsString::from("mcp"),
             OsString::from("--embedded"),

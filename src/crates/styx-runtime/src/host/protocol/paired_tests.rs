@@ -252,9 +252,7 @@ async fn unknown_cleanup_retains_profile_record_until_inflight_preparation_and_r
         session_state: None,
         current_observation: None,
     };
-    host.authority()
-        .configure_browser(facts.clone(), host.reserve_browser_io().unwrap())
-        .unwrap();
+    host.authority().configure_browser(facts.clone()).unwrap();
     let source = Arc::new(Profiles {
         entered: tokio::sync::Notify::new(),
         gate: (Mutex::new(false), Condvar::new()),

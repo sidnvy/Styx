@@ -514,9 +514,7 @@ async fn paired_journey(capacity: bool, computers: usize, browser_handoff: bool)
         let mut browser_facts = facts(device.clone());
         browser_facts.descriptor.capability_id = CapabilityId::BrowserHeadless;
         browser_facts.descriptor.scope = Scope::Browser;
-        host.authority()
-            .configure_browser(browser_facts, host.reserve_browser_io().unwrap())
-            .unwrap();
+        host.authority().configure_browser(browser_facts).unwrap();
     }
     let settings = if browser_handoff {
         let settings = crate::host::settings::HostSettings::open(
@@ -564,7 +562,6 @@ async fn paired_journey(capacity: bool, computers: usize, browser_handoff: bool)
             LinkAuthentication::Bearer(&rejected_bearer),
             ConnectionGeneration::try_from(format!("rejected-wire-{}", uuid::Uuid::new_v4()))
                 .unwrap(),
-            host.link_budget(),
         )
         .await;
         assert!(
@@ -621,7 +618,6 @@ async fn paired_journey(capacity: bool, computers: usize, browser_handoff: bool)
                 LinkAuthentication::Bearer(&bearer),
                 ConnectionGeneration::try_from(format!("host-wire-{}", uuid::Uuid::new_v4()))
                     .unwrap(),
-                host_task.link_budget(),
             )
             .await
             .unwrap();
@@ -1496,7 +1492,6 @@ async fn many_connected_computers(
             TcpStream::connect(client.address).await.unwrap(),
             LinkAuthentication::Bearer(&bearer),
             ConnectionGeneration::try_from(format!("computer-wire-{n}")).unwrap(),
-            host.link_budget(),
         )
         .await
         .unwrap();

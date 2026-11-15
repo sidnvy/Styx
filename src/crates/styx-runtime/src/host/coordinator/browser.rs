@@ -3,8 +3,7 @@
 use super::*;
 use crate::providers::browser::{
     BrowserAction, BrowserActionEvidence, BrowserActionReceipt, BrowserCleanup, BrowserDescendants,
-    BrowserError, BrowserHandle, BrowserIoBudget, BrowserOpenSpec, BrowserWorker,
-    OwnedBrowserConfig,
+    BrowserError, BrowserHandle, BrowserOpenSpec, BrowserWorker, OwnedBrowserConfig,
 };
 use std::collections::BTreeMap;
 use styx_contracts::capability::{CapabilityId, Scope};
@@ -137,11 +136,7 @@ fn handle(
     Ok(handle)
 }
 impl HostAuthority {
-    pub fn configure_browser(
-        &self,
-        facts: AdmissionFacts,
-        budget: Arc<BrowserIoBudget>,
-    ) -> Result<(), CoordinatorError> {
+    pub fn configure_browser(&self, facts: AdmissionFacts) -> Result<(), CoordinatorError> {
         validate_facts(&self.inner, &facts)?;
         let mut state = self.inner.state.lock().expect("Host state mutex");
         if state.shutting_down {
@@ -151,7 +146,7 @@ impl HostAuthority {
             return Err(ErrorCategory::StateConflict.into());
         }
         state.browser = Some(BrowserLane {
-            worker: BrowserWorker::new(budget),
+            worker: BrowserWorker::new(),
             facts,
             profiles: BTreeMap::new(),
             handles: BTreeMap::new(),

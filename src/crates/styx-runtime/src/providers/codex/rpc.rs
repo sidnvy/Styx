@@ -55,7 +55,6 @@ impl Observation {
     }
 }
 pub(super) struct Rpc {
-    _partition: Arc<tokio::sync::OwnedSemaphorePermit>,
     stdin: tokio::sync::Mutex<Option<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>,
     pending: Mutex<HashMap<u64, Pending>>,
     observations: Mutex<HashMap<String, Observation>>,
@@ -66,7 +65,6 @@ pub(super) struct Rpc {
     reader_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 impl Rpc {
-    #[cfg(test)]
     pub fn new<
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -75,22 +73,7 @@ impl Rpc {
         stdout: R,
         timeout: Duration,
     ) -> Arc<Self> {
-        let partition = Arc::new(tokio::sync::Semaphore::new(16 * 1024 * 1024))
-            .try_acquire_many_owned(16 * 1024 * 1024)
-            .expect("owned fixture partition");
-        Self::new_with_reserved_partition(stdin, stdout, timeout, Arc::new(partition))
-    }
-    pub fn new_with_reserved_partition<
-        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
-        R: tokio::io::AsyncRead + Unpin + Send + 'static,
-    >(
-        stdin: W,
-        stdout: R,
-        timeout: Duration,
-        partition: Arc<tokio::sync::OwnedSemaphorePermit>,
-    ) -> Arc<Self> {
         let rpc = Arc::new(Self {
-            _partition: partition.clone(),
             stdin: tokio::sync::Mutex::new(Some(Box::new(stdin))),
             pending: Mutex::new(HashMap::new()),
             observations: Mutex::new(HashMap::new()),
@@ -102,7 +85,6 @@ impl Rpc {
         });
         let weak = Arc::downgrade(&rpc);
         let reader_task = tokio::spawn(async move {
-            let _partition = partition;
             let mut frames = FramedRead::new(
                 stdout,
                 LinesCodec::new_with_max_length(styx_contracts::EXEC_FRAME_BYTES),

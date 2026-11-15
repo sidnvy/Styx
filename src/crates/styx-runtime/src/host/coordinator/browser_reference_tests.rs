@@ -151,15 +151,8 @@ async fn actual_snapshot_refs_navigation_tabs_owner_and_reopen_batch() {
         fixture_facts(CapabilityId::ExecRun),
     )
     .unwrap();
-    let budget = Arc::new(Semaphore::new(16 * 1024 * 1024))
-        .acquire_many_owned(16 * 1024 * 1024)
-        .await
-        .unwrap();
     authority
-        .configure_browser(
-            fixture_facts(CapabilityId::BrowserHeadless),
-            BrowserIoBudget::from_reserved(budget).unwrap(),
-        )
+        .configure_browser(fixture_facts(CapabilityId::BrowserHeadless))
         .unwrap();
     let owner = authority
         .register_verified_owner(

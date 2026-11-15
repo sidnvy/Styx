@@ -7,7 +7,7 @@ use crate::{
     gateway::paired::{PairedGatewayBackend, RelayHandle},
     host::{
         bootstrap::OwnedExecHost,
-        link::{HostLinkBudget, HostWssLink, LinkAuthentication, LinkEndpoint, SecretBearer},
+        link::{HostWssLink, LinkAuthentication, LinkEndpoint, SecretBearer},
         protocol::{PairedTrustedProfile, wire},
     },
     store::{
@@ -472,12 +472,6 @@ async fn gateway_lan_scenario_inner(
         device.as_str()
     ))
     .unwrap();
-    let link_budget = HostLinkBudget::from_reserved_partition(
-        Arc::new(Semaphore::new(16 * 1024 * 1024))
-            .try_acquire_many_owned(16 * 1024 * 1024)
-            .unwrap(),
-    )
-    .unwrap();
     let wrong = SecretBearer::from_protected_reader("w".repeat(43)).unwrap();
     let attempt = HostWssLink::connect(
         &endpoint,
@@ -485,7 +479,6 @@ async fn gateway_lan_scenario_inner(
         TcpStream::connect(lan).await.unwrap(),
         LinkAuthentication::Bearer(&wrong),
         ConnectionGeneration::try_from("wrong-credential").unwrap(),
-        link_budget.clone(),
     )
     .await;
     assert!(matches!(
@@ -607,7 +600,6 @@ async fn gateway_lan_scenario_inner(
                     "lan-host-{attempt}-{old_origin_namespace}"
                 ))
                 .unwrap(),
-                host.link_budget(),
             )
             .await
             .unwrap();

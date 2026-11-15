@@ -382,11 +382,10 @@ fn creation(birth: &ProcessIdentity) -> io::Result<u64> {
 /// startup job, with a Tokio runtime entered. No caller-supplied program arguments.
 pub(crate) fn spawn_suspended(
     image: Arc<PinnedExecutable>,
-    startup_budget: Arc<tokio::sync::OwnedSemaphorePermit>,
     cwd: PathBuf,
     env: BTreeMap<OsString, OsString>,
 ) -> Result<SuspendedChild, SpawnFailure> {
-    spawn_fixed(image, Some(startup_budget), cwd, env, Entry::Exec)
+    spawn_fixed(image, None, cwd, env, Entry::Exec)
 }
 /// Fixed trusted Browser entry: no shell, Node flags, remote arguments or
 /// arbitrary program selection. The same native image/Job checks precede resume.

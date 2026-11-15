@@ -17,10 +17,8 @@ use std::{
 };
 use styx_contracts::{capability::CapabilityId, identity::Sha256Digest, operation::OperationId};
 use styx_core::operations::{DispatchPermit, OwnerLease};
-#[cfg(test)]
-use tokio::sync::Semaphore;
 use tokio::{
-    sync::{OwnedMutexGuard, OwnedSemaphorePermit},
+    sync::OwnedMutexGuard,
     task::JoinHandle,
     time::{Instant, timeout_at},
 };
@@ -57,7 +55,6 @@ fn canonical_path(path: &Path) -> Result<PathBuf> {
     }
 }
 
-const IO_BYTES: usize = 16 * 1024 * 1024;
 const FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub use crate::providers::browser_contract::{BrowserAction, BrowserError};
 type Result<T> = std::result::Result<T, BrowserError>;
@@ -130,21 +127,6 @@ pub struct BrowserCleanup {
     pub context_closed: bool,
     pub descendants: BrowserDescendants,
 }
-/// Each executor allocates its bounded codec buffers on demand. Independent
-/// Browser contexts do not share a one-worker gate; each resource stays locked.
-pub struct BrowserIoBudget {}
-impl BrowserIoBudget {
-    pub(crate) fn platform_managed() -> Arc<Self> {
-        Arc::new(Self {})
-    }
-    pub fn from_reserved(partition: OwnedSemaphorePermit) -> Result<Arc<Self>> {
-        if partition.num_permits() != IO_BYTES {
-            return Err(BrowserError::InvalidRequest);
-        }
-        drop(partition);
-        Ok(Self::platform_managed())
-    }
-}
 #[derive(Clone)]
 pub struct BrowserWorker {
     inner: Arc<Inner>,
@@ -172,7 +154,6 @@ impl ReferenceLink {
 }
 struct Inner {
     reference_link: Arc<Mutex<ReferenceLink>>,
-    budget: Arc<BrowserIoBudget>,
     resources: Mutex<BTreeMap<OperationId, Arc<Resource>>>,
 }
 struct Resource {
@@ -183,7 +164,6 @@ struct Resource {
     digest: Sha256Digest,
     owner: OwnerLease,
     state: Arc<tokio::sync::Mutex<Live>>,
-    _budget: Arc<BrowserIoBudget>,
 }
 struct Live {
     child: Option<Child>,
@@ -260,12 +240,16 @@ pub struct BrowserActionSlot {
     resource: Arc<Resource>,
     state: OwnedMutexGuard<Live>,
 }
+impl Default for BrowserWorker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl BrowserWorker {
-    pub fn new(budget: Arc<BrowserIoBudget>) -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Arc::new(Inner {
                 reference_link: Arc::new(Mutex::new(ReferenceLink { revision: 1 })),
-                budget,
                 resources: Mutex::new(BTreeMap::new()),
             }),
         }
@@ -364,9 +348,7 @@ impl BrowserWorker {
 // The worker receives its fixed workspace in the Rust-owned config. Roots
 // discovery is unnecessary for these three tools and grants no additional scope.
 #[derive(Clone)]
-struct BrowserClient {
-    _budget: Arc<BrowserIoBudget>,
-}
+struct BrowserClient {}
 impl ClientHandler for BrowserClient {}
 mod policy;
 mod references;
@@ -619,7 +601,6 @@ impl BrowserOpenSlot {
                 scope: None,
                 cleanup: None,
             })),
-            _budget: self.worker.inner.budget.clone(),
         });
         let handle = BrowserHandle {
             resource: resource.clone(),
@@ -671,10 +652,9 @@ impl BrowserOpenSlot {
             let stdin = child_stdin(child).ok_or(BrowserError::SpawnFailed)?;
             let stdout = child_stdout(child).ok_or(BrowserError::SpawnFailed)?;
             if let Some(mut stderr) = child_stderr(child) {
-                let budget = resource._budget.clone();
-                live.stderr = Some(tokio::spawn(async move {let _budget=budget;let _=tokio::io::copy(&mut stderr,&mut tokio::io::sink()).await;}));
+                live.stderr = Some(tokio::spawn(async move {let _=tokio::io::copy(&mut stderr,&mut tokio::io::sink()).await;}));
             }
-            let handler = BrowserClient { _budget:resource._budget.clone() };
+            let handler = BrowserClient {};
             let transport = AsyncRwTransport::<RoleClient,_,_>::new(stdout,stdin).with_max_line_length(FRAME_BYTES);
             let client=tokio::select! {
                 _=resource.stop.cancelled()=>return Err(BrowserError::Unknown),

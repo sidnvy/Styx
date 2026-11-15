@@ -631,17 +631,12 @@ pub(super) struct ProxyWorker {
     daemon_ended: bool,
     attempted: bool,
     resumed: bool,
-    // Original source and budget survive cancellation/failed starts and cleanup.
+    // Original source survives cancellation/failed starts and cleanup.
     _source: Arc<MacProxySource>,
     _control: BoundMacSource,
-    _budget: Arc<super::CuaIoBudget>,
 }
 impl ProxyWorker {
-    fn new(
-        source: Arc<MacProxySource>,
-        control: BoundMacSource,
-        budget: Arc<super::CuaIoBudget>,
-    ) -> Self {
+    fn new(source: Arc<MacProxySource>, control: BoundMacSource) -> Self {
         Self {
             running: None,
             suspended: None,
@@ -652,7 +647,6 @@ impl ProxyWorker {
             resumed: false,
             _source: source,
             _control: control,
-            _budget: budget,
         }
     }
     pub(super) fn mark_session_started(&mut self) {
@@ -729,7 +723,7 @@ impl ProxyWorker {
 pub(super) async fn start_proxy(
     live: &mut super::Live,
     config: &Arc<OwnedCuaConfig>,
-    budget: Arc<super::CuaIoBudget>,
+
     until: Instant,
 ) -> Result<(ChildStdin, ChildStdout, ChildStderr)> {
     preflight(live, config, until).await?;
@@ -759,13 +753,13 @@ pub(super) async fn start_proxy(
     })
     .await
     .map_err(|_| CuaError::Unknown)??;
-    let mut worker = ProxyWorker::new(source, control_binding, budget.clone());
+    let mut worker = ProxyWorker::new(source, control_binding);
     worker.attempted = true;
     live.mac_proxy = Some(worker);
     let workspace = config.workspace.clone();
     let home = config.home.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        macos_spawn::spawn_installed_proxy_suspended(image, socket, workspace, home, budget)
+        macos_spawn::spawn_installed_proxy_suspended(image, socket, workspace, home)
     })
     .await
     .map_err(|_| CuaError::Unknown)?;

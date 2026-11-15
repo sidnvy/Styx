@@ -22,7 +22,6 @@ fn fixed_native_spawn_input_boundary() {
 #[ignore = "requires protected owned Windows fixture with original Codex PE copies; actual JobObject/native initialization"]
 async fn actual_pinned_codex_suspended_job_cleanup_and_waiter_drop() {
     use crate::store::PayloadPrivateRoot;
-    use tokio::sync::Semaphore;
     let root =
         PathBuf::from(std::env::var_os("STYX_TEST_WINDOWS_SPAWN_ROOT").expect("explicit fixture"));
     assert!(root.is_absolute());
@@ -48,22 +47,14 @@ async fn actual_pinned_codex_suspended_job_cleanup_and_waiter_drop() {
             root.join("home").into_os_string(),
         ),
     ]);
-    let pool = Arc::new(Semaphore::new(16 * 1024 * 1024));
     // A real original image exists but has no native-user-code execution yet.
-    let budget = Arc::new(
-        pool.clone()
-            .acquire_many_owned(16 * 1024 * 1024)
-            .await
-            .unwrap(),
-    );
     let pin = original.clone();
     let dir = work.clone();
     let variables = env.clone();
-    let mut suspended =
-        tokio::task::spawn_blocking(move || spawn_suspended(pin, budget, dir, variables))
-            .await
-            .unwrap()
-            .unwrap();
+    let mut suspended = tokio::task::spawn_blocking(move || spawn_suspended(pin, dir, variables))
+        .await
+        .unwrap()
+        .unwrap();
     {
         let guard = suspended.child.shared.native.lock().unwrap();
         let native = guard.as_ref().unwrap();
@@ -94,24 +85,16 @@ async fn actual_pinned_codex_suspended_job_cleanup_and_waiter_drop() {
         assert!(!facts.handles_closed_unconfirmed);
     }
     drop(rejected);
-    assert_eq!(pool.available_permits(), 16 * 1024 * 1024);
 
     // Real query-failure injection on an actual Job. It must stop the original
     // scope and finish supervision boundedly, never turn close into wait proof.
-    let budget = Arc::new(
-        pool.clone()
-            .acquire_many_owned(16 * 1024 * 1024)
-            .await
-            .unwrap(),
-    );
     let pin = original.clone();
     let dir = work.clone();
     let variables = env.clone();
-    let suspended =
-        tokio::task::spawn_blocking(move || spawn_suspended(pin, budget, dir, variables))
-            .await
-            .unwrap()
-            .unwrap();
+    let suspended = tokio::task::spawn_blocking(move || spawn_suspended(pin, dir, variables))
+        .await
+        .unwrap()
+        .unwrap();
     suspended
         .child
         .shared
@@ -136,15 +119,9 @@ async fn actual_pinned_codex_suspended_job_cleanup_and_waiter_drop() {
     }
     assert!(child.observed_exit().is_err());
     drop(child);
-    assert_eq!(pool.available_permits(), 16 * 1024 * 1024);
     assert!(!birth.still_current().unwrap());
 
     // Positive initialization uses the existing native Codex adapter and RPC.
-    let partition = pool
-        .clone()
-        .acquire_many_owned(16 * 1024 * 1024)
-        .await
-        .unwrap();
     let config = crate::providers::codex::OwnedExecutorConfig {
         binary: root.join("payload/bin/codex.exe"),
         cwd: work.clone(),
@@ -160,48 +137,36 @@ async fn actual_pinned_codex_suspended_job_cleanup_and_waiter_drop() {
         ]),
         rpc_timeout: Duration::from_secs(10),
     };
-    let provider = crate::providers::codex::CodexStdio::spawn_pinned_with_reserved_budget(
-        config,
-        partition,
-        original.clone(),
-    )
-    .await
-    .unwrap();
+    let provider = crate::providers::codex::CodexStdio::spawn_pinned(config, original.clone())
+        .await
+        .unwrap();
     assert!(!provider.session_id().is_empty() && !provider.provider_id().is_empty());
     let cleanup = provider.shutdown_owned(Duration::from_secs(10)).await;
     assert!(cleanup.executor_exited && cleanup.reader_task_reaped && cleanup.stderr_task_reaped);
     drop(provider);
-    assert_eq!(pool.available_permits(), 16 * 1024 * 1024);
 
     // Dropping only the waiter requests termination. The independent supervisor
-    // owns the handles/pin/credit; completion credit is returned after it exits.
-    let budget = Arc::new(
-        pool.clone()
-            .acquire_many_owned(16 * 1024 * 1024)
-            .await
-            .unwrap(),
-    );
+    // owns the handles and image pin until actual supervision finishes.
     let pin = original.clone();
     let dir = work;
     let variables = env;
-    let suspended =
-        tokio::task::spawn_blocking(move || spawn_suspended(pin, budget, dir, variables))
-            .await
-            .unwrap()
-            .unwrap();
+    let suspended = tokio::task::spawn_blocking(move || spawn_suspended(pin, dir, variables))
+        .await
+        .unwrap()
+        .unwrap();
     let SuspendedChild {
         mut child,
         thread,
         birth,
     } = suspended;
     drop(thread);
-    assert_eq!(pool.available_permits(), 0);
+    let completion = child.shared.clone();
     let waiter = tokio::spawn(async move { child.wait().await });
     tokio::task::yield_now().await;
     waiter.abort();
     assert!(waiter.await.unwrap_err().is_cancelled());
     tokio::time::timeout(Duration::from_secs(8), async {
-        while pool.available_permits() != 16 * 1024 * 1024 {
+        while !completion.facts.lock().unwrap().supervisor_finished {
             tokio::time::sleep(Duration::from_millis(20)).await
         }
     })

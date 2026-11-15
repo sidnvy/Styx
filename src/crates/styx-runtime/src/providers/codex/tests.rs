@@ -447,12 +447,7 @@ fn fixture_adapter(
 ) -> (Arc<CodexStdio>, ProcessHandle, tokio::io::DuplexStream) {
     let (client, server) = tokio::io::duplex(65536);
     let (r, w) = tokio::io::split(client);
-    let partition = Arc::new(
-        Arc::new(tokio::sync::Semaphore::new(16 * 1024 * 1024))
-            .try_acquire_many_owned(16 * 1024 * 1024)
-            .unwrap(),
-    );
-    let rpc = Rpc::new_with_reserved_partition(w, r, Duration::from_millis(200), partition.clone());
+    let rpc = Rpc::new(w, r, Duration::from_millis(200));
     let handle = ProcessHandle {
         process_id: Uuid::new_v4().to_string(),
         operation: operation.clone(),
@@ -476,7 +471,6 @@ fn fixture_adapter(
         })),
     });
     let adapter = Arc::new(CodexStdio {
-        _rpc_partition: partition,
         rpc,
         child: tokio::sync::Mutex::new(None),
         stderr_task: tokio::sync::Mutex::new(None),
@@ -1269,63 +1263,29 @@ async fn continuation_history_has_no_count_quota_and_survives_resource_retiremen
     worker.await.unwrap();
 }
 #[tokio::test]
-async fn externally_reserved_rpc_partition_outlives_helper_and_reader_cleanup() {
-    let budget = Arc::new(tokio::sync::Semaphore::new(16 * 1024 * 1024));
-    let (client, server) = tokio::io::duplex(128);
-    let (r, w) = tokio::io::split(client);
-    let partition = Arc::new(
-        budget
-            .clone()
-            .try_acquire_many_owned(16 * 1024 * 1024)
-            .unwrap(),
-    );
-    let rpc = Rpc::new_with_reserved_partition(w, r, Duration::from_millis(100), partition.clone());
-    drop(partition);
-    drop(rpc); // reader still waiting on its owned stdout
-    assert_eq!(budget.available_permits(), 0);
-    drop(server);
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while budget.available_permits() != 16 * 1024 * 1024 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
 #[ignore = "requires isolated STYX_TEST_CODEX/STYX_TEST_EXEC_ROOT; focused permit stdin/terminate/unknown only"]
 async fn real_codex_continuation_permit_focused_scenario() {
     let binary = PathBuf::from(std::env::var("STYX_TEST_CODEX").unwrap());
     let root = PathBuf::from(std::env::var("STYX_TEST_EXEC_ROOT").unwrap())
         .join(Uuid::new_v4().to_string());
     std::fs::create_dir_all(root.join("codex-home")).unwrap();
-    let global = Arc::new(tokio::sync::Semaphore::new(64 * 1024 * 1024));
-    let partition = global
-        .clone()
-        .try_acquire_many_owned(16 * 1024 * 1024)
-        .unwrap();
     let adapter = Arc::new(
-        CodexStdio::spawn_owned_with_reserved_budget(
-            OwnedExecutorConfig {
-                binary,
-                cwd: root.clone(),
-                environment: BTreeMap::from([
-                    ("PATH".into(), "/usr/bin:/bin".into()),
-                    ("HOME".into(), root.display().to_string()),
-                    (
-                        "CODEX_HOME".into(),
-                        root.join("codex-home").display().to_string(),
-                    ),
-                ]),
-                rpc_timeout: Duration::from_millis(300),
-            },
-            partition,
-        )
+        CodexStdio::spawn_owned(OwnedExecutorConfig {
+            binary,
+            cwd: root.clone(),
+            environment: BTreeMap::from([
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("HOME".into(), root.display().to_string()),
+                (
+                    "CODEX_HOME".into(),
+                    root.join("codex-home").display().to_string(),
+                ),
+            ]),
+            rpc_timeout: Duration::from_millis(300),
+        })
         .await
         .unwrap(),
     );
-    assert_eq!(global.available_permits(), 48 * 1024 * 1024);
     let a = adapter.clone();
     let worker = tokio::spawn(async move {
         let adapter = a;
@@ -1528,11 +1488,6 @@ async fn real_codex_continuation_permit_focused_scenario() {
     println!("NATIVE_CONTINUATION_CLEANUP {:?}", cleanup);
     assert!(cleanup.executor_exited && cleanup.reader_task_reaped && cleanup.stderr_task_reaped);
     drop(adapter);
-    assert_eq!(
-        global.available_permits(),
-        64 * 1024 * 1024,
-        "budget returns only after owned execution/reader/stderr/resource lifetime ends"
-    );
     outcome.unwrap();
 }
 

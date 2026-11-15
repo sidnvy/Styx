@@ -290,15 +290,8 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
         fixture_facts(CapabilityId::ExecRun),
     )
     .unwrap();
-    let budget = Arc::new(Semaphore::new(16 * 1024 * 1024))
-        .acquire_many_owned(16 * 1024 * 1024)
-        .await
-        .unwrap();
     authority
-        .configure_browser(
-            fixture_facts(CapabilityId::BrowserHeadless),
-            BrowserIoBudget::from_reserved(budget).unwrap(),
-        )
+        .configure_browser(fixture_facts(CapabilityId::BrowserHeadless))
         .unwrap();
     let owner = authority
         .register_verified_owner(

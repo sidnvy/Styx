@@ -1,9 +1,7 @@
 //! Synthetic session authority and real proc identity, with an owned duplex driver.
 //! These verify dispatch boundaries, not native desktop effects.
 use super::*;
-use crate::providers::cua::{
-    CuaEvidence, CuaIoBudget, ax_snapshot::parse_observed, fake_driver::FakeDriver,
-};
+use crate::providers::cua::{CuaEvidence, ax_snapshot::parse_observed, fake_driver::FakeDriver};
 use rmcp::model::CallToolResult;
 use serde_json::{Value, json};
 use styx_contracts::{
@@ -101,11 +99,7 @@ async fn fixture_for_pid(pid: u32) -> (State, OwnerLease, ResourceTarget) {
             .provider(&binding, evidence(cap), Duration::from_secs(60))
             .unwrap();
     }
-    let allocator = Arc::new(tokio::sync::Semaphore::new(8 * 1024 * 1024));
-    let budget =
-        CuaIoBudget::from_reserved(allocator.acquire_many_owned(8 * 1024 * 1024).await.unwrap())
-            .unwrap();
-    state.desktop = Some(super::super::desktop::test_lane(binding.clone(), budget));
+    state.desktop = Some(super::super::desktop::test_lane(binding.clone()));
     let mut context = context();
     context.session = Some(binding);
     let open = state

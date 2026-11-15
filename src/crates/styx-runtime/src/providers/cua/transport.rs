@@ -2,7 +2,7 @@
 //! Only the one original outbound request's response reaches rmcp. Native
 //! requests never reach SDK handler spawning; logging/progress are deliberately
 //! unused, silently discarded with finite credits, and never traced/persisted.
-use super::{CuaIoBudget, FRAME_BYTES, REQUEST_BYTES, bounded_bytes, capability};
+use super::{FRAME_BYTES, REQUEST_BYTES, bounded_bytes, capability};
 use rmcp::{
     RoleClient,
     model::{ClientNotification, ClientRequest, JsonRpcMessage, RequestId, ServerNotification},
@@ -72,10 +72,9 @@ struct State {
 struct Admission {
     state: Mutex<State>,
     stop: CancellationToken,
-    _budget: Arc<CuaIoBudget>,
 }
 impl Admission {
-    fn new(stop: CancellationToken, budget: Arc<CuaIoBudget>) -> Arc<Self> {
+    fn new(stop: CancellationToken) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(State {
                 phase: Phase::Fresh,
@@ -87,7 +86,6 @@ impl Admission {
                 raw_remaining: 0,
             }),
             stop,
-            _budget: budget,
         })
     }
     fn fence(&self) {
@@ -286,13 +284,8 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    pub(super) fn from_io(
-        read: R,
-        write: W,
-        stop: CancellationToken,
-        budget: Arc<CuaIoBudget>,
-    ) -> Self {
-        let admission = Admission::new(stop, budget);
+    pub(super) fn from_io(read: R, write: W, stop: CancellationToken) -> Self {
+        let admission = Admission::new(stop);
         let read = RawCreditRead {
             inner: read,
             admission: admission.clone(),
@@ -368,15 +361,7 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
     async fn new_gate() -> Arc<Admission> {
-        let allocator = Arc::new(tokio::sync::Semaphore::new(super::super::IO_BYTES));
-        let permit = allocator
-            .acquire_many_owned(super::super::IO_BYTES as u32)
-            .await
-            .unwrap();
-        Admission::new(
-            CancellationToken::new(),
-            CuaIoBudget::from_reserved(permit).unwrap(),
-        )
+        Admission::new(CancellationToken::new())
     }
     #[tokio::test]
     async fn typed_admission_rejects_foreign_duplicate_peer_requests_and_notification_flood() {

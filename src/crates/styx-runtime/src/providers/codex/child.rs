@@ -92,7 +92,6 @@ impl Child {
     pub(super) async fn spawn_pinned(
         config: &OwnedExecutorConfig,
         image: std::sync::Arc<crate::store::PinnedExecutable>,
-        startup_budget: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<Self, ExecError> {
         let cwd = config.cwd.clone();
         let environment = config
@@ -101,7 +100,7 @@ impl Child {
             .map(|(key, value)| (key.into(), value.into()))
             .collect();
         let spawned = tokio::task::spawn_blocking(move || {
-            crate::platform::windows_spawn::spawn_suspended(image, startup_budget, cwd, environment)
+            crate::platform::windows_spawn::spawn_suspended(image, cwd, environment)
                 .and_then(|child| child.verify_and_resume())
         })
         .await

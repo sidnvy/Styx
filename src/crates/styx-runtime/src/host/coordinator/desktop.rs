@@ -3,8 +3,8 @@
 use super::desktop_source::DesktopSource;
 use super::*;
 use crate::providers::cua::{
-    CuaAction, CuaError, CuaEvidence, CuaHandle, CuaIoBudget, CuaOpenSlot, CuaOpenSpec, CuaReceipt,
-    CuaWorker, OwnedCuaConfig,
+    CuaAction, CuaError, CuaEvidence, CuaHandle, CuaOpenSlot, CuaOpenSpec, CuaReceipt, CuaWorker,
+    OwnedCuaConfig,
 };
 use crate::session::ProviderEvidence;
 use std::collections::BTreeMap;
@@ -228,7 +228,7 @@ impl HostAuthority {
     pub(crate) async fn configure_desktop(
         &self,
         source: DesktopSource,
-        budget: Arc<CuaIoBudget>,
+
         grants: BTreeMap<CapabilityId, DesktopGrant>,
     ) -> Result<SessionBinding, CoordinatorError> {
         let source_copy = source.clone();
@@ -289,7 +289,7 @@ impl HostAuthority {
                 .map_err(|_| CuaError::PermissionDenied)?;
         }
         state.desktop = Some(DesktopLane {
-            worker: CuaWorker::new(budget),
+            worker: CuaWorker::new(),
             source,
             binding: binding.clone(),
             grants,
@@ -1134,9 +1134,9 @@ impl HostCoordinator {
 }
 
 #[cfg(all(test, target_os = "linux"))]
-pub(super) fn test_lane(binding: SessionBinding, budget: Arc<CuaIoBudget>) -> DesktopLane {
+pub(super) fn test_lane(binding: SessionBinding) -> DesktopLane {
     DesktopLane {
-        worker: CuaWorker::new(budget),
+        worker: CuaWorker::new(),
         source: DesktopSource::for_tests(),
         binding,
         grants: [
@@ -1180,10 +1180,6 @@ impl HostCoordinator {
             error::Recovery,
             session::{SessionIdentity, SessionState},
         };
-        let bytes = Arc::new(Semaphore::new(8 * 1024 * 1024));
-        let budget =
-            CuaIoBudget::from_reserved(bytes.acquire_many_owned(8 * 1024 * 1024).await.unwrap())
-                .unwrap();
         let mut state = self.inner.state.lock().unwrap();
         assert!(state.desktop.is_none());
         let registration = state
@@ -1223,7 +1219,7 @@ impl HostCoordinator {
                 Duration::from_secs(60),
             )
             .unwrap();
-        state.desktop = Some(test_lane(binding.clone(), budget));
+        state.desktop = Some(test_lane(binding.clone()));
         binding
     }
     pub(crate) fn desktop_refusal_records(&self) -> (Vec<OperationSnapshot>, usize) {

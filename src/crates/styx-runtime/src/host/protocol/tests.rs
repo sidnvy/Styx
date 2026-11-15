@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    host::link::{HostLinkBudget, LINK_BYTES, LinkAuthentication, SecretBearer},
+    host::link::{LinkAuthentication, SecretBearer},
     providers::codex::{CodexStdio, OwnedExecutorConfig},
     tls::{GatewayClientTls, GatewayLeafPin, GatewayServerTls, PrivateKeyPem, TrustAnchorPin},
 };
@@ -12,10 +12,7 @@ use std::{
 };
 use styx_contracts::{capability::*, error::Recovery};
 use styx_core::{operations::OperationLedger, policy::AdmissionFacts};
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::Semaphore,
-};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
 type GatewayWs = WebSocketStream<tokio_rustls::server::TlsStream<TcpStream>>;
 fn facts() -> AdmissionFacts {
@@ -89,7 +86,7 @@ struct Fixture {
     tls: GatewayClientTls,
     endpoint: LinkEndpoint,
     bearer: SecretBearer,
-    budget: Arc<HostLinkBudget>,
+
     root: PathBuf,
     nonce: String,
 }
@@ -308,7 +305,6 @@ async fn journey(
         tcp,
         LinkAuthentication::Bearer(&fixture.bearer),
         ConnectionGeneration::try_from(generation).unwrap(),
-        fixture.budget.clone(),
     )
     .await
     .unwrap();
@@ -347,33 +343,19 @@ async fn actual_tls_wss_codex_start_read_duplicate_and_lost_response_batch() {
     let root = PathBuf::from(std::env::var("STYX_TEST_EXEC_ROOT").unwrap())
         .join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(root.join("codex-home")).unwrap();
-    let global = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
-    // The actual adapter now owns a partition from this same Host source.
-    // Protocol heap remains a conservative composition reservation.
-    let rpc_partition = global
-        .clone()
-        .try_acquire_many_owned(16 * 1024 * 1024)
-        .unwrap();
-    let protocol_partition = global
-        .clone()
-        .try_acquire_many_owned(8 * 1024 * 1024)
-        .unwrap();
-    let adapter = CodexStdio::spawn_owned_with_reserved_budget(
-        OwnedExecutorConfig {
-            binary: std::env::var("STYX_TEST_CODEX").unwrap().into(),
-            cwd: root.clone(),
-            environment: BTreeMap::from([
-                ("PATH".into(), "/usr/bin:/bin".into()),
-                ("HOME".into(), root.display().to_string()),
-                (
-                    "CODEX_HOME".into(),
-                    root.join("codex-home").display().to_string(),
-                ),
-            ]),
-            rpc_timeout: Duration::from_secs(2),
-        },
-        rpc_partition,
-    )
+    let adapter = CodexStdio::spawn_owned(OwnedExecutorConfig {
+        binary: std::env::var("STYX_TEST_CODEX").unwrap().into(),
+        cwd: root.clone(),
+        environment: BTreeMap::from([
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("HOME".into(), root.display().to_string()),
+            (
+                "CODEX_HOME".into(),
+                root.join("codex-home").display().to_string(),
+            ),
+        ]),
+        rpc_timeout: Duration::from_secs(2),
+    })
     .await
     .unwrap();
     let (host, authority) = HostCoordinator::new_owned(
@@ -440,13 +422,6 @@ async fn actual_tls_wss_codex_start_read_duplicate_and_lost_response_batch() {
         .unwrap(),
         endpoint: LinkEndpoint::parse(&endpoint).unwrap(),
         bearer: SecretBearer::from_protected_reader("fixture-host-bearer".into()).unwrap(),
-        budget: HostLinkBudget::from_reserved_partition(
-            global
-                .clone()
-                .try_acquire_many_owned(LINK_BYTES as u32)
-                .unwrap(),
-        )
-        .unwrap(),
         root: root.clone(),
         nonce: uuid::Uuid::new_v4().to_string(),
     };
@@ -512,15 +487,10 @@ async fn actual_tls_wss_codex_start_read_duplicate_and_lost_response_batch() {
     );
     std::fs::write(root.join("native-cleanup.json"), serde_json::to_vec_pretty(&json!({"supervised_jobs_joined":cleanup.supervised_jobs_joined,"executor_exited":cleanup.native.as_ref().expect("fixture configured Exec").executor_exited,"reader_task_reaped":cleanup.native.as_ref().expect("fixture configured Exec").reader_task_reaped,"stderr_task_reaped":cleanup.native.as_ref().expect("fixture configured Exec").stderr_task_reaped,"native_receipt":format!("{:?}",cleanup.native)})).unwrap()).unwrap();
     drop(fixture);
-    drop(protocol_partition);
     drop(protocol);
     drop(authority);
-    assert_eq!(
-        global.available_permits(),
-        styx_contracts::HOST_QUEUED_BYTES
-    );
     println!(
-        "actual TLS/WSS→HostCoordinator→same owned Codex batch PASS: no unsolicited hello/version1 rejected; bootstrap-only owner; normal nonce+exit0/drain; duplicate/digest/owner negative controls; actual start/read response disconnects retained no-replay, fresh connections same Host/executor; lost read output not claimed restored; independent two nonce files append exactly once; owned cleanup reaped+joined; all Host bytes returned; fixture preverified owners are not real-account issuance"
+        "actual TLS/WSS→HostCoordinator→same owned Codex batch PASS: no unsolicited hello/version1 rejected; bootstrap-only owner; normal nonce+exit0/drain; duplicate/digest/owner negative controls; actual start/read response disconnects retained no-replay, fresh connections same Host/executor; lost read output not claimed restored; independent two nonce files append exactly once; owned cleanup reaped+joined; fixture preverified owners are not real-account issuance"
     );
 }
 
@@ -555,9 +525,6 @@ async fn actual_canonical_tls_wss_host_action_journey() {
         .await
         .unwrap(),
     );
-    let expected_unreserved =
-        styx_contracts::HOST_QUEUED_BYTES - 16 * 1024 * 1024 - 8 * 1024 * 1024 - LINK_BYTES;
-    assert_eq!(host.unreserved_queued_bytes(), expected_unreserved);
     let worker_host = host.clone();
     let worker_root = root.clone();
     // The test retains bootstrap authority outside the worker, so an assertion
@@ -616,7 +583,7 @@ async fn actual_canonical_tls_wss_host_action_journey() {
             endpoint: LinkEndpoint::parse(&endpoint).unwrap(),
             bearer: SecretBearer::from_protected_reader("isolated-action-fixture-bearer".into())
                 .unwrap(),
-            budget: host.link_budget(),
+
             root: root.clone(),
             nonce: uuid::Uuid::new_v4().to_string(),
         };
@@ -836,7 +803,6 @@ async fn actual_canonical_tls_wss_host_action_journey() {
             LinkAuthentication::Bearer(&fixture.bearer),
             ConnectionGeneration::try_from(format!("host-action-link-{}", uuid::Uuid::new_v4()))
                 .unwrap(),
-            fixture.budget.clone(),
         )
         .await
         .unwrap();
@@ -846,7 +812,6 @@ async fn actual_canonical_tls_wss_host_action_journey() {
         result.unwrap();
         stopped.unwrap();
         let observation = gateway.unwrap().unwrap();
-        assert_eq!(host.unreserved_queued_bytes(), expected_unreserved);
         println!("WSS_ACTION_OBSERVATION {}", observation);
     });
     let outcome = worker.await;
@@ -870,7 +835,6 @@ async fn actual_canonical_tls_wss_host_action_journey() {
                 .expect("fixture configured Exec")
                 .stderr_task_reaped
     );
-    assert_eq!(host.unreserved_queued_bytes(), expected_unreserved);
     outcome.unwrap();
 }
 

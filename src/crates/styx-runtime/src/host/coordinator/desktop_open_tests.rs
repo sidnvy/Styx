@@ -41,10 +41,6 @@ async fn fixture() -> (HostCoordinator, HostAuthority, OwnerLease, OwnerLease) {
     let b = authority
         .register_verified_owner("owner-b".try_into().unwrap(), "epoch-b".try_into().unwrap())
         .unwrap();
-    let allocator = Arc::new(tokio::sync::Semaphore::new(8 * 1024 * 1024));
-    let budget =
-        CuaIoBudget::from_reserved(allocator.acquire_many_owned(8 * 1024 * 1024).await.unwrap())
-            .unwrap();
     {
         let mut state = host.inner.state.lock().unwrap();
         let registration = state
@@ -84,7 +80,7 @@ async fn fixture() -> (HostCoordinator, HostAuthority, OwnerLease, OwnerLease) {
                 Duration::from_secs(60),
             )
             .unwrap();
-        state.desktop = Some(test_lane(binding, budget));
+        state.desktop = Some(test_lane(binding));
     }
     (host, authority, a, b)
 }

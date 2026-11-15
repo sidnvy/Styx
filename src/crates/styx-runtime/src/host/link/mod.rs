@@ -11,11 +11,9 @@ use std::{
     time::Duration,
 };
 use styx_contracts::identity::ConnectionGeneration;
-#[cfg(test)]
-use tokio::sync::Semaphore;
 use tokio::{
     net::TcpStream,
-    sync::{OwnedSemaphorePermit, mpsc, oneshot},
+    sync::{mpsc, oneshot},
     task::JoinHandle,
 };
 use tokio_tungstenite::{
@@ -30,7 +28,6 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 pub const MAX_MESSAGE: usize = 2 * 1024 * 1024;
-pub const LINK_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LinkError {
@@ -105,32 +102,9 @@ impl LinkEndpoint {
     }
 }
 
-/// A partition already reserved from the caller's *same* Host byte budget.
-/// The retained permit prevents a second, independent 64MiB allowance. This
-/// partition is exclusive to this allocator until all links have released it.
-pub struct HostLinkBudget {
-    _partition: OwnedSemaphorePermit,
-}
-impl HostLinkBudget {
-    pub fn from_reserved_partition(
-        partition: OwnedSemaphorePermit,
-    ) -> Result<Arc<Self>, LinkError> {
-        let bytes = partition.num_permits();
-        if !(LINK_BYTES..=styx_contracts::HOST_QUEUED_BYTES).contains(&bytes)
-            || !bytes.is_multiple_of(LINK_BYTES)
-        {
-            return Err(LinkError::Capacity);
-        }
-        Ok(Arc::new(Self {
-            _partition: partition,
-        }))
-    }
-}
-
 pub struct ReceivedText {
     pub generation: ConnectionGeneration,
     text: Utf8Bytes,
-    _lease: Arc<HostLinkBudget>,
 }
 impl ReceivedText {
     pub fn as_str(&self) -> &str {
@@ -193,7 +167,6 @@ impl HostWssLink {
         tcp: TcpStream,
         authentication: LinkAuthentication<'_>,
         generation: ConnectionGeneration,
-        budget: Arc<HostLinkBudget>,
     ) -> Result<Self, LinkError> {
         let bearer = match authentication {
             LinkAuthentication::Bearer(value) => value,
@@ -201,7 +174,6 @@ impl HostWssLink {
                 return Err(LinkError::UnsupportedMutualTls);
             }
         };
-        let lease = budget;
         let until = tokio::time::Instant::now() + Duration::from_secs(5);
         let host = match endpoint.0.host().ok_or(LinkError::InvalidEndpoint)? {
             url::Host::Domain(v) => v.to_owned(),
@@ -256,11 +228,9 @@ impl HostWssLink {
         let (control_tx, mut control_rx) = mpsc::channel::<()>(4);
         let reader_stop = stop.clone();
         let reader_generation = generation.clone();
-        let reader_lease = lease.clone();
         let close_frame = Arc::new(Mutex::new(None));
         let received_close = close_frame.clone();
         let reader = tokio::spawn(async move {
-            let lease = reader_lease;
             loop {
                 let next = tokio::select! { biased; _=reader_stop.cancelled()=>break, next=source.next()=>next };
                 match next {
@@ -268,7 +238,6 @@ impl HostWssLink {
                         let message = ReceivedText {
                             generation: reader_generation.clone(),
                             text,
-                            _lease: lease.clone(),
                         };
                         if tokio::select! {
                             _ = reader_stop.cancelled() => break,
@@ -299,7 +268,6 @@ impl HostWssLink {
         });
         let writer_stop = stop.clone();
         let writer = tokio::spawn(async move {
-            let _lease = lease;
             loop {
                 tokio::select! { biased;
                     _=writer_stop.cancelled()=>break,

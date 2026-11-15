@@ -15,24 +15,13 @@ fn response() -> Vec<u8> {
     bytes.push(b'\n');
     bytes
 }
-async fn budget() -> Arc<CuaIoBudget> {
-    let allocator = Arc::new(tokio::sync::Semaphore::new(super::super::IO_BYTES));
-    CuaIoBudget::from_reserved(
-        allocator
-            .acquire_many_owned(super::super::IO_BYTES as u32)
-            .await
-            .unwrap(),
-    )
-    .unwrap()
-}
-
 #[tokio::test]
 async fn actual_codec_cannot_ack_after_oversize_or_ignored_bad_frame_credit_exhaustion() {
     for oversized in [true, false] {
         let (mut peer, local) = duplex(4096);
         let (read, write) = split(local);
         let stop = CancellationToken::new();
-        let mut transport = AdmittedTransport::from_io(read, write, stop.clone(), budget().await);
+        let mut transport = AdmittedTransport::from_io(read, write, stop.clone());
         transport.send(initialize()).await.unwrap();
         let mut raw = if oversized {
             vec![b'x'; FRAME_BYTES + 256]
@@ -76,7 +65,7 @@ async fn normal_response_and_unpolled_send_cancel_preserve_original_credit_seman
     let (mut peer, local) = duplex(4096);
     let (read, write) = split(local);
     let stop = CancellationToken::new();
-    let mut transport = AdmittedTransport::from_io(read, write, stop.clone(), budget().await);
+    let mut transport = AdmittedTransport::from_io(read, write, stop.clone());
     transport.send(initialize()).await.unwrap();
     peer.write_all(&response()).await.unwrap();
     assert!(matches!(
@@ -103,7 +92,7 @@ async fn normal_response_and_unpolled_send_cancel_preserve_original_credit_seman
     let (peer, local) = duplex(4096);
     let (read, write) = split(local);
     let stop = CancellationToken::new();
-    let mut transport = AdmittedTransport::from_io(read, write, stop.clone(), budget().await);
+    let mut transport = AdmittedTransport::from_io(read, write, stop.clone());
     let send = transport.send(initialize());
     drop(send);
     assert!(stop.is_cancelled());
@@ -133,8 +122,7 @@ async fn actual_codec_cleanup_survives_business_stop_only_with_production_split_
         let (peer, local) = duplex(4096);
         let mut peer = BufReader::new(peer);
         let (read, write) = split(local);
-        let mut transport =
-            AdmittedTransport::from_io(read, write, transport_stop.clone(), budget().await);
+        let mut transport = AdmittedTransport::from_io(read, write, transport_stop.clone());
         let mut line = String::new();
         transport.send(initialize()).await.unwrap();
         peer.read_line(&mut line).await.unwrap();
@@ -229,7 +217,7 @@ async fn actual_codec_eof_still_requests_resource_cleanup_with_split_tokens() {
     });
     let (peer, local) = duplex(4096);
     let (read, write) = split(local);
-    let mut transport = AdmittedTransport::from_io(read, write, io_stop.clone(), budget().await);
+    let mut transport = AdmittedTransport::from_io(read, write, io_stop.clone());
     transport.send(initialize()).await.unwrap();
     assert!(!business.is_cancelled());
     drop(peer);

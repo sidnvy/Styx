@@ -5,8 +5,6 @@ use styx_core::{
     operations::{DispatchDisposition, ExecutorFact, OperationLedger},
     policy::AdmissionFacts,
 };
-#[cfg(test)]
-use tokio::sync::Semaphore;
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -113,16 +111,7 @@ pub(super) fn permit(
 #[tokio::test]
 async fn core_permit_pre_io_and_independent_context_admission_batch() {
     let fixture = Fixture::new();
-    let source = Arc::new(Semaphore::new(IO_BYTES));
-    let budget = BrowserIoBudget::from_reserved(
-        source
-            .clone()
-            .acquire_many_owned(IO_BYTES as u32)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    let worker = BrowserWorker::new(budget);
+    let worker = BrowserWorker::new();
     let slot = worker.try_reserve_open().unwrap();
     let independent = worker.try_reserve_open().unwrap();
     drop(independent);
@@ -263,11 +252,7 @@ async fn missing_unknown_requires_exact_ended_bundle_and_audit() {
             ledger.begin_action_release(&prepared.id).is_err(),
             "Unknown or missing audit cannot independently release"
         );
-        let pool = Arc::new(Semaphore::new(IO_BYTES));
-        let budget =
-            BrowserIoBudget::from_reserved(pool.acquire_many_owned(IO_BYTES as u32).await.unwrap())
-                .unwrap();
-        let worker = BrowserWorker::new(budget.clone());
+        let worker = BrowserWorker::new();
         let resource = Arc::new(Resource {
             reference_link: worker.inner.reference_link.clone(),
             stop: CancellationToken::new(),
@@ -275,7 +260,6 @@ async fn missing_unknown_requires_exact_ended_bundle_and_audit() {
             operation: parent.id().clone(),
             digest: target.payload_digest,
             owner: owner.clone(),
-            _budget: budget,
             state: Arc::new(tokio::sync::Mutex::new(Live {
                 child: None,
                 client: None,

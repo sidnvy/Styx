@@ -237,7 +237,6 @@ struct Resource {
 type Records = HashMap<String, Arc<Resource>>;
 pub struct CodexStdio {
     rpc: Arc<Rpc>,
-    _rpc_partition: Arc<tokio::sync::OwnedSemaphorePermit>,
     child: tokio::sync::Mutex<Option<Child>>,
     stderr_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     records: Mutex<Records>,
@@ -252,21 +251,10 @@ impl CodexStdio {
     pub(crate) fn fixture_io() -> (Self, tokio::io::DuplexStream) {
         let (client, server) = tokio::io::duplex(65536);
         let (reader, writer) = tokio::io::split(client);
-        let partition = Arc::new(
-            Arc::new(tokio::sync::Semaphore::new(16 * 1024 * 1024))
-                .try_acquire_many_owned(16 * 1024 * 1024)
-                .unwrap(),
-        );
-        let rpc = Rpc::new_with_reserved_partition(
-            writer,
-            reader,
-            Duration::from_secs(1),
-            partition.clone(),
-        );
+        let rpc = Rpc::new(writer, reader, Duration::from_secs(1));
         (
             Self {
                 rpc,
-                _rpc_partition: partition,
                 child: tokio::sync::Mutex::new(None),
                 stderr_task: tokio::sync::Mutex::new(None),
                 records: Mutex::new(HashMap::new()),
@@ -292,23 +280,7 @@ impl CodexStdio {
     pub fn provider_id(&self) -> &str {
         &self.provider_id
     }
-    /// Standalone adapter convenience. Host composition must provide its own
-    /// reserved partition through spawn_owned_with_reserved_budget instead.
     pub async fn spawn_owned(config: OwnedExecutorConfig) -> Result<Self, ExecError> {
-        let partition = Arc::new(tokio::sync::Semaphore::new(16 * 1024 * 1024))
-            .try_acquire_many_owned(16 * 1024 * 1024)
-            .map_err(|_| ExecError::Capacity)?;
-        Self::spawn_owned_with_reserved_budget(config, partition).await
-    }
-    /// One exclusive, conservatively sized RPC partition from the Host budget.
-    pub async fn spawn_owned_with_reserved_budget(
-        config: OwnedExecutorConfig,
-        partition: tokio::sync::OwnedSemaphorePermit,
-    ) -> Result<Self, ExecError> {
-        if partition.num_permits() != 16 * 1024 * 1024 {
-            return Err(ExecError::InvalidRequest);
-        }
-        let partition = Arc::new(partition);
         if !config.binary.is_absolute()
             || !config.cwd.is_absolute()
             || config.rpc_timeout.is_zero()
@@ -317,44 +289,37 @@ impl CodexStdio {
             return Err(ExecError::InvalidRequest);
         }
         let child = Child::spawn(&config)?;
-        Self::initialize_owned(config, partition, child).await
+        Self::initialize_owned(config, child).await
     }
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    pub(crate) async fn spawn_pinned_with_reserved_budget(
+    pub(crate) async fn spawn_pinned(
         config: OwnedExecutorConfig,
-        partition: tokio::sync::OwnedSemaphorePermit,
         image: Arc<crate::store::PinnedExecutable>,
     ) -> Result<Self, ExecError> {
-        if partition.num_permits() != 16 * 1024 * 1024
-            || !config.cwd.is_absolute()
+        if !config.cwd.is_absolute()
             || config.rpc_timeout.is_zero()
             || config.rpc_timeout > Duration::from_secs(60)
         {
             return Err(ExecError::InvalidRequest);
         }
-        let partition = Arc::new(partition);
         #[cfg(target_os = "macos")]
         let child = Child::spawn_pinned(&config, image).await?;
         #[cfg(target_os = "windows")]
-        let child = Child::spawn_pinned(&config, image, partition.clone()).await?;
-        Self::initialize_owned(config, partition, child).await
+        let child = Child::spawn_pinned(&config, image).await?;
+        Self::initialize_owned(config, child).await
     }
     async fn initialize_owned(
         config: OwnedExecutorConfig,
-        partition: Arc<tokio::sync::OwnedSemaphorePermit>,
         mut child: Child,
     ) -> Result<Self, ExecError> {
         let stdin = child.stdin.take().ok_or(ExecError::SpawnFailed)?;
         let stdout = child.stdout.take().ok_or(ExecError::SpawnFailed)?;
         let stderr_task = child.stderr.take().map(|mut stderr| {
-            let stderr_partition = partition.clone();
             tokio::spawn(async move {
-                let _partition = stderr_partition;
                 let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
             })
         });
-        let rpc =
-            Rpc::new_with_reserved_partition(stdin, stdout, config.rpc_timeout, partition.clone());
+        let rpc = Rpc::new(stdin, stdout, config.rpc_timeout);
         let initialized = match rpc
             .request("initialize", json!({"clientName":"styx-rust-native-host"}))
             .await
@@ -393,7 +358,6 @@ impl CodexStdio {
         }
         Ok(Self {
             rpc,
-            _rpc_partition: partition,
             child: tokio::sync::Mutex::new(Some(child)),
             stderr_task: tokio::sync::Mutex::new(stderr_task),
             records: Mutex::new(HashMap::new()),

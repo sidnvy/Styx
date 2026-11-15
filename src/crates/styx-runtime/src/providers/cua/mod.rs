@@ -58,7 +58,7 @@ use crate::platform::windows_spawn::RunningChild as Child;
 #[cfg(target_os = "linux")]
 use tokio::process::Child;
 use tokio::{
-    sync::{OwnedMutexGuard, OwnedSemaphorePermit},
+    sync::OwnedMutexGuard,
     task::JoinHandle,
     time::{Instant, timeout_at},
 };
@@ -67,7 +67,6 @@ use tokio_util::sync::CancellationToken;
 mod windows;
 #[cfg(target_os = "windows")]
 mod windows_config;
-const IO_BYTES: usize = 8 * 1024 * 1024;
 const FRAME_BYTES: usize = 1024 * 1024;
 const REQUEST_BYTES: usize = 64 * 1024;
 type Result<T> = std::result::Result<T, CuaError>;
@@ -431,27 +430,11 @@ pub(crate) fn trace_write_settlement(
         })
     );
 }
-/// Each Cua transport allocates its bounded codec buffers on demand. A live
-/// conversation does not reserve exclusive access to the Host's Computer lane.
-pub struct CuaIoBudget {}
-impl CuaIoBudget {
-    pub(crate) fn platform_managed() -> Arc<Self> {
-        Arc::new(Self {})
-    }
-    pub fn from_reserved(partition: OwnedSemaphorePermit) -> Result<Arc<Self>> {
-        if partition.num_permits() != IO_BYTES {
-            return Err(CuaError::InvalidRequest);
-        }
-        drop(partition);
-        Ok(Self::platform_managed())
-    }
-}
 #[derive(Clone)]
 pub struct CuaWorker {
     inner: Arc<Inner>,
 }
 struct Inner {
-    budget: Arc<CuaIoBudget>,
     resources: Mutex<BTreeMap<OperationId, Arc<Resource>>>,
     stop: CancellationToken,
 }
@@ -459,7 +442,6 @@ struct Resource {
     owner: OwnerLease,
     target: ResourceTarget,
     session: SessionBinding,
-    budget: Arc<CuaIoBudget>,
     stop: CancellationToken,
     // Stop business admission before draining the original Mac session. This
     // independent token fences only its IO; it must not be a child of stop.
@@ -522,9 +504,7 @@ impl Drop for Inner {
         self.stop.cancel();
     }
 }
-struct CuaClient {
-    _budget: Arc<CuaIoBudget>,
-}
+struct CuaClient {}
 impl ClientHandler for CuaClient {}
 #[derive(Clone)]
 pub struct CuaHandle {
@@ -563,11 +543,15 @@ pub struct CuaOpenFailure {
     pub evidence: CuaEvidence,
     pub cause: CuaError,
 }
+impl Default for CuaWorker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl CuaWorker {
-    pub fn new(budget: Arc<CuaIoBudget>) -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Arc::new(Inner {
-                budget,
                 resources: Mutex::new(BTreeMap::new()),
                 stop: CancellationToken::new(),
             }),
@@ -728,7 +712,6 @@ impl CuaOpenSlot {
             owner: permit.owner().clone(),
             target,
             session: config.launch.session.clone(),
-            budget: self.worker.inner.budget.clone(),
             stop,
             live: Arc::new(tokio::sync::Mutex::new(Live {
                 #[cfg(target_os = "linux")]
@@ -829,20 +812,20 @@ impl CuaOpenSlot {
    (stdin,stdout,stderr)
    };
    #[cfg(target_os = "macos")]
-   let (stdin,stdout,mut stderr)=macos::start_proxy(&mut live,&config,resource.budget.clone(),until).await?;
+   let (stdin,stdout,mut stderr)=macos::start_proxy(&mut live,&config,until).await?;
    #[cfg(target_os = "windows")]
    let (stdin,stdout,mut stderr) = {
      windows::start(&mut live,&config).await?;
      let child=live.child.as_mut().ok_or(CuaError::Unknown)?;
      (child.take_stdin().ok_or(CuaError::Unknown)?,child.take_stdout().ok_or(CuaError::Unknown)?,child.take_stderr().ok_or(CuaError::Unknown)?)
    };
-   let budget=resource.budget.clone();live.stderr=Some(tokio::spawn(async move{let _budget=budget;tokio::io::copy(&mut stderr,&mut tokio::io::sink()).await}));
+   live.stderr=Some(tokio::spawn(async move{tokio::io::copy(&mut stderr,&mut tokio::io::sink()).await}));
    #[cfg(target_os = "macos")]
    let transport_stop=resource.transport_stop.clone();
    #[cfg(not(target_os = "macos"))]
    let transport_stop=resource.stop.clone();
-   let transport=transport::AdmittedTransport::from_io(stdout,stdin,transport_stop,resource.budget.clone());
-   let handler=CuaClient{_budget:resource.budget.clone()};let client=tokio::select!{_=resource.stop.cancelled()=>return Err(CuaError::Unknown),value=timeout_at(until,handler.serve(transport))=>value.map_err(|_|CuaError::Unknown)?.map_err(|_|CuaError::ProtocolMismatch)?};live.client=Some(client);
+   let transport=transport::AdmittedTransport::from_io(stdout,stdin,transport_stop);
+   let handler=CuaClient{};let client=tokio::select!{_=resource.stop.cancelled()=>return Err(CuaError::Unknown),value=timeout_at(until,handler.serve(transport))=>value.map_err(|_|CuaError::Unknown)?.map_err(|_|CuaError::ProtocolMismatch)?};live.client=Some(client);
    let peer=live.client.as_ref().ok_or(CuaError::Unknown)?.peer().clone();let info=peer.peer_info().ok_or(CuaError::ProtocolMismatch)?;
    if !info.server_info.as_ref().is_some_and(|v|v.name=="cua-driver"&&v.version=="0.47.24"){return Err(CuaError::ProtocolMismatch)}
    let catalog=tokio::select!{_=resource.stop.cancelled()=>return Err(CuaError::Unknown),v=timeout_at(until,peer.list_tools(None))=>v.map_err(|_|CuaError::Unknown)?.map_err(|_|CuaError::ProtocolMismatch)?};

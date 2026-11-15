@@ -4,7 +4,7 @@ use super::{ForegroundError, ForegroundEvent, ForegroundOutcome, HostWireMode, p
 use crate::{
     host::{
         bootstrap::OwnedExecHost,
-        link::{HostLinkBudget, HostWssLink, LinkAuthentication, LinkError},
+        link::{HostWssLink, LinkAuthentication, LinkError},
         protocol::{HostProtocol, PairedTrustedProfile},
     },
     providers::codex::TerminationEvidence,
@@ -284,13 +284,6 @@ async fn prepare_computer(
         .await
         .map_err(|_| ForegroundError("computer_native_session_unavailable"))?;
     custody.retain_source(source.clone());
-    let budget = match host.reserve_computer_io() {
-        Ok(v) => v,
-        Err(_) => {
-            let _ = source.stop().await;
-            return Err(ForegroundError("computer_capacity"));
-        }
-    };
     let mut grants = BTreeMap::new();
     for cap in [
         CapabilityId::DesktopWindowsRead,
@@ -311,7 +304,7 @@ async fn prepare_computer(
     }
     let binding = match host
         .authority()
-        .configure_desktop(source.clone(), budget, grants)
+        .configure_desktop(source.clone(), grants)
         .await
     {
         Ok(v) => v,
@@ -383,13 +376,6 @@ async fn prepare_computer(
         .await
         .map_err(|e| ForegroundError(e.code()))?;
     custody.retain_source(source.clone());
-    let budget = match host.reserve_computer_io() {
-        Ok(v) => v,
-        Err(_) => {
-            let _ = source.stop().await;
-            return Err(ForegroundError("computer_capacity"));
-        }
-    };
     let mut grants = BTreeMap::new();
     for cap in [
         CapabilityId::DesktopWindowsRead,
@@ -410,7 +396,7 @@ async fn prepare_computer(
     }
     let binding = match host
         .authority()
-        .configure_desktop(source.clone(), budget, grants)
+        .configure_desktop(source.clone(), grants)
         .await
     {
         Ok(v) => v,
@@ -487,7 +473,6 @@ async fn validate(admitted: &Arc<Admitted>) -> Result<(), ForegroundError> {
 async fn connect(
     profile: &profile::LoadedLegacyProfile,
     generation: ConnectionGeneration,
-    budget: Arc<HostLinkBudget>,
 ) -> Result<HostWssLink, ForegroundError> {
     let endpoint = profile.endpoint();
     let url = url::Url::parse(endpoint.as_str())
@@ -516,7 +501,6 @@ async fn connect(
         tcp,
         LinkAuthentication::Bearer(profile.bearer()),
         generation,
-        budget,
     )
     .await
     .map_err(|error| match error {
@@ -947,11 +931,7 @@ async fn run_owned(
                     browser_facts.descriptor.scope = Scope::Browser;
                     browser_facts.descriptor.provider_id =
                         "playwright".try_into().expect("static provider identity");
-                    match host.reserve_browser_io().and_then(|budget| {
-                        host.authority()
-                            .configure_browser(browser_facts, budget)
-                            .map_err(Into::into)
-                    }) {
+                    match host.authority().configure_browser(browser_facts) {
                         Ok(()) => Some(Arc::new(ForegroundBrowser {
                             admitted: admitted.clone(),
                             source,
@@ -1079,7 +1059,7 @@ async fn run_owned(
                 event(&events, &cancel, "connecting", &device, Some(&connection));
                 let attempt = tokio::select! {
                     _=cancel.cancelled()=>break Ok(None),
-                    result=connect(&admitted.profile,connection,host.link_budget())=>result,
+                    result=connect(&admitted.profile,connection)=>result,
                 };
                 match attempt {
                     Ok(link) => break Ok(Some(link)),
@@ -1258,7 +1238,7 @@ async fn run_owned(
                             event(&events, &cancel, "reconnecting", &device, Some(&generation));
                             let attempt = tokio::select! {
                                 _=cancel.cancelled()=>break,
-                                result=connect(&admitted.profile,generation,host.link_budget())=>result,
+                                result=connect(&admitted.profile,generation)=>result,
                             };
                             match attempt {
                                 Ok(v) => {

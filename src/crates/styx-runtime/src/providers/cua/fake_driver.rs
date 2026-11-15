@@ -47,22 +47,10 @@ impl FakeDriver {
                 }
             }
         });
-        let allocator = Arc::new(tokio::sync::Semaphore::new(IO_BYTES));
-        let budget = CuaIoBudget::from_reserved(
-            allocator.acquire_many_owned(IO_BYTES as u32).await.unwrap(),
-        )
-        .unwrap();
         let (read, write) = tokio::io::split(local);
-        let transport = transport::AdmittedTransport::from_io(
-            read,
-            write,
-            CancellationToken::new(),
-            budget.clone(),
-        );
-        let client = CuaClient { _budget: budget }
-            .serve(transport)
-            .await
-            .unwrap();
+        let transport =
+            transport::AdmittedTransport::from_io(read, write, CancellationToken::new());
+        let client = CuaClient {}.serve(transport).await.unwrap();
         let peer = client.peer().clone();
         peer.list_tools(None).await.unwrap();
         Self {

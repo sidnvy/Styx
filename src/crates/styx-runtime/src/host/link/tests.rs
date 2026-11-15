@@ -6,7 +6,7 @@ use tokio_tungstenite::{
 };
 
 #[test]
-fn endpoint_credentials_and_partition_are_fail_closed() {
+fn endpoint_credentials_are_fail_closed() {
     for url in [
         "ws://localhost/",
         "wss://user:secret@localhost/",
@@ -18,8 +18,6 @@ fn endpoint_credentials_and_partition_are_fail_closed() {
     assert!(SecretBearer::from_protected_reader("x\r\ny".into()).is_err());
     let bearer = SecretBearer::from_protected_reader("test-only-secret".into()).unwrap();
     assert_eq!(format!("{bearer:?}"), "SecretBearer([REDACTED])");
-    let sem = Arc::new(Semaphore::new(1));
-    assert!(HostLinkBudget::from_reserved_partition(sem.try_acquire_owned().unwrap()).is_err());
 }
 
 // Tungstenite Callback fixes its rejection type to an unboxed HTTP response.
@@ -128,14 +126,6 @@ async fn strict_tls_wss_data_heartbeat_limits_close_cleanup_batch() {
             assert!(!matches!(closed, Some(Ok(Message::Text(_)))));
         }
     });
-    let host_sem = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
-    let budget = HostLinkBudget::from_reserved_partition(
-        host_sem
-            .clone()
-            .try_acquire_many_owned(LINK_BYTES as u32)
-            .unwrap(),
-    )
-    .unwrap();
     let generation = ConnectionGeneration::try_from("owned-wss-generation-1").unwrap();
     let mut link = HostWssLink::connect(
         &endpoint,
@@ -143,14 +133,9 @@ async fn strict_tls_wss_data_heartbeat_limits_close_cleanup_batch() {
         TcpStream::connect(address).await.unwrap(),
         LinkAuthentication::Bearer(&bearer),
         generation.clone(),
-        budget.clone(),
     )
     .await
     .unwrap();
-    assert_eq!(
-        host_sem.available_permits(),
-        styx_contracts::HOST_QUEUED_BYTES - LINK_BYTES
-    );
     assert_eq!(
         link.send_text("x".repeat(MAX_MESSAGE + 1), Duration::from_secs(1))
             .await,
@@ -187,25 +172,8 @@ async fn strict_tls_wss_data_heartbeat_limits_close_cleanup_batch() {
             .await,
         Err(SendFailure::NotSent(LinkError::Closed))
     );
-    drop(budget);
-    // Delivered text itself retains the same Host partition until dropped.
-    assert_eq!(
-        host_sem.available_permits(),
-        styx_contracts::HOST_QUEUED_BYTES - LINK_BYTES
-    );
     drop(incoming);
-    assert_eq!(
-        host_sem.available_permits(),
-        styx_contracts::HOST_QUEUED_BYTES
-    );
     for (index, saturation) in [false, true].into_iter().enumerate() {
-        let budget = HostLinkBudget::from_reserved_partition(
-            host_sem
-                .clone()
-                .try_acquire_many_owned(LINK_BYTES as u32)
-                .unwrap(),
-        )
-        .unwrap();
         let mut link = HostWssLink::connect(
             &endpoint,
             &tls,
@@ -213,7 +181,6 @@ async fn strict_tls_wss_data_heartbeat_limits_close_cleanup_batch() {
             LinkAuthentication::Bearer(&bearer),
             ConnectionGeneration::try_from(format!("owned-fresh-generation-{}", index + 2))
                 .unwrap(),
-            budget.clone(),
         )
         .await
         .unwrap();
@@ -235,11 +202,6 @@ async fn strict_tls_wss_data_heartbeat_limits_close_cleanup_batch() {
             );
         }
         link.shutdown(Duration::from_secs(2)).await.unwrap();
-        drop(budget);
-        assert_eq!(
-            host_sem.available_permits(),
-            styx_contracts::HOST_QUEUED_BYTES
-        );
     }
     tokio::time::timeout(Duration::from_secs(2), serving)
         .await
