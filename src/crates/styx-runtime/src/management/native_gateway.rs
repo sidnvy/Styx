@@ -925,7 +925,10 @@ mod platform {
         let address = endpoints.address;
         let clock = i64::try_from(now()?).map_err(|_| bad())?;
         if ready.schema != 1
-            || ready.root_identity != native_identity(&root)
+            || !crate::store::native_root::same_persisted_identity(
+                &native_identity(&root),
+                &ready.root_identity,
+            )
             || ready.origin != origin
             || ready.deployment_raw_sha256 != Sha256Digest::of_bytes(deployment.bytes())
             || clock < ready.not_before_unix

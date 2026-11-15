@@ -847,7 +847,10 @@ mod platform {
                     && state.state().reader_contract
                         == ReaderContract::NativePairingLifecycleStateV1
                     && update.is_none())
-                || seed.root_identity != identity(&root)
+                || !crate::store::native_root::same_persisted_identity(
+                    &identity(&root),
+                    &seed.root_identity,
+                )
                 || seed.scope_generation != state.state().scope_generation
                 || seed.deployment_raw_sha256 != Sha256Digest::of_bytes(&deployment_input.raw)
                 || seed.deployment_raw_sha256 != state.state().deployment_raw_sha256

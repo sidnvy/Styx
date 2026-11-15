@@ -775,8 +775,10 @@ impl Material {
             crate::store::native_host_snapshot::validated_runtime_selection(&root, &state, &marker)
                 .map_err(|_| refused("native_gateway_admin_material"))?;
         let state = state.state();
-        if marker.root_identity != root_identity(&root)
-            || marker.reader_floor != ReaderContract::NativeManagementStateV1
+        if !crate::store::native_root::same_persisted_identity(
+            &root_identity(&root),
+            &marker.root_identity,
+        ) || marker.reader_floor != ReaderContract::NativeManagementStateV1
             || state.migration.is_some()
             || state.mode != NativeDeploymentMode::CreateLocal
             || state.desired.host.is_some()

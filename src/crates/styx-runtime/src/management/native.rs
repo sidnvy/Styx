@@ -450,7 +450,7 @@ mod platform {
                 owner_sid,
             },
         };
-        if marker.root_identity != observed {
+        if !crate::store::native_root::same_persisted_identity(&observed, &marker.root_identity) {
             return Err(NativeManagementError::new(ErrorKind::Conflict));
         }
         let writer = root.try_existing_configuration_writer().map_err(store)?;
