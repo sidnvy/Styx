@@ -65,3 +65,31 @@ mutating routes without an exact Host click/write binding remain refused;
 Keyboard remains unavailable. Missing native permission or current window
 probe cannot authorize the click. Original not-dispatched receipts are retained,
 and actual independent button effects remain required for acceptance.
+
+
+## Descriptive reads and incomplete Linux Chrome observations (2026-11-17)
+
+Read acquisition distinguishes a native **descriptive result** from an **actionable
+observation**. A target-matched, structurally valid partial/degraded elements tree
+is returned with `display_only:true`, `read_only:true`, `elements_complete:false`,
+`input_authorized:false`, and its sanitized native reason. All native snapshot,
+element-token and action fields are removed. No Host alias or input observation
+is installed. The existing pre-read invalidation prevents a previous writable
+map surviving this result. Complete observations retain the existing exact
+window, owner, native-token, permission and once-only input checks.
+
+The concrete niuda reproduction was not a complete Chrome tree rejected solely
+for a strict flag: Cua 0.47.24 returned one window row, `degraded:true`, and
+`x11_property_fallback_partial` because the running Chrome did not register on
+the session AT-SPI bus. Screenshot/window discovery do not prove AX content.
+Returning this row makes the actual limitation visible; it does not manufacture
+DOM controls or enable Chromium accessibility, CDP, or broad pointer input.
+Chrome's runtime accessibility must be enabled before native controls can be
+observed. Do not restart Chrome or copy its profile to work around this.
+
+Parsed actionable responses now own their validated data. Projection cannot
+accept a second response argument, so repeated cryptographic comparisons of the
+same immutable response are unnecessary. Native-reference **fields** are
+translated or removed; native-looking text in a page label is ordinary content
+and does not confer authority. Cardinality is checked once against returned
+rows rather than imposing a second conflicting completeness flag.
