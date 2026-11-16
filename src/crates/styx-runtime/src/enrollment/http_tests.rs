@@ -80,3 +80,28 @@ fn response_serialization_is_bounded_before_growth_and_never_returns_partial_sec
         "nosniff"
     );
 }
+
+#[test]
+fn accept_network_error_is_per_connection_but_broken_listener_is_fatal() {
+    use std::io::{Error, ErrorKind};
+    for kind in [
+        ErrorKind::ConnectionAborted,
+        ErrorKind::ConnectionReset,
+        ErrorKind::Interrupted,
+        ErrorKind::WouldBlock,
+        ErrorKind::NetworkUnreachable,
+    ] {
+        assert!(transient_accept_error(&Error::from(kind)), "{kind:?}");
+    }
+    #[cfg(target_os = "linux")]
+    assert!(transient_accept_error(&Error::from_raw_os_error(
+        libc::EPROTO
+    )));
+    #[cfg(target_os = "linux")]
+    assert!(!transient_accept_error(&Error::from_raw_os_error(
+        libc::EBADF
+    )));
+    assert!(!transient_accept_error(&Error::from(
+        ErrorKind::PermissionDenied
+    )));
+}

@@ -49,6 +49,13 @@ impl Drop for SocketPin {
         }
     }
 }
+fn peer_authorized(peer: std::io::Result<tokio::net::unix::UCred>) -> bool {
+    // Query failure and wrong-UID peers are both per-connection refusals.
+    peer.is_ok_and(|peer| {
+        peer.uid() == nix::unistd::Uid::current().as_raw() && peer.pid().is_some()
+    })
+}
+
 pub(crate) struct ControlServer {
     listener: UnixListener,
     pin: SocketPin,
@@ -105,11 +112,22 @@ impl ControlServer {
     /// after disconnect/cancellation; shutdown cannot drop its original custody.
     pub(crate) async fn run(self, stop: CancellationToken) -> Result<()> {
         loop {
-            let (stream, _) = tokio::select! { _=stop.cancelled()=>return self.pin.remove(), v=self.listener.accept()=>v.map_err(|_| error())? };
+            let accepted = tokio::select! {
+                _ = stop.cancelled() => return self.pin.remove(),
+                result = self.listener.accept() => result,
+            };
+            // Even a transient accept failure must not bypass the original
+            // socket pathname and OS service identity pins.
             self.pin.validate()?;
             validate_scope(self.scope.clone()).await?;
-            let peer = stream.peer_cred().map_err(|_| error())?;
-            if peer.uid() != nix::unistd::Uid::current().as_raw() || peer.pid().is_none() {
+            let (stream, _) = match accepted {
+                Ok(value) => value,
+                Err(error) if crate::enrollment::http::transient_accept_error(&error) => continue,
+                Err(_) => return Err(error()),
+            };
+            // Credentials are per-peer. A failed query does not invalidate the
+            // listener or the retained service scope.
+            if !peer_authorized(stream.peer_cred()) {
                 continue;
             }
             let (read, mut write) = stream.into_split();
@@ -193,4 +211,18 @@ pub(super) async fn exchange(path: &Path, request: ServiceRequest) -> Result<Ser
         return Err(error());
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_peer_credential_query_is_local_and_next_peer_is_valid() {
+        assert!(!peer_authorized(Err(
+            std::io::ErrorKind::NotConnected.into()
+        )));
+        let (next, _other_end) = UnixStream::pair().unwrap();
+        assert!(peer_authorized(next.peer_cred()));
+    }
 }
