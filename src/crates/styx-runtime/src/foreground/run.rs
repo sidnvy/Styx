@@ -433,36 +433,32 @@ async fn prepare_computer(
 }
 fn event(
     events: &mpsc::Sender<ForegroundEvent>,
-    cancel: &CancellationToken,
+    _cancel: &CancellationToken,
     name: &'static str,
     device: &DeviceId,
     generation: Option<&ConnectionGeneration>,
 ) {
-    event_with_reason(events, cancel, name, device, generation, None);
+    event_with_reason(events, _cancel, name, device, generation, None);
 }
 fn event_with_reason(
     events: &mpsc::Sender<ForegroundEvent>,
-    cancel: &CancellationToken,
+    _cancel: &CancellationToken,
     name: &'static str,
     device: &DeviceId,
     generation: Option<&ConnectionGeneration>,
     reason: Option<&'static str>,
 ) {
-    if events
-        .try_send(ForegroundEvent {
-            schema: 1,
-            event: name,
-            reason,
-            #[cfg(target_os = "macos")]
-            computer_probe: None,
-            device_id: Some(device.clone()),
-            connection_generation: generation.cloned(),
-        })
-        .is_err()
-    {
-        // Output loss cannot block cleanup or silently detach an owned executor.
-        cancel.cancel();
-    }
+    // These events are best-effort status observations, not execution authority.
+    // A slow/closed event consumer must not terminate a healthy Host or its tasks.
+    let _ = events.try_send(ForegroundEvent {
+        schema: 1,
+        event: name,
+        reason,
+        #[cfg(target_os = "macos")]
+        computer_probe: None,
+        device_id: Some(device.clone()),
+        connection_generation: generation.cloned(),
+    });
 }
 async fn validate(admitted: &Arc<Admitted>) -> Result<(), ForegroundError> {
     let retained = admitted.clone();
@@ -1433,6 +1429,24 @@ fn record_process_exit(
 mod tests {
     use super::*;
     #[test]
+    fn full_or_closed_status_channel_does_not_cancel_host_work() {
+        let (events, receiver) = mpsc::channel(1);
+        let stop = CancellationToken::new();
+        let device: DeviceId = "telemetry-test-device".to_owned().try_into().unwrap();
+        event(&events, &stop, "connected", &device, None);
+        event(&events, &stop, "reconnecting", &device, None);
+        assert!(
+            !stop.is_cancelled(),
+            "a full status channel is not a Host stop"
+        );
+        drop(receiver);
+        event(&events, &stop, "disconnected", &device, None);
+        assert!(
+            !stop.is_cancelled(),
+            "a closed status channel is not a Host stop"
+        );
+    }
+    #[test]
     fn cleanup_unknown_original_resource_cannot_be_erased_by_server_exit_or_empty_inventory() {
         let operation = styx_contracts::operation::OperationId {
             host_generation: "test-host".try_into().unwrap(),
@@ -1470,22 +1484,18 @@ mod tests {
 #[cfg(target_os = "macos")]
 fn computer_unavailable_with_probe(
     events: &mpsc::Sender<ForegroundEvent>,
-    cancel: &CancellationToken,
+    _cancel: &CancellationToken,
     device: &DeviceId,
     reason: &'static str,
     computer_probe: Option<crate::providers::cua::probe_diagnostic::ProbeDiagnostic>,
 ) {
-    if events
-        .try_send(ForegroundEvent {
-            schema: 1,
-            event: "computer_unavailable",
-            reason: Some(reason),
-            computer_probe,
-            device_id: Some(device.clone()),
-            connection_generation: None,
-        })
-        .is_err()
-    {
-        cancel.cancel();
-    }
+    // Missing diagnostic delivery is never a reason to cancel Exec/Browser.
+    let _ = events.try_send(ForegroundEvent {
+        schema: 1,
+        event: "computer_unavailable",
+        reason: Some(reason),
+        computer_probe,
+        device_id: Some(device.clone()),
+        connection_generation: None,
+    });
 }

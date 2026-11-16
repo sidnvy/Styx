@@ -6,6 +6,23 @@ use tokio_tungstenite::{
 };
 
 #[test]
+fn queued_websocket_pong_flush_does_not_disconnect_on_full_notification_slot() {
+    let (tx, mut rx) = mpsc::channel::<()>(1);
+    assert!(request_control_flush(&tx));
+    assert!(
+        request_control_flush(&tx),
+        "a queued flush also covers a second ping"
+    );
+    assert_eq!(rx.try_recv(), Ok(()));
+    assert!(request_control_flush(&tx));
+    drop(rx);
+    assert!(
+        !request_control_flush(&tx),
+        "closed writer still ends this link"
+    );
+}
+
+#[test]
 fn endpoint_credentials_are_fail_closed() {
     for url in [
         "ws://localhost/",

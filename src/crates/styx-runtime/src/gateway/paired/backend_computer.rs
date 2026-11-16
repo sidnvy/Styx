@@ -131,6 +131,11 @@ fn computer_error(category: ErrorCategory, certainty: ExecutionCertainty) -> Cal
     let code = serde_json::to_value(category).expect("fixed category");
     CallToolResult::error(vec![ContentBlock::text(json!({"error":code.as_str().unwrap_or("RESULT_UNKNOWN").to_ascii_lowercase(),"category":code,"execution_certainty":certainty,"uncertain":certainty!=ExecutionCertainty::NotDispatched}).to_string())])
 }
+fn reusable_open_refusal(certainty: ExecutionCertainty) -> bool {
+    // This is a new explicit request, not a replay of the old operation.
+    // Unknown/acknowledged native dispatch must retain the original target.
+    certainty == ExecutionCertainty::NotDispatched
+}
 fn typed_error(reply: &Reply) -> Option<(ErrorCategory, ExecutionCertainty)> {
     match reply {
         Reply::Error {
@@ -340,7 +345,7 @@ impl PairedGatewayBackend {
                 Ok(Reply::Prepared { snapshot }) => snapshot,
                 Ok(reply) => {
                     if let Some((category, certainty)) = typed_error(&reply) {
-                        if certainty == ExecutionCertainty::NotDispatched {
+                        if reusable_open_refusal(certainty) {
                             self.retire_computer(owner, &device, &cell);
                         }
                         return computer_error(category, certainty);
@@ -386,14 +391,14 @@ impl PairedGatewayBackend {
                 }
                 Ok(reply) => {
                     if let Some((category, certainty)) = typed_error(&reply) {
-                        if category == ErrorCategory::Busy
-                            && certainty == ExecutionCertainty::NotDispatched
-                        {
+                        // The Host explicitly guarantees no native dispatch.
+                        // Retire only this unstarted presentation context: a
+                        // subsequent user read may establish a fresh one after
+                        // the desktop recovers. An unknown dispatch remains
+                        // blocked and is NEVER replayed automatically.
+                        if reusable_open_refusal(certainty) {
                             self.retire_computer(owner, &device, &cell);
                         }
-                        // A typed refusal proves no native dispatch, not that
-                        // the original Reserved Core record was released. Keep
-                        // its exact target and block automatic re-open/retry.
                         return computer_error(category, certainty);
                     }
                     return failure("outcome_unknown", None, true);

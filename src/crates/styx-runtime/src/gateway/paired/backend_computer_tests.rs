@@ -74,6 +74,24 @@ fn pre_dispatch_capacity_is_known_and_retryable() {
 }
 
 #[test]
+fn typed_not_dispatched_open_refusal_is_not_permanent_context_poison() {
+    for category in [
+        ErrorCategory::SessionDisconnected,
+        ErrorCategory::Busy,
+        ErrorCategory::PermissionDenied,
+    ] {
+        let response = Reply::Error {
+            category,
+            certainty: ExecutionCertainty::NotDispatched,
+            cursor_may_be_consumed: false,
+        };
+        assert!(reusable_open_refusal(typed_error(&response).unwrap().1));
+    }
+    assert!(!reusable_open_refusal(ExecutionCertainty::Unknown));
+    assert!(!reusable_open_refusal(ExecutionCertainty::Completed));
+}
+
+#[test]
 fn inspecting_unknown_action_preserves_identity_and_original_outcome() {
     use styx_contracts::{
         identity::{HostGeneration, OwnerEpoch},

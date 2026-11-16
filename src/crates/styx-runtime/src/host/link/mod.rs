@@ -29,6 +29,13 @@ use zeroize::Zeroizing;
 
 pub const MAX_MESSAGE: usize = 2 * 1024 * 1024;
 
+/// Tungstenite has already queued an automatic pong when the ping is read.
+/// One pending flush is sufficient for all queued pongs: a full notification
+/// slot is not a connection failure. A closed writer still ends this link.
+fn request_control_flush(tx: &mpsc::Sender<()>) -> bool {
+    !matches!(tx.try_send(()), Err(mpsc::error::TrySendError::Closed(_)))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LinkError {
     #[error("invalid or insecure WSS endpoint")]
@@ -251,7 +258,7 @@ impl HostWssLink {
                     // Tungstenite queues automatic pong on read. Sink flush
                     // shares Split BiLock and emits that queued control frame.
                     Some(Ok(Message::Ping(_))) => {
-                        if control_tx.try_send(()).is_err() {
+                        if !request_control_flush(&control_tx) {
                             break;
                         }
                     }
