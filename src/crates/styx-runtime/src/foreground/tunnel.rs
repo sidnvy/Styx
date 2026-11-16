@@ -17,6 +17,9 @@ use styx_contracts::native_release::NativeExternalWorker;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
+#[path = "tunnel_diagnostics.rs"]
+mod diagnostics;
+
 const RETRY: Duration = Duration::from_secs(15);
 const OBSERVATION_HEADER: &str = "X-Styx-Tunnel-Observation: file:";
 
@@ -530,7 +533,7 @@ fn arguments(c: &Connection, state: &Path, port: u16) -> Arguments {
         "--log.format".into(),
         "json".into(),
         "--log.level".into(),
-        "warn".into(),
+        "info".into(),
     ])
 }
 fn file_reference(prefix: &str, path: &Path) -> OsString {
@@ -642,6 +645,142 @@ fn write_event(
     }
 }
 
+// Use the existing Gateway log destination. Raw upstream lines never reach it,
+// and a diagnostics write failure cannot stop the product or cancel a task.
+fn write_diagnostic(mut out: impl Write, details: serde_json::Value) {
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|v| u64::try_from(v.as_millis()).ok());
+    let event = serde_json::json!({"schema":1,"event":"tunnel_diagnostic",
+        "at_unix_ms":at,"details":details});
+    if serde_json::to_writer(&mut out, &event).is_ok() {
+        let _ = out.write_all(b"\n");
+        let _ = out.flush();
+    }
+}
+
+fn emit_diagnostic(output: EventOutput, details: serde_json::Value) {
+    match output {
+        EventOutput::Foreground => write_diagnostic(std::io::stdout().lock(), details),
+        EventOutput::AppDiagnostic => write_diagnostic(std::io::stderr().lock(), details),
+    }
+}
+
+struct DiagnosticStore {
+    path: PathBuf,
+    root: PrivateRoot,
+    events: std::sync::Mutex<std::collections::VecDeque<serde_json::Value>>,
+}
+impl DiagnosticStore {
+    fn open(path: &Path) -> Option<Arc<Self>> {
+        let root = PrivateRoot::open(path).ok()?;
+        let events = root
+            .read_raw("diagnostic-observation.json", 1024 * 1024)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(raw.bytes()).ok())
+            .and_then(|value| {
+                value
+                    .get("events")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .take(256)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        Some(Arc::new(Self {
+            path: path.to_path_buf(),
+            root,
+            events: std::sync::Mutex::new(events),
+        }))
+    }
+    fn record(&self, details: serde_json::Value) {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|value| u64::try_from(value.as_millis()).ok());
+        let mut events = self
+            .events
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        events.push_back(serde_json::json!({"at_unix_ms":at,"details":details}));
+        // Retention only: this never participates in MCP admission or lifetime.
+        while events.len() > 256 {
+            events.pop_front();
+        }
+        if let Ok(bytes) = serde_json::to_vec(&serde_json::json!({"schema":1,"events":*events})) {
+            let _ = atomic_write(
+                &self.path,
+                &self.root,
+                "diagnostic-observation.json",
+                &bytes,
+            );
+        }
+    }
+}
+
+async fn read_diagnostics(
+    stream: impl tokio::io::AsyncRead + Unpin,
+    output: EventOutput,
+    store: Option<Arc<DiagnosticStore>>,
+) -> std::io::Result<u64> {
+    read_diagnostic_lines(stream, |details| {
+        if let Some(store) = &store {
+            store.record(details.clone());
+        }
+        emit_diagnostic(output, details);
+    })
+    .await
+}
+
+async fn read_diagnostic_lines(
+    mut stream: impl tokio::io::AsyncRead + Unpin,
+    mut record: impl FnMut(serde_json::Value),
+) -> std::io::Result<u64> {
+    use tokio::io::AsyncReadExt;
+    // This bounds only the diagnostic decoder's memory. An oversized line is
+    // drained and discarded; it cannot reject or terminate an MCP operation.
+    const DIAGNOSTIC_LINE_BYTES: usize = 64 * 1024;
+    let mut chunk = [0u8; 4096];
+    let mut line = Vec::new();
+    let mut discarded = false;
+    let mut read = 0u64;
+    loop {
+        let count = stream.read(&mut chunk).await?;
+        if count == 0 {
+            if !discarded
+                && !line.is_empty()
+                && let Some(details) = diagnostics::project_diagnostic_line(&line)
+            {
+                record(details);
+            }
+            return Ok(read);
+        }
+        read = read.saturating_add(count as u64);
+        for byte in &chunk[..count] {
+            if *byte == b'\n' {
+                if !discarded && let Some(details) = diagnostics::project_diagnostic_line(&line) {
+                    record(details);
+                }
+                line.clear();
+                discarded = false;
+            } else if !discarded {
+                if line.len() == DIAGNOSTIC_LINE_BYTES {
+                    line.clear();
+                    discarded = true;
+                } else {
+                    line.push(*byte);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 enum Image {
     Native(Arc<PinnedExecutable>),
@@ -657,13 +796,11 @@ type Process = crate::platform::windows_spawn::RunningChild;
 
 struct Child {
     process: Process,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     readers: Vec<tokio::task::JoinHandle<std::io::Result<u64>>>,
 }
 impl Child {
     async fn wait(&mut self) -> std::io::Result<ExitStatus> {
         let exit = self.process.wait().await?;
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
         while let Some(reader) = self.readers.last_mut() {
             let _ = reader.await;
             self.readers.pop();
@@ -672,8 +809,9 @@ impl Child {
     }
 }
 
-async fn spawn(image: &Image, args: Arguments, path: &Path) -> Result<Child> {
+async fn spawn(image: &Image, args: Arguments, path: &Path, output: EventOutput) -> Result<Child> {
     let env = environment(path)?;
+    let diagnostics = DiagnosticStore::open(path);
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let binary = match image {
@@ -690,13 +828,28 @@ async fn spawn(image: &Image, args: Arguments, path: &Path) -> Result<Child> {
             .env_clear()
             .envs(env)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        command
+        let mut process = command
             .spawn()
-            .map(|process| Child { process })
-            .map_err(|_| error("tunnel_client_start_failed"))
+            .map_err(|_| error("tunnel_client_start_failed"))?;
+        let mut readers = Vec::new();
+        if let Some(stream) = process.stdout.take() {
+            readers.push(tokio::spawn(read_diagnostics(
+                stream,
+                output,
+                diagnostics.clone(),
+            )));
+        }
+        if let Some(stream) = process.stderr.take() {
+            readers.push(tokio::spawn(read_diagnostics(
+                stream,
+                output,
+                diagnostics.clone(),
+            )));
+        }
+        Ok(Child { process, readers })
     }
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
@@ -735,18 +888,22 @@ async fn spawn(image: &Image, args: Arguments, path: &Path) -> Result<Child> {
                 return Err(error("tunnel_client_start_failed"));
             }
         };
-        // Drain and discard native pipes; never log upstream output or leave
-        // detached readers behind when the Gateway finishes its joined stop.
+        // Retain only structured diagnostic metadata through the existing
+        // output. The same child owns and joins both readers on shutdown.
         let mut readers = Vec::new();
-        if let Some(mut stream) = process.take_stdout() {
-            readers.push(tokio::spawn(async move {
-                tokio::io::copy(&mut stream, &mut tokio::io::sink()).await
-            }));
+        if let Some(stream) = process.take_stdout() {
+            readers.push(tokio::spawn(read_diagnostics(
+                stream,
+                output,
+                diagnostics.clone(),
+            )));
         }
-        if let Some(mut stream) = process.take_stderr() {
-            readers.push(tokio::spawn(async move {
-                tokio::io::copy(&mut stream, &mut tokio::io::sink()).await
-            }));
+        if let Some(stream) = process.take_stderr() {
+            readers.push(tokio::spawn(read_diagnostics(
+                stream,
+                output,
+                diagnostics.clone(),
+            )));
         }
         drop(process.take_stdin());
         Ok(Child { process, readers })
@@ -941,7 +1098,7 @@ async fn supervise(
             fs::remove_file(path.join("health.url"))
                 .map_err(|_| error("tunnel_protected_write"))?;
         }
-        match spawn(&image, args.clone(), path).await {
+        match spawn(&image, args.clone(), path, output).await {
             Ok(mut child) => {
                 emit(output, &stop, "tunnel_started", None);
                 let mut ready = false;
@@ -993,7 +1150,55 @@ mod tests {
         let stop = CancellationToken::new();
         unavailable(output, &stop);
         emit(output, &stop, "tunnel_exited", Some(7));
+        emit_diagnostic(
+            output,
+            serde_json::json!({"event":"upstream_error",
+            "cmd_request_id":"req_0123456789abcdef","status_code":404}),
+        );
         assert!(!stop.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn diagnostic_drain_skips_raw_oversized_lines_and_continues_after_them() {
+        let mut raw = vec![b'x'; 70 * 1024];
+        raw.extend_from_slice(b"\nSECRET_NOT_JSON\n");
+        raw.extend_from_slice(br#"{"level":"WARN","msg":"secret body", "error":"SECRET_VALUE","cmd_request_id":"req_0123456789abcdef"}"#);
+        let mut events = Vec::new();
+        let count = read_diagnostic_lines(raw.as_slice(), |value| events.push(value))
+            .await
+            .unwrap();
+        assert_eq!(count, raw.len() as u64);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["cmd_request_id"], "req_0123456789abcdef");
+        assert!(!events[0].to_string().contains("SECRET"));
+    }
+
+    #[test]
+    fn sanitized_diagnostics_survive_gateway_restart_in_the_existing_private_scope() {
+        let dir = Temporary::new();
+        let first = DiagnosticStore::open(&dir.0).unwrap();
+        let details = diagnostics::project_diagnostic_line(br#"{"level":"WARN","msg":"SECRET_BODY","cmd_request_id":"req_0123456789abcdef","status_code":404,"error":"SECRET_ERROR"}"#).unwrap();
+        first.record(details);
+        drop(first);
+        let reopened = DiagnosticStore::open(&dir.0).unwrap();
+        assert_eq!(reopened.events.lock().unwrap().len(), 1);
+        reopened.record(serde_json::json!({"event":"upstream_error","status_code":502}));
+        let raw = fs::read_to_string(dir.0.join("diagnostic-observation.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["events"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            value["events"][0]["details"]["cmd_request_id"],
+            "req_0123456789abcdef"
+        );
+        assert!(!raw.contains("SECRET"));
+        assert_eq!(
+            fs::metadata(dir.0.join("diagnostic-observation.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
 
     #[test]
@@ -1018,9 +1223,23 @@ mod tests {
             };
             assert!(!other.contains("tunnel_unavailable"));
             assert!(!other.contains("tunnel_exited"));
+            assert!(!other.contains("tunnel_diagnostic"));
             let actual: Vec<serde_json::Value> = events
                 .lines()
                 .filter_map(|line| serde_json::from_str(line).ok())
+                .collect();
+            let diagnostic = actual
+                .iter()
+                .find(|value| value["event"] == "tunnel_diagnostic")
+                .unwrap();
+            assert!(diagnostic["at_unix_ms"].is_u64());
+            assert_eq!(
+                diagnostic["details"]["cmd_request_id"],
+                "req_0123456789abcdef"
+            );
+            let actual: Vec<_> = actual
+                .into_iter()
+                .filter(|value| value["event"] != "tunnel_diagnostic")
                 .collect();
             // A child that exits before the first health poll need not emit
             // unavailable. Exit must still be reported on the correct stream.
@@ -1173,7 +1392,7 @@ mod tests {
             "--log.format",
             "json",
             "--log.level",
-            "warn",
+            "info",
         ];
         assert_eq!(
             actual.0,
