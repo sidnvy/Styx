@@ -1,10 +1,10 @@
 name: Styx release workflow checks
 on:
   push:
-    branches: [develop, main]
-    paths: ['.github/workflows/styx-release*.yml', 'src/ci/release-*', 'src/ci/test/test_release*.py', 'src/tools/release/build-native-binary.py']
+    branches: [main]
+    paths: ['.github/workflows/*.yml', 'src/ci/release-*', 'src/ci/test/test_release*.py', 'src/tools/release/build-native-binary.py']
   pull_request:
-    paths: ['.github/workflows/styx-release*.yml', 'src/ci/release-*', 'src/ci/test/test_release*.py', 'src/tools/release/build-native-binary.py']
+    paths: ['.github/workflows/*.yml', 'src/ci/release-*', 'src/ci/test/test_release*.py', 'src/tools/release/build-native-binary.py']
   workflow_dispatch:
 permissions:
   contents: read
@@ -30,4 +30,4 @@ jobs:
           curl --fail --location --silent --show-error https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz -o "$RUNNER_TEMP/actionlint.tar.gz"
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
-          "$RUNNER_TEMP/actionlint" -shellcheck= .github/workflows/styx-release.yml .github/workflows/styx-release-check.yml
+          "$RUNNER_TEMP/actionlint" -shellcheck= .github/workflows/*.yml

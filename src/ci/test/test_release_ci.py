@@ -1,5 +1,7 @@
 """Release boundaries: real archive/pin/asset failures must stop publication."""
 import argparse
+import contextlib
+import json
 import hashlib
 import importlib.util
 import io
@@ -156,6 +158,110 @@ class ReleaseTests(unittest.TestCase):
             ci.publisher_key(argparse.Namespace(output=output))
         self.assertEqual(output.stat().st_mode & 0o777, 0o600)
 
+
+
+class ReleaseSourcePolicyTests(unittest.TestCase):
+    """Exercise the real Git tag/ancestry checks, without signing or a network."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='styx-release-policy-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.git('init', '--quiet', '--initial-branch=main')
+        self.git('config', 'user.email', 'release-test@example.invalid')
+        self.git('config', 'user.name', 'Release policy test')
+        self.version('1.2.3')
+        self.commit('base')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.git('tag', 'v1.2.3')
+
+    def git(self, *args):
+        return subprocess.check_output(['git', *args], cwd=self.root,
+                                       stderr=subprocess.PIPE).decode().strip()
+
+    def version(self, value):
+        (self.root / 'Cargo.toml').write_text('[workspace.package]\nversion = "' + value + '"\n')
+
+    def commit(self, message):
+        self.git('add', '.')
+        self.git('commit', '--quiet', '-m', message)
+
+    def invoke(self, name='v1.2.3', kind='tag'):
+        output = io.StringIO()
+        with patch.object(ci, 'ROOT', self.root), patch.dict(os.environ, {
+            'GITHUB_REF_NAME': name, 'GITHUB_REF_TYPE': kind, 'GITHUB_OUTPUT': '',
+        }), contextlib.redirect_stdout(output):
+            ci.metadata(argparse.Namespace(build_number=1200))
+        return json.loads(output.getvalue())
+
+    def test_matching_main_tag_is_the_only_publishable_identity(self):
+        result = self.invoke()
+        self.assertEqual(result['version'], '1.2.3')
+        self.assertEqual(result['revision'], self.git('rev-parse', 'HEAD'))
+        self.assertEqual(result['publish'], 'true')
+        self.assertEqual(result['prerelease'], 'false')
+
+    def test_main_develop_and_feature_branch_cannot_sign_a_release(self):
+        for branch in ('main', 'develop', 'fix/input'):
+            with self.subTest(branch=branch), self.assertRaisesRegex(ValueError, 'version tag'):
+                self.invoke(branch, 'branch')
+
+    def test_tagged_but_unmerged_source_is_rejected(self):
+        self.git('checkout', '--quiet', '-b', 'fix/unreviewed')
+        self.version('1.2.4')
+        self.commit('unmerged change')
+        self.git('tag', 'v1.2.4')
+        with self.assertRaisesRegex(ValueError, 'merged to origin/main'):
+            self.invoke('v1.2.4')
+
+    def test_version_tag_must_match_workspace_version(self):
+        with self.assertRaisesRegex(ValueError, 'matching immutable version tag'):
+            self.invoke('v1.2.4')
+
+    def test_checkout_must_be_the_exact_tagged_commit(self):
+        (self.root / 'source').write_text('a later change')
+        self.commit('later main')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        with self.assertRaisesRegex(ValueError, 'does not point'):
+            self.invoke()
+
+    def test_tagged_ancestor_remains_valid_when_main_advances(self):
+        release = self.git('rev-parse', 'HEAD')
+        (self.root / 'source').write_text('later main')
+        self.commit('later main')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.git('checkout', '--quiet', '--detach', release)
+        self.assertEqual(self.invoke()['revision'], release)
+
+    def test_dirty_tag_checkout_is_rejected(self):
+        (self.root / 'uncommitted').write_text('local-only input')
+        with self.assertRaisesRegex(ValueError, 'must be clean'):
+            self.invoke()
+
+    def test_prerelease_tag_stays_explicit(self):
+        self.version('1.2.4-rc.1')
+        self.commit('candidate')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.git('tag', 'v1.2.4-rc.1')
+        result = self.invoke('v1.2.4-rc.1')
+        self.assertEqual(result['prerelease'], 'true')
+        self.assertEqual(result['marketing'], '1.2.4')
+
+    def test_workflow_has_one_early_source_authority_and_no_quick_signer(self):
+        root = SCRIPT.parents[2]
+        release = (root / '.github/workflows/styx-release.yml').read_text()
+        self.assertNotIn('branches: [develop]', release)
+        self.assertNotIn('inputs.publish', release)
+        self.assertEqual(release.count('release-ci.py metadata'), 1)
+        self.assertIn('  quality:\n    needs: source', release)
+        self.assertIn('  dependencies:\n    needs: source', release)
+        source = release.split('  source:', 1)[1].split('  quality:', 1)[0]
+        self.assertNotIn('environment: release', source)
+        self.assertNotIn('secrets.', source)
+        macos = (root / '.github/workflows/styx-macos-app.yml').read_text()
+        for obsolete in ('quick_build', 'quick-build:', 'quick_seal:', 'quick_app:', 'secrets.'):
+            self.assertNotIn(obsolete, macos)
+        self.assertIn('  compile:', macos)
 
 if __name__ == '__main__':
     unittest.main()

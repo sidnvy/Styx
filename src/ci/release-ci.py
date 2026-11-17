@@ -44,16 +44,23 @@ def git(*argv):
 
 
 def metadata(args):
+    """One release identity: a version tag at a commit already merged to main."""
     version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['package']['version']
     require(re.fullmatch(r'\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?', version), 'invalid Cargo version')
     tag = os.environ.get('GITHUB_REF_NAME', '')
-    publish = args.publish or os.environ.get('GITHUB_REF_TYPE') == 'tag'
-    if publish:
-        require(tag == 'v' + version, 'release must run at the matching immutable version tag')
-        require(not git('status', '--porcelain'), 'release source must be clean')
+    require(os.environ.get('GITHUB_REF_TYPE') == 'tag' and tag == 'v' + version,
+            'release must run at the matching immutable version tag, not a development branch')
+    revision = git('rev-parse', 'HEAD')
+    require(git('rev-parse', 'refs/tags/' + tag + '^{commit}') == revision,
+            'release tag does not point to the checked-out source')
+    try:
+        git('merge-base', '--is-ancestor', revision, 'refs/remotes/origin/main')
+    except subprocess.CalledProcessError as error:
+        raise ValueError('release source must already be merged to origin/main') from error
+    require(not git('status', '--porcelain'), 'release source must be clean')
     require(1 <= args.build_number <= 9999, 'macOS build sequence must be 1..9999')
-    values = dict(version=version, marketing=version.split('-')[0], revision=git('rev-parse', 'HEAD'),
-                  publish=str(publish).lower(), prerelease=str('-' in version).lower(),
+    values = dict(version=version, marketing=version.split('-')[0], revision=revision,
+                  publish='true', prerelease=str('-' in version).lower(),
                   build_number=str(args.build_number))
     output = os.environ.get('GITHUB_OUTPUT')
     if output:
@@ -309,7 +316,7 @@ def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    p = commands.add_parser('metadata'); p.add_argument('--publish', action='store_true')
+    p = commands.add_parser('metadata')
     p.add_argument('--build-number', type=int, required=True); p.set_defaults(action=metadata)
     p = commands.add_parser('source-archive'); p.add_argument('--output', type=Path, required=True); p.set_defaults(action=archive)
     p = commands.add_parser('sign')
