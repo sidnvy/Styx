@@ -355,7 +355,7 @@ fn native_capability_evidence(
         | CapabilityId::DesktopPointer
         | CapabilityId::DesktopWindowsControl => (windows_observed, accessibility),
         CapabilityId::DesktopAccessibility => (true, accessibility),
-        CapabilityId::DesktopCapture => (false, screen_recording),
+        CapabilityId::DesktopCapture => (true, screen_recording),
         _ => (false, false),
     }
 }
@@ -494,11 +494,20 @@ mod tests {
             native_capability_evidence(CapabilityId::DesktopKeyboard, true, true, true),
             (false, false)
         );
-        // Capture remains a separate original-frame acquisition, never an
-        // implicit general screenshot/input authorization.
+        // Original Cua implements a read-only desktop PNG independent of AX
+        // window observation. The same-daemon TCC result controls authorization;
+        // a missing OS grant remains permission-required, never invented.
         assert_eq!(
             native_capability_evidence(CapabilityId::DesktopCapture, true, true, true),
-            (false, true)
+            (true, true)
+        );
+        assert_eq!(
+            native_capability_evidence(CapabilityId::DesktopCapture, false, false, true),
+            (true, true)
+        );
+        assert_eq!(
+            native_capability_evidence(CapabilityId::DesktopCapture, true, true, false),
+            (true, false)
         );
     }
 }
