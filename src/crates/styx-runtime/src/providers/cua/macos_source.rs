@@ -574,3 +574,43 @@ fn verify_guest(
     }
     Ok(())
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod renewal_acceptance {
+    use super::*;
+
+    // Run only on a Mac with the original signed Styx App/daemon currently
+    // installed and authorized; this is a real read-only original-peer probe.
+    #[tokio::test]
+    #[ignore = "requires installed, connected Styx App with original signed daemon"]
+    async fn original_observation_peer_can_be_renewed_after_a_refused_read() {
+        assert_eq!(
+            std::env::var("STYX_TEST_MAC_READONLY_RENEWAL").as_deref(),
+            Ok("1"),
+        );
+        MacSourceCandidate::check_discovery_presence().unwrap();
+        let images = MacAppImages::open_fixed().unwrap();
+        let candidate = MacSourceCandidate::discover(images).unwrap();
+        let mut control = candidate
+            .connect(None)
+            .await
+            .unwrap()
+            .finish_binding()
+            .unwrap();
+        let mut observation = control.connect_same_peer(None).await.unwrap();
+        let before = observation.observe_initial_native(None).unwrap();
+        let after = observation.observe_initial_native(None).unwrap();
+        let control_after = control.observe_initial_native(None).unwrap();
+        observation
+            .commit_initial_native_pair(&mut control, &before, &after, &control_after, None)
+            .unwrap();
+        let identity = after.console_identity();
+        // Model the protocol-refused original observational FD, without
+        // executing an action or replacing the original signed source.
+        observation.fenced = true;
+        observation.renew_observation().unwrap();
+        let recovered = observation.observe_native(None).unwrap();
+        assert_eq!(identity, recovered.console_identity());
+        assert!(recovered.observed_unlocked());
+    }
+}
