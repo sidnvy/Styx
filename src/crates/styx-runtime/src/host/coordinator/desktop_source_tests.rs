@@ -23,6 +23,59 @@ async fn overlapping_source_reads_wait_for_the_original_reader_not_busy() {
     assert_eq!(source.fresh().await, Err(DesktopSourceError::Fenced));
 }
 
+#[test]
+fn established_desktop_transient_probes_remain_retryable_but_unknown_identity_does_not() {
+    use crate::platform::linux::association::AssociationError;
+    use crate::session_probe::{ProbeError, association::AssociationProbeError};
+
+    for error in [
+        AssociationProbeError::Association(AssociationError::Changed),
+        AssociationProbeError::Association(AssociationError::Unavailable),
+        AssociationProbeError::Association(AssociationError::Deadline),
+        AssociationProbeError::Association(AssociationError::Inactive),
+        AssociationProbeError::Probe(ProbeError::WorkerFailed),
+        AssociationProbeError::Probe(ProbeError::Deadline),
+    ] {
+        assert!(recoverable_probe_failure(error, true), "{error:?}");
+        assert!(!recoverable_probe_failure(error, false), "{error:?}");
+    }
+    for error in [
+        AssociationProbeError::Association(AssociationError::Untrusted),
+        AssociationProbeError::Association(AssociationError::Unsupported),
+        AssociationProbeError::Association(AssociationError::CloseUnconfirmed),
+        AssociationProbeError::Probe(ProbeError::InvalidFacts),
+        AssociationProbeError::Probe(ProbeError::CleanupUnconfirmed),
+    ] {
+        assert!(!recoverable_probe_failure(error, true), "{error:?}");
+    }
+}
+
+#[tokio::test]
+async fn transient_probe_revalidates_original_desktop_within_same_read() {
+    let mut source = DesktopSource::for_tests();
+    let (requests, mut receive) = mpsc::channel(1);
+    Arc::get_mut(&mut source.inner).unwrap().requests = requests;
+    let first = source.fresh();
+    tokio::pin!(first);
+    assert!(futures_util::poll!(&mut first).is_pending());
+    let transient = DesktopSourceError::Acquisition(
+        crate::session_probe::association::AssociationProbeError::Association(
+            crate::platform::linux::association::AssociationError::Changed,
+        ),
+    );
+    receive.recv().await.unwrap().send(Err(transient)).unwrap();
+    assert!(futures_util::poll!(&mut first).is_pending());
+    receive.recv().await.unwrap().send(Ok(())).unwrap();
+    assert_eq!(first.await, Ok(()));
+    assert!(!source.fenced());
+    // A new request still goes through its own original-source validation.
+    let next = source.fresh();
+    tokio::pin!(next);
+    assert!(futures_util::poll!(&mut next).is_pending());
+    receive.recv().await.unwrap().send(Ok(())).unwrap();
+    assert_eq!(next.await, Ok(()));
+}
+
 fn selected() -> LinuxCandidate {
     LinuxCandidate {
         session_id: "owned-session".into(),

@@ -32,6 +32,25 @@ fn unit(name: &str) -> UnitFact {
     UnitFact{name:name.into(),path:OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/test").unwrap(),invocation:vec![1;16],cgroup:"/user.slice/user-1000.slice/user@1000.service/session.slice/wayland-wm@hyprland.desktop.service".into(),main_pid:Some(43),binds:vec![],wants:vec![],on_success:vec![],on_failure:vec![],conflicts:vec![],restart:Some("no".into()),service_type:Some("notify".into()),bind_start:None}
 }
 #[test]
+fn incomplete_unselected_hyprland_instance_does_not_block_a_live_pair() {
+    use std::os::unix::net::UnixListener;
+    let dir = tempfile::tempdir().unwrap();
+    let current = dir.path().join("current");
+    let retired = dir.path().join("retired");
+    std::fs::create_dir(&current).unwrap();
+    std::fs::create_dir(&retired).unwrap();
+    let _current_control = UnixListener::bind(current.join(".socket.sock")).unwrap();
+    let _current_events = UnixListener::bind(current.join(".socket2.sock")).unwrap();
+    let _retired_events = UnixListener::bind(retired.join(".socket2.sock")).unwrap();
+    assert!(complete_hyprland_socket_pair(&current).unwrap());
+    assert!(!complete_hyprland_socket_pair(&retired).unwrap());
+    // A genuinely incomplete active pair is also ineligible, never silently
+    // treated as trusted. Other complete instances still need full peer checks.
+    std::fs::remove_file(current.join(".socket.sock")).unwrap();
+    assert!(!complete_hyprland_socket_pair(&current).unwrap());
+}
+
+#[test]
 fn exact_uwsm_chain_refuses_cross_target_and_unrecognized_anchor() {
     let mut c = candidate();
     assert!(check_candidate(&c, 1000).is_ok());

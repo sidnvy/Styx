@@ -5,12 +5,10 @@ use super::CuaError;
 use rmcp::model::CallToolResult;
 use serde::Serialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Write,
 };
-use styx_contracts::identity::Sha256Digest;
 
 const RESPONSE_BYTES: usize = 1024 * 1024;
 const RETAINED_BYTES: usize = 256 * 1024;
@@ -27,7 +25,8 @@ const REMOVE_NATIVE_FIELDS: &[&str] = &[
 pub(crate) struct ParsedAxSnapshot {
     native_snapshot_id: String,
     tokens: BTreeMap<u64, String>,
-    response_sha256: Sha256Digest,
+    // Owned validated data: callers cannot substitute a different native result.
+    result: CallToolResult,
     images_allowed: bool,
 }
 impl ParsedAxSnapshot {
@@ -65,16 +64,13 @@ impl ParsedAxSnapshot {
     /// Original text is discarded, including Markdown/native token hints.
     pub(crate) fn rewrite_result(
         &self,
-        original: &CallToolResult,
         host_snapshot_id: &str,
     ) -> Result<CallToolResult, CuaError> {
         if !snapshot_id_valid(host_snapshot_id) || host_snapshot_id == self.native_snapshot_id {
             return Err(CuaError::InvalidRequest);
         }
-        if bounded_digest(original)? != self.response_sha256 {
-            return Err(CuaError::ProtocolMismatch);
-        }
-        let mut structured = original
+        let mut structured = self
+            .result
             .structured_content
             .clone()
             .ok_or(CuaError::ProtocolMismatch)?;
@@ -110,55 +106,36 @@ impl ParsedAxSnapshot {
                 Value::String(format!("{host_snapshot_id}:{index}")),
             );
         }
-        // Fail closed rather than guessing whether a native snapshot prefix in
-        // an arbitrary label/value/extra field is harmless user prose. Such a
-        // label may be refused; its text is not retained in ParsedAxSnapshot.
-        if contains_native_prefix(&structured, &self.native_snapshot_id) {
-            return Err(CuaError::ProtocolMismatch);
-        }
-        bounded_digest(&structured)?;
+        // References are typed fields, not substrings of user-visible labels.
+        // Native-looking text in a page does not gain input authority.
         // Mature constructor deliberately regenerates a single text JSON view
         // from the same sanitized structured value. Ordinary authorized reads
         // retain their image content; acquisition never accepts images.
         let mut output = CallToolResult::structured(structured);
         if self.images_allowed {
             output.content.extend(
-                original
+                self.result
                     .content
                     .iter()
                     .filter(|part| matches!(part, rmcp::model::ContentBlock::Image(_)))
                     .cloned(),
             );
         }
-        bounded_digest(&output)?;
+        check_size(&output)?;
         Ok(output)
     }
 }
 
-pub(crate) fn parse_acquired(
-    result: &CallToolResult,
-    pid: u32,
-    window_id: u64,
-) -> Result<ParsedAxSnapshot, CuaError> {
-    parse_snapshot(result, pid, window_id, false)
-}
-pub(crate) fn parse_observed(
-    result: &CallToolResult,
-    pid: u32,
-    window_id: u64,
-) -> Result<ParsedAxSnapshot, CuaError> {
-    parse_snapshot(result, pid, window_id, true)
-}
-fn parse_snapshot(
+fn validate_read_frame(
     result: &CallToolResult,
     pid: u32,
     window_id: u64,
     observed: bool,
-) -> Result<ParsedAxSnapshot, CuaError> {
+) -> Result<&serde_json::Map<String, Value>, CuaError> {
     if pid == 0 || window_id == 0 {
         return Err(CuaError::InvalidRequest);
     }
-    let response_sha256 = bounded_digest(result)?;
+    check_size(result)?;
     if result.is_error == Some(true) {
         return Err(CuaError::Unsupported);
     }
@@ -188,38 +165,172 @@ fn parse_snapshot(
     {
         return Err(CuaError::ProtocolMismatch);
     }
-    // The Windows UIA driver reports elements_complete:false even when it returned
-    // every element; matching counts with nothing truncated prove the same thing.
-    let counts_complete = {
-        let count = |key| object.get(key).and_then(Value::as_u64);
-        let returned = count("returned_element_count");
-        returned.is_some()
-            && returned == count("total_element_count")
-            && returned == count("element_count")
-            && returned
-                == object
-                    .get("elements")
-                    .and_then(Value::as_array)
-                    .map(|e| e.len() as u64)
+    Ok(object)
+}
+fn flag(object: &serde_json::Map<String, Value>, name: &str) -> Result<bool, CuaError> {
+    match object.get(name) {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(CuaError::ProtocolMismatch),
+    }
+}
+
+/// Descriptive native results are useful even without a complete target map.
+/// Never create a Host observation, alias, or writable reference for this branch.
+pub(crate) fn project_descriptive_read(
+    result: &CallToolResult,
+    pid: u32,
+    window_id: u64,
+    observed: bool,
+) -> Result<Option<CallToolResult>, CuaError> {
+    let Some(object) = result
+        .structured_content
+        .as_ref()
+        .and_then(Value::as_object)
+    else {
+        return Ok(None); // The ordinary parser supplies the protocol error.
     };
-    // An ordinary (observed) read may be filtered by `query`: only the returned rows
-    // become clickable, so every returned row being present is what matters there.
-    let returned_all = observed
-        && object.get("returned_element_count").and_then(Value::as_u64)
-            == object
-                .get("elements")
-                .and_then(Value::as_array)
-                .map(|e| e.len() as u64);
-    if !(object.get("elements_complete").and_then(Value::as_bool) == Some(true)
-        || counts_complete
-        || returned_all)
-        || object.get("truncated").and_then(Value::as_bool) != Some(false)
-        || object
-            .get("degraded")
-            .is_some_and(|value| value.as_bool() != Some(false))
-        || object
-            .get("display_only")
-            .is_some_and(|value| value.as_bool() != Some(false))
+    let Some(elements) = object.get("elements").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    let partial = flag(object, "degraded")?
+        || flag(object, "display_only")?
+        || flag(object, "truncated")?
+        || elements.is_empty()
+        || (!observed
+            && object
+                .get("total_element_count")
+                .and_then(Value::as_u64)
+                .is_some_and(|total| total > elements.len() as u64));
+    if !partial {
+        return Ok(None);
+    }
+    let object = validate_read_frame(result, pid, window_id, observed)?;
+    let returned = object.get("returned_element_count").and_then(Value::as_u64);
+    let total = object.get("total_element_count").and_then(Value::as_u64);
+    if returned != Some(elements.len() as u64)
+        || total != object.get("element_count").and_then(Value::as_u64)
+        || total.is_none_or(|count| count < elements.len() as u64)
+        || !object.get("truncated").is_some_and(Value::is_boolean)
+    {
+        return Err(CuaError::ProtocolMismatch);
+    }
+    let mut indices = BTreeSet::new();
+    for element in elements {
+        validate_row(element, &mut indices)?;
+    }
+    let mut output = Value::Object(object.clone());
+    let output_object = output.as_object_mut().expect("validated native AX object");
+    for name in REMOVE_NATIVE_FIELDS
+        .iter()
+        .copied()
+        .chain(["snapshot_id", "capture_id"])
+    {
+        output_object.remove(name);
+    }
+    let reason = native_reason(result).unwrap_or_else(|| {
+        if elements.is_empty() {
+            "empty_accessibility_tree".into()
+        } else if object.get("truncated") == Some(&Value::Bool(true)) {
+            "truncated_accessibility_tree".into()
+        } else {
+            "partial_accessibility_tree".into()
+        }
+    });
+    output_object.insert("native_reason".into(), Value::String(reason.clone()));
+    output_object.insert(
+        "read_status".into(),
+        Value::String(
+            if reason == "x11_property_fallback_partial" {
+                "window_metadata_only"
+            } else {
+                "partial_accessibility_tree"
+            }
+            .into(),
+        ),
+    );
+    output_object.insert("display_only".into(), Value::Bool(true));
+    output_object.insert("read_only".into(), Value::Bool(true));
+    output_object.insert("elements_complete".into(), Value::Bool(false));
+    output_object.insert("input_authorized".into(), Value::Bool(false));
+    output_object.insert(
+        "execution_certainty".into(),
+        Value::String("acknowledged".into()),
+    );
+    for row in output_object
+        .get_mut("elements")
+        .unwrap()
+        .as_array_mut()
+        .unwrap()
+    {
+        let row = row.as_object_mut().expect("validated native AX row");
+        row.remove("element_token");
+        row.remove("actions");
+        row.insert("read_only".into(), Value::Bool(true));
+    }
+    let output = CallToolResult::structured(output);
+    check_size(&output)?;
+    Ok(Some(output))
+}
+
+/// Only a short driver diagnostic code is projected, never arbitrary error text.
+pub(crate) fn native_reason(result: &CallToolResult) -> Option<String> {
+    let value = result
+        .structured_content
+        .as_ref()?
+        .get("degraded_reason")?
+        .as_str()?;
+    let code = value.split(':').next()?;
+    (code.len() <= 96
+        && !code.is_empty()
+        && code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+    .then(|| code.to_owned())
+}
+fn validate_row(element: &Value, indices: &mut BTreeSet<u64>) -> Result<u64, CuaError> {
+    let row = element.as_object().ok_or(CuaError::ProtocolMismatch)?;
+    let index = row
+        .get("element_index")
+        .and_then(Value::as_u64)
+        .ok_or(CuaError::ProtocolMismatch)?;
+    if !indices.insert(index)
+        || !row
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(|role| !role.is_empty() && role.len() <= 256)
+        || row.get("depth").and_then(Value::as_u64).is_none()
+    {
+        return Err(CuaError::ProtocolMismatch);
+    }
+    Ok(index)
+}
+
+pub(crate) fn parse_acquired(
+    result: &CallToolResult,
+    pid: u32,
+    window_id: u64,
+) -> Result<ParsedAxSnapshot, CuaError> {
+    parse_snapshot(result, pid, window_id, false)
+}
+pub(crate) fn parse_observed(
+    result: &CallToolResult,
+    pid: u32,
+    window_id: u64,
+) -> Result<ParsedAxSnapshot, CuaError> {
+    parse_snapshot(result, pid, window_id, true)
+}
+fn parse_snapshot(
+    result: &CallToolResult,
+    pid: u32,
+    window_id: u64,
+    observed: bool,
+) -> Result<ParsedAxSnapshot, CuaError> {
+    let object = validate_read_frame(result, pid, window_id, observed)?;
+    // Counts below already prove that the returned projection is complete.
+    // Windows may report elements_complete:false even with matching counts;
+    // do not impose a second, contradictory completeness test.
+    if object.get("truncated").and_then(Value::as_bool) != Some(false)
+        || flag(object, "degraded")?
+        || flag(object, "display_only")?
     {
         return Err(CuaError::Unsupported);
     }
@@ -270,20 +381,8 @@ fn parse_snapshot(
     let mut indices = BTreeSet::new();
     let mut retained = 128 + native.len();
     for element in elements {
-        let element = element.as_object().ok_or(CuaError::ProtocolMismatch)?;
-        let index = element
-            .get("element_index")
-            .and_then(Value::as_u64)
-            .ok_or(CuaError::ProtocolMismatch)?;
-        if !indices.insert(index)
-            || !element
-                .get("role")
-                .and_then(Value::as_str)
-                .is_some_and(|role| !role.is_empty() && role.len() <= 256)
-            || element.get("depth").and_then(Value::as_u64).is_none()
-        {
-            return Err(CuaError::ProtocolMismatch);
-        }
+        let index = validate_row(element, &mut indices)?;
+        let element = element.as_object().expect("validated AX row");
         let read_only = match element.get("read_only") {
             None | Some(Value::Bool(false)) => false,
             Some(Value::Bool(true)) => true,
@@ -313,7 +412,7 @@ fn parse_snapshot(
     Ok(ParsedAxSnapshot {
         native_snapshot_id: native.into(),
         tokens,
-        response_sha256,
+        result: result.clone(),
         images_allowed: observed,
     })
 }
@@ -325,20 +424,9 @@ fn snapshot_id_valid(value: &str) -> bool {
             .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(v))
         && value != "s00000000"
 }
-fn contains_native_prefix(value: &Value, native: &str) -> bool {
-    match value {
-        Value::String(text) => text.contains(native),
-        Value::Array(values) => values.iter().any(|v| contains_native_prefix(v, native)),
-        Value::Object(values) => values
-            .iter()
-            .any(|(key, v)| key.contains(native) || contains_native_prefix(v, native)),
-        _ => false,
-    }
-}
-fn bounded_digest(value: &impl Serialize) -> Result<Sha256Digest, CuaError> {
+fn check_size(value: &impl Serialize) -> Result<(), CuaError> {
     struct Bound {
         count: usize,
-        hasher: Sha256,
     }
     impl Write for Bound {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -347,19 +435,15 @@ fn bounded_digest(value: &impl Serialize) -> Result<Sha256Digest, CuaError> {
                 .checked_add(bytes.len())
                 .filter(|n| *n <= RESPONSE_BYTES)
                 .ok_or_else(|| std::io::Error::other("AX response bound"))?;
-            self.hasher.update(bytes);
             Ok(bytes.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
     }
-    let mut writer = Bound {
-        count: 0,
-        hasher: Sha256::new(),
-    };
+    let mut writer = Bound { count: 0 };
     serde_json::to_writer(&mut writer, value).map_err(|_| CuaError::Busy)?;
-    Ok(Sha256Digest::from_bytes(writer.hasher.finalize().into()))
+    Ok(())
 }
 #[cfg(test)]
 #[path = "ax_snapshot_tests.rs"]
@@ -373,7 +457,7 @@ mod host_alias_tests {
         let parsed = ParsedAxSnapshot {
             native_snapshot_id: "s00000001".into(),
             tokens: BTreeMap::from([(2, "s00000001:2".into())]),
-            response_sha256: bounded_digest(&Value::Null).unwrap(),
+            result: CallToolResult::structured(Value::Null),
             images_allowed: false,
         };
         assert_eq!(

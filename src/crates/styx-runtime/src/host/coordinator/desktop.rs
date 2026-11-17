@@ -423,8 +423,9 @@ impl HostCoordinator {
         )?))
     }
     /// Refreshes through the original collector, not cached environment state.
-    /// Failed or changed association permanently fences this source; callers
-    /// must explicitly attach a new generation instead of switching targets.
+    /// A failed read invalidates old observations. Only a confirmed source fence
+    /// disconnects the session; transient probe errors may be revalidated by the
+    /// next read against the SAME kernel-pinned source.
     pub(crate) async fn refresh_desktop_source(&self) -> Result<(), CoordinatorError> {
         let source = {
             let state = self.inner.state.lock().expect("Host state mutex");
@@ -434,10 +435,9 @@ impl HostCoordinator {
         let mut state = self.inner.state.lock().expect("Host state mutex");
         if result.is_err() || source.fenced() {
             super::desktop_observation::invalidate(state.desktop.as_mut(), None);
-            // Lock/console availability and expired completed reads deny this
-            // call and invalidate old targets, without retiring the same Mac
-            // source. The next caller must acquire fresh native facts.
-            #[cfg(target_os = "macos")]
+            // A failed probe without an identity fence must not permanently
+            // disconnect the Linux binding. Both Linux and macOS require fresh
+            // native evidence on the next call; neither replays this operation.
             if !source.fenced() {
                 return Err(CuaError::StaleObservation.into());
             }

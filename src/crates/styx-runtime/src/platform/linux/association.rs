@@ -973,6 +973,20 @@ fn sources() -> Result<Vec<SourceFact>> {
         })
         .collect()
 }
+// UWSM/Hyprland may leave a prior instance directory with only one socket.
+// It is not a candidate desktop: ignore that incomplete *unselected* directory.
+// Complete candidates still pass the original inode, owner, SO_PEERCRED,
+// process and unique-pair checks in `endpoint` below.
+fn complete_hyprland_socket_pair(dir: &Path) -> Result<bool> {
+    for name in [".socket.sock", ".socket2.sock"] {
+        match std::fs::symlink_metadata(dir.join(name)) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => return Err(AssociationError::Unavailable),
+        }
+    }
+    Ok(true)
+}
 async fn endpoint(path: &Path, uid: u32, end: Instant) -> Result<(UnixStream, EndpointFact)> {
     let selected = path.to_path_buf();
     let before = tokio::task::spawn_blocking(move || std::fs::symlink_metadata(selected))
@@ -1236,6 +1250,9 @@ async fn collect(
     let mut ipc = Vec::new();
     for dir in directory_entries(&runtime.join("hypr"))? {
         private_dir(&dir, uid)?;
+        if !complete_hyprland_socket_pair(&dir)? {
+            continue;
+        }
         let (_a, a) = endpoint(&dir.join(".socket.sock"), uid, end).await?;
         let (_b, b) = endpoint(&dir.join(".socket2.sock"), uid, end).await?;
         if a.peer == wayland.peer && b.peer == wayland.peer {

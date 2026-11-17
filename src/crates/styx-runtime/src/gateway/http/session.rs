@@ -14,12 +14,9 @@ use rmcp::{
         },
     },
 };
-use std::{
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -57,12 +54,8 @@ impl<L: GatewayOwnerLifecycle> BoundedManager<L> {
     }
     pub fn new(life: Arc<Life<L>>) -> Self {
         let mut inner = LocalSessionManager::default();
-        inner.session_config.channel_capacity = 1;
-        inner.session_config.init_timeout = Some(Duration::from_secs(5));
-        // Only the Gateway timer can see active HTTP streams and live owner work.
+        // Idle time alone does not close an admitted conversation.
         inner.session_config.keep_alive = None;
-        inner.session_config.sse_retry = None;
-        inner.session_config.completed_cache_ttl = Duration::ZERO;
         Self {
             inner,
             created: AtomicBool::new(false),
@@ -213,8 +206,8 @@ impl<L: GatewayOwnerLifecycle> SessionManager for BoundedManager<L> {
     }
     async fn resume(
         &self,
-        _id: &SessionId,
-        _last: String,
+        id: &SessionId,
+        last: String,
     ) -> Result<
         impl Stream<Item = rmcp::transport::common::server_side_http::ServerSseMessage>
         + Send
@@ -222,7 +215,10 @@ impl<L: GatewayOwnerLifecycle> SessionManager for BoundedManager<L> {
         + 'static,
         Self::Error,
     > {
-        // No response-cache recovery guarantee in this first slice. Never rerun a tool.
-        Err::<futures_util::stream::Empty<_>, _>(SessionError::Refused)
+        if !self.life.is_active() {
+            return Err(SessionError::Refused);
+        }
+        // SDK event replay resumes the original stream; it never reruns a tool.
+        Ok(self.inner.resume(id, last).await?)
     }
 }

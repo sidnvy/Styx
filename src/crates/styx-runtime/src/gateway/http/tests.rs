@@ -244,7 +244,7 @@ async fn official_sdk_tcp_auth_sessions_limits_and_pending_close() {
                 assert_eq!(raw.delete(&uri).bearer_auth(&token).header(SID,&sid).header(VERSION,OLDEST).send().await.unwrap().status(),StatusCode::BAD_REQUEST);
                 assert!(app.find_session(&sid).unwrap().life.is_active());
             }
-            if index==4 {
+            let pending = if index==4 {
                 let before=backend.calls.lock().unwrap().len();
                 let unknown=raw.post(&uri).bearer_auth(&token).header(SID,&sid).header(VERSION,*version).header(http::header::ACCEPT,"application/json, text/event-stream").json(&serde_json::json!({"jsonrpc":"2.0","id":77,"method":"resources/list"})).send().await.unwrap();
                 assert_eq!(unknown.status(),StatusCode::BAD_REQUEST);assert_eq!(backend.calls.lock().unwrap().len(),before);
@@ -253,10 +253,14 @@ async fn official_sdk_tcp_auth_sessions_limits_and_pending_close() {
                 tokio::time::timeout(Duration::from_secs(3),backend.arrived.notified()).await.unwrap();
                 assert_eq!(std::fs::read_to_string(&backend.path).unwrap(),"fixture-nonce-effect\n");
                 assert_eq!(raw.delete(&uri).bearer_auth(&token).header(SID,&sid).header(VERSION,*version).send().await.unwrap().status(),StatusCode::ACCEPTED);
-                let _pending_delivery=pending.await.unwrap(); // may close without a response; never replay
                 assert!(backend.fenced.lock().unwrap().len()>=5);
-            }
+                Some(pending)
+            } else { None };
+            // DELETE closes the server owner; the SDK may still be recovering
+            // its disconnected response stream. Close this original client
+            // before joining its pending delivery. Never resend the tool.
             let _=client.cancel().await;
+            if let Some(pending) = pending { let _pending_delivery=pending.await.unwrap(); }
             collected(&app).await;
         }
         assert_eq!(app.oldest_methods.load(Ordering::Acquire)&7,7,"actual official client oldest POST/GET/DELETE shim journey");

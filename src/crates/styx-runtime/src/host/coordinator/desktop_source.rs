@@ -157,6 +157,17 @@ impl DesktopSource {
         self.inner.state.epoch.load(Ordering::Acquire)
     }
     pub(crate) async fn fresh(&self) -> Result<()> {
+        let first = self.fresh_once().await;
+        // A revalidation probe is read-only: retry it once if the original
+        // pinned source is still live. Never replay any native Cua action.
+        if matches!(first, Err(DesktopSourceError::Acquisition(error)) if recoverable_probe_failure(error, true))
+            && !self.fenced()
+        {
+            return self.fresh_once().await;
+        }
+        first
+    }
+    async fn fresh_once(&self) -> Result<()> {
         if self.fenced() {
             return Err(DesktopSourceError::Fenced);
         }
@@ -277,6 +288,40 @@ fn accept_event(
         }
     }
 }
+// A failed refresh does not prove a different desktop exists. Keep the original
+// kernel-pinned association and revalidate it on the next read. A successful
+// candidate must STILL match the original source exactly; an actual owner,
+// process or socket identity replacement continues to fence this source.
+fn recoverable_probe_failure(
+    error: crate::session_probe::association::AssociationProbeError,
+    initialized: bool,
+) -> bool {
+    use crate::platform::linux::association::AssociationError;
+    use crate::session_probe::{ProbeError, association::AssociationProbeError};
+    initialized
+        && matches!(
+            error,
+            AssociationProbeError::Association(
+                AssociationError::Unavailable
+                    | AssociationError::Deadline
+                    | AssociationError::Ambiguous
+                    | AssociationError::Changed
+                    | AssociationError::Capacity
+                    | AssociationError::Inactive
+            ) | AssociationProbeError::Probe(
+                ProbeError::Spawn
+                    | ProbeError::Deadline
+                    | ProbeError::WorkerFailed
+                    | ProbeError::Cancelled
+            )
+        )
+}
+fn source_probe_deferred(reason: &'static str) {
+    eprintln!(
+        "{}",
+        serde_json::json!({"schema":1,"event":"desktop_source_probe_unavailable","reason":reason})
+    );
+}
 fn source_fault(reason: &'static str) {
     // Diagnostic only; never consumed as authorization or native outcome proof.
     eprintln!(
@@ -338,13 +383,17 @@ async fn supervise(
                             _ => { source_fault("association_source_identity_changed"); state.fence(); Err(DesktopSourceError::Fenced) }
                         }
                     },
+                    Ok(Err(error)) if recoverable_probe_failure(error, initialized) => {
+                        source_probe_deferred(error.code());
+                        Err(DesktopSourceError::Acquisition(error))
+                    },
                     Ok(Err(error)) => { source_fault(error.code()); state.fence(); Err(DesktopSourceError::Acquisition(error)) },
                     _ => { source_fault("association_epoch_owner_or_job_changed"); state.fence(); Err(DesktopSourceError::Fenced) }
                 };
                 let failed = result.is_err();
                 if !failed { initialized = true; }
                 let _ = pending.answer.send(result);
-                if failed { break None; }
+                if failed && state.fenced.load(Ordering::Acquire) { break None; }
             },
             request = requests.recv(), if ready.is_none() && pending.is_none() => match request {
                 Some(answer) => pending = Some(begin_probe(&selected, &state, answer)),

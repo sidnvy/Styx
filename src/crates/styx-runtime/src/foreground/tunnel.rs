@@ -622,10 +622,12 @@ fn emit(
 }
 fn write_event(
     mut out: impl Write,
-    stop: &CancellationToken,
+    _stop: &CancellationToken,
     event: &'static str,
     exit_code: Option<i32>,
 ) {
+    // A diagnostic sink can be full, closed, or broken without terminating the
+    // active tunnel process or the shared Gateway/Host lifecycle.
     if serde_json::to_writer(
         &mut out,
         &TunnelEvent {
@@ -634,11 +636,10 @@ fn write_event(
             exit_code,
         },
     )
-    .is_err()
-        || out.write_all(b"\n").is_err()
-        || out.flush().is_err()
+    .is_ok()
+        && out.write_all(b"\n").is_ok()
     {
-        stop.cancel();
+        let _ = out.flush();
     }
 }
 
@@ -979,6 +980,22 @@ async fn supervise(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn broken_diagnostic_stream_does_not_stop_tunnel_or_gateway() {
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        let stop = CancellationToken::new();
+        write_event(Broken, &stop, "tunnel_ready", None);
+        assert!(!stop.is_cancelled());
+    }
 
     #[test]
     fn event_stream_child() {

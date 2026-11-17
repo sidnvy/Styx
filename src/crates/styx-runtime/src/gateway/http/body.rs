@@ -6,13 +6,11 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::Duration,
 };
 use tokio::sync::OwnedSemaphorePermit;
 /// Holds admissions through actual SSE/body EOF or drop, not just response headers.
 pub(crate) struct HeldBody {
     pub inner: BoxBody<Bytes, Infallible>,
-    pub until: Pin<Box<tokio::time::Sleep>>,
     pub _permits: Vec<OwnedSemaphorePermit>,
     pub _lifetime: Option<Arc<dyn Send + Sync>>,
     pub ended: bool,
@@ -26,7 +24,6 @@ impl HeldBody {
     ) -> Self {
         Self {
             inner,
-            until: Box::pin(tokio::time::sleep(Duration::from_secs(30))),
             _permits: permits,
             _lifetime: lifetime,
             ended: false,
@@ -41,7 +38,6 @@ impl Body for HeldBody {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
-        use std::future::Future;
         if self.ended {
             return Poll::Ready(None);
         }
@@ -49,7 +45,6 @@ impl Body for HeldBody {
             .delivery_allowed
             .as_ref()
             .is_some_and(|allowed| !allowed())
-            || self.until.as_mut().poll(cx).is_ready()
         {
             self.ended = true;
             self.inner = Full::new(Bytes::new()).boxed();

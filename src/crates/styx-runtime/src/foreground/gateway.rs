@@ -561,21 +561,18 @@ mod platform {
             gateway_id,
         })
     }
-    fn emit(events: &mpsc::Sender<ForegroundEvent>, stop: &CancellationToken, name: &'static str) {
-        if events
-            .try_send(ForegroundEvent {
-                schema: 1,
-                event: name,
-                reason: None,
-                #[cfg(target_os = "macos")]
-                computer_probe: None,
-                device_id: None,
-                connection_generation: None,
-            })
-            .is_err()
-        {
-            stop.cancel();
-        }
+    fn emit(events: &mpsc::Sender<ForegroundEvent>, name: &'static str) {
+        // Observability is best-effort: a full or closed channel cannot revoke
+        // the owned Gateway and all of its Host/Tunnel work.
+        let _ = events.try_send(ForegroundEvent {
+            schema: 1,
+            event: name,
+            reason: None,
+            #[cfg(target_os = "macos")]
+            computer_probe: None,
+            device_id: None,
+            connection_generation: None,
+        });
     }
     enum Validation {
         Ready,
@@ -626,6 +623,33 @@ mod platform {
         .await
         .map_err(|_| error("gateway_reader_failed"))?
     }
+    fn on_tunnel_supervisor_exit(
+        stop: &CancellationToken,
+        result: Result<Result<(), ForegroundError>, tokio::task::JoinError>,
+    ) -> Option<&'static str> {
+        // The same result may become ready concurrently with explicit stop.
+        // That is a normal join, not an unexpected supervisor departure.
+        if stop.is_cancelled() {
+            return None;
+        }
+        let code = match result {
+            Ok(Ok(())) => "gateway_tunnel_supervisor_exited",
+            Ok(Err(_)) => "gateway_tunnel_supervisor_failed",
+            Err(_) => "gateway_tunnel_supervisor_panicked",
+        };
+        stop.cancel();
+        Some(code)
+    }
+    fn validation_failure_event(code: &str) -> &'static str {
+        // A failed read or worker is not proof that identity/configuration
+        // changed. Retain fail-closed admission when authority is unverified.
+        match code {
+            "fresh_gateway_configuration_changed" | "execution_lease_changed" => {
+                "gateway_inputs_changed"
+            }
+            _ => "gateway_validation_unavailable",
+        }
+    }
     async fn validate(admitted: Arc<Admitted>) -> Result<(), ForegroundError> {
         match validate_for_poll(admitted).await? {
             Validation::Ready => Ok(()),
@@ -670,7 +694,7 @@ mod platform {
         if retained_candidate.is_some() && app_scope.is_none() {
             return Err(error("app_scope_required_for_retained_gateway_runtime"));
         }
-        emit(&events, &stop, "gateway_loading");
+        emit(&events, "gateway_loading");
         let Loaded {
             admitted,
             service,
@@ -926,10 +950,13 @@ mod platform {
         if let Some(d) = &diagnostic {
             d.mark("listening");
         }
-        emit(&events, &stop, "gateway_listening");
+        emit(&events, "gateway_listening");
         // The original Gateway task owns and joins its tunnel supervisor. Listener
         // and local-control failures use the same stop token as SIGINT/SIGTERM.
-        let tunnel = crate::foreground::tunnel::start(
+        // A disabled/unconfigured Tunnel is allowed to finish immediately.
+        // An enabled supervisor must instead remain owned until Gateway stop.
+        let tunnel_expected = tunnel_ingress.is_some();
+        let mut tunnel = crate::foreground::tunnel::start(
             tunnel_state,
             tunnel_port,
             tunnel_release,
@@ -937,7 +964,9 @@ mod platform {
             tunnel_output,
             tunnel_ingress,
         );
-        let mut invalidated = false;
+        let mut tunnel_early_failure: Option<&'static str> = None;
+        let mut tunnel_completion: Option<bool> = None;
+        let mut failure: Option<&'static str> = None;
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let facts = loop {
@@ -946,30 +975,57 @@ mod platform {
                     break result.map_err(|_| error("gateway_listener_worker_failed"))
                         .and_then(|result| result.map_err(|_| error("gateway_listener_failed")));
                 }
-                _ = control_failed.cancelled(), if !stop.is_cancelled() => { invalidated=true;stop.cancel(); }
+                _ = control_failed.cancelled(), if !stop.is_cancelled() => {
+                    failure = Some("gateway_service_control_failed");
+                    emit(&events, "gateway_control_service_failed");
+                    stop.cancel();
+                }
+                result = &mut tunnel, if tunnel_expected && tunnel_completion.is_none() => {
+                    tunnel_completion = Some(matches!(&result, Ok(Ok(()))));
+                    tunnel_early_failure = on_tunnel_supervisor_exit(&stop, result);
+                    if let (Some(d), Some(code)) = (&diagnostic, tunnel_early_failure) {
+                        d.report(code);
+                    }
+                }
                 _ = interval.tick(), if !stop.is_cancelled() => {
                     match validate_for_poll(admitted.clone()).await {
                         Ok(Validation::Ready)=> {
                             #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos", target_os = "windows"))]
-                            if shared.with(|s| s.set_service_tip_pending(false)).await.is_err() {invalidated=true;stop.cancel();}
+                            if shared.with(|s| s.set_service_tip_pending(false)).await.is_err() {
+                                failure = Some("gateway_enrollment_authority_unavailable");
+                                emit(&events, "gateway_enrollment_authority_failed");
+                                stop.cancel();
+                            }
                         }
                         #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos", target_os = "windows"))]
                         Ok(Validation::Pending)=> {
                             #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos", target_os = "windows"))]
-                            if shared.with(|s| s.set_service_tip_pending(true)).await.is_err() {invalidated=true;stop.cancel();}
+                            if shared.with(|s| s.set_service_tip_pending(true)).await.is_err() {
+                                failure = Some("gateway_enrollment_authority_unavailable");
+                                emit(&events, "gateway_enrollment_authority_failed");
+                                stop.cancel();
+                            }
                         }
                         #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos", target_os = "windows"))]
                         Ok(Validation::StopRequested)=>stop.cancel(),
                         Err(error)=> {
                             if let Some(d) = &diagnostic { d.report(error.code()); }
-                            invalidated=true;emit(&events,&stop,"gateway_inputs_changed");stop.cancel();
+                            // Fail closed on unverified security inputs, but do
+                            // not misreport I/O or reader failure as a proved
+                            // configuration change.
+                            failure = Some(error.code());
+                            emit(&events, validation_failure_event(error.code()));
+                            stop.cancel();
                         }
                     }
                 }
             }
         };
         stop.cancel();
-        let tunnel_joined = tunnel.await.is_ok_and(|result| result.is_ok());
+        let tunnel_joined = match tunnel_completion {
+            Some(joined) => joined, // The original JoinHandle already yielded.
+            None => tunnel.await.is_ok_and(|result| result.is_ok()),
+        };
         #[cfg(any(
             all(target_os = "linux", target_env = "gnu"),
             target_os = "macos",
@@ -986,7 +1042,8 @@ mod platform {
         // A timeout is not release. Keep the exact original input pins, writer
         // and execution lease while real blocking/read tasks finish.
         let mut joined = facts.blocking_jobs_joined;
-        let mut worker_failure = facts.worker_failure_observed || !tunnel_joined;
+        let mut worker_failure =
+            facts.worker_failure_observed || !tunnel_joined || tunnel_early_failure.is_some();
         #[cfg(any(
             all(target_os = "linux", target_env = "gnu"),
             target_os = "macos",
@@ -996,7 +1053,7 @@ mod platform {
             worker_failure |= !control_joined;
         }
         while !joined {
-            emit(&events, &stop, "gateway_waiting_for_owned_jobs");
+            emit(&events, "gateway_waiting_for_owned_jobs");
             let next = app.wait_for_blocking(Duration::from_secs(30)).await;
             joined = next.blocking_jobs_joined;
             worker_failure |= next.worker_failure_observed;
@@ -1006,7 +1063,7 @@ mod platform {
             || !lifecycle.lifecycle_jobs_joined
             || !lifecycle.session_transports_joined
         {
-            emit(&events, &stop, "gateway_waiting_for_owned_lifecycle");
+            emit(&events, "gateway_waiting_for_owned_lifecycle");
             tokio::time::sleep(Duration::from_secs(1)).await;
             lifecycle = mcp_stop.shutdown(Duration::from_secs(5)).await;
         }
@@ -1024,18 +1081,86 @@ mod platform {
             listener_error_observed: facts.listener_error_observed,
         };
         if outcome.unconfirmed_owner_cleanups != 0 {
-            emit(&events, &stop, "remote_owner_cleanup_unconfirmed");
+            emit(&events, "remote_owner_cleanup_unconfirmed");
         }
         if outcome.unconfirmed_transport_drains != 0 {
-            emit(&events, &stop, "remote_transport_drain_unconfirmed");
+            emit(&events, "remote_transport_drain_unconfirmed");
         }
-        emit(&events, &stop, "gateway_stopped");
+        emit(&events, "gateway_stopped");
         // This explicit command-scope teardown follows actual owned-job waits.
         // None above is not silently promoted to an SDK join claim.
-        if invalidated {
-            Err(error("gateway_protected_input_changed"))
+        if let Some(code) = tunnel_early_failure {
+            Err(error(code))
+        } else if let Some(code) = failure {
+            Err(error(code))
         } else {
             Ok(outcome)
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn full_or_closed_observation_queue_is_best_effort() {
+            // emit has no cancellation token: observers have no shutdown authority.
+            let (events, mut receiver) = mpsc::channel(1);
+            emit(&events, "gateway_loading");
+            emit(&events, "gateway_listening"); // full
+            assert_eq!(receiver.try_recv().unwrap().event, "gateway_loading");
+            drop(receiver);
+            emit(&events, "gateway_stopped"); // closed
+        }
+
+        #[test]
+        fn unverified_read_does_not_claim_changed_configuration() {
+            assert_eq!(
+                validation_failure_event("gateway_reader_failed"),
+                "gateway_validation_unavailable"
+            );
+            assert_eq!(
+                validation_failure_event("fresh_gateway_binding_changed"),
+                "gateway_validation_unavailable"
+            );
+            assert_eq!(
+                validation_failure_event("execution_lease_changed"),
+                "gateway_inputs_changed"
+            );
+        }
+
+        #[tokio::test]
+        async fn unexpected_tunnel_supervisor_exit_cancels_owned_gateway() {
+            let stop = CancellationToken::new();
+            let result = tokio::spawn(async { Ok::<(), ForegroundError>(()) }).await;
+            assert_eq!(
+                on_tunnel_supervisor_exit(&stop, result),
+                Some("gateway_tunnel_supervisor_exited")
+            );
+            assert!(stop.is_cancelled());
+        }
+
+        #[tokio::test]
+        async fn explicit_gateway_stop_is_not_misreported_as_tunnel_failure() {
+            let stop = CancellationToken::new();
+            stop.cancel();
+            let result = tokio::spawn(async { Ok::<(), ForegroundError>(()) }).await;
+            assert_eq!(on_tunnel_supervisor_exit(&stop, result), None);
+        }
+
+        #[tokio::test]
+        async fn tunnel_supervisor_panic_is_not_silent() {
+            let stop = CancellationToken::new();
+            let result = tokio::spawn(async {
+                panic!("synthetic supervisor panic");
+                #[allow(unreachable_code)]
+                Ok::<(), ForegroundError>(())
+            })
+            .await;
+            assert_eq!(
+                on_tunnel_supervisor_exit(&stop, result),
+                Some("gateway_tunnel_supervisor_panicked")
+            );
+            assert!(stop.is_cancelled());
         }
     }
 }

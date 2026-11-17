@@ -42,6 +42,36 @@ type McpRouter = Arc<
         + Sync,
 >;
 type PublicFailure = (u16, &'static str);
+/// Tokio listeners may report a failed incoming connection as an accept
+/// error. Only a broken listener/descriptor is a service-wide failure.
+/// Keep the OS listener and its original ownership; do not restart it.
+pub(crate) fn transient_accept_error(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    if matches!(
+        error.kind(),
+        ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::TimedOut
+            | ErrorKind::NetworkDown
+            | ErrorKind::NetworkUnreachable
+            | ErrorKind::HostUnreachable
+    ) {
+        return true;
+    }
+    // Linux accept(2) reports pending network errors on the newly arriving
+    // socket. They are not proof that the listening descriptor has failed.
+    #[cfg(target_os = "linux")]
+    if matches!(
+        error.raw_os_error(),
+        Some(libc::EPROTO | libc::ENOPROTOOPT | libc::EHOSTDOWN | libc::ENONET | libc::EOPNOTSUPP)
+    ) {
+        return true;
+    }
+    false
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
@@ -455,6 +485,7 @@ impl EnrollmentHttp {
             };
             let (tcp, _) = match accepted {
                 Ok(value) => value,
+                Err(error) if transient_accept_error(&error) => continue,
                 Err(_) => {
                     self.listener_failure.store(true, Ordering::Release);
                     cancel.cancel();

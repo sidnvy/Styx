@@ -212,7 +212,6 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
         });
         let mut config = StreamableHttpServerConfig::default();
         config.max_request_body_bytes = MESSAGE_BYTES;
-        config.sse_retry = None;
         config.sse_keep_alive = Some(Duration::from_secs(10));
         config.session_store = None;
         // Outer original-header GatewayBearerPolicy is authoritative and stricter.
@@ -583,28 +582,12 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
         }
         let delete = parts.method == Method::DELETE;
         let new_session = sid.is_none();
-        let response = match tokio::time::timeout(
-            Duration::from_secs(5),
-            session
-                .sdk
-                .handle(Request::from_parts(parts, Full::new(bytes))),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(_) => {
-                if session.manager.id.lock().expect("SDK session id").is_none() {
-                    session
-                        .life
-                        .facts
-                        .lock()
-                        .expect("session lifetime")
-                        .transport_joined = true;
-                }
-                let _ = session.life.close();
-                return plain(StatusCode::GATEWAY_TIMEOUT);
-            }
-        };
+        // SDK queueing is not evidence that the MCP session has ended.
+        // Keep transport lifetime independent from an HTTP response's latency.
+        let response = session
+            .sdk
+            .handle(Request::from_parts(parts, Full::new(bytes)))
+            .await;
         if new_session
             && (!response.status().is_success()
                 || session
@@ -900,3 +883,6 @@ mod tests;
 
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod lan_tests;
+
+#[cfg(test)]
+mod slow_dispatch_tests;

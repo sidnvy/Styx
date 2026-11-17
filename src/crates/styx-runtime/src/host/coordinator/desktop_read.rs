@@ -88,14 +88,21 @@ fn insufficient_read(error: CuaError, original: Option<&CallToolResult>) -> Call
         };
         (
             category,
-            "desktop_read_not_proven",
+            match error {
+                CuaError::ProtocolMismatch => "desktop_read_protocol_mismatch",
+                CuaError::PermissionDenied => "desktop_read_permission_denied",
+                CuaError::StaleObservation => "desktop_read_stale",
+                CuaError::Unsupported => "desktop_read_unsupported",
+                _ => "desktop_read_not_proven",
+            },
             "The native response did not contain a usable window observation.",
         )
     };
     CallToolResult::error(vec![ContentBlock::text(
         serde_json::json!({
             "category":category, "error":code, "reason":reason,
-            "native_reason":if unresolved { Some("ax_window_unresolved") } else { None },
+            "native_reason":if unresolved { Some("ax_window_unresolved".to_owned()) }
+                else { original.and_then(crate::providers::cua::ax_snapshot::native_reason) },
             "execution_certainty":"acknowledged", "uncertain":false,
             "input_authorized":false
         })
@@ -150,6 +157,14 @@ pub(super) fn settle_acquired_read(
         let original = receipt.result.as_ref().ok_or(CuaError::Unknown)?;
         match target.request {
             DesktopReadRequest::Accessibility(request) => {
+                if let Some(result) = crate::providers::cua::ax_snapshot::project_descriptive_read(
+                    original,
+                    request.pid,
+                    request.window_id,
+                    !acquisition,
+                )? {
+                    return Ok((result, None));
+                }
                 let parsed = if acquisition {
                     parse_acquired(original, request.pid, request.window_id)?
                 } else {
@@ -165,7 +180,7 @@ pub(super) fn settle_acquired_read(
                 }
                 lane.next_read_alias = next;
                 let alias = format!("s{next:08x}");
-                let result = parsed.rewrite_result(original, &alias)?;
+                let result = parsed.rewrite_result(&alias)?;
                 Ok((result, Some((parsed, alias))))
             }
             DesktopReadRequest::WindowCapture(request) => {
@@ -225,6 +240,7 @@ mod tests {
         let value: Value =
             serde_json::from_str(&output.content[0].as_text().unwrap().text).unwrap();
         assert_eq!(value["category"], "PROTOCOL_MISMATCH");
+        assert_eq!(value["error"], "desktop_read_protocol_mismatch");
         assert_eq!(value["input_authorized"], false);
     }
 }

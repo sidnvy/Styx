@@ -9,8 +9,12 @@ fn directory(name: &str) -> PathBuf {
         .join("../../..")
         .canonicalize()
         .unwrap();
+    // Linked worktrees reuse the canonical Cargo cache via target/. Fixture
+    // paths must name that directory, not ask production code to trust aliases.
     let root = repo
         .join("target")
+        .canonicalize()
+        .unwrap()
         .join(format!("{name}-{}", uuid::Uuid::new_v4().simple()));
     private_directory(&root).unwrap();
     root
