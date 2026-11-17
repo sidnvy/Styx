@@ -233,6 +233,58 @@ impl MacProxySource {
                 }
             })
     }
+    /// Only the authenticated read-only probe can be retried after a refused
+    /// native session. Rebind against the SAME daemon/source pins first; the
+    /// action-serving SDK proxy and all Host input ownership remain untouched.
+    fn read_native_observation(
+        source: &mut BoundMacSource,
+        until: Option<std::time::Instant>,
+        qualifying: bool,
+    ) -> std::result::Result<NativeObservation, super::macos_source::BindingError> {
+        let result = if qualifying {
+            source.observe_initial_native(until)
+        } else {
+            source.observe_native(until)
+        };
+        if !qualifying
+            && result.as_ref().is_err_and(|error| {
+                matches!(
+                    error,
+                    super::macos_source::BindingError::NativeProtocol
+                        | super::macos_source::BindingError::ObservationExpired
+                )
+            })
+        {
+            source.renew_observation()?;
+            return source.observe_native(until);
+        }
+        result
+    }
+
+    fn read_native_windows(
+        source: &mut BoundMacSource,
+        until: Option<std::time::Instant>,
+        qualifying: bool,
+    ) -> std::result::Result<
+        super::macos_source::WindowReadEvidence,
+        super::macos_source::BindingError,
+    > {
+        let result = source.probe_windows(until);
+        if !qualifying
+            && result.as_ref().is_err_and(|error| {
+                matches!(
+                    error,
+                    super::macos_source::BindingError::NativeProtocol
+                        | super::macos_source::BindingError::ObservationExpired
+                )
+            })
+        {
+            source.renew_observation()?;
+            return source.probe_windows(until);
+        }
+        result
+    }
+
     fn observe_current_at(
         &self,
         until: impl Into<Option<std::time::Instant>>,
@@ -289,11 +341,7 @@ impl MacProxySource {
                 );
                 CuaError::Unknown
             })?;
-            let response = if qualifying {
-                observations.observe_initial_native(until)
-            } else {
-                observations.observe_native(until)
-            };
+            let response = Self::read_native_observation(&mut observations, until, qualifying);
             let value = response.map_err(|error| {
                 let fault = observations.probe_diagnostic().map_or_else(
                     || ProbeDiagnostic::observed(observation, error.probe_cause(), started, until),
@@ -394,25 +442,26 @@ impl MacProxySource {
                 );
                 CuaError::Unknown
             })?;
-            let windows = observations.probe_windows(until).map_err(|error| {
-                let fault = observations.probe_diagnostic().map_or_else(
-                    || {
-                        ProbeDiagnostic::observed(
-                            ProbeStage::SessionBinding,
-                            error.probe_cause(),
-                            started,
-                            until,
-                        )
-                    },
-                    |fault| ProbeDiagnostic::observed(fault.stage, fault.cause, started, until),
-                );
-                self.remember_probe_diagnostic(fault);
-                if error == super::macos_source::BindingError::ObservationExpired {
-                    CuaError::StaleObservation
-                } else {
-                    CuaError::PermissionDenied
-                }
-            })?;
+            let windows =
+                Self::read_native_windows(&mut observations, until, initial).map_err(|error| {
+                    let fault = observations.probe_diagnostic().map_or_else(
+                        || {
+                            ProbeDiagnostic::observed(
+                                ProbeStage::SessionBinding,
+                                error.probe_cause(),
+                                started,
+                                until,
+                            )
+                        },
+                        |fault| ProbeDiagnostic::observed(fault.stage, fault.cause, started, until),
+                    );
+                    self.remember_probe_diagnostic(fault);
+                    if error == super::macos_source::BindingError::ObservationExpired {
+                        CuaError::StaleObservation
+                    } else {
+                        CuaError::PermissionDenied
+                    }
+                })?;
             if initial {
                 let mut control = self.control.lock().map_err(|_| {
                     self.remember_probe_failure(
