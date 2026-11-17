@@ -117,18 +117,19 @@ impl BoundMacSource {
         until: impl Into<Option<Instant>>,
     ) -> Result<NativeObservation> {
         let until = until.into();
-        self.observe_native_mode(until)
+        self.observe_native_mode(until, false)
     }
     pub(in crate::providers::cua) fn observe_initial_native(
         &mut self,
         until: impl Into<Option<Instant>>,
     ) -> Result<NativeObservation> {
         let until = until.into();
-        self.observe_native_mode(until)
+        self.observe_native_mode(until, true)
     }
     fn observe_native_mode(
         &mut self,
         until: impl Into<Option<Instant>>,
+        initial_qualification: bool,
     ) -> Result<NativeObservation> {
         let until = until.into();
         self.fresh_binding()?;
@@ -175,7 +176,14 @@ impl BoundMacSource {
             return Err(BindingError::Fenced);
         }
         self.native_console = identity;
-        self.initial_provisional = true;
+        // Only initial source qualification holds a provisional epoch. A
+        // normal post-qualification read must not reactivate this latch:
+        // renewal of a later expired read-only SDK session would otherwise
+        // be refused as an unfinished initial claim, permanently fencing
+        // Computer until the entire App restarts.
+        if initial_qualification {
+            self.initial_provisional = true;
+        }
         self.fenced = false;
         Ok(value)
     }

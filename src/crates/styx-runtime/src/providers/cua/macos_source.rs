@@ -601,9 +601,13 @@ mod renewal_acceptance {
         let before = observation.observe_initial_native(None).unwrap();
         let after = observation.observe_initial_native(None).unwrap();
         let control_after = control.observe_initial_native(None).unwrap();
+        assert!(observation.initial_provisional);
+        assert!(control.initial_provisional);
         observation
             .commit_initial_native_pair(&mut control, &before, &after, &control_after, None)
             .unwrap();
+        assert!(!observation.initial_provisional);
+        assert!(!control.initial_provisional);
         let identity = after.console_identity();
         // A normal post-qualification read must not reopen the initial
         // provisional claim. The previous test skipped this, so it could
