@@ -396,6 +396,29 @@ impl BoundMacSource {
         self.fresh_binding()?;
         Ok(next)
     }
+    /// Replace only an exhausted private read-only observation transport.
+    /// Keep the original signed App, daemon birth, socket inode and audit token.
+    /// No GUI input is ever replayed and no new source authority is discovered.
+    pub(crate) fn renew_observation(&mut self) -> Result<()> {
+        if self.probe_drained || self.probe_daemon_exited || self.initial_provisional {
+            return Err(BindingError::Fenced);
+        }
+        // Do not reuse a partial reply or a refused SDK session. The new
+        // connection must independently qualify against the original pins.
+        let stream = UnixStream::connect(&self.candidate.socket_path)
+            .map_err(|_| BindingError::Unavailable)?;
+        let connected = ConnectedCandidate {
+            candidate: Arc::clone(&self.candidate),
+            stream,
+        };
+        let mut next = connected.finish_binding()?;
+        if next.peer_token != self.peer_token {
+            return Err(BindingError::Peer);
+        }
+        next.native_console = self.native_console.clone();
+        *self = next;
+        Ok(())
+    }
     pub(crate) fn proxy_parts(&mut self) -> Result<(Arc<SignedAppMember>, PathBuf)> {
         self.fresh_binding()?;
         self.fresh_binding()?;
