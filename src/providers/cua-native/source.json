@@ -6,7 +6,7 @@
   "official_archive_sha256": "8a2b76c50cffd076b40c29c593e69d51b51c2563b6bf51dc1926d1dac9558cfe",
   "archive_root_mtime": 1794515309,
   "patch": "cua-0.47.24-styx-fixes.patch",
-  "patch_sha256": "37da05e9edc3f6ee6cb38939aebea4c73fccbec40d52dcdc1c81682b3469383b",
+  "patch_sha256": "a8286f8d1ea317bad6ac82fe2063e007f095657b9edf9c012e61502a27854f89",
   "files": [
     {
       "path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs",
@@ -76,9 +76,9 @@
       "path": "libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs",
       "original_sha256": "bc69507bf3e3fa3e68b24f8da25c0640a22e6fa1f465c48f33b3bb80299d1676",
       "original_git_blob_sha1": "abd52cc5754bf573b941d5327c2ab0fcd189f4e0",
-      "final_sha256": "477df69c0a2dba832323fc7cdc5f68a20cc575a99d906e5f2a09089cadc16ed2",
+      "final_sha256": "d84466f87259899426473651bce41af0fc9d0305009cdbb58237fc79df684594",
       "original_bytes": 55800,
-      "final_bytes": 55057
+      "final_bytes": 55031
     },
     {
       "path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/mod.rs",

@@ -48,7 +48,7 @@ pub(crate) mod fake_driver;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) mod permissions;
 pub(crate) mod public_contract;
-pub(crate) use click::ElementInputRequest;
+pub(crate) use element_input::ElementInputRequest;
 pub(crate) mod ax_snapshot;
 mod ax_target;
 mod ax_write;

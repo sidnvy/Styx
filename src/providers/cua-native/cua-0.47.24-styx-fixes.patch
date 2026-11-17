@@ -821,9 +821,12 @@
      /// A UIA pattern on a non-combo element (`ValuePattern`, `RangeValuePattern`).
 --- a/libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs
 +++ b/libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs
-@@ -14,8 +14,8 @@
+@@ -12,10 +12,10 @@
+ use std::{fs, sync::Arc};
+ 
  use super::impl_::{
-     announce_keyboard_target, atspi_up, background_keyboard_refusal, background_virtual_text,
+-    announce_keyboard_target, atspi_up, background_keyboard_refusal, background_virtual_text,
++    atspi_up, background_keyboard_refusal, background_virtual_text,
      coordinate_frame_is_desktop, coordinate_frame_schema, focus_by_pixel,
 -    focus_hyprland_foreground, focus_nested_inject_target, foreground_hyprland_refusal,
 -    foreground_structured, hyprland_foreground, hyprland_input_result, inject_terminal_input,
@@ -884,7 +887,7 @@
 +                    .with_structured(json!({"code":"keyboard_unavailable","effect":"none"}));
 +            }
 +            let count = text.chars().count();
-+            let result = spawn_blocking_bounded("foreground element typing", text_typing_budget(count), move || {
++            let result = spawn_blocking_bounded("foreground element typing", text_typing_budget(&text), move || {
 +                crate::wayland::hyprland::activate_exact(xid, pid)?;
 +                if !crate::atspi::native::focus_element_ref(&object)? {
 +                    anyhow::bail!("native element focus was not confirmed");
