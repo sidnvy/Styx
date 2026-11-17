@@ -33,7 +33,13 @@ impl DriverPermissions {
         facts.retain(|key, _| {
             matches!(
                 key.as_str(),
-                "atspi" | "x11" | "wayland_enabled" | "xsend_event" | "uia" | "post_message"
+                "atspi"
+                    | "x11"
+                    | "wayland_enabled"
+                    | "wayland_virtual_keyboard"
+                    | "xsend_event"
+                    | "uia"
+                    | "post_message"
             )
         });
         Ok(Self {
@@ -52,9 +58,13 @@ impl DriverPermissions {
                 &["x11", "wayland_enabled"],
                 "X11/XWayland or enabled Wayland capture",
             ),
-            (Platform::Linux, CapabilityId::DesktopPointer | CapabilityId::DesktopKeyboard) => {
-                (&["xsend_event"], "X11/XWayland input only")
+            (Platform::Linux, CapabilityId::DesktopPointer) => {
+                (&["xsend_event"], "X11/XWayland pointer input")
             }
+            (Platform::Linux, CapabilityId::DesktopKeyboard) => (
+                &["xsend_event", "wayland_virtual_keyboard"],
+                "native keyboard backend; target focus is checked at dispatch",
+            ),
             (
                 Platform::Windows,
                 CapabilityId::DesktopAccessibility | CapabilityId::DesktopWindowsControl,
@@ -265,5 +275,33 @@ mod tests {
             "check_permissions",
             Some(serde_json::json!({"prompt":true}).as_object().unwrap())
         ));
+    }
+}
+
+#[cfg(test)]
+mod native_keyboard_tests {
+    use super::*;
+    #[test]
+    fn wayland_keyboard_does_not_depend_on_xwayland_or_invent_pointer_permission() {
+        let reply = CallToolResult::structured(serde_json::json!({
+            "atspi":true,"x11":false,"xsend_event":false,
+            "wayland_enabled":true,"wayland_virtual_keyboard":true
+        }));
+        let facts = DriverPermissions::parse(Platform::Linux, &reply).unwrap();
+        assert_eq!(
+            facts.evidence(CapabilityId::DesktopKeyboard).availability,
+            Availability::Available
+        );
+        assert_eq!(
+            facts.evidence(CapabilityId::DesktopPointer).availability,
+            Availability::Unavailable
+        );
+        let hint =
+            CallToolResult::structured(serde_json::json!({"atspi":true,"wayland_enabled":true}));
+        let facts = DriverPermissions::parse(Platform::Linux, &hint).unwrap();
+        assert_eq!(
+            facts.evidence(CapabilityId::DesktopKeyboard).availability,
+            Availability::Unavailable
+        );
     }
 }

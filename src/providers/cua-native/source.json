@@ -6,7 +6,7 @@
   "official_archive_sha256": "8a2b76c50cffd076b40c29c593e69d51b51c2563b6bf51dc1926d1dac9558cfe",
   "archive_root_mtime": 1794515309,
   "patch": "cua-0.47.24-styx-fixes.patch",
-  "patch_sha256": "4608100b00a98c0f0eda5e51c64213aef01787e69cac652f75988dfed8c1bce1",
+  "patch_sha256": "37da05e9edc3f6ee6cb38939aebea4c73fccbec40d52dcdc1c81682b3469383b",
   "files": [
     {
       "path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs",
@@ -71,6 +71,46 @@
       "final_sha256": "10086f9b1f14ad5ab006377feda3e743b26018c153acadf302b46f232dfe2eda",
       "original_bytes": 15514,
       "final_bytes": 21912
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs",
+      "original_sha256": "bc69507bf3e3fa3e68b24f8da25c0640a22e6fa1f465c48f33b3bb80299d1676",
+      "original_git_blob_sha1": "abd52cc5754bf573b941d5327c2ab0fcd189f4e0",
+      "final_sha256": "477df69c0a2dba832323fc7cdc5f68a20cc575a99d906e5f2a09089cadc16ed2",
+      "original_bytes": 55800,
+      "final_bytes": 55057
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/mod.rs",
+      "original_sha256": "78b37958274cbf1956712d78b6be1cfa4484f0fa3478e2dd1c08ed178161820d",
+      "original_git_blob_sha1": "13c2d2278efd629e04238d7232e80d39efded4f7",
+      "final_sha256": "a55324d6a2940951079be35525209158bd154d386934fb6516fae89ff7d5a6b9",
+      "original_bytes": 210680,
+      "final_bytes": 211311
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/virtual_keyboard.rs",
+      "original_sha256": "d1d37515954768fa337e1ea98635a6d3a4d6a62d0b4a9dc0d5c6d6377dc2417d",
+      "original_git_blob_sha1": "8bdb5ae1f84432bf8dc2e57eabf2523d8e01f8cf",
+      "final_sha256": "a136defedbb29eb878f2ef7df4834c95bf721d2160fe6dae2ca9f0d89b6273fc",
+      "original_bytes": 8254,
+      "final_bytes": 8732
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs",
+      "original_sha256": "bb2038bfe9313e46b12a4bb317934b1f379f881ff4766989095a6ce0903a42c1",
+      "original_git_blob_sha1": "f16e4ed3716ec7f7bfee124412970f18fdbd0204",
+      "final_sha256": "c2c7467cf574034f2ae2553b0198608f208bfd6416547d1e6619ae8d8240bd02",
+      "original_bytes": 70767,
+      "final_bytes": 71512
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/tools/check_permissions.rs",
+      "original_sha256": "e9779306fd15837d3fe4a00d17fcc5316b69823a3dcafd3411b7df26e4e9b8f8",
+      "original_git_blob_sha1": "b2569be008ed21d136c7db8d43b1df27aacdbb83",
+      "final_sha256": "8e3222a78070ca378ce9bc0a806aba24ce52a1c4dbb8d6538dad0a02a31df63d",
+      "original_bytes": 3969,
+      "final_bytes": 4041
     }
   ],
   "rust_toolchain": "1.97.1",

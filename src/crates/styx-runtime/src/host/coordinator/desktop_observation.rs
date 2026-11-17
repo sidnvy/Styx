@@ -104,13 +104,13 @@ impl OwnedAxObservation {
             )?;
         Ok(())
     }
-    fn click_binding(
+    fn element_input_binding(
         &self,
         state: &State,
         owner: &OwnerLease,
         resource: &ResourceTarget,
-        request: &crate::providers::cua::ClickRequest,
-    ) -> Result<crate::providers::cua::ClickRequest, CoordinatorError> {
+        request: &crate::providers::cua::ElementInputRequest,
+    ) -> Result<crate::providers::cua::ElementInputRequest, CoordinatorError> {
         let lane = desktop(state)?;
         if &self.owner != owner || &self.resource != resource {
             return Err(ErrorCategory::Unauthorized.into());
@@ -133,55 +133,55 @@ impl OwnedAxObservation {
         {
             return Err(ErrorCategory::StaleObservation.into());
         }
-        Ok(crate::providers::cua::ClickRequest {
+        Ok(crate::providers::cua::ElementInputRequest {
             pid: Some(read.pid),
             window_id: Some(read.window_id),
             element_token: request.element_token.clone(),
-            gesture: request.gesture,
+            gesture: request.gesture.clone(),
         })
     }
-    fn click_target(
+    fn element_input_target(
         &self,
         state: &State,
         owner: &OwnerLease,
         resource: &ResourceTarget,
-        request: &crate::providers::cua::ClickRequest,
-    ) -> Result<crate::providers::cua::ClickRequest, CoordinatorError> {
-        let request = self.click_binding(state, owner, resource, request)?;
+        request: &crate::providers::cua::ElementInputRequest,
+    ) -> Result<crate::providers::cua::ElementInputRequest, CoordinatorError> {
+        let request = self.element_input_binding(state, owner, resource, request)?;
         self.target.validate()?;
         Ok(request)
     }
-    pub(super) fn click_facts(
+    pub(super) fn element_input_facts(
         &self,
         state: &State,
         owner: &OwnerLease,
         resource: &ResourceTarget,
         context: &PreparedContext,
-        request: &crate::providers::cua::ClickRequest,
+        request: &crate::providers::cua::ElementInputRequest,
         now: MonotonicMillis,
     ) -> Result<AdmissionFacts, CoordinatorError> {
-        let request = self.click_target(state, owner, resource, request)?;
-        self.click_bound_facts(state, context, &request, now)
+        let request = self.element_input_target(state, owner, resource, request)?;
+        self.element_input_bound_facts(state, context, &request, now)
     }
     /// Deliver only the original action receipt. A successful click may close
     /// its window or process. This cannot mint an observation or authorize input.
-    pub(super) fn click_result_facts(
+    pub(super) fn element_input_result_facts(
         &self,
         state: &State,
         owner: &OwnerLease,
         resource: &ResourceTarget,
         context: &PreparedContext,
-        request: &crate::providers::cua::ClickRequest,
+        request: &crate::providers::cua::ElementInputRequest,
         now: MonotonicMillis,
     ) -> Result<AdmissionFacts, CoordinatorError> {
-        let request = self.click_binding(state, owner, resource, request)?;
-        self.click_bound_facts(state, context, &request, now)
+        let request = self.element_input_binding(state, owner, resource, request)?;
+        self.element_input_bound_facts(state, context, &request, now)
     }
-    fn click_bound_facts(
+    fn element_input_bound_facts(
         &self,
         state: &State,
         context: &PreparedContext,
-        request: &crate::providers::cua::ClickRequest,
+        request: &crate::providers::cua::ElementInputRequest,
         now: MonotonicMillis,
     ) -> Result<AdmissionFacts, CoordinatorError> {
         if context.observation.as_ref() != Some(&self.observation)
@@ -212,7 +212,7 @@ impl OwnedAxObservation {
         }
         primary.ok_or_else(|| ErrorCategory::StateConflict.into())
     }
-    pub(super) fn recheck_click(
+    pub(super) fn recheck_element_input(
         &self,
         state: &State,
         owner: &OwnerLease,
@@ -227,9 +227,9 @@ impl OwnedAxObservation {
             serde_json::from_slice(state.ledger.inspect_payload(owner, operation, digest)?)
                 .map_err(|_| CuaError::InvalidRequest)?;
         let request = action
-            .click_request()?
+            .element_input_request()?
             .ok_or(ErrorCategory::StateConflict)?;
-        let facts = self.click_facts(state, owner, resource, &context, &request, now)?;
+        let facts = self.element_input_facts(state, owner, resource, &context, &request, now)?;
         state.ledger.authorize_resource_access(
             owner,
             &resource.operation_id,
@@ -389,17 +389,17 @@ pub(super) fn validate_dispatch(
         .ok_or(ErrorCategory::StaleObservation)?;
     entry.write_facts(state, owner, resource, context, request, now)
 }
-pub(super) fn prepare_click(
+pub(super) fn prepare_element_input(
     state: &State,
     owner: &OwnerLease,
     resource: &ResourceTarget,
-    request: &crate::providers::cua::ClickRequest,
+    request: &crate::providers::cua::ElementInputRequest,
 ) -> Result<(CuaAction, ObservationId), CoordinatorError> {
     let entry = desktop(state)?
         .ax_observation
         .as_ref()
         .ok_or(ErrorCategory::StaleObservation)?;
-    let request = entry.click_target(state, owner, resource, request)?;
+    let request = entry.element_input_target(state, owner, resource, request)?;
     let native = entry
         .parsed
         .native_token_for(&entry.alias, &request.element_token)
@@ -409,19 +409,19 @@ pub(super) fn prepare_click(
         entry.observation.clone(),
     ))
 }
-pub(super) fn validate_click_dispatch(
+pub(super) fn validate_element_input_dispatch(
     state: &State,
     owner: &OwnerLease,
     resource: &ResourceTarget,
     context: &PreparedContext,
-    request: &crate::providers::cua::ClickRequest,
+    request: &crate::providers::cua::ElementInputRequest,
     now: MonotonicMillis,
 ) -> Result<AdmissionFacts, CoordinatorError> {
     let entry = desktop(state)?
         .ax_observation
         .as_ref()
         .ok_or(ErrorCategory::StaleObservation)?;
-    entry.click_facts(state, owner, resource, context, request, now)
+    entry.element_input_facts(state, owner, resource, context, request, now)
 }
 /// Root cleanup calls this before native cancellation; a later read completion
 /// must additionally pass fresh authority/resource checks before installing.

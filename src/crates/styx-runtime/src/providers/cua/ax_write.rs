@@ -107,17 +107,32 @@ pub(super) fn diagnostic(stage: &'static str, code: &str) {
     );
 }
 
-fn pre_send_code(code: &str) -> bool {
-    matches!(
-        code,
-        "invalid_request"
-            | "stale_observation"
-            | "editable_unavailable"
-            | "window_unavailable"
-            | "process_unavailable"
-            | "strict_text_unavailable"
-            | "permission_denied"
-    )
+fn refusal_cause(code: &str) -> Option<CuaError> {
+    Some(match code {
+        "invalid_request" => CuaError::InvalidRequest,
+        "stale_observation" | "window_unavailable" | "process_unavailable" => {
+            CuaError::StaleObservation
+        }
+        "editable_unavailable" | "strict_text_unavailable" => CuaError::Unsupported,
+        "permission_denied" => CuaError::PermissionDenied,
+        _ => return None,
+    })
+}
+fn refused_result(code: &str, cause: CuaError) -> CallToolResult {
+    let category = match cause {
+        CuaError::InvalidRequest => "INVALID_REQUEST",
+        CuaError::StaleObservation => "STALE_OBSERVATION",
+        CuaError::Unsupported => "CAPABILITY_UNSUPPORTED",
+        CuaError::PermissionDenied => "PERMISSION_DENIED",
+        _ => unreachable!("validated strict text refusal"),
+    };
+    let mut result = CallToolResult::structured(serde_json::json!({
+        "category": category, "error": code, "native_reason": code,
+        "execution_certainty":"not_dispatched", "input_authorized":false,
+        "uncertain":false
+    }));
+    result.is_error = Some(true);
+    result
 }
 
 // Official Cua 0.47 publishes successful set_value calls as ActionResult.
@@ -209,7 +224,7 @@ fn write_evidence(value: &CallToolResult) -> CuaEvidence {
                 && data
                     .get("code")
                     .and_then(Value::as_str)
-                    .is_some_and(pre_send_code) =>
+                    .is_some_and(|code| refusal_cause(code).is_some()) =>
         {
             CuaEvidence::NotDispatched
         }
@@ -276,11 +291,22 @@ pub(super) async fn invoke(
                 }))),
                 None,
             ),
-            CuaEvidence::NotDispatched => (
-                CuaEvidence::NotDispatched,
-                None,
-                Some(CuaError::PermissionDenied),
-            ),
+            CuaEvidence::NotDispatched => {
+                // A missing EditableText interface is not an OS permission
+                // denial. Preserve the producer's typed refusal accurately.
+                let code = value
+                    .structured_content
+                    .as_ref()
+                    .and_then(|v| v.get("code"))
+                    .and_then(Value::as_str)
+                    .expect("validated strict text refusal code");
+                let cause = refusal_cause(code).expect("validated refusal classification");
+                (
+                    CuaEvidence::NotDispatched,
+                    Some(refused_result(code, cause)),
+                    Some(cause),
+                )
+            }
             CuaEvidence::Unknown => (CuaEvidence::Unknown, Some(value), Some(CuaError::Unknown)),
         },
         _ => (CuaEvidence::Unknown, None, Some(CuaError::Unknown)),
@@ -295,6 +321,50 @@ pub(super) async fn invoke(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn missing_editable_interface_and_stale_target_are_not_permission_denials() {
+        for (code, cause, category) in [
+            (
+                "editable_unavailable",
+                CuaError::Unsupported,
+                "CAPABILITY_UNSUPPORTED",
+            ),
+            (
+                "strict_text_unavailable",
+                CuaError::Unsupported,
+                "CAPABILITY_UNSUPPORTED",
+            ),
+            (
+                "stale_observation",
+                CuaError::StaleObservation,
+                "STALE_OBSERVATION",
+            ),
+            (
+                "window_unavailable",
+                CuaError::StaleObservation,
+                "STALE_OBSERVATION",
+            ),
+            (
+                "invalid_request",
+                CuaError::InvalidRequest,
+                "INVALID_REQUEST",
+            ),
+            (
+                "permission_denied",
+                CuaError::PermissionDenied,
+                "PERMISSION_DENIED",
+            ),
+        ] {
+            assert_eq!(refusal_cause(code), Some(cause));
+            let result = refused_result(code, cause);
+            assert_eq!(result.is_error, Some(true));
+            let data = result.structured_content.unwrap();
+            assert_eq!(data["category"], category);
+            assert_eq!(data["native_reason"], code);
+            assert_eq!(data["execution_certainty"], "not_dispatched");
+        }
+        assert!(refusal_cause("arbitrary_native_failure").is_none());
+    }
     // Captured from the actual Session-1 Windows fixture, not a synthesized
     // envelope. The producer's words and follow-up hint are never authority.
     #[test]

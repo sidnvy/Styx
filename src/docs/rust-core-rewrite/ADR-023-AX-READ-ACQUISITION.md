@@ -62,7 +62,7 @@ This registration does not supply target authority. Host still requires the
 same owner/resource/process/window, a fresh complete AX observation and native
 token, every grant, and the final source refresh before one dispatch. All other
 mutating routes without an exact Host click/write binding remain refused;
-Keyboard remains unavailable. Missing native permission or current window
+Keyboard remains unavailable on macOS in this slice. Missing native permission or current window
 probe cannot authorize the click. Original not-dispatched receipts are retained,
 and actual independent button effects remain required for acceptance.
 
@@ -93,3 +93,29 @@ same immutable response are unnecessary. Native-reference **fields** are
 translated or removed; native-looking text in a page label is ordinary content
 and does not confer authority. Cardinality is checked once against returned
 rows rather than imposing a second conflicting completeness flag.
+
+
+## Explicit Linux foreground text (2026-11-17)
+
+`set_value` remains a direct accessibility replacement, not an implicit keyboard
+fallback. The native codes `editable_unavailable` and `strict_text_unavailable`
+are CapabilityUnsupported; a stale target is StaleObservation and only actual
+permission rejection is PermissionDenied. The original code is retained in the
+sanitized refusal. Unknown native outcomes are never reclassified as not sent.
+
+`type_text` is an explicit Linux foreground keyboard action on the same exact
+Host-owned AX element used by click. It requires PID, window ID, current element
+token, text, and `delivery_mode:"foreground"`. It inserts at the caret; it does
+not select all or replace the field. No pixel, clipboard, global focused-target
+or caller-selected session form is exposed. The existing observation/grant/late
+dispatch gate is shared; Keyboard and WindowsControl authority are checked too.
+
+On the supported Hyprland session, the native executor verifies the exact
+address/PID, uses the compositor's normal focus IPC and the retained object's
+Component.GrabFocus, checks window focus, then invokes its existing wtype helper
+once through the standard Wayland virtual-keyboard protocol. The target may
+remain focused. This path does not require Cua's optional compositor plugin and
+does not try AX insertion before keyboard delivery. Any uncertainty after focus
+or input is returned without a second writer. Native permission discovery uses
+actual virtual-keyboard globals, not XWayland availability or an environment
+hint. User input should be independently observed after completion.

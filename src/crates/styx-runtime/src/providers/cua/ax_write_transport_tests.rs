@@ -197,7 +197,15 @@ async fn standard_set_value_runs_gate_before_one_strict_call_and_never_replays()
             }
             Reply::Refused => {
                 assert_eq!(result.0, CuaEvidence::NotDispatched);
-                assert!(result.1.is_none());
+                let data = result
+                    .1
+                    .as_ref()
+                    .unwrap()
+                    .structured_content
+                    .as_ref()
+                    .unwrap();
+                assert_eq!(data["execution_certainty"], "not_dispatched");
+                assert_eq!(data["input_authorized"], false);
                 assert!(!uncertain);
                 assert_eq!(trace.effects, 0);
             }

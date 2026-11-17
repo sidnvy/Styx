@@ -39,16 +39,16 @@ pub(crate) mod probe_diagnostic;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{MacProxySource, TrustedCuaLaunch};
 mod admission;
-mod click;
 #[cfg(test)]
 mod deadline_tests;
 mod driver_result;
+mod element_input;
 #[cfg(test)]
 pub(crate) mod fake_driver;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) mod permissions;
 pub(crate) mod public_contract;
-pub(crate) use click::ClickRequest;
+pub(crate) use click::ElementInputRequest;
 pub(crate) mod ax_snapshot;
 mod ax_target;
 mod ax_write;
@@ -1152,9 +1152,9 @@ impl CuaActionSlot {
         ) {
             return refused("permit_binding", e);
         }
-        let click = match action.click_request() {
+        let click = match action.element_input_request() {
             Ok(value) => value.is_some(),
-            Err(error) => return refused("click_request", error),
+            Err(error) => return refused("element_input_request", error),
         };
         if click && write_gate.is_none() {
             return refused("click_gate_missing", CuaError::PermissionDenied);

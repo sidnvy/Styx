@@ -1766,6 +1766,65 @@
       }
     },
     {
+      "name": "type_text",
+      "title": "type_text",
+      "description": "Type text into a fresh observed element on a Linux Host using explicit foreground keyboard delivery. Requires pid, window_id, element_token, text and delivery_mode:\"foreground\". May activate the target window. Inserts text at the element caret; it does not replace existing text. Uses the existing Cua compositor/keyboard path; no clipboard, pixel or unspecified-focused-window route. Observe new state afterward. Unknown outcomes must not be replayed. Select the execution host with environment_id.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pid": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647,
+            "description": "Observed native process ID."
+          },
+          "window_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "Observed exact native window ID."
+          },
+          "element_token": {
+            "type": "string",
+            "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+            "maxLength": 14,
+            "description": "Fresh element_token from the most recent complete Styx element tree. A token must use a nonzero snapshot and canonical row 0–2047; the decoder checks these semantics."
+          },
+          "environment_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. With multiple Hosts, select the device explicitly; an offline target never falls back to another Host."
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 16384,
+            "description": "Text to insert at the native caret, at most 16 KiB UTF-8. Not an implicit replacement.",
+            "minLength": 1
+          },
+          "delivery_mode": {
+            "type": "string",
+            "const": "foreground",
+            "description": "Explicitly permits temporary target-window activation for OS keyboard input."
+          }
+        },
+        "required": [
+          "pid",
+          "window_id",
+          "element_token",
+          "text",
+          "delivery_mode"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
       "name": "verify_state",
       "title": "verify_state",
       "description": "Styx verify_state read-only native route. Select execution host with environment_id; native platform constraints still apply. Use Styx computer tools when GUI observation/interaction is necessary or the user explicitly requests a GUI workflow. Git/GitHub clone, downloads, file operations, builds, tests and CLI work default to exec_command, including foreground/TTY sessions. Do not open Terminal through Spotlight or another launcher to paste commands, including as a fallback for Exec failure, authentication, sandbox restrictions or disconnection; check get_execution_environment_status and recover the Exec connection or report the blocker. For genuine GUI tasks observe first and act with fresh references; after a desktop error refresh stale observations or report the missing permission/connection, not osascript/System Events or shell-driven input.",

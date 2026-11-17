@@ -563,7 +563,7 @@ mod public_contract_regressions {
             arguments.insert("full_output".into(), Value::Bool(true));
             assert!(ComputerRequest::parse("get_window_state", Some(arguments)).is_err());
         }
-        for name in ["type_text", "press_key", "scroll"] {
+        for name in ["press_key", "scroll"] {
             assert!(!is_public_computer_tool(name));
             assert!(ComputerRequest::parse(name, None).is_err());
         }

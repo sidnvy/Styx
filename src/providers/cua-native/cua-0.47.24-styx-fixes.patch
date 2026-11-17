@@ -819,3 +819,236 @@
  /// How `set_value` wrote the value.
  enum SetValueRoute {
      /// A UIA pattern on a non-combo element (`ValuePattern`, `RangeValuePattern`).
+--- a/libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs
+@@ -14,8 +14,8 @@
+ use super::impl_::{
+     announce_keyboard_target, atspi_up, background_keyboard_refusal, background_virtual_text,
+     coordinate_frame_is_desktop, coordinate_frame_schema, focus_by_pixel,
+-    focus_hyprland_foreground, focus_nested_inject_target, foreground_hyprland_refusal,
+-    foreground_structured, hyprland_foreground, hyprland_input_result, inject_terminal_input,
++    focus_nested_inject_target, foreground_hyprland_refusal,
++    foreground_structured, hyprland_foreground, inject_terminal_input,
+     input_error_result, invalid_pointer_arguments, is_chromium_embedder, is_popup_keyboard_grab,
+     is_terminal_process, is_webkitgtk_embedder, isolated_hyprland_background,
+     isolated_hyprland_refusal, isolated_hyprland_result, isolated_hyprland_task_error,
+@@ -444,93 +444,43 @@
+         }
+ 
+         if hyprland_foreground(delivery) {
+-            if xid_opt.is_none() {
+-                return foreground_hyprland_refusal("an exact window_id is required");
+-            }
+-            // Native editables retain their verifiable, addressed AT-SPI route.
+-            if !is_chromium_embedder(pid) && !is_webkitgtk_embedder(pid) {
+-                if let Some(element) = token.clone() {
+-                    let text_ax = text.clone();
+-                    if matches!(
+-                        tokio::task::spawn_blocking(move || crate::atspi::type_into_token(
+-                            pid, &element, &text_ax
+-                        ))
+-                        .await,
+-                        Ok(Ok(()))
+-                    ) {
+-                        position_named_session_keyboard_cursor(
+-                            &self.state,
+-                            &args,
+-                            pid,
+-                            xid,
+-                            token.clone(),
+-                            None,
+-                            true,
+-                        )
+-                        .await;
+-                        return type_text_ax_result(
+-                            pid,
+-                            text.chars().count(),
+-                            "via targeted AT-SPI",
+-                        );
+-                    }
++            // Explicit foreground typing uses the normal compositor and virtual
++            // keyboard protocol. It does not require the optional isolated-input
++            // compositor plugin and never tries AX then repeats through keys.
++            let Some(element) = token.as_ref() else {
++                return foreground_hyprland_refusal("a fresh exact element token is required");
++            };
++            if xid_opt.is_none() || px.is_some() || py.is_some() {
++                return foreground_hyprland_refusal("an exact element/window target is required");
++            }
++            let object = match element.object() {
++                Ok(object) => object.clone(),
++                Err(_) => return foreground_hyprland_refusal("cached element is unavailable"),
++            };
++            if !crate::wayland::keyboard_input_available() {
++                return ToolResult::error("native Wayland virtual keyboard is unavailable")
++                    .with_structured(json!({"code":"keyboard_unavailable","effect":"none"}));
++            }
++            let count = text.chars().count();
++            let result = spawn_blocking_bounded("foreground element typing", text_typing_budget(count), move || {
++                crate::wayland::hyprland::activate_exact(xid, pid)?;
++                if !crate::atspi::native::focus_element_ref(&object)? {
++                    anyhow::bail!("native element focus was not confirmed");
+                 }
+-            }
+-            match crate::wayland::hyprland_input::text_actions(&text) {
+-                Ok(actions) if !actions.is_empty() => {}
+-                Ok(_) => return foreground_hyprland_refusal("foreground text must not be empty"),
+-                Err(error) => return foreground_hyprland_refusal(error.to_string()),
+-            }
+-            if let Err(error) =
+-                focus_hyprland_foreground(&self.state, &args, pid, xid, token.clone(), px.zip(py))
+-                    .await
+-            {
+-                return error;
+-            }
+-            if named_session_cursor_key(&args).is_some() {
+-                if px.is_none() {
+-                    position_named_session_keyboard_cursor(
+-                        &self.state,
+-                        &args,
+-                        pid,
+-                        xid,
+-                        token.clone(),
+-                        None,
+-                        true,
+-                    )
+-                    .await;
++                if !crate::wayland::hyprland::target_is_active(xid, Some(pid))? {
++                    anyhow::bail!("target lost compositor focus before typing");
+                 }
+-            } else {
+-                announce_keyboard_target(&args, pid, xid, token.clone(), px.zip(py)).await;
+-            }
+-            let owner = named_session_cursor_key(&args);
+-            let (_cancellation, dispatch) =
+-                match spawn_isolated_hyprland(&args, move |cancellation| {
+-                    crate::wayland::hyprland_input::execute_foreground_text(
+-                        owner,
+-                        pid,
+-                        xid,
+-                        &text,
+-                        cancellation,
+-                    )
+-                }) {
+-                    Ok(dispatch) => dispatch,
+-                    Err(_) => {
+-                        return foreground_hyprland_refusal(
+-                            "authenticated admitted lifecycle required",
+-                        )
+-                    }
+-                };
+-            return hyprland_input_result(
+-                match dispatch.await {
+-                    Ok(result) => result,
+-                    Err(error) => Err(crate::wayland::hyprland_input::unknown_dispatch(
+-                        error.into(),
+-                        0,
+-                    )),
+-                },
+-                true,
+-            );
++                crate::input::action::admit(|| ())?;
++                crate::wayland::type_text_focused_once(&text)
++            }).await;
++            return match result {
++                Ok(Ok(())) => ToolResult::text("Typed into the confirmed native element; observe the result.")
++                    .with_structured(type_text_structured("wayland_keyboard", count, false)),
++                // A focus change or input could already have happened. Preserve
++                // that uncertainty; do not run a second writer or retry keys.
++                _ => ToolResult::error("foreground keyboard input outcome is unconfirmed")
++                    .with_structured(json!({"code":"foreground_input_unknown","effect":"unknown"})),
++            };
+         }
+ 
+         position_named_session_keyboard_cursor(
+@@ -1204,3 +1154,14 @@
+         "約"
+     );
+ }
++
++#[cfg(test)]
++#[test]
++fn styx_native_foreground_text_never_retries_through_ax_or_requires_plugin() {
++    let source=include_str!("type_text.rs");
++    let route=source.split("// Explicit foreground typing").nth(1).unwrap()
++        .split("position_named_session_keyboard_cursor(").next().unwrap();
++    assert!(route.contains("type_text_focused_once(&text)"));
++    assert!(!route.contains("type_into_token("));
++    assert!(!route.contains("execute_foreground_text("));
++}
+--- a/libs/cua-driver/rust/crates/platform-linux/src/wayland/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/wayland/mod.rs
+@@ -2854,6 +2854,20 @@
+ /// the caller. This avoids re-resolving a title that can change mid-sequence
+ /// (for example after opening a Chromium tab). Under niri, text goes out on
+ /// niri's own keymap and stops if focus leaves the window that had it.
++/// Native support evidence only; no keyboard is created and no input is sent.
++pub fn keyboard_input_available() -> bool {
++    is_wayland() && virtual_keyboard::available().unwrap_or(false)
++}
++
++/// One normal wtype delivery after the caller confirms exact element focus.
++/// A failure after launching the writer is not permission to use libei/retype.
++pub fn type_text_focused_once(text: &str) -> anyhow::Result<()> {
++    let text = text_keys::typable_text(text)?;
++    let output = wtype_output(&["-k", "Shift_L", "--", &text])?;
++    anyhow::ensure!(output.status.success(), "native keyboard writer did not complete");
++    Ok(())
++}
++
+ pub fn type_text_focused(text: &str) -> anyhow::Result<()> {
+     type_into(None, text)
+ }
+--- a/libs/cua-driver/rust/crates/platform-linux/src/wayland/virtual_keyboard.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/wayland/virtual_keyboard.rs
+@@ -105,6 +105,18 @@
+         _: &QueueHandle<Self>,
+     ) {
+     }
++}
++
++/// Inspect the standard Wayland globals without constructing an input device.
++pub(super) fn available() -> anyhow::Result<bool> {
++    let conn = Connection::connect_to_env()?;
++    let mut queue = conn.new_event_queue::<State>();
++    let qh = queue.handle();
++    conn.display().get_registry(&qh, ());
++    let mut state = State::default();
++    queue.roundtrip(&mut state)?;
++    queue.roundtrip(&mut state)?;
++    Ok(state.manager.is_some() && state.seats.selected().is_some())
+ }
+ 
+ pub(super) fn hotkey(modifiers: &[String], key: &str) -> anyhow::Result<()> {
+--- a/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs
+@@ -811,6 +811,19 @@
+     Ok(())
+ }
+ 
++/// Focus an exact compositor address only after binding it to the expected PID.
++/// Uses ordinary Hyprland IPC once, not the optional isolated-input plugin.
++pub fn activate_exact(address: u64, pid: u32) -> Result<()> {
++    capture_target(&list_windows()?, address, Some(pid))?;
++    if target_is_active(address, Some(pid))? { return Ok(()); }
++    let mut ipc = ipc_connection()?;
++    let command = format!("dispatch focuswindow address:0x{address:x}");
++    let reply = read_reply(&mut ipc, command.as_bytes(), action_capped(QUERY_TIMEOUT)?)?;
++    anyhow::ensure!(reply.trim_ascii() == b"ok", "Hyprland exact focus was refused");
++    anyhow::ensure!(target_is_active(address, Some(pid))?, "Hyprland exact focus was not confirmed");
++    Ok(())
++}
++
+ pub fn window_for_address(address: u64) -> Option<Window> {
+     list_windows()
+         .ok()?
+--- a/libs/cua-driver/rust/crates/platform-linux/src/tools/check_permissions.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/tools/check_permissions.rs
+@@ -76,6 +76,6 @@
+             if x11_ok { "✅ available" } else { "❌ requires X11" }
+         );
+         ToolResult::text(status_text)
+-            .with_structured(json!({ "x11": x11_ok, "wayland": wayland_display.is_some(), "wayland_enabled": crate::wayland::wayland_enabled(), "atspi": atspi_ok, "dbus_session_bus_address": dbus_address, "xsend_event": x11_ok }))
++            .with_structured(json!({ "x11": x11_ok, "wayland": wayland_display.is_some(), "wayland_enabled": crate::wayland::wayland_enabled(), "atspi": atspi_ok, "dbus_session_bus_address": dbus_address, "xsend_event": x11_ok, "wayland_virtual_keyboard": crate::wayland::keyboard_input_available() }))
+     }
+ }

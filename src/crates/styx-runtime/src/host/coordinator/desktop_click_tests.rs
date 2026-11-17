@@ -92,6 +92,7 @@ async fn fixture_for_pid(pid: u32) -> (State, OwnerLease, ResourceTarget) {
         CapabilityId::DesktopAccessibility,
         CapabilityId::DesktopCapture,
         CapabilityId::DesktopPointer,
+        CapabilityId::DesktopKeyboard,
         CapabilityId::DesktopWindowsControl,
     ] {
         state
@@ -400,10 +401,14 @@ fn prepare(
     resource: &ResourceTarget,
     action: &CuaAction,
 ) -> Result<(CuaAction, PreparedContext), CoordinatorError> {
-    let (action, observation) =
-        prepare_click(state, owner, resource, &action.click_request()?.unwrap())?;
+    let (action, observation) = prepare_element_input(
+        state,
+        owner,
+        resource,
+        &action.element_input_request()?.unwrap(),
+    )?;
     let mut context = context();
-    context.capability = CapabilityId::DesktopPointer;
+    context.capability = action.capability()?;
     context.session = Some(desktop(state)?.binding.clone());
     context.observation = Some(observation);
     Ok((action, context))
@@ -419,6 +424,14 @@ async fn desktop_click_fresh_token_dispatches_once_and_unknown_is_never_replayed
         (true, json!({"delivery_mode":"background"})),
         (false, json!({"button":"left","delivery_mode":"background"})),
         (true, json!({"button":"left","delivery_mode":"background"})),
+        (
+            false,
+            json!({"pid":std::process::id(),"window_id":42,"text":"Chrome 原生输入","delivery_mode":"foreground"}),
+        ),
+        (
+            true,
+            json!({"pid":std::process::id(),"window_id":42,"text":"Chrome 原生输入","delivery_mode":"foreground"}),
+        ),
     ] {
         let (mut state, owner, resource) = fixture().await;
         let mut arguments = json!({"element_token":"s00000002:1"})
@@ -426,17 +439,31 @@ async fn desktop_click_fresh_token_dispatches_once_and_unknown_is_never_replayed
             .unwrap()
             .clone();
         arguments.extend(defaults.as_object().unwrap().clone());
-        let request = CuaAction::new("click".into(), arguments).unwrap();
-        assert_eq!(
-            request.to_operation_payload().unwrap(),
-            click("s00000002:1").to_operation_payload().unwrap()
-        );
+        let keyboard = arguments.contains_key("text");
+        let request = CuaAction::new(
+            if keyboard { "type_text" } else { "click" }.into(),
+            arguments,
+        )
+        .unwrap();
+        if !keyboard {
+            assert_eq!(
+                request.to_operation_payload().unwrap(),
+                click("s00000002:1").to_operation_payload().unwrap()
+            );
+        }
         let (action, context) = prepare(&state, &owner, &resource, &request).unwrap();
         assert_eq!(
-            action.click_request().unwrap().unwrap().element_token,
+            action
+                .element_input_request()
+                .unwrap()
+                .unwrap()
+                .element_token,
             "s00000001:1"
         );
-        assert_eq!(action.click_request().unwrap().unwrap().window_id, Some(42));
+        assert_eq!(
+            action.element_input_request().unwrap().unwrap().window_id,
+            Some(42)
+        );
         // A permissions refresh replaces registry observations, not the retained tree.
         for cap in [
             CapabilityId::DesktopAccessibility,
@@ -452,12 +479,12 @@ async fn desktop_click_fresh_token_dispatches_once_and_unknown_is_never_replayed
                 )
                 .unwrap();
         }
-        let facts = validate_click_dispatch(
+        let facts = validate_element_input_dispatch(
             &state,
             &owner,
             &resource,
             &context,
-            &action.click_request().unwrap().unwrap(),
+            &action.element_input_request().unwrap().unwrap(),
             MonotonicMillis(1),
         )
         .unwrap();
@@ -492,7 +519,7 @@ async fn desktop_click_fresh_token_dispatches_once_and_unknown_is_never_replayed
             .take()
             .unwrap();
         retained
-            .recheck_click(
+            .recheck_element_input(
                 &state,
                 &owner,
                 &reserved.id,
@@ -579,12 +606,12 @@ async fn desktop_click_wrong_stale_expired_and_ungranted_targets_never_dispatch(
             .unwrap()
             .remote_grant = false;
         assert!(
-            validate_click_dispatch(
+            validate_element_input_dispatch(
                 &state,
                 &owner,
                 &resource,
                 &context,
-                &action.click_request().unwrap().unwrap(),
+                &action.element_input_request().unwrap().unwrap(),
                 MonotonicMillis(1)
             )
             .is_err()
@@ -608,12 +635,12 @@ async fn desktop_click_wrong_stale_expired_and_ungranted_targets_never_dispatch(
         .observed_at -= Duration::from_secs(30);
     assert!(prepare(&state, &owner, &resource, &click("s00000002:1")).is_err());
     assert!(
-        validate_click_dispatch(
+        validate_element_input_dispatch(
             &state,
             &owner,
             &resource,
             &context,
-            &action.click_request().unwrap().unwrap(),
+            &action.element_input_request().unwrap().unwrap(),
             MonotonicMillis(1)
         )
         .is_err()
@@ -646,12 +673,12 @@ async fn desktop_click_requires_current_os_evidence_and_latest_owned_window_read
                 .provider(&binding, refused, Duration::from_secs(60))
                 .unwrap();
             assert!(
-                validate_click_dispatch(
+                validate_element_input_dispatch(
                     &state,
                     &owner,
                     &resource,
                     &context,
-                    &action.click_request().unwrap().unwrap(),
+                    &action.element_input_request().unwrap().unwrap(),
                     MonotonicMillis(1)
                 )
                 .is_err()
@@ -664,12 +691,12 @@ async fn desktop_click_requires_current_os_evidence_and_latest_owned_window_read
             .provider(&binding, unavailable, Duration::from_secs(60))
             .unwrap();
         assert!(
-            validate_click_dispatch(
+            validate_element_input_dispatch(
                 &state,
                 &owner,
                 &resource,
                 &context,
-                &action.click_request().unwrap().unwrap(),
+                &action.element_input_request().unwrap().unwrap(),
                 MonotonicMillis(1)
             )
             .is_err()
@@ -714,7 +741,7 @@ async fn desktop_click_requires_current_os_evidence_and_latest_owned_window_read
             .clone(),
     )
     .unwrap();
-    assert!(pixel.click_request().is_err());
+    assert!(pixel.element_input_request().is_err());
     for unsupported in [
         json!({"button":"right"}),
         json!({"button":"middle"}),
@@ -726,7 +753,7 @@ async fn desktop_click_requires_current_os_evidence_and_latest_owned_window_read
             .clone();
         arguments.extend(unsupported.as_object().unwrap().clone());
         let request = CuaAction::new("click".into(), arguments).unwrap();
-        assert!(request.click_request().is_err());
+        assert!(request.element_input_request().is_err());
         assert!(prepare(&state, &owner, &resource, &request).is_err());
     }
 }
@@ -865,7 +892,7 @@ async fn desktop_click_receipt_survives_original_target_exit_but_cannot_authoriz
         .unwrap();
     let (mut state, owner, resource) = fixture_for_pid(child.id()).await;
     let (action, context) = prepare(&state, &owner, &resource, &click("s00000002:1")).unwrap();
-    let request = action.click_request().unwrap().unwrap();
+    let request = action.element_input_request().unwrap().unwrap();
     let retained = state
         .desktop
         .as_mut()
@@ -874,7 +901,7 @@ async fn desktop_click_receipt_survives_original_target_exit_but_cannot_authoriz
         .take()
         .unwrap();
     retained
-        .click_facts(
+        .element_input_facts(
             &state,
             &owner,
             &resource,
@@ -888,7 +915,7 @@ async fn desktop_click_receipt_survives_original_target_exit_but_cannot_authoriz
     child.wait().unwrap();
     assert!(
         retained
-            .click_facts(
+            .element_input_facts(
                 &state,
                 &owner,
                 &resource,
@@ -899,7 +926,7 @@ async fn desktop_click_receipt_survives_original_target_exit_but_cannot_authoriz
             .is_err()
     );
     retained
-        .click_result_facts(
+        .element_input_result_facts(
             &state,
             &owner,
             &resource,
@@ -908,11 +935,11 @@ async fn desktop_click_receipt_survives_original_target_exit_but_cannot_authoriz
             MonotonicMillis(2),
         )
         .unwrap();
-    let mut wrong = action.click_request().unwrap().unwrap();
+    let mut wrong = action.element_input_request().unwrap().unwrap();
     wrong.window_id = Some(43);
     assert!(
         retained
-            .click_result_facts(
+            .element_input_result_facts(
                 &state,
                 &owner,
                 &resource,
@@ -925,7 +952,7 @@ async fn desktop_click_receipt_survives_original_target_exit_but_cannot_authoriz
     state.facts.grant_revision += 1;
     assert!(
         retained
-            .click_result_facts(
+            .element_input_result_facts(
                 &state,
                 &owner,
                 &resource,
@@ -936,4 +963,68 @@ async fn desktop_click_receipt_survives_original_target_exit_but_cannot_authoriz
             .is_err()
     );
     assert!(prepare(&state, &owner, &resource, &click("s00000002:1")).is_err());
+}
+
+#[tokio::test]
+async fn explicit_element_typing_preserves_window_owner_keyboard_and_focus_permissions() {
+    let (mut state, owner, resource) = fixture().await;
+    let input = |pid: u32, window: u64, token: &str| {
+        CuaAction::new("type_text".into(),
+        json!({"pid":pid,"window_id":window,"element_token":token,"text":"fixture text","delivery_mode":"foreground"})
+            .as_object().unwrap().clone()).unwrap()
+    };
+    let pid = std::process::id();
+    for action in [
+        input(pid, 43, "s00000002:1"),
+        input(pid, 42, "s00000001:1"),
+        input(pid, 42, "s00000002:0"),
+    ] {
+        assert!(prepare(&state, &owner, &resource, &action).is_err());
+    }
+    let (action, context) =
+        prepare(&state, &owner, &resource, &input(pid, 42, "s00000002:1")).unwrap();
+    assert_eq!(context.capability, CapabilityId::DesktopKeyboard);
+    assert_eq!(
+        serde_json::to_value(&action).unwrap()["arguments"]["text"],
+        "fixture text"
+    );
+    assert_eq!(
+        serde_json::to_value(&action).unwrap()["arguments"]["delivery_mode"],
+        "foreground"
+    );
+    let request = action.element_input_request().unwrap().unwrap();
+    for capability in [
+        CapabilityId::DesktopKeyboard,
+        CapabilityId::DesktopWindowsControl,
+    ] {
+        let lane = state.desktop.as_mut().unwrap();
+        lane.grants.get_mut(&capability).unwrap().remote_grant = false;
+        assert!(
+            validate_element_input_dispatch(
+                &state,
+                &owner,
+                &resource,
+                &context,
+                &request,
+                MonotonicMillis(1)
+            )
+            .is_err()
+        );
+        state
+            .desktop
+            .as_mut()
+            .unwrap()
+            .grants
+            .get_mut(&capability)
+            .unwrap()
+            .remote_grant = true;
+    }
+    let stranger = state
+        .ledger
+        .register_verified_owner(
+            "different-text-owner".try_into().unwrap(),
+            "different-text-epoch".try_into().unwrap(),
+        )
+        .unwrap();
+    assert!(prepare(&state, &stranger, &resource, &input(pid, 42, "s00000002:1")).is_err());
 }
