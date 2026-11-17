@@ -1,21 +1,15 @@
 name: Styx release
 
+# The only signed distribution pipeline. Use a version tag already on main.
 on:
   push:
     tags: ['v[0-9]*']
-    branches: [develop]
-    paths: ['.github/workflows/styx-release.yml', 'Cargo.toml', 'Cargo.lock', 'src/ci/release-*', 'src/tools/release/**', 'src/host/build-*', 'src/host/windows/platform-update/**', 'src/host/macos/product-ui/ProductOwnedCore.swift']
   workflow_dispatch:
-    inputs:
-      publish:
-        description: 'Publish the matching version tag after all packages succeed'
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 concurrency:
-  group: styx-release-${{ github.ref }}-${{ github.sha }}
+  group: styx-release-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -25,10 +19,10 @@ env:
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
 jobs:
-  quality:
+  # No signing environment or secrets before source eligibility is established.
+  source:
     runs-on: ubuntu-24.04
-    container: debian:bookworm-slim
-    timeout-minutes: 60
+    timeout-minutes: 5
     outputs:
       version: ${{ steps.meta.outputs.version }}
       marketing: ${{ steps.meta.outputs.marketing }}
@@ -36,6 +30,27 @@ jobs:
       publish: ${{ steps.meta.outputs.publish }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
       build_number: ${{ steps.meta.outputs.build_number }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require version tag from main
+        id: meta
+        run: python3 -I -B src/ci/release-ci.py metadata --build-number "$((1142 + GITHUB_RUN_NUMBER))"
+
+  quality:
+    needs: source
+    runs-on: ubuntu-24.04
+    container: debian:bookworm-slim
+    timeout-minutes: 60
+    outputs:
+      version: ${{ needs.source.outputs.version }}
+      marketing: ${{ needs.source.outputs.marketing }}
+      revision: ${{ needs.source.outputs.revision }}
+      publish: ${{ needs.source.outputs.publish }}
+      prerelease: ${{ needs.source.outputs.prerelease }}
+      build_number: ${{ needs.source.outputs.build_number }}
     steps:
       - name: Debian 12 build tools
         run: |
@@ -74,12 +89,6 @@ jobs:
           restore-keys: |
             quality-linux-rust1971-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
             quality-linux-rust1971-
-      - name: Version and source
-        id: meta
-        env:
-          PUBLISH: ${{ inputs.publish || false }}
-        run: |
-          python3 src/ci/release-ci.py metadata --build-number "$((1142 + GITHUB_RUN_NUMBER))" $(test "$PUBLISH" != true || printf '%s' '--publish')
       - name: Locked dependencies and available CPU budget
         run: |
           echo "CARGO_BUILD_JOBS=$(nproc)" >> "$GITHUB_ENV"
@@ -95,6 +104,7 @@ jobs:
           retention-days: 14
 
   dependencies:
+    needs: source
     # Public dependencies/Cua can build while the shared Rust gate runs.
     strategy:
       fail-fast: false
@@ -165,11 +175,8 @@ jobs:
           restore-keys: |
             cua-${{ matrix.target }}-rust1971-${{ hashFiles('src/providers/cua-native/**', 'src/ci/release-cua.py') }}-
             cua-${{ matrix.target }}-rust1971-
-      - name: Source version
-        id: meta
-        run: python3 src/ci/release-ci.py metadata --build-number "$((1142 + GITHUB_RUN_NUMBER))"
       - name: Build pinned upstream Cua with the retained behavioral fixes
-        run: python3 src/ci/release-cua.py --platform '${{ matrix.platform }}' --source-revision '${{ steps.meta.outputs.revision }}' --cache "$HOME/.cache/styx-public-dependencies" --target-dir "$HOME/.cache/styx-cua-target" --output "$RUNNER_TEMP/cua"
+        run: python3 src/ci/release-cua.py --platform '${{ matrix.platform }}' --source-revision '${{ needs.source.outputs.revision }}' --cache "$HOME/.cache/styx-public-dependencies" --target-dir "$HOME/.cache/styx-cua-target" --output "$RUNNER_TEMP/cua"
       - name: Save completed Cua compilation before signing
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         if: success() && steps.cua_cache.outputs.cache-hit != 'true'
@@ -179,7 +186,7 @@ jobs:
       - name: Fetch pinned public executors and locked Browser dependencies
         env:
           STYX_PLATFORM: ${{ matrix.platform }}
-          STYX_VERSION: ${{ steps.meta.outputs.version }}
+          STYX_VERSION: ${{ needs.source.outputs.version }}
         run: |
           suffix=''
           if [ "$STYX_PLATFORM" = windows ]; then suffix='.exe'; fi
@@ -204,8 +211,8 @@ jobs:
       - name: Sign fresh macOS worker copies before publisher sealing
         if: matrix.platform == 'macos'
         run: |
-          python3 src/ci/release-macos.py sign-workers --source-revision '${{ steps.meta.outputs.revision }}' --input-dir "$RUNNER_TEMP/workers" --local-signing "$RUNNER_TEMP/mac-signing/local-signing.json"
-          python3 src/ci/release-workers.py manifest --platform macos --version '${{ steps.meta.outputs.version }}' --worker-release "$RUNNER_TEMP/workers/worker-release"
+          python3 src/ci/release-macos.py sign-workers --source-revision '${{ needs.source.outputs.revision }}' --input-dir "$RUNNER_TEMP/workers" --local-signing "$RUNNER_TEMP/mac-signing/local-signing.json"
+          python3 src/ci/release-workers.py manifest --platform macos --version '${{ needs.source.outputs.version }}' --worker-release "$RUNNER_TEMP/workers/worker-release"
       - name: Archive workers for this run only
         run: python3 src/ci/release-ci.py bundle --source "$RUNNER_TEMP/workers" --output "$RUNNER_TEMP/workers-${{ matrix.platform }}.tar.gz"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -495,8 +502,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.quality.outputs.version }}
           PRERELEASE: ${{ needs.quality.outputs.prerelease }}
+          SOURCE_REVISION: ${{ needs.quality.outputs.revision }}
         run: |
           args=()
           if [ "$PRERELEASE" = true ]; then args+=(--prerelease); fi
-          gh release create "v$VERSION" "$RUNNER_TEMP/release/"* --draft --verify-tag --title "Styx $VERSION" --notes-file src/docs/github-release-notes.md "${args[@]}"
+          {
+            printf 'Source commit: `%s`\n' "$SOURCE_REVISION"
+            printf 'CI: https://github.com/%s/actions/runs/%s\n\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            cat src/docs/github-release-notes.md
+          } > "$RUNNER_TEMP/release-notes.md"
+          # No clobber: an already-published version is never replaced in place.
+          gh release create "v$VERSION" "$RUNNER_TEMP/release/"* --draft --verify-tag --title "Styx $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md" "${args[@]}"
           gh release edit "v$VERSION" --draft=false

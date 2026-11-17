@@ -1,7 +1,7 @@
 name: Styx contracts
 on:
   push:
-    branches: [develop, main]
+    branches: [main]
     paths:
       - 'src/**'
       - 'package.json'

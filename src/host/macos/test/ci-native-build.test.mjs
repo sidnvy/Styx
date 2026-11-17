@@ -29,9 +29,9 @@ test('CI copies main.swift, uses production Swift argv and provides real artwork
  assert.throws(()=>compileMacTestingApp(output,{platform:'darwin',run:()=>assert.fail('existing output must not compile')}),/fresh_absolute_native_ci_output_required/);
  const other=path.join(root,'other');assert.throws(()=>compileMacTestingApp(other,{platform:'linux',run:()=>assert.fail('non-native platform must not compile')}),/native_macos_compile_required/);assert.equal(fs.existsSync(other),false);
 });
-test('develop pushes compile before binary-dependent fixtures and retain the native owner lifetime gate',()=>{
+test('main pushes compile before binary-dependent fixtures and retain the native owner lifetime gate',()=>{
  const workflow=fs.readFileSync(new URL('../../../../.github/workflows/styx-macos-app.yml',import.meta.url),'utf8');
- assert.match(workflow,/push:\s*\n\s*branches: \[develop\]/);assert.match(workflow,/paths: \['src\/\*\*'/);
+ assert.match(workflow,/push:\s*\n\s*branches: \[main\]/);assert.match(workflow,/paths: \['src\/\*\*'/);
  const compile=workflow.indexOf('node src/host/macos/ci-native-build.mjs'),fixtures=workflow.indexOf('node --test --test-concurrency=1 src/host/macos/test/*.test.mjs');assert.ok(compile>0&&fixtures>compile);
  assert.ok(workflow.slice(compile,fixtures).includes('STYX_NATIVE_TEST_BINARY='));assert.ok(workflow.includes('"$STYX_NATIVE_TEST_BINARY" --self-test'));assert.ok(workflow.includes('liveness-acceptance.py "$STYX_NATIVE_TEST_BINARY"'));
  assert.equal(workflow.includes('swiftc -D STYX_TESTING'),false);

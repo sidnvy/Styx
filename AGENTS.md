@@ -7,9 +7,16 @@
 - Keep task lifetime separate from caller access: Exec tasks and continuation state belong to Host; Gateway must not keep a second task directory or stop Exec on chat cleanup. Host runtime owns task/caller state across protocol reconstruction; ordinary disconnect ends the link, while explicit revocation and local quit enter the existing Host shutdown path. Browser sessions also belong to Host: chat cleanup preserves them, explicit takeover changes only the current operator and invalidates old references, and close/capability disable/Host exit ends them. Gateway holds no second Browser directory; Cua keeps upstream concurrency.
 - Start with the platform framework or upstream executor's normal behavior. Add a process, durable state or protocol only for a concrete user-visible requirement. When ownership moves, remove the superseded path and verify the change through its normal entry point. Keep the runtime stop reason separate from observed cleanup facts; clients consume the same result instead of inferring cleanup from an error code.
 
+## Release authority
+
+- `main` is the single release source. Local builds are for development/tests, not routine device upgrades.
+- Publish only a new matching version tag already merged to `main`, through `.github/workflows/styx-release.yml`.
+- Use the complete GitHub Release assets from that run for every platform. Never reuse a version/tag for changed code, mix CI/local installers, or call an Actions artifact a published Release.
+- Keep existing identities and caches. Installed version, running Runtime selection and feature acceptance are separate facts; see `src/docs/RELEASING.md`.
+
 ## Default development loop
 
-- Work in the existing project and native cache. WORKSPACE.md maps paths and commands; read only the relevant section. On the workstation, integrate into /home/sid/Developer/Styx on develop; origin is GitHub.
+- Work in the existing project and native cache. WORKSPACE.md maps paths and commands; read only the relevant section. On the workstation, use the existing checkout/worktree; integrate reviewed changes through PRs into main. Origin is GitHub.
 - Keep reusable worker inputs, runtimes, packages and acceptance evidence in the persistent artifact locations in WORKSPACE.md; `/tmp` is only for small disposable files. Check active owners before retiring outputs.
 - Reuse the existing development command and cache in WORKSPACE.md. Match build settings to the warm artifacts and size parallelism to observed resources.
 - Develop and reproduce locally before release production: incremental affected-crate check, the changed scenario, and actual native execution when runtime behavior needs it. A typecheck is sufficient for a typecheck task, not for a startup/recovery fix.

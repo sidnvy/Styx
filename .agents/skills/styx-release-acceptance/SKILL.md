@@ -20,6 +20,12 @@ A status request alone does not authorize installation, configuration reset or t
 
 ## Freeze and production
 
+- Routine distribution uses only `main` -> new version tag -> GitHub Actions ->
+  complete GitHub Release. Follow `src/docs/RELEASING.md`; existing local producers
+  remain for development and diagnosis, not a parallel production supply path.
+- Do not package or install a second local "release" when a CI package is queued
+  or blocked. Resolve that one pipeline or report its concrete external blocker.
+
 - Integrate validated source once, run the integration quality gate, then freeze source/inputs.
   Keep immutable release receipts and outputs; do not require a new project, worktree, chat,
   toolchain or Cargo cache. Daily development remains incremental.

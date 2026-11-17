@@ -8,11 +8,11 @@ Read the relevant section rather than the historical record before every edit.
 
 | Machine | Product checkout | Native Cargo target | Tools and evidence |
 | --- | --- | --- | --- |
-| Workstation | /home/sid/Developer/Styx (develop) | /home/sid/Developer/Styx/target | /home/sid/Developer/Artifacts/Styx |
+| Workstation | /home/sid/Developer/Styx (shared checkout; PRs target main) | /home/sid/Developer/Styx/target | /home/sid/Developer/Artifacts/Styx |
 | PilotMac | /Users/it-bootstrap/Developer/Styx/source | /Users/it-bootstrap/Developer/Styx/cache/cargo-target | Persistent project tools/, inputs/, artifacts/, tasks/, scratch/ |
 | NAB5 | `D:\Developer\Styx\source` | `D:\Developer\Styx\cache\cargo-target` | Persistent project tools/, inputs/, artifacts/, tasks/, scratch/ |
 
-Origin is git@github.com:sidnvy/Styx.git. Integrate shared changes in the workstation checkout.
+Origin is git@github.com:sidnvy/Styx.git. Integrate shared changes into main through reviewed PRs.
 Native owners reuse their existing project, source checkout and chat; Git synchronization must preserve leased local changes.
 Do not create a checkout, toolchain or cache per candidate. Frozen outputs belong in artifacts.
 Use the newest relocation receipts when an old artifact references a former path.
@@ -99,3 +99,11 @@ live runtime data and process-referenced paths; Git does not recover all of thos
 - Earlier workspace snapshots, paths and retirement records:
   [historical workspace](src/docs/rust-core-rewrite/WORKSPACE-HISTORY-20261112.md).
   Consult it only for an old path/receipt; its dated commands and status are not current instructions.
+
+## Distribution
+
+`src/docs/RELEASING.md` is the single publication procedure. Local native builds
+are debug/test inputs only. Distribute versioned GitHub Release assets from the
+one tag-triggered GitHub workflow; do not deploy development-branch Actions
+artifacts or locally sealed packages as a routine update. Historical artifact
+paths above remain evidence/caches, not alternative release channels.
