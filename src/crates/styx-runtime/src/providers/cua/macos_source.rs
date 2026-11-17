@@ -605,6 +605,15 @@ mod renewal_acceptance {
             .commit_initial_native_pair(&mut control, &before, &after, &control_after, None)
             .unwrap();
         let identity = after.console_identity();
+        // A normal post-qualification read must not reopen the initial
+        // provisional claim. The previous test skipped this, so it could
+        // renew immediately after startup but not after hours of live reads.
+        let normal = observation.observe_native(None).unwrap();
+        assert_eq!(identity, normal.console_identity());
+        assert!(
+            !observation.initial_provisional,
+            "a live read must not mark the source as initially provisional"
+        );
         // Model the protocol-refused original observational FD, without
         // executing an action or replacing the original signed source.
         observation.fenced = true;
