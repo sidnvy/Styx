@@ -698,6 +698,10 @@ impl NativeTransactions {
     pub(crate) fn has_runtime_update_custody(&self) -> bool {
         self.retained_runtime_update.is_some()
     }
+    #[cfg(target_os = "macos")]
+    pub(crate) fn runtime_update_high_water(&self) -> Result<u64, NativeTransactionError> {
+        Ok(self.journal.observe()?.high_water)
+    }
     fn validate_runtime_app_scope(
         &self,
         scope: &std::sync::Arc<crate::app::HostScope>,

@@ -79,6 +79,7 @@ impl HostApp {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::super::runtime_bootstrap::same_file;
     use super::*;
 
