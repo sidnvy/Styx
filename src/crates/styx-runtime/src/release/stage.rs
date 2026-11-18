@@ -33,26 +33,6 @@ pub async fn stage(
     .await
 }
 
-/// First App setup installs an already admitted bundle into its private Runtime.
-/// Check each signed member while copying, without two additional tree scans.
-pub(crate) async fn stage_installed(
-    payload: &Path,
-    publisher_file: &Path,
-    expected_pin: &str,
-    destination_parent: &Path,
-    name: &OsStr,
-) -> Result<NativeRuntimeSelection> {
-    stage_with_policy(
-        payload,
-        publisher_file,
-        expected_pin,
-        destination_parent,
-        name,
-        false,
-    )
-    .await
-}
-
 async fn stage_with_policy(
     payload: &Path,
     publisher_file: &Path,

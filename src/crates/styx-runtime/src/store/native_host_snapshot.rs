@@ -188,6 +188,27 @@ impl NativeHostSnapshot {
     ) -> JournalResult<Self> {
         Self::open_source(path, Some(scope), None, RunPolicy::ControlBinding)
     }
+    /// Observe an App-managed Host using its currently installed App bundle.
+    /// The profile C07 selection remains historical enrollment data and is
+    /// never used to select executable bytes for this App-owned process.
+    pub(crate) fn observe_for_app_retained(
+        path: &Path,
+        scope: Arc<crate::app::HostScope>,
+        runtime: Arc<crate::release::VerifiedNativeRelease>,
+    ) -> JournalResult<Self> {
+        Self::open_source_retained(
+            path,
+            Some(scope),
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
+            None,
+            RunPolicy::ControlBinding,
+            Some(runtime),
+        )
+    }
     pub(crate) fn open_for_app(
         path: &Path,
         scope: Arc<crate::app::HostScope>,
@@ -475,16 +496,35 @@ impl NativeHostSnapshot {
         if bootstrap != seed.runtime {
             return Err(JournalError::Conflict);
         }
-        let candidate = match runtime {
+        let (candidate, execution_selection) = match runtime {
+            Some(candidate) if app_scope.is_some() && !run_policy.app_service_client() => {
+                // The OS-installed App is the executable authority. A legacy
+                // persisted selection cannot redirect an upgraded App back to
+                // copied Runtime files, but its publisher identity stays bound
+                // to the originally paired device.
+                let bundled = candidate
+                    .runtime_selection()
+                    .map_err(|_| JournalError::Conflict)?;
+                if bundled.publisher_spki_sha256 != current_selection.publisher_spki_sha256 {
+                    return Err(JournalError::Conflict);
+                }
+                candidate
+                    .revalidate_matches_selection(&bundled)
+                    .map_err(|_| JournalError::Conflict)?;
+                (candidate, bundled)
+            }
             Some(candidate) => {
                 candidate
                     .revalidate_matches_selection(&current_selection)
                     .map_err(|_| JournalError::Conflict)?;
-                candidate
+                (candidate, current_selection.clone())
             }
-            None => Arc::new(
-                crate::release::load_selected(&current_selection)
-                    .map_err(|_| JournalError::Conflict)?,
+            None => (
+                Arc::new(
+                    crate::release::load_selected(&current_selection)
+                        .map_err(|_| JournalError::Conflict)?,
+                ),
+                current_selection.clone(),
             ),
         };
         // The boundary above just fully verified/revalidated this exact object.
@@ -505,7 +545,7 @@ impl NativeHostSnapshot {
             canonical,
             pins,
             seed,
-            current_selection,
+            current_selection: execution_selection,
             verified_release: candidate,
             ready,
             ca,

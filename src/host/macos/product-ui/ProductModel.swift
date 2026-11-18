@@ -221,24 +221,9 @@ enum ProductRestorationPolicy {
             page = .welcome
         }
     }
-    var nativeRuntimeUpdate: ProductJSON { status["runtimeUpdate"] }
+    // The App updater remains independent of the removed Runtime updater.
     var checkAppUpdate: (() -> Void)?
-    @Published var updatingStyx = false
-    func updateStyx() {
-        guard !busy, nativeSupportsOperation("updateStyx") else { return }
-        let alert = NSAlert()
-        alert.messageText = productText("更新 Styx？", "Update Styx?")
-        alert.informativeText = productText("Styx 会完成更新并重新连接这台电脑。正在运行的任务会停止，设置与配对会保留。", "Styx will finish the update and reconnect this computer. Running tasks will stop; your settings and pairing will be kept.")
-        alert.addButton(withTitle: productText("更新", "Update"))
-        alert.addButton(withTitle: productText("取消", "Cancel"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        perform { [self] in
-            updatingStyx = true
-            defer { updatingStyx = false }
-            try applyNative(try await client.native("updateStyx", ["authorize": .bool(true)]))
-            checkAppUpdate?()
-        }
-    }
+
     #if STYX_TESTING
     var testSuppressObservations = false
     var testPreview = false

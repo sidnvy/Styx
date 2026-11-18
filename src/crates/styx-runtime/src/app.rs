@@ -537,6 +537,22 @@ impl HostApp {
         if let Some(d) = &diagnostic {
             d.report("app_scope_open_begin");
         }
+        // For a native desktop App, the installed bundle owns executable
+        // code. The persisted C07 runtime selection records prior enrollment
+        // history; it must not choose an older worker after the App is upgraded.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let app_runtime = if let Some(path) = selection.as_ref() {
+            let pinned = runtime_update::SelectionPin::open(path)?;
+            let runtime = Arc::new(
+                crate::release::load_selected(&pinned.selection).map_err(|e| AppError(e.code()))?,
+            );
+            pinned.validate()?;
+            Some(runtime)
+        } else {
+            None
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let app_runtime = None;
         let scope = Arc::new(HostScope::open(state_dir)?);
         if let Some(d) = &diagnostic {
             d.report("app_scope_open_ready");
@@ -555,7 +571,7 @@ impl HostApp {
             inspected_join: None,
             enrollment: None,
             native_computer_requested: None,
-            native_runtime: None,
+            native_runtime: app_runtime,
             input_writer: None,
             running: None,
             observed,
@@ -598,7 +614,12 @@ impl HostApp {
                 if let Some(d) = &app.startup_diagnostic {
                     d.report("app_enrollment_inspect_begin");
                 }
-                match native_join::inspect_for_app(app.scope.clone()).await {
+                let inspect = if let Some(bundle) = app.native_runtime.clone() {
+                    native_join::inspect_for_app_retained(app.scope.clone(), bundle).await
+                } else {
+                    native_join::inspect_for_app(app.scope.clone()).await
+                };
+                match inspect {
                     Ok(report) => {
                         app.native_computer_requested = Some(report.computer_requested);
                         app.native_runtime = Some(report.verified_runtime.clone());
@@ -1335,11 +1356,6 @@ impl HostApp {
                 "connect",
                 "disconnect",
                 "retireRole",
-                "updateStyx",
-                "stageRuntime",
-                "updateRuntime",
-                "runtimeUpdateStatus",
-                "recoverRuntimeUpdate",
             ]);
             // Advertise only the supported fresh single-Host composition.
             // The mutation still revalidates original scope, Ready and C07.
@@ -1599,28 +1615,17 @@ impl HostApp {
         if matches!(operation, Operation::RetireRole) {
             return self.retire_role(decode_input(&input)?).await;
         }
-        if matches!(operation, Operation::RuntimeUpdateStatus) {
-            self.scope.validate()?;
-            return Ok(self.snapshot().await);
-        }
-        if matches!(operation, Operation::UpdateStyx) {
-            self.update_styx(decode_input(&input)?).await?;
-            return Ok(self.snapshot().await);
-        }
-        if matches!(operation, Operation::StageRuntime) {
-            self.stage_runtime(decode_input(&input)?).await?;
-            return Ok(self.snapshot().await);
-        }
+        // App-managed execution always comes from the installed App bundle.
+        // Legacy Runtime-update commands must not activate a second copy.
         if matches!(
             operation,
-            Operation::UpdateRuntime | Operation::RecoverRuntimeUpdate
+            Operation::UpdateStyx
+                | Operation::StageRuntime
+                | Operation::UpdateRuntime
+                | Operation::RuntimeUpdateStatus
+                | Operation::RecoverRuntimeUpdate
         ) {
-            self.update_runtime(
-                decode_input(&input)?,
-                matches!(operation, Operation::RecoverRuntimeUpdate),
-            )
-            .await?;
-            return Ok(self.snapshot().await);
+            return Err(AppError("app_operation_not_supported"));
         }
         if matches!(operation, Operation::ResumeLocal) {
             self.resume_local(LocalInput::desktop(&input)?).await?;

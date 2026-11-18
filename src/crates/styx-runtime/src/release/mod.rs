@@ -857,7 +857,6 @@ mod windows_tests;
 mod digest_cache;
 mod stage;
 pub use stage::stage;
-pub(crate) use stage::stage_installed;
 #[cfg(test)]
 mod stage_tests;
 

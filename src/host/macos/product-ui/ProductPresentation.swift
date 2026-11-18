@@ -390,9 +390,7 @@ struct ProductDailyPanel: View {
         else { model.requestSettings(section) }
     }
     @ViewBuilder private var nativeRows: some View {
-        if model.updatingStyx {
-            ProgressView(productText("正在更新 Styx…", "Updating Styx…")).padding(16)
-        } else if model.status["configuration"] == .null && model.status["enrollment"] == .null && model.status["gateway"] == .null {
+        if model.status["configuration"] == .null && model.status["enrollment"] == .null && model.status["gateway"] == .null {
             ProductMenuRow(title: productText("开始设置", "Get started"), symbol: "sparkles") { controller?.showOnboarding() }
                 .disabled(!model.nativeCanCreateLocal)
             ProductMenuRow(title: productText("加入已有 Styx", "Join an existing Styx"), symbol: "link") {

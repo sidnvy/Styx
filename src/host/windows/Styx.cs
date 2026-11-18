@@ -530,11 +530,6 @@ namespace StyxNative {
    if(volumes!=null)foreach(var volume in volumes){double required,available;if(!Double.TryParse(Convert.ToString(Json.Get(volume,"requiredBytes")),out required)||!Double.TryParse(Convert.ToString(Json.Get(volume,"availableBytes")),out available)||Double.IsNaN(required)||Double.IsNaN(available)||Double.IsInfinity(required)||Double.IsInfinity(available)||required<0||available<0||required>9007199254740991d||available>9007199254740991d)continue;text+="\nRequired: "+(required/1073741824d).ToString("0.00")+" GB; available: "+(available/1073741824d).ToString("0.00")+" GB.";}
    return text+"\nFree up disk space, then retry.";
   }
-  internal Task UpdateStyx(){
-   if(busy||starting||core==null||!Supports("updateStyx"))return Task.FromResult(0);
-   if(MessageBox.Show(settings,UI("Styx will finish the update and reconnect this computer. Running tasks will stop; your settings and pairing will be kept."),UI("Update Styx"),MessageBoxButtons.OKCancel,MessageBoxIcon.Information)!=DialogResult.OK)return Task.FromResult(0);
-   return Run(async()=>{tray.Text=UI("Updating Styx… Keep the app open.");await Call("updateStyx",Json.Obj("authorize",true));await RefreshAfterMutation();settings.ShowPage("general");settings.Feedback(UI("Styx is up to date."));},"Updating Styx… Keep the app open.","The update needs attention. Your settings and pairing are retained. Review the current status before continuing the same update.");
-  }
   internal static string ConnectionText(object data){
    if(Json.Yes(data,"admission_fenced"))return "Styx needs attention. Your settings and pairing are retained.";
    string enrollment=Json.Str(data,"enrollment","status");
@@ -810,12 +805,6 @@ namespace StyxNative {
      toggle.CheckedChanged+=async(sender,args)=>{toggle.Enabled=false;try{var result=await owner.Call("hostCapabilities",Json.Obj(selectedCapability,toggle.Checked));await owner.RefreshAfterMutation();if(!Json.Yes(result,"applied"))Feedback("Settings have not fully applied. Refresh to check their status.");}catch(Exception){Feedback("The setting result is unconfirmed. Refresh the status before trying again.");}finally{if(!toggle.IsDisposed)toggle.Enabled=true;}};
     }
   }
-  void UpdateStatus(){
-   string update=Json.Str(owner.CurrentStatus,"runtimeUpdate","status");
-   if(update=="committed")Explain(StyxContext.Connected(owner.CurrentStatus)?"Styx is updated and connected.":"Styx is updated. Connection needs attention.",50);
-   else if(update=="staging"||update=="staged"||update=="updating")Explain("An update is in progress. Keep Styx open.",50);
-   else if(update=="unknown")Explain("The update needs attention. Update Styx continues the original update when recovery is available; your settings are retained.",75);
-  }
   void ShowRustPage(string name){
    if(name=="general"){
     StyxContext.Heading(content,"Connection settings");JoinGatewayAction();
@@ -825,9 +814,6 @@ namespace StyxNative {
     StyxContext.Button(content,"Quit Styx",owner.RequestQuit);
     NativeAction("Login startup…","appLifecycle",async()=>{ShowPage("login-startup");await ReadLogin();});
     StyxContext.Heading(content,"About Styx");Explain("Styx " + Application.ProductVersion,35);
-    if(owner.Supports("updateStyx"))StyxContext.Button(content,"Update Styx…",owner.UpdateStyx);
-    else Unavailable("Update Styx…");
-    UpdateStatus();
    }else if(name=="host-capabilities"){
     HostCapabilities();
     Action("Refresh",async()=>{await owner.RefreshAfterMutation();ShowPage("host-capabilities");},false);
