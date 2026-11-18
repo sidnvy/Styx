@@ -539,12 +539,22 @@ mod installed_bundle_acceptance {
             .join("Library/Application Support/Styx/NativeRustHost-v1");
         let state_dir = parent.join("profile");
         let payload = std::path::Path::new("/Applications/Styx.app/Contents/Resources/native");
+        let manifest_meta: serde_json::Value = serde_json::from_slice(
+            &std::fs::read("/Applications/Styx.app/Contents/Resources/macos-runtime.json").unwrap(),
+        )
+        .unwrap();
+        let current_manifest = manifest_meta["nativeRuntime"]["manifestSha256"]
+            .as_str()
+            .unwrap();
         let chosen = std::fs::read_dir(parent.join("migration-candidates"))
             .unwrap()
             .filter_map(Result::ok)
             .filter_map(|entry| std::fs::read(entry.path()).ok())
             .filter_map(|raw| serde_json::from_slice::<NativeRuntimeSelection>(&raw).ok())
-            .find(|selection| std::path::Path::new(&selection.payload_path) == payload)
+            .find(|selection| {
+                std::path::Path::new(&selection.payload_path) == payload
+                    && selection.manifest_sha256.to_hex() == current_manifest
+            })
             .expect("installed signed App candidate must be published");
         let runtime = Arc::new(crate::release::load_selected(&chosen).unwrap());
         let scope = Arc::new(HostScope::open(&state_dir).unwrap());
