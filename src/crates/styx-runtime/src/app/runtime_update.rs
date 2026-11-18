@@ -337,7 +337,6 @@ impl Work {
         self.original_pin = Some(raw);
         self.validate()
     }
-
 }
 impl HostApp {
     /// Discover only already-published immutable original inputs. No stage,

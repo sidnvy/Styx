@@ -792,6 +792,3 @@ pub(crate) use browser::LocalFile as WindowsLocalFile;
 
 #[path = "release_stage_windows.rs"]
 mod release_staging;
-
-#[path = "app_runtime_inputs.rs"]
-mod app_runtime_inputs;
