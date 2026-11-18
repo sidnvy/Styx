@@ -121,12 +121,6 @@ struct ProductSettingsView: View {
                 if model.nativeSupportsOperation("retireRole") {
                     Button(productText("更改这台电脑的角色…", "Change this computer's role…")) { model.nativeChangeRole() }.disabled(model.busy)
                 }
-                if model.nativeSupportsOperation("updateStyx") {
-                    Button(productText("更新 Styx…", "Update Styx…")) { model.updateStyx() }
-                        .disabled(model.busy).accessibilityIdentifier("styx-update")
-                    if model.busy { ProgressView(productText("正在处理，请保持 Styx 打开…", "Working… Keep Styx open.")) }
-                    Text(runtimeUpdateDescription).font(.caption).foregroundStyle(.secondary)
-                }
                 if model.nativeHasServiceState {
                     ProductServiceSettings(model: model)
                 }
@@ -153,16 +147,6 @@ struct ProductSettingsView: View {
                 }
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
-    }
-    private var runtimeUpdateDescription: String {
-        switch model.nativeRuntimeUpdate["status"].string {
-        case "staging", "staged", "updating": return productText("正在更新 Styx，请保持 App 打开。", "Updating Styx. Keep the app open.")
-        case "committed": return model.localIndicator == .connected
-            ? productText("Styx 已更新并连接。", "Styx is updated and connected.")
-            : productText("Styx 已更新，正在检查连接。", "Styx is updated. Checking the connection.")
-        case "unknown": return productText("更新需要处理。再次选择“更新 Styx”会在可恢复时继续原更新，设置与配对会保留。", "The update needs attention. Update Styx continues the original update when recovery is available; your settings and pairing are retained.")
-        default: return productText("更新会保留设置与配对，并自动恢复连接。", "Updating keeps your settings and pairing and reconnects automatically.")
-        }
     }
     private var componentNotice: String? {
         switch model.status["components"]["host"]["status"].string {
@@ -212,8 +196,7 @@ struct ProductSettingsView: View {
     @ViewBuilder private var computers: some View {
         GroupBox(productText("这台 Mac", "This Mac")) {
             VStack(alignment: .leading, spacing: 16) {
-                if model.updatingStyx { ProgressView(productText("正在更新 Styx…", "Updating Styx…")) }
-                else { Label(model.localIndicator.label, systemImage: "desktopcomputer") }
+                Label(model.localIndicator.label, systemImage: "desktopcomputer")
                 if model.nativeHost && model.localIndicator != .connected && model.status["foreground"]["status"].string != "started" && model.nativeSupportsOperation("connect") {
                     Button(productText("重新连接", "Reconnect")) { model.resumeForeground() }.disabled(model.busy || model.status["admission_fenced"].bool)
                 }

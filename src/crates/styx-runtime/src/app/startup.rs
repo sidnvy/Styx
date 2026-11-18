@@ -14,8 +14,17 @@ impl HostApp {
             d.report("app_current_observation_begin");
         }
         let scope = self.scope.clone();
+        let bundle = self.native_runtime.clone();
         let profile = match tokio::task::spawn_blocking(move || {
-            NativeHostSnapshot::observe_for_app(scope.state_dir(), scope.clone())
+            if let Some(bundle) = bundle {
+                NativeHostSnapshot::observe_for_app_retained(
+                    scope.state_dir(),
+                    scope.clone(),
+                    bundle,
+                )
+            } else {
+                NativeHostSnapshot::observe_for_app(scope.state_dir(), scope.clone())
+            }
         })
         .await
         {
@@ -509,5 +518,47 @@ mod tests {
         drop(raw);
         drop(held);
         fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod installed_bundle_acceptance {
+    use super::*;
+    use styx_contracts::native_management::NativeRuntimeSelection;
+
+    /// Read only: verify the existing paired Pilot Mac Host can load its
+    /// current App-bundled Runtime without changing its old C07 selection.
+    #[tokio::test]
+    #[ignore = "requires existing paired Pilot Mac, installed signed App; read-only"]
+    async fn original_paired_host_uses_new_app_bundle_without_runtime_update() {
+        assert_eq!(
+            std::env::var("STYX_TEST_APP_BUNDLE_READONLY").as_deref(),
+            Ok("1"),
+        );
+        let parent = std::path::PathBuf::from(std::env::var("HOME").unwrap())
+            .join("Library/Application Support/Styx/NativeRustHost-v1");
+        let state_dir = parent.join("profile");
+        let payload = std::path::Path::new("/Applications/Styx.app/Contents/Resources/native");
+        let chosen = std::fs::read_dir(parent.join("migration-candidates"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read(entry.path()).ok())
+            .filter_map(|raw| serde_json::from_slice::<NativeRuntimeSelection>(&raw).ok())
+            .find(|selection| std::path::Path::new(&selection.payload_path) == payload)
+            .expect("installed signed App candidate must be published");
+        let runtime = Arc::new(crate::release::load_selected(&chosen).unwrap());
+        let scope = Arc::new(HostScope::open(&state_dir).unwrap());
+        let snapshot = NativeHostSnapshot::observe_for_app_retained(
+            &state_dir,
+            scope.clone(),
+            runtime.clone(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.current_selection(), &chosen);
+        let report = native_join::inspect_for_app_retained(scope, runtime)
+            .await
+            .unwrap();
+        assert_eq!(report.verified_runtime.runtime_selection().unwrap(), chosen);
+        snapshot.revalidate().unwrap();
     }
 }

@@ -669,9 +669,19 @@ mod platform {
             // boundary, but derive reader support from that same authenticated
             // immutable manifest. The publication getters would scan the entire
             // payload three times here; no validation is cached across calls.
-            self.candidate
-                .revalidate_matches_selection(&selected)
-                .map_err(|_| unknown())?;
+            if cfg!(any(target_os = "macos", target_os = "windows")) && self.app_scope.is_some() {
+                let installed = self.candidate.runtime_selection().map_err(|_| unknown())?;
+                if installed.publisher_spki_sha256 != selected.publisher_spki_sha256 {
+                    return Err(unknown());
+                }
+                self.candidate
+                    .revalidate_matches_selection(&installed)
+                    .map_err(|_| unknown())?;
+            } else {
+                self.candidate
+                    .revalidate_matches_selection(&selected)
+                    .map_err(|_| unknown())?;
+            }
             if bootstrap != &self.seed.runtime
                 || selected.publisher_spki_sha256 != self.seed.runtime.publisher_spki_sha256
                 || !self
@@ -759,15 +769,28 @@ mod platform {
     fn candidate_for_load(
         selected: &NativeRuntimeSelection,
         retained: Option<Arc<release::VerifiedNativeRelease>>,
+        app_bundle: bool,
     ) -> Result<Arc<release::VerifiedNativeRelease>> {
         let candidate = match retained {
             Some(candidate) => {
                 // Create or the original App owner may pass its formal object.
                 // Revalidate the retained selection and native image identities;
                 // ordinary loading does not repeat install-time asset scanning.
-                candidate
-                    .revalidate_matches_selection(selected)
-                    .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?;
+                if app_bundle {
+                    let installed = candidate
+                        .runtime_selection()
+                        .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?;
+                    if installed.publisher_spki_sha256 != selected.publisher_spki_sha256 {
+                        return Err(JoinError::new("native_join_candidate_untrusted", 2));
+                    }
+                    candidate
+                        .revalidate_matches_selection(&installed)
+                        .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?;
+                } else {
+                    candidate
+                        .revalidate_matches_selection(selected)
+                        .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?;
+                }
                 candidate
             }
             None => Arc::new(
@@ -827,7 +850,10 @@ mod platform {
                 // request/claim/confirm, including App-managed updates.
                 return Err(bad());
             }
-            let candidate = candidate_for_load(&selected, candidate)?;
+            let app_bundle = cfg!(any(target_os = "macos", target_os = "windows"))
+                && app_scope.is_some()
+                && candidate.is_some();
+            let candidate = candidate_for_load(&selected, candidate, app_bundle)?;
             // The cold verifier or retained-candidate boundary above performed
             // complete original-root/publisher validation and exact selection
             // comparison. Reader support is part
@@ -1833,27 +1859,35 @@ mod platform {
                 (Arc::new(verified), selected)
             };
             let (original, selected) = make("original");
-            let accepted = candidate_for_load(&selected, Some(original)).unwrap();
+            let accepted = candidate_for_load(&selected, Some(original), false).unwrap();
             let mut wrong = selected.clone();
             wrong.manifest_sha256 = Sha256Digest::of_bytes(b"wrong manifest");
-            assert!(candidate_for_load(&wrong, Some(accepted)).is_err());
-            let (other, _) = make("other");
-            assert!(candidate_for_load(&selected, Some(other)).is_err());
+            assert!(candidate_for_load(&wrong, Some(accepted), false).is_err());
+            let (other, other_selection) = make("other");
+            assert!(candidate_for_load(&selected, Some(other.clone()), false).is_err());
+            // App-managed execution uses the installed bundle even when the
+            // canonical paired state still records an older version. This
+            // changes the executor, never the persistent device identity.
+            let bundled = candidate_for_load(&selected, Some(other), true).unwrap();
+            assert_eq!(bundled.runtime_selection().unwrap(), other_selection);
+            let mut foreign = selected.clone();
+            foreign.publisher_spki_sha256 = Sha256Digest::of_bytes(b"other publisher");
+            assert!(candidate_for_load(&foreign, Some(bundled), true).is_err());
             // Cold load reads installed metadata, not the complete payload.
-            let original = candidate_for_load(&selected, None).unwrap();
+            let original = candidate_for_load(&selected, None, false).unwrap();
             let member = root.join("original/source-inputs.json");
             let mut file = fs::OpenOptions::new().write(true).open(member).unwrap();
             file.write_all(b"changed").unwrap();
             file.sync_all().unwrap();
             drop(file);
-            candidate_for_load(&selected, Some(original.clone())).unwrap();
+            candidate_for_load(&selected, Some(original.clone()), false).unwrap();
             assert!(release::verify_selected(&selected).is_err());
             let image = root.join("original/bin/styx");
             let mut file = fs::OpenOptions::new().write(true).open(image).unwrap();
             file.write_all(b"changed").unwrap();
             file.sync_all().unwrap();
             drop(file);
-            assert!(candidate_for_load(&selected, Some(original)).is_err());
+            assert!(candidate_for_load(&selected, Some(original), false).is_err());
             fs::remove_dir_all(root).unwrap();
         }
     }
