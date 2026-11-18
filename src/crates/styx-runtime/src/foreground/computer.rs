@@ -2,7 +2,7 @@
 //! protected local selection remain authoritative; no executable/profile path,
 //! session identity or environment is supplied by MCP. Synchronous filesystem
 //! methods run only on the existing bounded bootstrap blocking workers.
-use super::{ForegroundError, profile::LoadedLegacyProfile};
+use super::{ForegroundError, profile::LoadedProfile};
 use crate::{
     host::{coordinator::DesktopSource, protocol::computer::ComputerBootstrap},
     providers::{
@@ -29,7 +29,7 @@ struct OwnerDirectories {
 struct LocalComputer {
     // These original authorities outlive configs/jobs and remain revalidated.
     // A cloned pin is not a new publisher or OS/session permission authority.
-    profile: Arc<LoadedLegacyProfile>,
+    profile: Arc<LoadedProfile>,
     driver: Arc<PinnedExecutable>,
     source: DesktopSource,
     source_epoch: u64,
@@ -52,7 +52,7 @@ struct LocalComputer {
 /// None means the protected Computer lane is locally disabled, not unavailable
 /// Exec. Creation never adopts an existing home or any original user profile.
 pub(crate) fn prepare_computer_bootstrap(
-    profile: Arc<LoadedLegacyProfile>,
+    profile: Arc<LoadedProfile>,
     source: DesktopSource,
     binding: SessionBinding,
 ) -> std::result::Result<Option<Arc<dyn ComputerBootstrap>>, ForegroundError> {

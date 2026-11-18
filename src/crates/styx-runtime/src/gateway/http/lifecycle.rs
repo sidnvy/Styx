@@ -19,10 +19,6 @@ pub struct OwnerFenceError;
 /// an action stopped. Cleanup implementations must retain action ownership if
 /// their waiter is dropped, and must not report Complete from a cancel ACK.
 pub trait GatewayOwnerLifecycle: Send + Sync + 'static {
-    /// Missing/uncertain liveness protects the owner from automatic close.
-    fn owner_has_live_work(&self, _owner: &VerifiedGatewayOwner) -> bool {
-        true
-    }
     fn fence_owner(&self, owner: &VerifiedGatewayOwner) -> Result<(), OwnerFenceError>;
     fn cleanup_owner(
         &self,
@@ -46,15 +42,12 @@ pub(super) struct Supervisor {
 }
 pub(super) struct Life<L: GatewayOwnerLifecycle> {
     pub boundary: Boundary,
-    pub activity: Mutex<Activity>,
     pub owner: VerifiedGatewayOwner,
     pub lifecycle: Arc<L>,
     pub facts: Mutex<CloseFacts>,
     pub changed: Notify,
     pub cancellation: Mutex<Option<CancellationToken>>,
     pub supervisor: Weak<Supervisor>,
-    // All SDK handler/transport and cleanup owners retain this same real lease.
-    pub _budget: Arc<super::HttpBudget>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Boundary {
@@ -62,28 +55,7 @@ pub(super) enum Boundary {
     /// This authority owns supervised logical work, not an SDK transport.
     TunnelConversation,
 }
-pub(super) struct Activity {
-    pub last: tokio::time::Instant,
-    pub users: usize,
-}
-pub(super) struct ActivityGuard<L: GatewayOwnerLifecycle>(Arc<Life<L>>);
-impl<L: GatewayOwnerLifecycle> Drop for ActivityGuard<L> {
-    fn drop(&mut self) {
-        let mut a = self.0.activity.lock().expect("session activity");
-        a.users -= 1;
-        a.last = tokio::time::Instant::now();
-    }
-}
 impl<L: GatewayOwnerLifecycle> Life<L> {
-    pub(super) fn activity(self: &Arc<Self>) -> Option<ActivityGuard<L>> {
-        let mut a = self.activity.lock().expect("session activity");
-        if !self.is_active() {
-            return None;
-        }
-        a.users += 1;
-        a.last = tokio::time::Instant::now();
-        Some(ActivityGuard(self.clone()))
-    }
     pub fn is_active(&self) -> bool {
         !self.facts.lock().expect("session lifetime").closing
     }

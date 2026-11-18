@@ -54,12 +54,10 @@ final class ProductOwnedCore: @unchecked Sendable {
     // Only an admission returned by this original child followed by actual
     // joined exit0 can populate this cache. It is never inferred from absence.
     private var joinedQuitTicket: String?
-    private var maintenance: ProductJSON = .null
-    private var maintenanceUnknown = false
     private var sequence = 0
     private var buffer = Data()
     // Fixed diagnostic vocabulary only. Rust owns operation support and admission.
-    static let diagnosticOperations: Set<String> = ["computers", "inviteComputer", "pendingComputers", "approveComputer", "rejectComputer", "revokeComputer", "tunnelStatus", "tunnelSave", "pluginRead", "pluginSave", "pluginExport", "startupStatus", "status", "hostCapabilities", "networkInterfaces", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "retireRole", "appLifecycle", "appLogin", "appLoginResult", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService", "prepareAppMaintenance", "appMaintenanceStatus", "cancelAppMaintenance"]
+    static let diagnosticOperations: Set<String> = ["computers", "inviteComputer", "pendingComputers", "approveComputer", "rejectComputer", "revokeComputer", "tunnelStatus", "tunnelSave", "pluginRead", "pluginSave", "pluginExport", "startupStatus", "status", "hostCapabilities", "networkInterfaces", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "retireRole", "appLifecycle", "appLogin", "appLoginResult", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService"]
 
     // Only the fixed package bootstrap below can construct this owner.
     private init(cli: URL, selection: URL, state: URL, cliPin: FileHandle, selectionPin: FileHandle) throws {
@@ -173,92 +171,20 @@ final class ProductOwnedCore: @unchecked Sendable {
             }
         }
     }
-    private var originalMaintenance: (ProductJSON, Bool) {
-        stopLock.lock(); defer { stopLock.unlock() }; return (maintenance, maintenanceUnknown)
-    }
-    private func markMaintenanceUnknown() {
-        stopLock.lock(); maintenanceUnknown = true; stopLock.unlock()
-    }
-    private func setOriginalMaintenance(_ value: ProductJSON) {
-        stopLock.lock(); maintenance = value; stopLock.unlock()
-    }
-    private static func validMaintenance(_ value: ProductJSON, status: String, request: String, ticket: String? = nil) -> Bool {
-        let keys: Set<String> = ["schema", "status", "ticketId", "requestId", "operation", "installRoot", "packageSha256", "candidatePackageSha256", "scope", "runtimeReferences", "statePreserved", "operationsReplayed", "requiresOwnedQuit"]
-        guard Set(value.object.keys) == keys,
-              value["schema"].number == 1, value["status"].string == status,
-              value["requestId"].string == request, value["operation"].string == "upgrade",
-              value["installRoot"].string == "/Applications/Styx.app",
-              value["packageSha256"] == .null, value["candidatePackageSha256"] == .null,
-              value["scope"].string == "original_app", value["runtimeReferences"].string == "outside_install_root",
-              value["statePreserved"] == .bool(true), value["operationsReplayed"] == .bool(false), value["requiresOwnedQuit"] == .bool(true),
-              let returned = value["ticketId"].string,
-              returned.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil else { return false }
-        return ticket == nil || returned == ticket
-    }
-    func prepareAppMaintenance(requestId: String) async throws -> ProductJSON {
-        let (previous, unknown) = originalMaintenance
-        guard !unknown, previous == .null,
-              requestId.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil else { throw ProductOwnedCoreError.cleanupUnknown }
-        let result: ProductJSON
-        do {
-            result = try await call("prepareAppMaintenance", ["schema": .number(1), "authorize": .bool(true),
-                "operation": .string("upgrade"), "requestId": .string(requestId), "installRoot": .string("/Applications/Styx.app"),
-                "packageSha256": .null, "candidatePackageSha256": .null, "loginObservation": .null])
-        } catch let rejection as ProductOwnedCoreRejection {
-            if rejection.response["error"].string?.contains("unknown") == true { markMaintenanceUnknown() }
-            throw rejection
-        } catch { markMaintenanceUnknown(); throw error }
-        let prepared = result["maintenance"]
-        guard Self.validMaintenance(prepared, status: "prepared", request: requestId) else {
-            markMaintenanceUnknown(); throw ProductOwnedCoreError.cleanupUnknown
-        }
-        setOriginalMaintenance(prepared)
-        return prepared
-    }
-    func cancelAppMaintenance(ticketId: String) async throws {
-        let (original, unknown) = originalMaintenance
-        guard !unknown, original["ticketId"].string == ticketId,
-              let request = original["requestId"].string else { throw ProductOwnedCoreError.cleanupUnknown }
-        do {
-            let result = try await call("cancelAppMaintenance", ["authorize": .bool(true), "ticketId": .string(ticketId)])
-            guard Self.validMaintenance(result["maintenance"], status: "cancelled", request: request, ticket: ticketId) else { throw ProductOwnedCoreError.cleanupUnknown }
-            setOriginalMaintenance(.null)
-        } catch { markMaintenanceUnknown(); throw error }
-    }
     private var quitAlreadyJoined: Bool {
         stopLock.lock(); defer { stopLock.unlock() }; return joinedQuitTicket != nil
     }
     func quitAndJoin() async throws {
-        // A maintenance handoff may already have admitted and joined this
-        // original child. Ordinary AppKit Quit must reuse that exact proof,
-        // rather than send a second request to a process that has exited.
+        // Reuse only the original child's confirmed exit; otherwise request
+        // the ordinary Core Quit and join that same process.
         if quitAlreadyJoined { return }
-        guard !originalMaintenance.1 else { throw ProductOwnedCoreError.cleanupUnknown }
-        do {
-            let result = try await call("quitAdmission")
-            try await joinAfterQuitAdmission(result)
-        } catch let rejection as ProductOwnedCoreRejection {
-            if originalMaintenance.0 != .null || rejection.response["error"].string?.contains("unknown") == true { markMaintenanceUnknown() }
-            throw rejection
-        } catch {
-            if originalMaintenance.0 != .null { markMaintenanceUnknown() }
-            throw error
-        }
+        let result = try await call("quitAdmission")
+        try await joinAfterQuitAdmission(result)
     }
     private func joinAfterQuitAdmission(_ result: ProductJSON) async throws {
         guard result["quit"]["status"].string == "ready_to_quit",
               let ticket = result["quit"]["ticketId"].string,
               ticket.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil else { throw ProductOwnedCoreError.cleanupUnknown }
-        let (original, unknown) = originalMaintenance
-        guard !unknown else { throw ProductOwnedCoreError.cleanupUnknown }
-        if original != .null {
-            guard let request = original["requestId"].string, let maintenanceTicket = original["ticketId"].string,
-                  Self.validMaintenance(result["maintenance"], status: "ready_to_exit", request: request, ticket: maintenanceTicket) else {
-                markMaintenanceUnknown(); throw ProductOwnedCoreError.cleanupUnknown
-            }
-        } else if result["maintenance"] != .null {
-            markMaintenanceUnknown(); throw ProductOwnedCoreError.cleanupUnknown
-        }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             queue.async { [self] in
                 stopLock.lock(); let previous = joinedQuitTicket; stopLock.unlock()

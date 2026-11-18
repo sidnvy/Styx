@@ -1,17 +1,46 @@
-# Windows per-user setup preview
+# Windows installation
 
-Runtime note (A38): the JS Gateway/Host/Core and legacy setup are retired; follow [the Rust release scope](../../docs/rust-core-rewrite/REDUCED-SCOPE.md).
+The supported installer is the native Inno Setup package published by the
+[release workflow](../../docs/RELEASING.md). It installs the C# App, Rust core and
+fixed native workers together. The retired .NET self-extracting preview and
+JavaScript installer are not alternative product installation paths.
 
-`build-setup.ps1 -PackageDirectory <verified native package> -OutputFile <fresh StyxSetup.exe>` creates one self-extracting Windows executable using the existing .NET Framework compiler. Run `build-windows-app.mjs` first; setup refuses a package that has not been natively compiled or whose inventory has changed. No extra installer toolchain is downloaded.
+## User flow
 
-The setup window appears before extraction, reports preparation/checking progress, and offers Install (or Update), Restore previous, and Open Styx. It runs as the current user and installs under `%LOCALAPPDATA%\Programs\Styx`. The Start menu shortcut points to the stable `Styx.exe` launcher; a desktop shortcut is optional. An unrelated existing shortcut is never overwritten.
+1. Quit the running Styx App.
+2. Run the new `Styx-<version>-windows-x64.exe` from the GitHub Release.
+3. Open Styx from the Start menu. It reuses the existing native profile and pairing.
 
-Each update installs a new release directory, verifies it, then atomically switches `installation.json`. The previous directory is retained for Restore previous. A failed copy or verification leaves the active version unchanged. Initial root creation is atomic and a failed first copy can be retried. Native Setup serializes operations with a per-user, cross-session Windows named mutex; after an interrupted child exits, Retry reclaims its stale transaction lock in native code while holding that actual mutex. Direct internal JavaScript lifecycle calls never reclaim locks automatically. The launcher verifies the selected native executable against the receipt-bound package manifest before execution; the native App still verifies its full package before starting Core.
+Installation is per-user and requires no elevation. Program files live under
+`%LOCALAPPDATA%\Programs\Styx\versions\<package-hash>`. Inno installs the new
+version and points the Start menu shortcut to its App. The native core and workers
+come from that same version directory.
 
-The launcher is protocol version 1 and is retained across updates. A future incompatible launcher needs an explicit migration; this is not an arbitrary executable replacement mechanism. Quit any currently running Styx instance before opening the new or restored version. Setup does not stop services or processes, migrate deployment configuration, or roll back configuration schema. Restoring binaries is supported only while the retained configuration remains compatible.
+The installation guard checks for an existing App using the selected installation
+root. It does not force-stop unrelated processes or use a custom App-maintenance
+handshake. A running App must finish its normal Quit before its files are replaced.
 
-The standard App state remains `%LOCALAPPDATA%\StyxPreview\WindowsFirst`, outside the installation tree. Prior manually launched previews with a custom `--state-dir` are not silently adopted. Uninstall is not yet exposed as a user-facing action; deleting or cleaning device identities is never part of an update.
+Native state remains outside the installation tree. The default profile is
+`%LOCALAPPDATA%\StyxPreview\WindowsFirst`; an explicit `--state-dir` continues
+to name its own profile. Updating program files does not reset that state, erase
+device credentials or require a new pairing.
 
-This is an **unsigned development preview**, not an Authenticode-signed public release. Hash checks establish consistency, not publisher trust. Native compilation and isolated lifecycle/shortcut tests do not establish Windows desktop presentation, onboarding, permission prompts, or ChatGPT account acceptance; those require the logged-in user's actual end-to-end run.
+Inno provides the normal Windows uninstall entry. Its file removal is separate
+from profile and credential storage; uninstalling program files is not a request
+to erase a device's retained identity.
 
-Focused tests: `node --test src/host/windows/setup-install.test.mjs` exercises actual generated package verification, copying and installation receipts with small fixture payloads. Native acceptance additionally uses a real compiled package on NAB in a dedicated test directory, without replacing existing shortcuts or state.
+## Source and build entry points
+
+| Source | Responsibility |
+| --- | --- |
+| `ci/release-windows.ps1` | Build/package adapter used by the release workflow |
+| `host/build-windows-app.mjs` | Assemble the native App with its Rust runtime |
+| `host/windows/platform-update/build-inno.mjs` | Build the Inno package from that native input |
+| `host/windows/platform-update/product.iss` | Installation paths, shortcuts and uninstall |
+| `host/windows/platform-update/InstallGate.cs` | Existing-installation process checks |
+| `host/windows/Styx.cs` | Native App startup, normal Quit and settings |
+
+Use the persistent Windows project and toolchain described in
+[WORKSPACE.md](../../../WORKSPACE.md) for development. A successful compiler or
+installer build does not establish that the installed App reopened, selected the
+intended runtime and reconnected; those are separate behavior checks.

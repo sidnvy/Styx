@@ -282,7 +282,7 @@ mod tests {
     use super::*;
     #[test]
     fn status_shows_connected_computers_without_quota() {
-        let report = json!({"gateway":{"computers":{"connected":32,"capacity":32}}});
+        let report = json!({"gateway":{"computers":{"connected":32}}});
         assert!(render(&report, Path::new("/owned/styx"), 0).contains("Connected computers: 32"));
         assert!(!render(&json!({}), Path::new("/owned/styx"), 0).contains("Connected computers:"));
     }
@@ -308,8 +308,7 @@ mod tests {
     }
     #[test]
     fn status_shows_open_sessions_without_retired_quota_counters() {
-        let value =
-            json!({"gateway":{"mcp_sessions":{"open":17,"capacity":64,"expired":11,"evicted":29}}});
+        let value = json!({"gateway":{"mcp_sessions":{"open":17}}});
         assert!(render(&value, Path::new("/owned"), 0).contains("MCP sessions: 17 open"));
     }
     #[test]

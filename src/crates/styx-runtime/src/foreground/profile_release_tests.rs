@@ -1,11 +1,15 @@
 //! Real private files and a synthetic signed C08; no executable is launched.
 use super::*;
+use crate::crypto::PublisherVerifyingKey;
+use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey, pkcs8::EncodePublicKey as _};
 use std::{
     fs,
     io::Write as _,
     os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _},
+    path::Path,
 };
+use styx_contracts::identity::Sha256Digest;
 
 #[test]
 fn fresh_profile_keeps_original_release_and_refuses_foreign_selection_or_replaced_member() {
@@ -88,10 +92,7 @@ fn fresh_profile_keeps_original_release_and_refuses_foreign_selection_or_replace
     let (original, selection) = make("original");
     let profile =
         ProfileRelease::from_retained_native(&selection, &expected, original.clone()).unwrap();
-    match &profile.retained {
-        RetainedRelease::Native { verified } => assert!(Arc::ptr_eq(verified, &original)),
-        _ => panic!("fresh profile must retain the original native release"),
-    }
+    assert!(Arc::ptr_eq(&profile.verified, &original));
     profile.revalidate().unwrap();
     let mut wrong = selection.clone();
     wrong.manifest_sha256 = Sha256Digest::of_bytes(b"other manifest");

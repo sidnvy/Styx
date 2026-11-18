@@ -37,7 +37,7 @@ namespace StyxNative {
      if(worker.IdSafe()!=0){worker.StandardInput.Close();worker.WaitForExit();File.WriteAllText(Path.Combine(dir,"worker-exit"),worker.ExitCode.ToString());}
      if(mode=="active"||mode=="disconnected"||mode=="busy")System.Threading.Thread.Sleep(150);
      int id=Convert.ToInt32(Json.Get(request,"id"));
-     Console.WriteLine(Json.Codec.Serialize(Json.Obj("id",mode=="lost"?id+1:id,"ok",!refuse,"error",refuse?"app_runtime_update_in_progress":null,"result",Json.Obj("quit",Json.Obj("status","ready_to_quit","ticketId",mode=="disconnected"?null:new string('a',32))))));Console.Out.Flush();
+     Console.WriteLine(Json.Codec.Serialize(Json.Obj("id",mode=="lost"?id+1:id,"ok",!refuse,"error",refuse?"app_login_in_progress":null,"result",Json.Obj("quit",Json.Obj("status","ready_to_quit","ticketId",mode=="disconnected"?null:new string('a',32))))));Console.Out.Flush();
     }
     if(mode=="slow"||mode=="dispose")while(!File.Exists(Path.Combine(dir,"release")))System.Threading.Thread.Sleep(20);
     // Larger than ordinary OS pipe buffers: the owner must drain while waiting.

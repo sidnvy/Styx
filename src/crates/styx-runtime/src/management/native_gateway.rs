@@ -343,6 +343,27 @@ mod platform {
     fn changed() -> BootstrapError {
         BootstrapError::new("fresh_gateway_binding_changed", 4)
     }
+    fn validate_runtime_candidate(
+        candidate: &VerifiedNativeRelease,
+        selected: &NativeRuntimeSelection,
+        app_owned: bool,
+    ) -> Result<(), BootstrapError> {
+        if app_owned {
+            // The installed App owns executable code; canonical selection keeps
+            // the original enrollment and publisher history.
+            let bundled = candidate.runtime_selection().map_err(|_| changed())?;
+            if bundled.publisher_spki_sha256 != selected.publisher_spki_sha256 {
+                return Err(changed());
+            }
+            candidate
+                .revalidate_matches_selection(&bundled)
+                .map_err(|_| changed())
+        } else {
+            candidate
+                .revalidate_matches_selection(selected)
+                .map_err(|_| changed())
+        }
+    }
     // Map only the identity observed by the retained PrivateRoot. Ready JSON
     // cannot choose a foreign OS root or alias another platform's identity.
     fn native_identity(root: &PrivateRoot) -> NativeRootIdentity {
@@ -793,9 +814,7 @@ mod platform {
                 transactions.marker(),
             )
             .map_err(|_| changed())?;
-            self.candidate
-                .revalidate_matches_selection(&current)
-                .map_err(|_| changed())
+            validate_runtime_candidate(&self.candidate, &current, self.app_scope.is_some())
         }
     }
     pub(crate) fn open_existing(path: &Path) -> Result<FreshGatewayRuntime, BootstrapError> {
@@ -988,11 +1007,7 @@ mod platform {
             }
             let candidate = match retained_candidate {
                 Some(candidate) => {
-                    // Same formal C08 object from this App's successful bootstrap.
-                    // A mismatch is a closed failure, never a cold-load fallback.
-                    candidate
-                        .revalidate_matches_selection(&selected)
-                        .map_err(|_| changed())?;
+                    validate_runtime_candidate(&candidate, &selected, app_scope.is_some())?;
                     candidate
                 }
                 None => Arc::new(
@@ -1007,8 +1022,7 @@ mod platform {
                     "verify_selected_done"
                 });
             }
-            // Formal verification or exact-selection revalidation authenticated
-            // this same retained manifest.
+            // Verification/revalidation authenticated this retained manifest.
             // Reader support is immutable signed metadata; load/reconcile still
             // perform their complete release validation before admission.
             if !candidate

@@ -1,5 +1,5 @@
 //! Fixed App-owned Mac Computer bootstrap; no C08 standalone Cua or browser authority.
-use super::{ForegroundError, profile::LoadedLegacyProfile};
+use super::{ForegroundError, profile::LoadedProfile};
 use crate::{
     host::{coordinator::DesktopSource, protocol::computer::ComputerBootstrap},
     providers::cua::{OwnedCuaConfig, TrustedCuaLaunch},
@@ -83,7 +83,7 @@ struct OwnerDirectories {
     home: Directory,
 }
 struct LocalComputer {
-    profile: Arc<LoadedLegacyProfile>,
+    profile: Arc<LoadedProfile>,
     source: DesktopSource,
     epoch: u64,
     binding: SessionBinding,
@@ -91,7 +91,7 @@ struct LocalComputer {
     owners: Mutex<Vec<OwnerDirectories>>,
 }
 pub(crate) fn prepare_computer_bootstrap(
-    profile: Arc<LoadedLegacyProfile>,
+    profile: Arc<LoadedProfile>,
     source: DesktopSource,
     binding: SessionBinding,
 ) -> std::result::Result<Option<Arc<dyn ComputerBootstrap>>, ForegroundError> {

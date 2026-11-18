@@ -532,11 +532,11 @@ mod tests {
         let error = shared
             .read_before_source(Duration::from_secs(30), || {
                 calls += 1;
-                std::future::ready(Err::<bool, _>(ForegroundError("legacy_profile_changed")))
+                std::future::ready(Err::<bool, _>(ForegroundError("native_profile_changed")))
             })
             .await
             .unwrap_err();
-        assert_eq!(error.code(), "legacy_profile_changed");
+        assert_eq!(error.code(), "native_profile_changed");
         assert_eq!(calls, 1);
         let error = shared
             .read_before_source(Duration::ZERO, || {

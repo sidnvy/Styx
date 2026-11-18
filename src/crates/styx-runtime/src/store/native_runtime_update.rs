@@ -695,28 +695,10 @@ impl NativeTransactions {
         }
         result
     }
-    pub(crate) fn pending_app_transaction(
-        &self,
-    ) -> Result<Option<TransactionId>, NativeTransactionError> {
-        let inventory = self.journal.observe()?;
-        if !inventory.orphans.is_empty() {
-            return Err(NativeTransactionError::UnknownInspect);
-        }
-        let Some(last) = inventory.transactions.last() else {
-            return Ok(None);
-        };
-        if last
-            .phase_receipts
-            .last()
-            .is_some_and(|p| p.stage == DurableStage::Committed)
-        {
-            return Ok(None);
-        }
-        Ok(Some(last.intent.transaction_id.clone()))
-    }
     pub(crate) fn has_runtime_update_custody(&self) -> bool {
         self.retained_runtime_update.is_some()
     }
+    #[cfg(target_os = "macos")]
     pub(crate) fn runtime_update_high_water(&self) -> Result<u64, NativeTransactionError> {
         Ok(self.journal.observe()?.high_water)
     }

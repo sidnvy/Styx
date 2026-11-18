@@ -29,7 +29,7 @@ fn fixed_native_spawn_input_boundary() {
 #[tokio::test]
 #[ignore = "requires protected owned Windows fixture with original Codex PE copies; actual JobObject/native initialization"]
 async fn actual_pinned_codex_suspended_job_cleanup_and_waiter_drop() {
-    use crate::store::PayloadPrivateRoot;
+    use crate::store::{PayloadLimits, PrivateRoot};
     let root =
         PathBuf::from(std::env::var_os("STYX_TEST_WINDOWS_SPAWN_ROOT").expect("explicit fixture"));
     assert!(root.is_absolute());

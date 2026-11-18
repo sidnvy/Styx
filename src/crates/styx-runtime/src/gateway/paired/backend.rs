@@ -671,21 +671,6 @@ impl GatewayToolBackend for PairedGatewayBackend {
     }
 }
 impl GatewayOwnerLifecycle for PairedGatewayBackend {
-    fn owner_has_live_work(&self, owner: &VerifiedGatewayOwner) -> bool {
-        let Ok(state) = self.state.lock() else {
-            return true;
-        };
-        {
-            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-            {
-                state.computers.owner_has_live_work(owner)
-            }
-            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-            {
-                false
-            }
-        }
-    }
     fn fence_owner(&self, owner: &VerifiedGatewayOwner) -> Result<(), OwnerFenceError> {
         owner.fence();
         let mut state = self.state.lock().expect("paired state");

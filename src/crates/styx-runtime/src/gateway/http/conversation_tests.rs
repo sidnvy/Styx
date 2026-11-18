@@ -37,7 +37,7 @@ impl GatewayToolBackend for ResourceBackend {
                 .and_then(serde_json::Value::as_str)
                 == Some("hold-owned-call")
         {
-            assert!(self.owner_has_live_work(owner));
+            assert!(self.has_live_work(owner));
             self.entered.add_permits(1);
             self.release.acquire().await.unwrap().forget();
             self.completed.fetch_add(1, Ordering::AcqRel);
@@ -73,14 +73,16 @@ impl GatewayToolBackend for ResourceBackend {
         )]))
     }
 }
-impl GatewayOwnerLifecycle for ResourceBackend {
-    fn owner_has_live_work(&self, owner: &VerifiedGatewayOwner) -> bool {
+impl ResourceBackend {
+    fn has_live_work(&self, owner: &VerifiedGatewayOwner) -> bool {
         self.resource
             .lock()
             .unwrap()
             .as_ref()
             .is_some_and(|(actual, _)| actual == owner.owner_id().as_str())
     }
+}
+impl GatewayOwnerLifecycle for ResourceBackend {
     fn fence_owner(&self, owner: &VerifiedGatewayOwner) -> Result<(), OwnerFenceError> {
         self.fenced
             .lock()
@@ -96,7 +98,7 @@ impl GatewayOwnerLifecycle for ResourceBackend {
         Ok(())
     }
     async fn cleanup_owner(&self, owner: &VerifiedGatewayOwner, _: Duration) -> OwnerCleanup {
-        assert!(!self.owner_has_live_work(owner));
+        assert!(!self.has_live_work(owner));
         OwnerCleanup::Complete
     }
 }
@@ -141,9 +143,7 @@ async fn authenticated_tunnel_context_across_transports_and_isolation() {
         let forwarding = "separate-owned-forwarder-credential-bbbbb";
         let policy = Arc::new(GatewayBearerPolicy::new(ordinary.as_bytes(), vec![address.to_string()], vec![]).unwrap().with_tunnel_ingress(forwarding.as_bytes()).unwrap());
         let backend = Arc::new(ResourceBackend {resource: Mutex::new(None), file: root.join("independent-effect.txt"), attempts: AtomicUsize::new(0), fenced: Mutex::new(BTreeSet::new()), entered: Semaphore::new(0), release: Semaphore::new(0), completed: AtomicUsize::new(0)});
-        let partition = Arc::new(Semaphore::new(GATEWAY_HTTP_BYTES));
-        let budget = HttpBudget::from_reserved_partition(partition.clone().try_acquire_many_owned(GATEWAY_HTTP_BYTES as u32).unwrap()).unwrap();
-        let app = GatewayHttp::new(policy, backend.clone(), budget.clone());
+        let app = GatewayHttp::new(policy, backend.clone());
         let server = app.clone().serve_owned(listener).await.unwrap();
         let meta = serde_json::json!({"openai/organization":"owned-org","openai/subject":"owned-subject","openai/session":"owned-chat"});
         let first = sdk(&uri, forwarding).await;
@@ -179,7 +179,7 @@ async fn authenticated_tunnel_context_across_transports_and_isolation() {
         }
         assert_eq!(backend.attempts.load(Ordering::Acquire), before, "invalid contexts refused before backend dispatch");
         // Drop a real HTTP response waiter after backend admission. The single
-        // logical call reservation and actual work must outlive that waiter.
+        // logical owner and actual work must outlive that waiter.
         let pending_http = raw.post(&uri).bearer_auth(forwarding).header(SID, &second_sid).header(VERSION, "2025-11-25").header("accept", "application/json, text/event-stream").json(&serde_json::json!({"jsonrpc":"2.0","id":9001,"method":"tools/call","params":{"name":"write_stdin","arguments":{"session_id":1,"chars":"hold-owned-call"},"_meta":meta}}));
         let waiter = tokio::spawn(async move { pending_http.send().await });
         tokio::time::timeout(Duration::from_secs(2), backend.entered.acquire()).await.unwrap().unwrap().forget();
@@ -187,7 +187,7 @@ async fn authenticated_tunnel_context_across_transports_and_isolation() {
         app.collect_closed_conversations();
         assert!(!backend.fenced.lock().unwrap().contains(&original_owner));
         assert_eq!(backend.completed.load(Ordering::Acquire), 0);
-        assert!(app.conversations.lock().unwrap().values().any(|c| c.life.owner.owner_id().as_str()==original_owner && c.life.activity.lock().unwrap().users>0));
+        assert!(app.conversations.lock().unwrap().values().any(|c| c.life.owner.owner_id().as_str()==original_owner && c.life.is_active()));
         backend.release.add_permits(1);
         let until = tokio::time::Instant::now() + Duration::from_secs(2);
         while backend.completed.load(Ordering::Acquire)==0 {
@@ -207,13 +207,12 @@ async fn authenticated_tunnel_context_across_transports_and_isolation() {
         assert_eq!(stopped.unresolved_sessions, 0);
         assert!(backend.resource.lock().unwrap().is_none());
         assert!(backend.fenced.lock().unwrap().contains(&original_owner));
-        drop(server); drop(app); drop(budget);
-        assert_eq!(partition.available_permits(), GATEWAY_HTTP_BYTES);
-        println!("PASS actual SDK distinct transports, same scoped resource, DELETE survival, cross-chat/subject/org and ordinary forgery refusal, invalid-context no-dispatch, dropped HTTP waiter retained original work/capacity, live-owner retention, one file effect and joined cleanup; not native/account acceptance; fixture={}", root.display());
+        drop(server); drop(app);
+        println!("PASS actual SDK distinct transports, same scoped resource, DELETE survival, cross-chat/subject/org and ordinary forgery refusal, invalid-context no-dispatch, dropped HTTP waiter retained original work/owner, live-owner retention, one file effect and joined cleanup; not native/account acceptance; fixture={}", root.display());
     }).await.unwrap();
 }
 
-/// Pure lifecycle/capacity control: no socket/native/account acceptance claim.
+/// Pure lifecycle control: no socket/native/account acceptance claim.
 #[tokio::test]
 async fn logical_capacity_and_unknown_cleanup_never_reassign_an_owner() {
     let backend = Arc::new(UnconfirmedRemoteBackend {
@@ -236,15 +235,7 @@ async fn logical_capacity_and_unknown_cleanup_never_reassign_an_owner() {
         format!("Bearer {forwarding}").parse().unwrap(),
     );
     let principal = policy.authorize(&headers).unwrap();
-    let partition = Arc::new(Semaphore::new(GATEWAY_HTTP_BYTES));
-    let budget = HttpBudget::from_reserved_partition(
-        partition
-            .clone()
-            .try_acquire_many_owned(GATEWAY_HTTP_BYTES as u32)
-            .unwrap(),
-    )
-    .unwrap();
-    let app = GatewayHttp::new(policy, backend.clone(), budget.clone());
+    let app = GatewayHttp::new(policy, backend.clone());
     let meta = |i: usize| {
         serde_json::from_value::<RequestMetaObject>(serde_json::json!({"openai/organization":"capacity-org", "openai/subject":"capacity-subject", "openai/session":format!("capacity-chat-{i}")})).unwrap()
     };
@@ -304,6 +295,4 @@ async fn logical_capacity_and_unknown_cleanup_never_reassign_an_owner() {
     drop(original);
     drop(server);
     drop(app);
-    drop(budget);
-    assert_eq!(partition.available_permits(), GATEWAY_HTTP_BYTES);
 }

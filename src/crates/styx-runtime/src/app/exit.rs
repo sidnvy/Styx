@@ -1,5 +1,5 @@
 //! Local App lifetime is independent of a missing remote settlement receipt.
-//! Control/update paths retain strict remote checks. No result becomes Complete.
+//! Control paths retain strict remote checks. No result becomes Complete.
 use super::*;
 
 impl HostApp {
@@ -11,7 +11,7 @@ impl HostApp {
             .as_ref()
             .is_some_and(|role| role.worker.is_finished())
         {
-            self.settle_host(!self.maintenance_fenced()).await?;
+            self.settle_host(true).await?;
         }
         if self.login.pending() {
             return Err(AppError("app_login_in_progress"));
@@ -38,9 +38,6 @@ impl HostApp {
                 json!({"quit":{"status":"ready_to_quit","ticketId":ticket},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status())}),
             );
         }
-        if self.runtime_update_running() {
-            return Err(AppError("app_runtime_update_in_progress"));
-        }
         if let Some(ticket) = &self.quit_ticket {
             // A role change may be refused after stopping. Reuse the completed
             // local stop, including its original evidence, without another write.
@@ -48,7 +45,7 @@ impl HostApp {
             return Ok(self.local_quit_reply(ticket));
         }
         self.settle_for_quit().await?;
-        self.available_for(!self.maintenance_fenced())?;
+        self.available_for(true)?;
         let ticket = uuid::Uuid::new_v4().simple().to_string();
         self.record_exit_uncertainty(&ticket).await?;
         self.quit_ticket = Some(ticket.clone());
@@ -66,20 +63,12 @@ impl HostApp {
             .is_some_and(|c| c.local_stop_complete() && !c.is_complete())
     }
     pub(super) async fn settle_for_quit(&mut self) -> Result<(), AppError> {
-        // Installation handoff continues to need the original full admission.
-        if self.maintenance_fenced() {
-            return self.settle_all().await;
-        }
-        self.reap_runtime_update(true).await;
         let host = self.settle_host(true).await;
         let gateway = match &mut self.local_gateway {
             Some(gateway) => gateway.settle_for(true).await,
             None => Ok(()),
         };
         host.and(gateway)?;
-        if self.runtime_update_fenced() {
-            return Err(AppError("app_runtime_update_pending"));
-        }
         Ok(())
     }
     pub(super) async fn record_exit_uncertainty(&self, ticket: &str) -> Result<(), AppError> {

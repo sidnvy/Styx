@@ -48,13 +48,12 @@ fn role(component: NativeComponent) -> ServiceRole {
     }
 }
 fn os(error: crate::platform::linux::native_service::ServiceError) -> NativeManagementError {
-    use crate::platform::linux::manager::ManagerError;
+    use crate::platform::linux::native_service::ServiceError;
     NativeManagementError::new(match error {
-        ManagerError::Invalid => ErrorKind::Invalid,
-        ManagerError::Conflict => ErrorKind::Conflict,
-        ManagerError::Busy => ErrorKind::Busy,
-        ManagerError::Unavailable => ErrorKind::Unavailable,
-        ManagerError::Unknown => ErrorKind::Unknown,
+        ServiceError::Invalid => ErrorKind::Invalid,
+        ServiceError::Conflict => ErrorKind::Conflict,
+        ServiceError::Unavailable => ErrorKind::Unavailable,
+        ServiceError::Unknown => ErrorKind::Unknown,
     })
 }
 /// No mutation retry. A lost caller detaches the ONE owned operation. Unknown

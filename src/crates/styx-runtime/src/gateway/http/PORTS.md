@@ -14,8 +14,8 @@ A conversation owns its transport and observation references. Exec tasks and
 Browser sessions belong to the Host and survive conversation closure. Host Quit,
 capability changes and explicit resource closure follow their existing lifecycle
 owners. Session expiry/DELETE must not claim an unrelated Host resource ended.
-The original supervised backend job retains HTTP activity until it actually
-finishes, even if its request waiter disappears.
+The original supervised backend job retains its owner and lifecycle until it
+actually finishes, even if its request waiter disappears.
 
 Transport frame validation, request deadlines and the mature transport's existing
 backpressure remain. A full relay channel waits for its original send reservation

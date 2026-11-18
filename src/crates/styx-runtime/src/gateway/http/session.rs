@@ -23,7 +23,7 @@ use std::sync::{
 pub(super) enum SessionError {
     #[error("SDK session rejected")]
     Local(#[from] LocalSessionManagerError),
-    #[error("session capacity or lifetime refused")]
+    #[error("session lifetime refused")]
     Refused,
 }
 #[derive(Debug, thiserror::Error)]
@@ -38,14 +38,14 @@ impl From<LocalSessionWorkerError> for TransportError {
         Self::Local
     }
 }
-pub(super) struct BoundedManager<L: GatewayOwnerLifecycle> {
+pub(super) struct McpSessionManager<L: GatewayOwnerLifecycle> {
     inner: LocalSessionManager,
     created: AtomicBool,
     pub id: Mutex<Option<SessionId>>,
     pub life: Arc<Life<L>>,
     pub negotiated: Mutex<Option<String>>,
 }
-impl<L: GatewayOwnerLifecycle> BoundedManager<L> {
+impl<L: GatewayOwnerLifecycle> McpSessionManager<L> {
     /// Only a never-attempted transport is exempt from a join. Once creation
     /// starts, a failed/unknown SDK result is not fabricated into quiescence.
     pub(super) fn local_transport_quiescent(&self) -> bool {
@@ -107,7 +107,7 @@ impl<L: GatewayOwnerLifecycle> Drop for ObservedTransport<L> {
         let _ = self.life.close();
     } // signal/fence only; never a join claim
 }
-impl<L: GatewayOwnerLifecycle> SessionManager for BoundedManager<L> {
+impl<L: GatewayOwnerLifecycle> SessionManager for McpSessionManager<L> {
     type Error = SessionError;
     type Transport = ObservedTransport<L>;
     async fn create_session(&self) -> Result<(SessionId, Self::Transport), Self::Error> {

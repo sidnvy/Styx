@@ -153,12 +153,11 @@ test('stable macOS bundle identity and version reject injected plist values',()=
   for(const bad of ['0.1.0<dict>','0.1','v0.1.0','0.1.0-rc.1',null])
     assert.throws(()=>appInfoPlist(bad),/invalid_app_version/);
 });
-test('publisher plan signs nested Cua and updater before host and verifies exact team identity',()=>{
+test('publisher plan signs nested Cua before host and verifies exact team identity',()=>{
   const plan=macSigningPlan({app:'/build/Styx.app',identity:'Developer ID Application: Example (A123456789)',teamID:'A123456789',notaryProfile:'styx-release'});
   assert.equal(plan[0][1].at(-1),'/build/Styx.app/Contents/MacOS/cua-driver');
-  assert.equal(plan[1][1].at(-1),'/build/Styx.app/Contents/MacOS/StyxUpdater');
-  assert.equal(plan[2][1].at(-1),'/build/Styx.app');
-  assert.ok(plan[4][1].some(arg=>arg.includes('identifier "app.styx.host"')));
+  assert.equal(plan[1][1].at(-1),'/build/Styx.app');
+  assert.ok(plan[3][1].some(arg=>arg.includes('identifier "app.styx.host"')));
   assert.equal(plan.filter(([,args])=>args.includes('--deep')&&args.includes('--sign')).length,0);
   assert.ok(plan.some(([,args])=>args[0]==='notarytool'&&args.includes('--wait')));
   assert.ok(plan.some(([,args])=>args[0]==='stapler'&&args[1]==='validate'));
@@ -170,7 +169,7 @@ test('signing fails closed for ad-hoc identity, wrong team and unsafe profile',(
   assert.throws(()=>macSigningPlan({...valid,teamID:'B123456789'}),/signing_team/);
   assert.throws(()=>macSigningPlan({...valid,app:'/build/Other.app'}),/invalid_styx/);
   assert.throws(()=>macSigningPlan({...valid,notaryProfile:'release\n--password'}),/invalid_notary/);
-  assert.equal(macSigningPlan(valid).length,5);
+  assert.equal(macSigningPlan(valid).length,4);
 });
 test('Linux cannot accidentally produce a macOS signing receipt',{skip:process.platform==='darwin'},()=>{
   assert.throws(()=>buildMacApp({}),/native_macos_build_required/);
@@ -180,7 +179,7 @@ test('explicit local-development signing allows distinct CN user id and OU team 
   const plan=macDevelopmentSigningPlan({app:'/scratch/Styx.app',identity:'Apple Development: Example (U123456789)',teamID:'T123456789'});
   assert.equal(plan[0][1].at(-1),'/scratch/Styx.app/Contents/MacOS/cua-driver');
   assert.ok(plan[0][1].includes('--timestamp=none'));
-  assert.ok(plan[4][1].some(arg=>arg.includes('T123456789')));
+  assert.ok(plan[3][1].some(arg=>arg.includes('T123456789')));
   assert.ok(!plan.some(([,args])=>args.includes('notarytool')));
   assert.throws(()=>macSigningPlan({app:'/scratch/Styx.app',identity:'Apple Development: Example (U123456789)',teamID:'T123456789'}),/developer_id_application_required/);
 });
@@ -230,7 +229,6 @@ test('successive update builds keep marketing version but emit distinct explicit
   for(const plist of [first,second])assert.match(plist,/<key>CFBundleShortVersionString<\/key><string>0\.3\.0<\/string>/);
   assert.match(first,/<key>CFBundleVersion<\/key><string>1008<\/string>/);
   assert.match(second,/<key>CFBundleVersion<\/key><string>1009<\/string>/);
-  assert.match(second,/<key>StyxUpdateRelease<\/key><true\/>/);
   assert.throws(()=>appInfoPlist('0.3.0',{updateRelease:true}),/macos_update_release_build_number_required/);
 });
 test('build numbers use bounded canonical Apple numeric components, never Host prerelease semver',()=>{
@@ -244,6 +242,5 @@ test('legacy development builds are explicitly excluded from update releases',()
   assert.deepEqual(macAppBuildMetadata({version:'0.3.0'}),{marketingVersion:'0.3.0',buildNumber:'0',updateRelease:false,buildNumberSource:'development_sentinel_not_for_updates'});
   const plist=appInfoPlist('0.3.0');
   assert.match(plist,/<key>CFBundleVersion<\/key><string>0<\/string>/);
-  assert.match(plist,/<key>StyxUpdateRelease<\/key><false\/>/);
   assert.equal(macAppBuildMetadata({version:'0.3.0',buildNumber:'1008'}).updateRelease,false);
 });

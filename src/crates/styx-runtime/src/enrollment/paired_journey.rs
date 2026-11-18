@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     gateway::{
         auth::GatewayBearerPolicy,
-        http::{GatewayHttp, HttpBudget},
+        http::GatewayHttp,
         paired::{RelayHandle, backend::PairedGatewayBackend},
     },
     host::{
@@ -29,7 +29,6 @@ use styx_contracts::{
     identity::{ConnectionGeneration, GatewayId, HostGeneration},
 };
 use styx_core::policy::AdmissionFacts;
-use tokio::sync::Semaphore;
 
 async fn pair(
     client: &Client,
@@ -415,7 +414,7 @@ async fn paired_journey(capacity: bool, computers: usize, browser_handoff: bool)
     let gateway_id = GatewayId::try_from("owned-paired-gateway").unwrap();
     let gateway_epoch =
         GatewayEpoch::try_from(format!("owned-gateway-{}", uuid::Uuid::new_v4())).unwrap();
-    let partition = Arc::new(Semaphore::new(crate::gateway::paired::GATEWAY_RELAY_BYTES));
+
     let policy = Arc::new(
         GatewayBearerPolicy::new(mcp.as_bytes(), vec![host_header.clone()], vec![])
             .unwrap()
@@ -424,24 +423,9 @@ async fn paired_journey(capacity: bool, computers: usize, browser_handoff: bool)
     );
     // Constructor is composed with the same service, TLS leaf and listener.
     let shared = crate::enrollment::shared::SharedEnrollment::new(service);
-    let relay = RelayHandle::new(
-        shared.clone(),
-        gateway_id.clone(),
-        gateway_epoch,
-        partition
-            .clone()
-            .try_acquire_many_owned(crate::gateway::paired::GATEWAY_RELAY_BYTES as u32)
-            .unwrap(),
-    )
-    .unwrap();
+    let relay = RelayHandle::new(shared.clone(), gateway_id.clone(), gateway_epoch);
     let backend = Arc::new(PairedGatewayBackend::new(relay.clone()));
-    let http_budget = HttpBudget::from_reserved_partition(
-        Arc::new(Semaphore::new(crate::gateway::http::GATEWAY_HTTP_BYTES))
-            .try_acquire_many_owned(crate::gateway::http::GATEWAY_HTTP_BYTES as u32)
-            .unwrap(),
-    )
-    .unwrap();
-    let mcp_http = GatewayHttp::new(policy, backend.clone(), http_budget);
+    let mcp_http = GatewayHttp::new(policy, backend.clone());
     let app = EnrollmentHttp::new_paired(
         tls,
         shared,
@@ -1084,9 +1068,6 @@ async fn capacity_cycles(
     let mut first = None;
     for abandon in [false, true] {
         for n in 0..1050 {
-            if abandon {
-                http.age_idle_sessions_for_test(Duration::from_secs(61));
-            }
             let r=post(raw,uri,token,None,json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"paired-capacity-oracle","version":"1"}}})).await;
             assert_eq!(
                 r.status(),
@@ -1172,7 +1153,7 @@ async fn capacity_cycles(
         2100,
         "independent native effects"
     );
-    http.age_idle_sessions_for_test(Duration::from_secs(601));
+
     http.collect_closed_sessions_for_test().await;
     // Idle HTTP sessions and Host-owned work survive without a background GET.
     // A fresh caller below must discover/continue the original resources.
@@ -1200,7 +1181,7 @@ async fn capacity_cycles(
     }
     let pid = std::fs::read_to_string(root.join("protected.pid")).unwrap();
     assert!(Path::new(&format!("/proc/{pid}/stat")).exists());
-    http.age_idle_sessions_for_test(Duration::from_secs(601));
+
     http.collect_closed_sessions_for_test().await;
     assert!(
         Path::new(&format!("/proc/{pid}/stat")).exists(),
@@ -1244,7 +1225,7 @@ async fn capacity_cycles(
     }
     assert_eq!(result["exit_code"], 0);
     file_within(&root.join("protected.txt"), "still-owned").await;
-    http.age_idle_sessions_for_test(Duration::from_secs(601));
+
     http.collect_closed_sessions_for_test().await;
     let live = new_session(raw, uri, token).await;
     tool(
@@ -1274,7 +1255,7 @@ async fn capacity_cycles(
         json!({"environment_id":device.as_str()}),
     )
     .await;
-    http.age_idle_sessions_for_test(Duration::from_secs(601));
+
     http.collect_closed_sessions_for_test().await;
     assert_eq!(
         raw.get(uri)
@@ -1533,7 +1514,7 @@ async fn many_connected_computers(
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(relay.connection_counts(), (computers, 0));
+    assert_eq!(relay.connection_count(), computers);
     let config =
         StreamableHttpClientTransportConfig::with_uri(format!("https://{}/mcp", client.host))
             .auth_header(model.to_owned())
@@ -1600,7 +1581,7 @@ async fn many_connected_computers(
         let command = format!("printf '%s' '{}' > independent-effect.txt", nonces[n]);
         data(owner.call_tool(call("exec_command", json!({"cmd":command,"login":false,"environment_id":device.as_str(),"yield_time_ms":100}))).await.unwrap());
         file_within(&effect, &nonces[n]).await;
-        assert_eq!(relay.connection_counts(), (computers, 0));
+        assert_eq!(relay.connection_count(), computers);
     }
     // The status probe allocates no owner and observes physical computers once,
     // independently of how many Exec/Browser/Computer lanes each advertises.
@@ -1616,7 +1597,6 @@ async fn many_connected_computers(
         status.headers()["x-styx-computers-connected"],
         computers.to_string()
     );
-    assert_eq!(status.headers()["x-styx-computers-capacity"], "0");
     // A running task is stopped by a remote capability change. A second Host's
     // task stays alive and accepts its original stdin; control remains usable
     // with all capabilities disabled, then a local change re-enables Exec.
@@ -1636,7 +1616,7 @@ async fn many_connected_computers(
             .unwrap(),
     );
     assert_eq!(status["exec"]["configured"], false);
-    assert_eq!(relay.connection_counts(), (computers, 0));
+    assert_eq!(relay.connection_count(), computers);
     let refused = owner.call_tool(call("exec_command", json!({"cmd":"printf forbidden > disabled-effect.txt","login":false,"environment_id":devices[0].as_str()}))).await.unwrap();
     assert_eq!(refused.is_error, Some(true));
     data(owner.call_tool(call("write_stdin", json!({"environment_id":devices[1],"session_id":other["session_id"],"chars":"still-running\n","yield_time_ms":100}))).await.unwrap());
@@ -1752,7 +1732,7 @@ async fn many_connected_computers(
         );
     }
     let until = tokio::time::Instant::now() + Duration::from_secs(5);
-    while relay.connection_counts().0 != 0 {
+    while relay.connection_count() != 0 {
         assert!(
             tokio::time::Instant::now() < until,
             "all disconnected computers release their slots"
@@ -1760,7 +1740,7 @@ async fn many_connected_computers(
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     std::fs::write(root.join("many-computers-observation.json"), serde_json::to_vec_pretty(&json!({
-        "connected_computers":computers,"capacity":0,"devices":devices,"independent_effect_nonces":nonces,
+        "connected_computers":computers,"devices":devices,"independent_effect_nonces":nonces,
         "capability_settings":"remote disable stops owned Exec; other Host session survives; same local controller re-enables; persisted settings reopen",
         "mcp_conversations":1,"ambiguous_target":"not dispatched for Exec, Browser and Computer Use","offline_target":"not dispatched; no effect on any other Host",
         "effects":"computer-N/independent-effect.txt; exact unique nonce bytes read independently",
@@ -1836,30 +1816,15 @@ async fn named_computers_revoke_requires_sockets() {
     let gateway_id = GatewayId::try_from("owned-paired-gateway").unwrap();
     let gateway_epoch =
         GatewayEpoch::try_from(format!("owned-gateway-{}", uuid::Uuid::new_v4())).unwrap();
-    let partition = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
+
     let policy = Arc::new(
         GatewayBearerPolicy::new(mcp.as_bytes(), vec![host_header.clone()], vec![]).unwrap(),
     );
     // Constructor is composed with the same service, TLS leaf and listener.
     let shared = crate::enrollment::shared::SharedEnrollment::new(service);
-    let relay = RelayHandle::new(
-        shared.clone(),
-        gateway_id.clone(),
-        gateway_epoch,
-        partition
-            .clone()
-            .try_acquire_many_owned(16 * 1024 * 1024)
-            .unwrap(),
-    )
-    .unwrap();
+    let relay = RelayHandle::new(shared.clone(), gateway_id.clone(), gateway_epoch);
     let backend = Arc::new(PairedGatewayBackend::new(relay.clone()));
-    let http_budget = HttpBudget::from_reserved_partition(
-        Arc::new(Semaphore::new(crate::gateway::http::GATEWAY_HTTP_BYTES))
-            .try_acquire_many_owned(crate::gateway::http::GATEWAY_HTTP_BYTES as u32)
-            .unwrap(),
-    )
-    .unwrap();
-    let mcp_http = GatewayHttp::new(policy, backend.clone(), http_budget);
+    let mcp_http = GatewayHttp::new(policy, backend.clone());
     let app = EnrollmentHttp::new_paired(
         tls,
         shared,

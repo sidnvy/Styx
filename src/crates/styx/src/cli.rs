@@ -192,6 +192,15 @@ enum Command {
         root: Option<PathBuf>,
         #[arg(long)]
         yes: bool,
+        /// Directory containing the installed Styx command.
+        #[arg(long)]
+        bin_dir: Option<PathBuf>,
+    },
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[command(name = "__upgrade-apply", hide = true)]
+    UpgradeApply {
+        #[arg(long)]
+        root: PathBuf,
     },
     /// Back up stopped role roots, then set up or join again normally.
     Role {
@@ -528,49 +537,10 @@ enum HostCommand {
         #[command(subcommand)]
         command: HostJoinCommand,
     },
-    /// Explicit current-user transient action; no autostart or installation.
-    Start {
-        #[arg(long)]
-        state_dir: PathBuf,
-        #[arg(long, required = true)]
-        transient: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Observe scoped user units; never starts or adopts one.
-    Status {
-        #[arg(long)]
-        state_dir: PathBuf,
-        #[arg(long, required = true)]
-        transient: bool,
-        #[arg(long)]
-        owner_file: Option<PathBuf>,
-        #[arg(long)]
-        json: bool,
-    },
+    /// Run the existing native Host profile in the foreground.
     Run {
         #[arg(long)]
         state_dir: PathBuf,
-    },
-    Stop {
-        #[arg(long)]
-        state_dir: Option<PathBuf>,
-        #[arg(long, requires_all = ["state_dir", "owner_file", "expected_invocation"])]
-        transient: bool,
-        #[arg(long, requires = "transient")]
-        owner_file: Option<PathBuf>,
-        #[arg(long, requires = "transient")]
-        expected_invocation: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    Pause {
-        #[arg(long)]
-        state_dir: Option<PathBuf>,
-    },
-    Resume {
-        #[arg(long)]
-        state_dir: Option<PathBuf>,
     },
 }
 #[derive(Subcommand)]
@@ -1272,7 +1242,7 @@ async fn local_app(
 }
 
 pub(crate) async fn run(cli: Cli) -> ExitCode {
-    use styx_runtime::foreground::{self, HostWireMode};
+    use styx_runtime::foreground;
     match cli.command {
         #[cfg(target_os = "linux")]
         Command::Start { root } => setup_result(lifecycle::run(root, true).await),
@@ -1336,9 +1306,20 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             expected_publisher,
             root,
             yes,
-        } => {
-            setup_result(upgrade::run(payload, publisher_file, expected_publisher, root, yes).await)
-        }
+            bin_dir,
+        } => setup_result(
+            upgrade::run(
+                payload,
+                publisher_file,
+                expected_publisher,
+                root,
+                yes,
+                bin_dir,
+            )
+            .await,
+        ),
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        Command::UpgradeApply { root } => setup_result(upgrade::apply(root).await),
         Command::Uninstall { root, yes } => setup_result(setup::uninstall(root, yes).await),
         Command::Status {
             state_dir: None,
@@ -1961,30 +1942,6 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 json,
             ),
         },
-        Command::Host {
-            command: HostCommand::Start {
-                state_dir, json, ..
-            },
-        } => transient_manager::start(state_dir, json).await,
-        Command::Host {
-            command:
-                HostCommand::Status {
-                    state_dir,
-                    owner_file,
-                    json,
-                    ..
-                },
-        } => transient_manager::query(state_dir, owner_file, json).await,
-        Command::Host {
-            command:
-                HostCommand::Stop {
-                    state_dir: Some(state_dir),
-                    transient: true,
-                    owner_file: Some(owner_file),
-                    expected_invocation: Some(expected),
-                    json,
-                },
-        } => transient_manager::stop(state_dir, owner_file, expected, json).await,
         Command::Gateway {
             command: GatewayCommand::Tunnel { command },
         } => {
@@ -2251,10 +2208,6 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
         Command::Gateway {
             command: GatewayCommand::Run { state_dir: None },
         } => error("gateway_input_required"),
-        Command::Host {
-            command:
-                HostCommand::Stop { .. } | HostCommand::Pause { .. } | HostCommand::Resume { .. },
-        } => error("unsupported"),
         Command::Doctor {
             desktop_sessions: true,
             watch: true,
@@ -2313,12 +2266,7 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             });
             let mut signal_failed = false;
             let outcome = {
-                let running = foreground::host_run(
-                    &state_dir,
-                    HostWireMode::PairedV3,
-                    cancel.clone(),
-                    events,
-                );
+                let running = foreground::host_run(&state_dir, cancel.clone(), events);
                 tokio::pin!(running);
                 tokio::select! {
                     result=&mut running=>result,
@@ -2356,8 +2304,6 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
         }
     }
 }
-#[path = "cli_manager.rs"]
-mod transient_manager;
 
 #[cfg(test)]
 #[path = "cli_tests.rs"]

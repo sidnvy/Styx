@@ -32,7 +32,6 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayToolBackend for Backe
         if !self.admitted(owner) {
             return Err(refused());
         }
-        let _activity = self.life.activity().ok_or_else(refused)?;
         self.backend.list_tools(owner, request).await
     }
     fn call_tool(
@@ -91,7 +90,6 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> BackendBridge<B> {
             if !admitted || !transport.is_active() || !life.is_active() {
                 return Err(refused());
             }
-            let activity = life.activity().ok_or_else(refused)?;
             let supervisor = life.supervisor.upgrade().ok_or_else(refused)?;
             let (tx, rx) = oneshot::channel();
             #[cfg(test)]
@@ -115,9 +113,10 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> BackendBridge<B> {
                 }
                 let mut jobs = supervisor.jobs.lock().expect("backend supervisor");
                 while jobs.try_join_next().is_some() {}
+                let retained_life = life.clone();
                 jobs.spawn(async move {
-                    // Keep activity alive through the original supervised work.
-                    let _activity = activity;
+                    // Retain the original owner until its supervised call finishes.
+                    let _life = retained_life;
                     let _authorized_call = authorized;
                     let result = backend.call_tool(&owner, request).await;
                     let _ = tx.send(result);

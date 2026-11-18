@@ -457,7 +457,6 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
     var setupBuffer = ""
     var setupOpenRequested = false
     #if STYX_PRODUCT_UI
-    var platformUpdate: ProductPlatformUpdate?
     #endif
     var setupStatusLine: NSMenuItem?
     let setupPreference = "Styx.SetupWindowOpened.v1"
@@ -484,7 +483,6 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         let launchedAtLogin = launchEvent?.eventID == AEEventID(kAEOpenApplication)
             && launchEvent?.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue == OSType(keyAELaunchedAsLogInItem)
         #if STYX_PRODUCT_UI
-        platformUpdate = ProductPlatformUpdate.configured()
         #endif
         NSApp.mainMenu = styxApplicationMenu(actionTarget: self)
         for number in [SIGTERM, SIGINT] {
@@ -590,13 +588,6 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
                 ProductNativeDiagnostics.lifecycle(.windowCreated)
                 await model.bootstrap()
                 guard model.loaded else { core.requestEOF(); nativeCore = nil; throw ProductOwnedCoreError.unavailable }
-                model.checkAppUpdate = { [weak self] in self?.platformUpdate?.checkAppUpdateIfAvailable() }
-                platformUpdate?.bind(client: model.client, report: { [weak self, weak model] message in
-                    model?.reportNativeAppUpdateFailure(message)
-                    // Present feedback after the deferred termination reply has
-                    // returned; a modal alert must never hold that reply open.
-                    DispatchQueue.main.async { [weak self] in self?.setupWindow?.showSettings(.general) }
-                })
                 ProductNativeDiagnostics.lifecycle(.bootstrapCompleted)
                 observeProductComponents(core)
                 setupStatusLine?.title = "Native Host settings ready"
@@ -978,7 +969,6 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         }
         #if STYX_PRODUCT_UI
         if nativeCoreAttempted {
-            guard platformUpdate?.permitsApplicationQuit() != false else { return .terminateCancel }
             // Original bootstrap worker still owns its child until it completes.
             // A UI close cannot make an in-flight verified launch ownerless.
             if nativeCoreStarting { ProductNativeDiagnostics.lifecycle(.terminateCancelStarting); return .terminateCancel }
@@ -1004,15 +994,7 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
                 if approved {
                     Task {
                         await owner.stopAndJoin()
-                        // The original Core has already been actually joined by
-                        // prepareToQuit. Replacement also requires clean native
-                        // Cua settlement, never forced process exit or absence.
-                        let nativeClean = owner.daemon == nil && owner.daemonStopTask == nil && owner.phase != "cleanup_unknown"
-                        guard owner.platformUpdate?.nativeOwnerDidJoin(clean: nativeClean) != false else {
-                            owner.terminationPending = false
-                            ProductNativeDiagnostics.lifecycle(.terminateReply, ok: false)
-                            sender.reply(toApplicationShouldTerminate: false); return
-                        }
+                        // prepareToQuit already joined the original Core.
                         owner.nativeCore = nil
                         owner.nativeComponentObservation = nil; owner.nativeDesktopIntentObservedAt = nil
                         owner.componentTimer?.invalidate(); owner.componentTimer = nil

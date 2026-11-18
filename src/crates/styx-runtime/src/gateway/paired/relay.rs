@@ -1,6 +1,4 @@
 use super::GatewayExecProfile;
-#[cfg(test)]
-use super::{GATEWAY_RELAY_BYTES, PAIRED_LINK_BYTES};
 #[path = "drain.rs"]
 mod drain;
 use crate::{
@@ -19,9 +17,7 @@ use std::{
 };
 use styx_contracts::{identity::*, operation::OperationId};
 use styx_core::enrollment::{ConnectionLease, Lane};
-#[cfg(test)]
-use tokio::sync::Semaphore;
-use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum RelayError {
@@ -222,7 +218,7 @@ pub(crate) struct Inner {
     pub gateway: GatewayId,
     pub epoch: GatewayEpoch,
     pub state: Mutex<State>,
-    pub links: LinkSlots,
+    pub links: ActiveLinks,
     bindings: Mutex<Vec<Arc<Binding>>>,
     shutdown_lock: tokio::sync::Mutex<()>,
     pub(crate) shutdown_failed: AtomicBool,
@@ -231,29 +227,23 @@ pub(crate) struct Inner {
     next_owner: std::sync::atomic::AtomicU64,
 }
 /// Track transport settlement without limiting the number of Hosts.
-pub(crate) struct LinkSlots {
-    _budget: OwnedSemaphorePermit,
+#[derive(Default)]
+pub(crate) struct ActiveLinks {
     active: Arc<AtomicUsize>,
 }
 #[derive(Debug)]
-pub(crate) struct LinkPermit {
+pub(crate) struct LinkGuard {
     active: Arc<AtomicUsize>,
 }
-impl Drop for LinkPermit {
+impl Drop for LinkGuard {
     fn drop(&mut self) {
         self.active.fetch_sub(1, Ordering::AcqRel);
     }
 }
-impl LinkSlots {
-    fn new(budget: OwnedSemaphorePermit) -> Result<Self, RelayError> {
-        Ok(Self {
-            _budget: budget,
-            active: Arc::new(AtomicUsize::new(0)),
-        })
-    }
-    pub(crate) fn admit(&self) -> LinkPermit {
+impl ActiveLinks {
+    pub(crate) fn admit(&self) -> LinkGuard {
         self.active.fetch_add(1, Ordering::AcqRel);
-        LinkPermit {
+        LinkGuard {
             active: self.active.clone(),
         }
     }
@@ -279,14 +269,8 @@ pub struct RelayHandle {
     pub(crate) inner: Arc<Inner>,
 }
 impl RelayHandle {
-    pub fn new(
-        shared: SharedEnrollment,
-        gateway: GatewayId,
-        epoch: GatewayEpoch,
-        budget: OwnedSemaphorePermit,
-    ) -> Result<Self, RelayError> {
-        let links = LinkSlots::new(budget)?;
-        Ok(Self {
+    pub fn new(shared: SharedEnrollment, gateway: GatewayId, epoch: GatewayEpoch) -> Self {
+        Self {
             inner: Arc::new(Inner {
                 shared,
                 gateway,
@@ -296,7 +280,7 @@ impl RelayHandle {
                     closing: false,
                     tasks: vec![],
                 }),
-                links,
+                links: ActiveLinks::default(),
                 bindings: Mutex::new(vec![]),
                 shutdown_lock: tokio::sync::Mutex::new(()),
                 shutdown_failed: AtomicBool::new(false),
@@ -304,13 +288,12 @@ impl RelayHandle {
                 opening: tokio::sync::Mutex::new(()),
                 next_owner: std::sync::atomic::AtomicU64::new(1),
             }),
-        })
+        }
     }
-    /// Physical slot occupancy includes negotiation and transport settlement.
+    /// The physical connection count includes negotiation and transport settlement.
     /// It does not count three capability lanes as three computers.
-    pub fn connection_counts(&self) -> (usize, usize) {
-        let links = &self.inner.links;
-        (links.active.load(Ordering::Acquire), 0)
+    pub fn connection_count(&self) -> usize {
+        self.inner.links.active.load(Ordering::Acquire)
     }
     pub(crate) async fn authorize(&self, e: &Entry) -> Result<(), RelayError> {
         self.authorize_for(e, Lane::Exec).await
@@ -1426,16 +1409,9 @@ mod settled_targets_tests {
 #[cfg(test)]
 mod connection_capacity_tests {
     use super::*;
-    fn reserve(bytes: usize) -> Result<LinkSlots, RelayError> {
-        LinkSlots::new(
-            Arc::new(Semaphore::new(bytes))
-                .try_acquire_many_owned(bytes as u32)
-                .unwrap(),
-        )
-    }
     #[test]
     fn connections_have_no_count_quota_and_drop_tracks_only_the_original_link() {
-        let links = reserve(GATEWAY_RELAY_BYTES).unwrap();
+        let links = ActiveLinks::default();
         let mut admitted = (0..80).map(|_| links.admit()).collect::<Vec<_>>();
         assert_eq!(links.active.load(Ordering::Acquire), 80);
         drop(admitted.pop());
@@ -1447,8 +1423,8 @@ mod connection_capacity_tests {
         assert_eq!(links.active.load(Ordering::Acquire), 0);
     }
     #[tokio::test]
-    async fn two_hundred_reconnections_release_permits_and_reap_completed_tasks() {
-        let links = reserve(GATEWAY_RELAY_BYTES).unwrap();
+    async fn two_hundred_reconnections_track_live_links_and_reap_completed_tasks() {
+        let links = ActiveLinks::default();
         // Other computers remain connected while one repeatedly disconnects.
         let others = (0..31).map(|_| links.admit()).collect::<Vec<_>>();
         let mut state = State {
@@ -1477,23 +1453,5 @@ mod connection_capacity_tests {
         assert!(state.tasks.is_empty());
         drop(others);
         assert_eq!(links.active.load(Ordering::Acquire), 0);
-    }
-    #[test]
-    fn connection_accounting_does_not_derive_a_quota_from_reserved_bytes() {
-        assert_eq!(GATEWAY_RELAY_BYTES, 32 * PAIRED_LINK_BYTES);
-        assert!(reserve(GATEWAY_RELAY_BYTES + PAIRED_LINK_BYTES).is_ok());
-        assert!(reserve(PAIRED_LINK_BYTES - 1).is_ok());
-        assert!(reserve(PAIRED_LINK_BYTES + 1).is_ok());
-        let source = Arc::new(Semaphore::new(GATEWAY_RELAY_BYTES));
-        let links = LinkSlots::new(
-            source
-                .clone()
-                .try_acquire_many_owned(GATEWAY_RELAY_BYTES as u32)
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(source.available_permits(), 0);
-        drop(links);
-        assert_eq!(source.available_permits(), GATEWAY_RELAY_BYTES);
     }
 }

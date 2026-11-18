@@ -49,7 +49,7 @@ enum ProductNativeDiagnostics {
             "native_release_platform_unsupported", "native_release_input_invalid", "native_release_publisher_untrusted",
             "native_release_payload_integrity", "native_release_observation_changed", "native_release_input_unavailable",
             "native_release_capacity", "native_release_busy", "native_release_observation_unknown",
-            "app_service_original_operation_unknown", "app_runtime_update_pending", "app_cleanup_unknown",
+            "app_service_original_operation_unknown", "app_cleanup_unknown",
             "app_gateway_fenced", "app_quit_admitted", "join_http_invalid_input",
             "join_http_invalid_timeout", "join_http_connect_failed", "join_http_tls_rejected",
             "join_http_leaf_pin_mismatch", "join_http_deadline", "join_http_exchange_failed",
@@ -233,14 +233,6 @@ final class ProductCoreClient {
         guard let owner = owned else { throw ProductCoreError.unavailable }; return try await owner.call(operation, input)
     }
     func quitNative() async throws { guard let owner = owned else { throw ProductCoreError.unavailable }; try await owner.quitAndJoin() }
-    func prepareNativeAppMaintenance(requestId: String) async throws -> ProductJSON {
-        guard let owner = owned else { throw ProductCoreError.unavailable }
-        return try await owner.prepareAppMaintenance(requestId: requestId)
-    }
-    func cancelNativeAppMaintenance(ticketId: String) async throws {
-        guard let owner = owned else { throw ProductCoreError.unavailable }
-        try await owner.cancelAppMaintenance(ticketId: ticketId)
-    }
     func changeNativeService(_ operation: String) async throws -> ProductJSON {
         guard ["transferToService", "prepareServiceFirstStart", "stopService"].contains(operation) else { throw ProductCoreError.rejected }
         guard nativeServiceChangeAllowed else { throw ProductCoreError.serviceChangeUnconfirmed }

@@ -1,10 +1,53 @@
 //! The installed App bundle supplies executable code for a newly configured
 //! App-managed Host. The original pairing profile holds data and identity, not
 //! a second executable installation under runtime-versions.
-use super::runtime_update::SelectionPin;
 use super::*;
-use crate::release;
+use crate::{release, store::RawFile};
 use styx_contracts::management::ReaderContract;
+use styx_contracts::native_management::NativeRuntimeSelection;
+
+pub(super) struct SelectionPin {
+    root: PrivateRoot,
+    pub(super) file: RawFile,
+    pub(super) selection: NativeRuntimeSelection,
+}
+impl SelectionPin {
+    pub(super) fn open(path: &Path) -> Result<Self, AppError> {
+        let root = PrivateRoot::open(
+            path.parent()
+                .ok_or(AppError("app_runtime_selection_invalid"))?,
+        )
+        .map_err(|_| AppError("app_runtime_selection_invalid"))?;
+        let file = root
+            .read_raw(
+                Path::new(
+                    path.file_name()
+                        .ok_or(AppError("app_runtime_selection_invalid"))?,
+                ),
+                65536,
+            )
+            .map_err(|_| AppError("app_runtime_selection_invalid"))?;
+        let selection = serde_json::from_slice(file.bytes())
+            .map_err(|_| AppError("app_runtime_selection_invalid"))?;
+        Ok(Self {
+            root,
+            file,
+            selection,
+        })
+    }
+    pub(super) fn validate(&self) -> Result<(), AppError> {
+        same_file(&self.root, &self.file)
+    }
+}
+pub(super) fn same_file(root: &PrivateRoot, file: &RawFile) -> Result<(), AppError> {
+    let current = root
+        .read_raw(file.relative_path(), 65536)
+        .map_err(|_| AppError("app_runtime_input_changed"))?;
+    if current.observation() != file.observation() || current.bytes() != file.bytes() {
+        return Err(AppError("app_runtime_input_changed"));
+    }
+    Ok(())
+}
 
 impl HostApp {
     /// Validate the installed App's own Runtime for setup, without copying

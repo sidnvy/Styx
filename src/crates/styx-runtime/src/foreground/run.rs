@@ -1,11 +1,10 @@
-//! Protected foreground execution, not a migration/service manager. All ownership
-//! refusals are conservative observations; the Rust lease cannot lock old JS.
-use super::{ForegroundError, ForegroundEvent, ForegroundOutcome, HostWireMode, profile};
+//! Native foreground execution shared by CLI, App and persistent services.
+use super::{ForegroundError, ForegroundEvent, ForegroundOutcome, profile};
 use crate::{
     host::{
         bootstrap::OwnedExecHost,
         link::{HostWssLink, LinkAuthentication, LinkError},
-        protocol::{HostProtocol, PairedTrustedProfile},
+        protocol::PairedTrustedProfile,
     },
     providers::codex::TerminationEvidence,
     store::{ExecutionLeaseGuard, PrivateRoot},
@@ -24,18 +23,6 @@ use tokio_util::sync::CancellationToken;
 #[path = "computer_startup.rs"]
 mod computer_startup;
 
-const STATE_OWNERS: &[&str] = &[
-    "foreground.lock",
-    "foreground-recovery.lock",
-    "background.lock",
-    "advance.lock",
-    "capabilities.lock",
-];
-const HEALTH_OWNERS: &[&str] = &[
-    "install/.health-update-lock",
-    "install/.health-operation-lock",
-    "install/.health-recovery-guard",
-];
 struct LocalCapabilityRuntime {
     admitted: Arc<Admitted>,
     host: Arc<OwnedExecHost>,
@@ -98,7 +85,7 @@ struct Admitted {
         target_os = "windows"
     ))]
     service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
-    profile: Arc<profile::LoadedLegacyProfile>,
+    profile: Arc<profile::LoadedProfile>,
     state: PrivateRoot,
     base: PrivateRoot,
     lease: ExecutionLeaseGuard,
@@ -150,30 +137,7 @@ impl Admitted {
                 .validate_identity()
                 .map_err(|_| ForegroundError("native_service_scope_changed"))?;
         }
-        if self
-            .profile
-            .validate_committed_ownership(&self.state, &self.base)?
-        {
-            self.lease
-                .validate()
-                .map_err(|_| ForegroundError("execution_lease_changed"))?;
-            return Ok(());
-        }
-        for name in STATE_OWNERS {
-            self.state
-                .ensure_absent(name)
-                .map_err(|_| ForegroundError("legacy_owner_reconciliation_required"))?;
-        }
-        // No OS service observer is available in this slice. Even a reportedly
-        // stopped service configuration therefore requires explicit reconciliation.
-        self.base
-            .ensure_absent("service.json")
-            .map_err(|_| ForegroundError("legacy_service_observation_required"))?;
-        for name in HEALTH_OWNERS {
-            self.base
-                .ensure_absent(name)
-                .map_err(|_| ForegroundError("legacy_update_reconciliation_required"))?;
-        }
+        self.profile.validate_ownership(&self.state, &self.base)?;
         self.lease
             .validate()
             .map_err(|_| ForegroundError("execution_lease_changed"))?;
@@ -467,7 +431,7 @@ async fn validate(admitted: &Arc<Admitted>) -> Result<(), ForegroundError> {
         .map_err(|_| ForegroundError("profile_reader_failed"))?
 }
 async fn connect(
-    profile: &profile::LoadedLegacyProfile,
+    profile: &profile::LoadedProfile,
     generation: ConnectionGeneration,
 ) -> Result<HostWssLink, ForegroundError> {
     let endpoint = profile.endpoint();
@@ -643,7 +607,6 @@ fn empty_outcome() -> ForegroundOutcome {
 }
 pub async fn host_run(
     state_dir: &Path,
-    mode: HostWireMode,
     cancel: CancellationToken,
     events: mpsc::Sender<ForegroundEvent>,
 ) -> Result<ForegroundOutcome, ForegroundError> {
@@ -656,7 +619,6 @@ pub async fn host_run(
     tokio::spawn(async move {
         run_owned(
             &state,
-            mode,
             stop,
             events,
             RunOwner::Cli,
@@ -691,7 +653,6 @@ pub(crate) async fn host_run_for_app(
     tokio::spawn(async move {
         run_owned(
             &state,
-            HostWireMode::PairedV3,
             stop,
             events,
             RunOwner::App(scope, verified_runtime),
@@ -726,7 +687,6 @@ pub(crate) async fn host_run_for_service(
     tokio::spawn(async move {
         run_owned(
             &path,
-            HostWireMode::PairedV3,
             stop,
             events,
             RunOwner::Service(scope),
@@ -740,7 +700,6 @@ pub(crate) async fn host_run_for_service(
 }
 async fn run_owned(
     state_dir: &Path,
-    mode: HostWireMode,
     cancel: CancellationToken,
     events: mpsc::Sender<ForegroundEvent>,
     owner: RunOwner,
@@ -783,9 +742,7 @@ async fn run_owned(
         let profile = match owner {
             RunOwner::App(scope, Some(runtime)) => profile::load_for_app_retained(scope, runtime)?,
             RunOwner::App(scope, None) => profile::load_for_app(scope)?,
-            RunOwner::Cli => match mode {
-                HostWireMode::PairedV3 => profile::load_paired(&path)?,
-            },
+            RunOwner::Cli => profile::load_paired(&path)?,
             #[cfg(any(
                 all(target_os = "linux", target_env = "gnu"),
                 target_os = "macos",
@@ -936,89 +893,84 @@ async fn run_owned(
     // Browser is an independent optional local capability. Unsupported or
     // unavailable Browser inputs cannot take down an already admitted Exec Host.
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-    let browser: Option<Arc<dyn crate::host::protocol::browser::BrowserBootstrap>> =
-        if mode == HostWireMode::PairedV3 {
-            let retained = admitted.clone();
-            let source = tokio::task::spawn_blocking(move || {
-                retained.validate_ownership().map_err(|_| {
-                    super::browser::BrowserPreparationError::new(
-                        "ownership",
-                        styx_contracts::error::ErrorCategory::StateConflict,
-                    )
-                })?;
-                super::browser::prepare_browser_bootstrap(retained.profile.clone())
-            })
-            .await;
-            match source {
-                Ok(Ok(Some(source))) => {
-                    let mut browser_facts = facts(&device);
-                    browser_facts.descriptor.capability_id = CapabilityId::BrowserHeadless;
-                    browser_facts.descriptor.scope = Scope::Browser;
-                    browser_facts.descriptor.provider_id =
-                        "playwright".try_into().expect("static provider identity");
-                    match host.authority().configure_browser(browser_facts) {
-                        Ok(()) => Some(Arc::new(ForegroundBrowser {
-                            admitted: admitted.clone(),
-                            source,
-                        })),
-                        Err(_) => {
-                            event_with_reason(
-                                &events,
-                                &cancel,
-                                "browser_unavailable",
-                                &device,
-                                None,
-                                Some("configure_lane"),
-                            );
-                            None
-                        }
+    let browser: Option<Arc<dyn crate::host::protocol::browser::BrowserBootstrap>> = {
+        let retained = admitted.clone();
+        let source = tokio::task::spawn_blocking(move || {
+            retained.validate_ownership().map_err(|_| {
+                super::browser::BrowserPreparationError::new(
+                    "ownership",
+                    styx_contracts::error::ErrorCategory::StateConflict,
+                )
+            })?;
+            super::browser::prepare_browser_bootstrap(retained.profile.clone())
+        })
+        .await;
+        match source {
+            Ok(Ok(Some(source))) => {
+                let mut browser_facts = facts(&device);
+                browser_facts.descriptor.capability_id = CapabilityId::BrowserHeadless;
+                browser_facts.descriptor.scope = Scope::Browser;
+                browser_facts.descriptor.provider_id =
+                    "playwright".try_into().expect("static provider identity");
+                match host.authority().configure_browser(browser_facts) {
+                    Ok(()) => Some(Arc::new(ForegroundBrowser {
+                        admitted: admitted.clone(),
+                        source,
+                    })),
+                    Err(_) => {
+                        event_with_reason(
+                            &events,
+                            &cancel,
+                            "browser_unavailable",
+                            &device,
+                            None,
+                            Some("configure_lane"),
+                        );
+                        None
                     }
                 }
-                Ok(Ok(None)) => None,
-                Ok(Err(error)) => {
-                    // Static stage plus typed category; never format an upstream
-                    // native error or protected path into this event/log.
-                    eprintln!(
-                        "styx_browser_prepare_failed stage={} category={:?}",
-                        error.stage, error.category
-                    );
-                    event_with_reason(
-                        &events,
-                        &cancel,
-                        "browser_unavailable",
-                        &device,
-                        None,
-                        Some(error.stage),
-                    );
-                    None
-                }
-                Err(_) => {
-                    event_with_reason(
-                        &events,
-                        &cancel,
-                        "browser_unavailable",
-                        &device,
-                        None,
-                        Some("prepare_task_join"),
-                    );
-                    None
-                }
             }
-        } else {
-            None
-        };
+            Ok(Ok(None)) => None,
+            Ok(Err(error)) => {
+                // Static stage plus typed category; never format an upstream
+                // native error or protected path into this event/log.
+                eprintln!(
+                    "styx_browser_prepare_failed stage={} category={:?}",
+                    error.stage, error.category
+                );
+                event_with_reason(
+                    &events,
+                    &cancel,
+                    "browser_unavailable",
+                    &device,
+                    None,
+                    Some(error.stage),
+                );
+                None
+            }
+            Err(_) => {
+                event_with_reason(
+                    &events,
+                    &cancel,
+                    "browser_unavailable",
+                    &device,
+                    None,
+                    Some("prepare_task_join"),
+                );
+                None
+            }
+        }
+    };
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    let mut computer = (mode == HostWireMode::PairedV3).then(|| {
-        computer_startup::ComputerStartup::start(
-            admitted.clone(),
-            host.clone(),
-            events.clone(),
-            device.clone(),
-            cancel.clone(),
-            #[cfg(target_os = "macos")]
-            runtime_fault,
-        )
-    });
+    let mut computer = computer_startup::ComputerStartup::start(
+        admitted.clone(),
+        host.clone(),
+        events.clone(),
+        device.clone(),
+        cancel.clone(),
+        #[cfg(target_os = "macos")]
+        runtime_fault,
+    );
     // Keep this SAME protocol and executor across transport reconnects. In v3,
     // per-chat owner admission comes only from the authenticated fixed Gateway;
     // loading a device credential does not register a bootstrap MCP owner.
@@ -1027,44 +979,34 @@ async fn run_owned(
             "native_service_admission_configuration_failed",
         ))
     } else {
-        match mode {
-            HostWireMode::PairedV3 => {
-                let protocol = host.paired_protocol(PairedTrustedProfile {
-                    endpoint: admitted.profile.endpoint().as_str().to_owned(),
-                    gateway_namespace: admitted.profile.paired_gateway_namespace(),
-                    device_id: device.clone(),
-                    host_generation: generation,
-                });
-                let protocol = protocol.map(|protocol| {
-                    let protocol =
-                        protocol.with_command_environment(admitted.profile.command_environment());
-                    if let Some(settings) = &settings {
-                        protocol.with_settings(settings.clone())
-                    } else {
-                        protocol
-                    }
-                });
-                #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-                let protocol = protocol.and_then(|protocol| {
-                    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-                    let protocol = if let Some(source) = &browser {
-                        protocol.with_browser_profiles(source.clone())?
-                    } else {
-                        protocol
-                    };
-                    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-                    let protocol = if let Some(source) = &computer {
-                        protocol.with_computer_profiles(source.factory())?
-                    } else {
-                        protocol
-                    };
-                    Ok(protocol)
-                });
+        let protocol = host.paired_protocol(PairedTrustedProfile {
+            endpoint: admitted.profile.endpoint().as_str().to_owned(),
+            gateway_namespace: admitted.profile.paired_gateway_namespace(),
+            device_id: device.clone(),
+            host_generation: generation,
+        });
+        let protocol = protocol.map(|protocol| {
+            let protocol =
+                protocol.with_command_environment(admitted.profile.command_environment());
+            if let Some(settings) = &settings {
+                protocol.with_settings(settings.clone())
+            } else {
                 protocol
-                    .map(ConnectionSession::Paired)
-                    .map_err(|_| ForegroundError("paired_bootstrap_refused"))
             }
-        }
+        });
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+        let protocol = protocol.and_then(|protocol| {
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            let protocol = if let Some(source) = &browser {
+                protocol.with_browser_profiles(source.clone())?
+            } else {
+                protocol
+            };
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+            let protocol = protocol.with_computer_profiles(computer.factory())?;
+            Ok(protocol)
+        });
+        protocol.map_err(|_| ForegroundError("paired_bootstrap_refused"))
     };
     let mut failure = None;
     // No remote transport exists until after the local signed inputs, executor
@@ -1117,10 +1059,6 @@ async fn run_owned(
             };
             match initial {
                 Ok(Some(mut link)) => {
-                    if mode == HostWireMode::PairedV3 {
-                        remote_transport_drain =
-                            Some(crate::host::protocol::wire::TransportDrainOutcome::Unknown);
-                    }
                     loop {
                         // Readiness cannot drop or replace this connection future.
                         // The paired protocol sends it only after the drain-enable
@@ -1196,14 +1134,15 @@ async fn run_owned(
                                 }
                             }
                         };
-                        if mode == HostWireMode::PairedV3 {
-                            let observed = result.as_ref().ok().copied().flatten().unwrap_or(
+
+                        let observed =
+                            result.as_ref().ok().copied().flatten().unwrap_or(
                                 crate::host::protocol::wire::TransportDrainOutcome::Unknown,
                             );
-                            let retained = retain_transport_outcome(settled_transports, observed);
-                            settled_transports = Some(retained);
-                            remote_transport_drain = Some(retained);
-                        }
+                        let retained = retain_transport_outcome(settled_transports, observed);
+                        settled_transports = Some(retained);
+                        remote_transport_drain = Some(retained);
+
                         if matches!(
                             &result,
                             Err(crate::host::protocol::ProtocolError::PairingRevoked)
@@ -1288,10 +1227,6 @@ async fn run_owned(
                             break;
                         };
                         link = connected;
-                        if mode == HostWireMode::PairedV3 {
-                            remote_transport_drain =
-                                Some(crate::host::protocol::wire::TransportDrainOutcome::Unknown);
-                        }
                     }
                 }
                 Ok(None) => {}
@@ -1309,7 +1244,10 @@ async fn run_owned(
             }
             // Same original input jobs remain owned through every link failure.
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            session.drain_browser_inputs().await;
+            {
+                session.drain_browser_inputs().await;
+                session.drain_computer_inputs().await;
+            }
         }
         Err(error) => failure = Some(error),
     }
@@ -1329,9 +1267,7 @@ async fn run_owned(
     };
     let mut process_exits = BTreeMap::new();
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    if let Some(computer) = &computer {
-        computer.close_admission();
-    }
+    computer.close_admission();
 
     // Unknown cleanup retains the SAME owner, pin and supervisor. Never release
     // the lease on a timer while the native child might still execute signed code.
@@ -1355,7 +1291,7 @@ async fn run_owned(
             outcome.supervised_jobs_joined = cleanup.supervised_jobs_joined;
         }
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-        if let Some(computer) = &mut computer {
+        {
             // Exec shutdown happens independently, while desktop initialization
             // and its original source stay retained until real join/stop facts.
             let complete = computer
@@ -1382,37 +1318,6 @@ async fn run_owned(
     // Preserve the actual local cleanup even when admission or transport ended
     // the runtime. Callers report stop_reason separately from cleanup evidence.
     Ok(outcome)
-}
-
-/// A local composition choice, not a wire fallback. Protocol negotiation never
-/// silently switches to legacy mode if authenticated paired admission fails.
-enum ConnectionSession<'a> {
-    Paired(HostProtocol<'a>),
-}
-impl ConnectionSession<'_> {
-    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-    async fn drain_browser_inputs(&self) {
-        let Self::Paired(protocol) = self;
-        protocol.drain_browser_inputs().await;
-        protocol.drain_computer_inputs().await;
-    }
-    async fn run_connection_with_readiness(
-        &self,
-        link: &mut HostWssLink,
-        stop: &CancellationToken,
-        ready: Option<tokio::sync::oneshot::Sender<()>>,
-    ) -> Result<
-        Option<crate::host::protocol::wire::TransportDrainOutcome>,
-        crate::host::protocol::ProtocolError,
-    > {
-        match self {
-            Self::Paired(protocol) => {
-                protocol
-                    .run_connection_with_readiness(link, stop, ready)
-                    .await
-            }
-        }
-    }
 }
 
 /// Keep original resource identities even if a later cleanup inventory is empty.

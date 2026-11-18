@@ -77,7 +77,7 @@ pub(super) struct LocalGateway {
     pub cleanup: Option<foreground::GatewayForegroundOutcome>,
     retained: Option<native::NativeManagementError>,
     startup_failure: Option<foreground::AppGatewayError>,
-    startup_candidate: Option<Arc<crate::release::VerifiedNativeRelease>>,
+    runtime_candidate: Option<Arc<crate::release::VerifiedNativeRelease>>,
     failed: bool,
     pub scope: Arc<HostScope>,
 }
@@ -94,7 +94,10 @@ impl LocalGateway {
             .clone()
             .ok_or(AppError("app_lan_setup_required"))
     }
-    pub async fn open(scope: Arc<HostScope>) -> Result<Self, AppError> {
+    pub async fn open(
+        scope: Arc<HostScope>,
+        runtime_candidate: Option<Arc<crate::release::VerifiedNativeRelease>>,
+    ) -> Result<Self, AppError> {
         scope.validate()?;
         let root = scope
             .root
@@ -148,7 +151,7 @@ impl LocalGateway {
             cleanup: None,
             retained: None,
             startup_failure: None,
-            startup_candidate: None,
+            runtime_candidate,
             failed: false,
         };
         result.validate()?;
@@ -253,16 +256,16 @@ impl LocalGateway {
         });
         let diagnostic = crate::management::native_gateway::StartupDiagnostic::from_env();
         let worker_diagnostic = diagnostic.clone();
-        // Move the original bootstrap object only after the original C07 startup
-        // transition has settled. Unknown startup never repopulates or retries it.
-        let startup_candidate = self.startup_candidate.take();
+        // Each clean restart uses the current App bundle. The original C07
+        // transition and retained failure checks above still gate startup.
+        let runtime_candidate = self.runtime_candidate.clone();
         let worker = tokio::spawn(async move {
             foreground::gateway_run_for_app(
                 scope,
                 worker_cancel,
                 events,
                 worker_diagnostic,
-                startup_candidate,
+                runtime_candidate,
             )
             .await
         });
@@ -391,7 +394,7 @@ impl HostApp {
         native::inspect_gateway_for_app(scope.clone())
             .await
             .map_err(|e| self.management_error(e))?;
-        LocalGateway::open(scope).await
+        LocalGateway::open(scope, self.native_runtime.clone()).await
     }
     fn require_unstarted_local_inputs(&self) -> Result<(), AppError> {
         self.scope.validate()?;
@@ -610,7 +613,7 @@ impl HostApp {
         if let Some(diagnostic) = &self.startup_diagnostic {
             diagnostic.report("app_load_gateway_done");
         }
-        gateway.startup_candidate = Some(startup_candidate);
+        gateway.runtime_candidate = Some(startup_candidate);
         self.local_gateway = Some(gateway);
         self.finish_local_pairing(choice, input.tunnel).await
     }

@@ -15,13 +15,6 @@ test('Windows native installer admission holds package mutex and observes runnin
   execFileSync(harness,[path.join(temp,'Programs Styx 中文'),gate],{windowsHide:true,timeout:30000,stdio:'pipe'});
 });
 
-test('Windows installer requires the existing Core registration before touching a startup entry',{skip:process.platform!=='win32'},t=>{
- const temp=temporary('styx-login-ownership-');t.after(()=>fs.rmSync(temp,{recursive:true,force:true}));
- const csc=path.join(process.env.WINDIR,'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),gate=path.join(temp,'gate.exe'),harness=path.join(temp,'test.exe');
- const compile=(out,file)=>execFileSync(csc,['/nologo','/warn:4','/warnaserror+','/target:exe','/reference:System.Web.Extensions.dll','/out:'+out,path.join(here,file)],{windowsHide:true,stdio:'pipe'});
- compile(gate,'InstallGate.cs');compile(harness,'LoginOwnershipTest.cs');execFileSync(harness,[temp,gate],{windowsHide:true,timeout:30000,stdio:'pipe'});
-});
-
 test('Windows native setup creates only missing private program directories',{skip:process.platform!=='win32'},t=>{
  const temp=temporary('styx-root-creation-');t.after(()=>fs.rmSync(temp,{recursive:true,force:true}));
  const csc=path.join(process.env.WINDIR,'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),gate=path.join(temp,'gate.exe'),harness=path.join(temp,'test.exe');
@@ -36,6 +29,7 @@ test('Inno selected directory scopes admission and atomic App fencing before any
  const temp=temporary('styx-selected-root-');t.after(()=>fs.rmSync(temp,{recursive:true,force:true}));
  const payload=path.join(temp,'payload'),output=path.join(temp,'output');fs.mkdirSync(payload);fs.mkdirSync(output);
  fs.writeFileSync(path.join(payload,'inert.txt'),'installer admission test only\n');
+ fs.copyFileSync(path.join(here,'../../../assets/brand/styx.ico'),path.join(payload,'styx.ico'));
  const gate=path.join(temp,'StyxInstallGate.exe');
  execFileSync(path.join(process.env.WINDIR,'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),[
   '/nologo','/warn:4','/warnaserror+','/target:exe','/reference:System.Web.Extensions.dll','/out:'+gate,path.join(here,'InstallGate.cs'),
@@ -76,7 +70,7 @@ begin
   Result := False;
 end;
 `);
- const defines={NativePackage:'0',SourceDir:payload,OutputDir:output,ProductVersion:'0.0.0.1',PackageHash:'a'.repeat(64),GateFile:gate,
+ const defines={SourceDir:payload,OutputDir:output,ProductVersion:'0.0.0.1',PackageHash:'a'.repeat(64),GateFile:gate,
   ProductId:'Styx.SelectedRoot.Test',ProductName:'Styx Selected Root Test',InstallFolder:'StyxSelectedRootTest',StateDirectoryArgument:'X'};
  execFileSync(process.env.STYX_INNO_COMPILER,[...Object.entries(defines).map(([key,value])=>`/D${key}=${value}`),harness],{windowsHide:true,stdio:'pipe'});
  for(const mode of ['idle','app-busy','setup-busy']){
@@ -89,6 +83,7 @@ end;
   // Silent pre-install navigation refusal exits 1; the report distinguishes our
   // intentional stop from an initialization failure, without installing anything.
   if(exitCode!==1)throw Error(`expected_preinstall_abort_${mode}: ${exitCode}`);
-  if(fs.existsSync(root))throw Error(`unexpected_install_write_${mode}`);
+  // Native preflight may create an empty private root, but never copy program files.
+  if(fs.existsSync(root)&&(mode!=='idle'||fs.readdirSync(root).length!==0))throw Error(`unexpected_install_write_${mode}`);
  }
 });

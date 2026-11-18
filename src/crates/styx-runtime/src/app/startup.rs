@@ -1,5 +1,5 @@
-//! Startup observes the current committed profile. Historical update inputs
-//! remain available to their original recovery path, not startup admission.
+//! Startup observes the current committed profile and pending native operation.
+//! Retired App-updater files do not govern installed bundle admission.
 use super::*;
 use crate::store::native_host_snapshot::NativeHostSnapshot;
 
@@ -79,7 +79,8 @@ impl HostApp {
 
 #[cfg(test)]
 mod tests {
-    use super::super::runtime_update::{OriginalInput, root_digest, same_file};
+    #[cfg(unix)]
+    use super::super::runtime_bootstrap::same_file;
     use super::*;
 
     #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
@@ -124,7 +125,6 @@ mod tests {
             observed,
             deployment_file: PathBuf::new(),
             retire_failure: None,
-            runtime_update: None,
             service: None,
             local_gateway: None,
             resume_local_available: false,
@@ -142,229 +142,11 @@ mod tests {
             unknown: false,
             quit_ticket: None,
             login: login::Login::default(),
-            maintenance: None,
             startup_diagnostic: None,
             startup_profile: None,
         };
         profile.revalidate().unwrap();
         app.scope.validate().unwrap();
-    }
-
-    // Real signed payload and original dual-role update/retirement. The new
-    // empty private root exercises cold-open scope validation only; it is not
-    // a completed Host enrollment or native acceptance.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore = "requires STYX_HISTORY_C29 and STYX_HISTORY_C30 signed payload directories; disposable local TLS"]
-    async fn retired_dual_history_archives_before_new_root_cold_open() {
-        use std::{
-            fs,
-            io::Write,
-            os::unix::fs::{DirBuilderExt, OpenOptionsExt},
-        };
-        fn dir(path: &Path) {
-            fs::DirBuilder::new().mode(0o700).create(path).unwrap();
-        }
-        fn write(path: &Path, bytes: &[u8]) {
-            let mut f = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(path)
-                .unwrap();
-            f.write_all(bytes).unwrap();
-            f.sync_all().unwrap();
-        }
-        fn raw(value: Value) -> Box<serde_json::value::RawValue> {
-            serde_json::value::to_raw_value(&value).unwrap()
-        }
-        fn selection(path: &Path) -> styx_contracts::native_management::NativeRuntimeSelection {
-            let publisher = path.join("publisher.pem");
-            let pin =
-                crate::crypto::PublisherVerifyingKey::from_spki_pem(&fs::read(&publisher).unwrap())
-                    .unwrap()
-                    .fingerprint()
-                    .unwrap();
-            crate::release::verify(&path.join("payload"), &publisher, &pin)
-                .unwrap()
-                .runtime_selection()
-                .unwrap()
-        }
-        async fn wait(app: &mut HostApp, target: &str) {
-            tokio::time::timeout(Duration::from_secs(150), async {
-                loop {
-                    let status = app
-                        .dispatch(Operation::RuntimeUpdateStatus, raw(json!({})))
-                        .await
-                        .unwrap();
-                    let phase = status["runtimeUpdate"]["status"].as_str().unwrap();
-                    assert_ne!(phase, "unknown", "runtime update: {status}");
-                    if phase == target {
-                        break;
-                    }
-                    assert!(matches!(phase, "staging" | "updating"));
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                }
-            })
-            .await
-            .unwrap();
-        }
-        let top =
-            std::env::temp_dir().join(format!("styx-retired-history-{}", uuid::Uuid::new_v4()));
-        dir(&top);
-        struct Cleanup(PathBuf);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let _cleanup = Cleanup(top.clone());
-        let parent = top.join("app");
-        dir(&parent);
-        let old = selection(Path::new(&std::env::var("STYX_HISTORY_C29").unwrap()));
-        let new = selection(Path::new(&std::env::var("STYX_HISTORY_C30").unwrap()));
-        let old_selection = top.join("old.json");
-        write(&old_selection, &serde_json::to_vec(&old).unwrap());
-        let new_selection = top.join("new.json");
-        write(&new_selection, &serde_json::to_vec(&new).unwrap());
-        let profile = parent.join("profile");
-        let mut app = HostApp::open_native(&profile, &old_selection)
-            .await
-            .unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        app.create_local(LocalInput {
-            exec: true,
-            tunnel: None,
-            label: "Disposable history".into(),
-            computer: false,
-            browser: false,
-            browser_channel: None,
-            persist_login: false,
-            port,
-            lan_address: None,
-            allow_remote_hosts: false,
-        })
-        .await
-        .unwrap();
-        app.settle_all().await.unwrap();
-        app.set_desired(NativeRunDesired::Stopped).await.unwrap();
-        drop(app);
-        let mut app = HostApp::open_native(&profile, &new_selection)
-            .await
-            .unwrap();
-        app.dispatch(Operation::StageRuntime, raw(json!({"authorize":true})))
-            .await
-            .unwrap();
-        wait(&mut app, "staged").await;
-        app.dispatch(Operation::UpdateRuntime, raw(json!({"authorize":true,"transactionId":format!("history-{}", uuid::Uuid::new_v4().simple())}))).await.unwrap();
-        wait(&mut app, "committed").await;
-        let old_root = root_digest(app.scope.root.get().unwrap()).unwrap();
-        let updates = parent.join("runtime-updates");
-        let entries: Vec<_> = fs::read_dir(&updates)
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .collect();
-        assert_eq!(entries.len(), 1);
-        let before = fs::read(&entries[0]).unwrap();
-        let original: OriginalInput = serde_json::from_slice(&before).unwrap();
-        assert_eq!(original.roles.len(), 2);
-        app.dispatch(Operation::QuitAdmission, raw(json!({})))
-            .await
-            .unwrap();
-        drop(app);
-        // Control: completed history remains readable while original roots exist.
-        let mut app = HostApp::open_native(&profile, &new_selection)
-            .await
-            .unwrap();
-        // A foreign/invalid history entry must not be swept into a new receipt.
-        let foreign = updates.join("foreign.json");
-        write(&foreign, b"{}");
-        let refused = app
-            .dispatch(
-                Operation::RetireRole,
-                raw(json!({"allowOtherDevices":false})),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(refused.code(), "role_retire_history_unproven");
-        assert!(profile.is_dir() && parent.join("gateway").is_dir());
-        assert!(!parent.join(".styx-app-role-retire-v1").exists());
-        fs::remove_file(&foreign).unwrap();
-        let retired = app
-            .dispatch(
-                Operation::RetireRole,
-                raw(json!({"allowOtherDevices":false})),
-            )
-            .await
-            .unwrap();
-        assert_eq!(retired["retirement"]["outcome"], "retired");
-        drop(app);
-        let history = retired["retirement"]["retired"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| {
-                p["oldPath"]
-                    .as_str()
-                    .is_some_and(|p| p.ends_with("/runtime-updates"))
-            })
-            .unwrap();
-        let archived = PathBuf::from(history["newPath"].as_str().unwrap());
-        assert!(!updates.exists());
-        assert_eq!(
-            fs::read(archived.join(entries[0].file_name().unwrap())).unwrap(),
-            before
-        );
-        let ledger = parent.join(".styx-app-role-retire-v1");
-        let receipt = fs::read_dir(&ledger)
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        assert!(parent.join("runtime-versions").is_dir());
-        assert!(!profile.exists());
-        dir(&profile);
-        let root = PrivateRoot::open(&profile).unwrap();
-        assert_ne!(root_digest(&root).unwrap(), old_root);
-        drop(root);
-        assert_eq!(
-            fs::read(archived.join(entries[0].file_name().unwrap())).unwrap(),
-            before
-        );
-        // Clean-parent control uses the same empty-root cold-open entry.
-        let clean = top.join("clean");
-        dir(&clean);
-        dir(&clean.join("profile"));
-        let clean_result = HostApp::open_native(&clean.join("profile"), &new_selection).await;
-        let clean_code = clean_result.as_ref().err().map(AppError::code);
-        assert_ne!(clean_code, Some("app_runtime_input_changed"));
-        assert_ne!(clean_code, Some("app_role_retire_unknown"));
-        drop(clean_result);
-        let reopened = HostApp::open_native(&profile, &new_selection).await;
-        assert_eq!(reopened.as_ref().err().map(AppError::code), clean_code);
-        drop(reopened);
-        // Completed records remain valid if an owner later removes old archives.
-        fs::remove_dir_all(&archived).unwrap();
-        let after_archive_removal = HostApp::open_native(&profile, &new_selection).await;
-        assert_eq!(
-            after_archive_removal.as_ref().err().map(AppError::code),
-            clean_code
-        );
-        drop(after_archive_removal);
-        fs::write(
-            receipt.join("done"),
-            br#"{"schema":1,"begin_sha256":"fake-test-secret"}"#,
-        )
-        .unwrap();
-        let tampered = HostApp::open_native(&profile, &new_selection).await;
-        assert_eq!(
-            tampered.as_ref().err().map(AppError::code),
-            Some("app_role_retire_unknown")
-        );
-        drop(tampered);
     }
 
     #[cfg(any(
@@ -490,7 +272,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn active_update_input_pin_rejects_same_content_replacement() {
+    fn installed_selection_input_pin_rejects_same_content_replacement() {
         use std::{
             fs,
             io::Write,

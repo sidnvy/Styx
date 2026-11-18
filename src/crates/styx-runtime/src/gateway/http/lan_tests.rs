@@ -218,17 +218,12 @@ async fn gateway_lan_scenario_inner(
         service.allow_remote_host(address.to_string()).unwrap();
     }
     let shared = SharedEnrollment::new(service);
-    let partition = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
+
     let relay = RelayHandle::new(
         shared.clone(),
         gateway_namespace.clone(),
         GatewayEpoch::try_from("lan-test-epoch").unwrap(),
-        partition
-            .clone()
-            .try_acquire_many_owned(16 * 1024 * 1024)
-            .unwrap(),
-    )
-    .unwrap();
+    );
     let backend = Arc::new(PairedGatewayBackend::new(relay.clone()));
     let policy = Arc::new(
         GatewayBearerPolicy::new(model.as_bytes(), vec![local_host.clone()], vec![]).unwrap(),
@@ -242,16 +237,7 @@ async fn gateway_lan_scenario_inner(
     let principal = policy.authorize(&owner_headers).unwrap();
     let owner = principal.new_mcp_session_owner().unwrap();
     let unknown_owner = principal.new_mcp_session_owner().unwrap();
-    let mcp = GatewayHttp::new(
-        policy,
-        backend.clone(),
-        HttpBudget::from_reserved_partition(
-            Arc::new(Semaphore::new(crate::gateway::http::GATEWAY_HTTP_BYTES))
-                .try_acquire_many_owned(crate::gateway::http::GATEWAY_HTTP_BYTES as u32)
-                .unwrap(),
-        )
-        .unwrap(),
-    );
+    let mcp = GatewayHttp::new(policy, backend.clone());
     let app = EnrollmentHttp::new_paired(
         server_tls,
         shared,

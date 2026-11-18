@@ -3,9 +3,8 @@
 //! The owned session_probe worker isolates SDK allocations; MAX_FACTS only
 //! bounds retained/serialized facts, not upstream DBus frame allocation.
 pub(crate) mod association;
-pub mod manager;
 #[cfg(target_env = "gnu")]
-pub(crate) use manager::persistent as native_service;
+pub(crate) mod native_service;
 
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
