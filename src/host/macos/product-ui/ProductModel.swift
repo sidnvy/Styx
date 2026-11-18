@@ -221,6 +221,9 @@ enum ProductRestorationPolicy {
             page = .welcome
         }
     }
+    // The App updater remains independent of the removed Runtime updater.
+    var checkAppUpdate: (() -> Void)?
+
     #if STYX_TESTING
     var testSuppressObservations = false
     var testPreview = false
