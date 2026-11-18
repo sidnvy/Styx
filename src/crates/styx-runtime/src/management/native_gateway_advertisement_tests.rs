@@ -1,6 +1,9 @@
-//! Protected canonical + real signed-reader projection, never activation/GUI acceptance.
+//! Protected canonical feature projection, never activation/GUI acceptance.
 use super::*;
-use crate::store::native_root;
+use crate::{
+    release::{self, VerifiedNativeRelease},
+    store::native_root,
+};
 use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey, pkcs8::EncodePublicKey as _};
 use std::{
@@ -135,7 +138,7 @@ fn canonical(
 }
 
 #[test]
-fn rejection_advertisement_requires_canonical_seven_and_a_verified_compatible_reader() {
+fn rejection_advertisement_uses_current_app_and_requires_canonical_seven() {
     let top = std::env::temp_dir().join(format!(
         "styx-rejection-advertisement-{}",
         uuid::Uuid::new_v4()
@@ -145,15 +148,15 @@ fn rejection_advertisement_requires_canonical_seven_and_a_verified_compatible_re
     let old = candidate(&top, "reader-old", false);
     let (old_binding, old_state) = canonical(&top, "old-state", false, &capable);
     assert!(
-        !pairing_rejection_projection(&old_state, &capable),
+        !pairing_rejection_projection(&old_state),
         "a capable App cannot upgrade a canonical old profile by advertising"
     );
     let (new_binding, new_state) = canonical(&top, "new-state", true, &capable);
-    assert!(pairing_rejection_projection(&new_state, &capable));
+    assert!(pairing_rejection_projection(&new_state));
     let (mixed_binding, mixed_state) = canonical(&top, "incompatible-selection", true, &old);
     assert!(
-        !pairing_rejection_projection(&mixed_state, &old),
-        "schema seven alone cannot make an old signed runtime support rejection"
+        pairing_rejection_projection(&mixed_state),
+        "the current App implements rejection; the historical selection does not select its code"
     );
     // The real original configuration writers remain held by these bindings;
     // this metadata projection never requests another writer or starts an image.

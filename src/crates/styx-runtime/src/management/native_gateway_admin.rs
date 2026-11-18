@@ -3,7 +3,6 @@
 //! fresh private file; reports and errors contain public observations only.
 use super::native_join_http::{self as http, JoinHttpCertainty, JoinHttpError};
 use crate::{
-    release::{self, VerifiedNativeRelease},
     store::{PrivateRoot, RawFile, RootIdentity, native_state},
     tls::{GatewayClientTls, GatewayLeafPin, TrustAnchorPin},
 };
@@ -337,32 +336,25 @@ pub(crate) async fn reject_for_app(
 }
 /// Read-only UI discovery, not a grant or permission to reject. The original
 /// Gateway owns its writer; this path only reuses protected material/C07 reads.
-/// Any unproven file, format or signature omits the operation from discovery.
+/// Any unproven file or canonical format omits the operation from discovery.
 pub(crate) async fn pairing_rejection_supported_for_app(
     scope: Arc<crate::app::HostScope>,
 ) -> Result<bool> {
     let path = scope.state_dir().to_owned();
     blocking(move || {
         let material = Material::open_scoped(path, Some(scope))?;
-        // open_scoped already checked the complete original C07 tip, current
-        // signed selection, role/ready binding and original file pins. This
-        // pure projection creates neither a writer nor authorization evidence.
+        // The running App owns this implementation. The original C07 tip,
+        // role/ready binding and private file pins still gate discovery.
         let marker = native_state::decode_marker(material.files[0].bytes())
             .map_err(|_| refused("native_gateway_admin_material"))?;
         let canonical = native_state::decode_state(material.files[1].bytes(), &marker)
             .map_err(|_| refused("native_gateway_admin_material"))?;
-        Ok(pairing_rejection_projection(
-            &canonical,
-            &material.candidate,
-        ))
+        Ok(pairing_rejection_projection(&canonical))
     })
     .await
 }
 
-fn pairing_rejection_projection(
-    canonical: &native_state::ValidatedNativeState,
-    candidate: &VerifiedNativeRelease,
-) -> bool {
+fn pairing_rejection_projection(canonical: &native_state::ValidatedNativeState) -> bool {
     let state = canonical.state();
     state.schema == 7
         && state.reader_contract == ReaderContract::NativePairingLifecycleStateV1
@@ -374,12 +366,6 @@ fn pairing_rejection_projection(
                 && gateway.autostart
                     == styx_contracts::native_management::NativeAutostartDesired::Disabled
         })
-        && candidate.manifest().scope
-            == styx_contracts::native_release::NativeReleaseScope::RuntimeCandidate
-        && candidate
-            .manifest()
-            .minimum_reader
-            .supports_state_reader(ReaderContract::NativePairingLifecycleStateV1)
 }
 
 /// Read the selection committed by the original native state/journal chain.
@@ -586,8 +572,7 @@ async fn observe_scoped(
     }
     Ok(result)
 }
-// This authenticated unknown-session probe allocates no MCP owner and works
-// even when every session slot belongs to live work.
+// This authenticated unknown-session probe allocates no MCP owner.
 async fn session_counters(
     client: &reqwest::Client,
     origin: &str,
@@ -604,31 +589,21 @@ async fn session_counters(
     if response.status() != reqwest::StatusCode::NOT_FOUND {
         return None;
     }
-    let mut counters = serde_json::Map::new();
-    for name in ["open", "capacity", "expired", "evicted"] {
-        let value = response
+    let count = |name: &str| {
+        response
             .headers()
-            .get(format!("x-styx-sessions-{name}"))?
+            .get(name)?
             .to_str()
             .ok()?
             .parse::<u64>()
-            .ok()?;
-        counters.insert(name.into(), serde_json::json!(value));
-    }
-    let computers = ["connected", "capacity"]
-        .into_iter()
-        .map(|name| {
-            let value = response
-                .headers()
-                .get(format!("x-styx-computers-{name}"))?
-                .to_str()
-                .ok()?
-                .parse::<u64>()
-                .ok()?;
-            Some((name.to_owned(), serde_json::json!(value)))
+            .ok()
+    };
+    Some(serde_json::json!({
+        "mcp_sessions": {"open": count("x-styx-sessions-open")?},
+        "computers": count("x-styx-computers-connected").map(|connected| {
+            serde_json::json!({"connected": connected})
         })
-        .collect::<Option<serde_json::Map<_, _>>>();
-    Some(serde_json::json!({"mcp_sessions":counters,"computers":computers}))
+    }))
 }
 async fn owned(action: Action) -> Result<AdminReport> {
     owned_scoped(action, None).await
@@ -694,7 +669,7 @@ struct Material {
     path: PathBuf,
     root: PrivateRoot,
     files: Vec<RawFile>,
-    candidate: VerifiedNativeRelease,
+    selection: NativeRuntimeSelection,
     tls: GatewayClientTls,
     origin: url::Url,
     origins: Vec<String>,
@@ -813,21 +788,6 @@ impl Material {
         {
             return Err(refused("native_gateway_admin_material"));
         }
-        let candidate = release::load_selected(&selection)
-            .map_err(|_| refused("native_gateway_admin_candidate"))?;
-        if !candidate
-            .supports_state_reader(state.reader_contract)
-            .map_err(|_| refused("native_gateway_admin_candidate"))?
-        {
-            return Err(refused("native_gateway_admin_candidate"));
-        }
-        if candidate
-            .runtime_selection()
-            .map_err(|_| refused("native_gateway_admin_candidate"))?
-            != selection
-        {
-            return Err(refused("native_gateway_admin_candidate"));
-        }
         let names = [
             "gateway-ca.pem",
             "gateway-ca-key.pem",
@@ -897,7 +857,7 @@ impl Material {
             path,
             root,
             files,
-            candidate,
+            selection,
             tls,
             origin,
             origins,
@@ -920,9 +880,6 @@ impl Material {
         {
             return Err(refused("native_gateway_admin_material_changed"));
         }
-        self.candidate
-            .revalidate()
-            .map_err(|_| refused("native_gateway_admin_material_changed"))?;
         let marker = native_state::decode_marker(self.files[0].bytes())
             .map_err(|_| refused("native_gateway_admin_material_changed"))?;
         let state = native_state::decode_state(self.files[1].bytes(), &marker)
@@ -931,12 +888,7 @@ impl Material {
             &self.root, &state, &marker,
         )
         .map_err(|_| refused("native_gateway_admin_material_changed"))?;
-        if self
-            .candidate
-            .runtime_selection()
-            .map_err(|_| refused("native_gateway_admin_material_changed"))?
-            != current
-        {
+        if self.selection != current {
             return Err(refused("native_gateway_admin_material_changed"));
         }
         for old in &self.files {
@@ -979,14 +931,14 @@ impl Output {
             .map_err(|_| refused("native_gateway_invitation_output"))?;
         let canonical_state = std::fs::canonicalize(&material.path)
             .map_err(|_| refused("native_gateway_invitation_output"))?;
-        let canonical_payload = std::fs::canonicalize(
-            &material
-                .candidate
-                .runtime_selection()
-                .map_err(|_| refused("native_gateway_admin_candidate"))?
-                .payload_path,
-        )
-        .map_err(|_| refused("native_gateway_invitation_output"))?;
+        let payload = Path::new(&material.selection.payload_path);
+        let canonical_payload = match std::fs::canonicalize(payload) {
+            Ok(path) => path,
+            // A replaced App may no longer have its historical payload. Its
+            // committed path still excludes output inside that location.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => payload.to_owned(),
+            Err(_) => return Err(refused("native_gateway_invitation_output")),
+        };
         if root.identity() == material.root.identity()
             || canonical_parent.starts_with(canonical_state)
             || canonical_parent.starts_with(canonical_payload)

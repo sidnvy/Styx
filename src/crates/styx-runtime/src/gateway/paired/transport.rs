@@ -566,8 +566,6 @@ mod capacity_tests {
         }
     }
 
-    // This exact workload was also run in an isolated System allocator counter;
-    // see the reservation report next to PAIRED_LINK_BYTES.
     fn ceiling_response(kind: &str) -> String {
         let mut value = serde_json::json!({"request_id":"fixture-reply","connection_generation":"fixture-connection","reply":{}});
         value["reply"] = if kind == "exec" {

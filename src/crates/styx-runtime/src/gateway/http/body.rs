@@ -7,24 +7,17 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-use tokio::sync::OwnedSemaphorePermit;
-/// Holds admissions through actual SSE/body EOF or drop, not just response headers.
+/// Retains the session through actual SSE/body EOF or drop, not just response headers.
 pub(crate) struct HeldBody {
     pub inner: BoxBody<Bytes, Infallible>,
-    pub _permits: Vec<OwnedSemaphorePermit>,
     pub _lifetime: Option<Arc<dyn Send + Sync>>,
     pub ended: bool,
     pub delivery_allowed: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 impl HeldBody {
-    pub fn new(
-        inner: BoxBody<Bytes, Infallible>,
-        permits: Vec<OwnedSemaphorePermit>,
-        lifetime: Option<Arc<dyn Send + Sync>>,
-    ) -> Self {
+    pub fn new(inner: BoxBody<Bytes, Infallible>, lifetime: Option<Arc<dyn Send + Sync>>) -> Self {
         Self {
             inner,
-            _permits: permits,
             _lifetime: lifetime,
             ended: false,
             delivery_allowed: None,
@@ -48,7 +41,6 @@ impl Body for HeldBody {
         {
             self.ended = true;
             self.inner = Full::new(Bytes::new()).boxed();
-            self._permits.clear();
             self._lifetime = None;
             return Poll::Ready(None);
         }
@@ -56,7 +48,6 @@ impl Body for HeldBody {
         if matches!(result, Poll::Ready(None)) {
             self.ended = true;
             self.inner = Full::new(Bytes::new()).boxed();
-            self._permits.clear();
             self._lifetime = None;
         }
         result

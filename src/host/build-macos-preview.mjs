@@ -6,7 +6,6 @@ import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {MAC_BUNDLE_ID,buildMacApp,macNativeSwiftSources,macLocalSigningPlan,normalizeMacLocalSigning,publicMacLocalSigning,verifyMacLocalSigning} from './build-macos-app.mjs';
-import {isSparkleFrameworkLink} from './macos/platform-update/sparkle-build.mjs';
 import {requirePrivateFile} from './private-storage.mjs';
 import {verifyNativeMacRuntime,copyNativeMacRuntime,authenticateNativeMacRuntimeEnvelope} from './build-macos-native-runtime.mjs';
 const ROOT=fileURLToPath(new URL('../',import.meta.url));
@@ -32,12 +31,12 @@ function tree(source,destination,{skip=()=>false}={}){
  if(st.isDirectory()){fs.mkdirSync(destination,{recursive:true});for(const name of fs.readdirSync(source).sort())if(!skip(name))tree(path.join(source,name),path.join(destination,name),{skip});}
  else{assert(st.isFile(),'distribution_regular_files_required');fs.mkdirSync(path.dirname(destination),{recursive:true});if(fs.existsSync(destination))assert(sha(source)===sha(destination),'distribution_copy_collision');else fs.copyFileSync(source,destination,fs.constants.COPYFILE_EXCL);}
 }
-function scanPrivateMaterial(root,{allowSparkle=false}={}){
- function walk(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,e.name);if(e.isSymbolicLink()&&allowSparkle&&isSparkleFrameworkLink(root,file))continue;assert(!e.isSymbolicLink(),'distribution_symlink_forbidden');if(e.isDirectory())walk(file);else{assert(!['admin.token','model.token','device.token','identity.pem','publisher-private.pem'].includes(e.name),'private_material_filename_in_distribution');const bytes=fs.readFileSync(file);assert(!/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\r\n]/.test(bytes.toString('utf8')),'private_key_in_distribution');}}}walk(root);
+function scanPrivateMaterial(root){
+ function walk(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,e.name);assert(!e.isSymbolicLink(),'distribution_symlink_forbidden');if(e.isDirectory())walk(file);else{assert(!['admin.token','model.token','device.token','identity.pem','publisher-private.pem'].includes(e.name),'private_material_filename_in_distribution');const bytes=fs.readFileSync(file);assert(!/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\r\n]/.test(bytes.toString('utf8')),'private_key_in_distribution');}}}walk(root);
 }
-export function machOFiles(root,{preserveSparkle=false}={}){
+export function machOFiles(root){
  const files=[];
- function walk(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,e.name);if(preserveSparkle&&file===path.join(root,'Contents/Frameworks/Sparkle.framework'))continue;assert(!e.isSymbolicLink(),'distribution_symlink_forbidden');if(e.isDirectory())walk(file);else{assert(e.isFile(),'distribution_regular_files_required');const fd=fs.openSync(file,'r'),head=Buffer.alloc(8);let n;try{n=fs.readSync(fd,head,0,8,0)}finally{fs.closeSync(fd)}if(n>=4&&['feedface','cefaedfe','feedfacf','cffaedfe','cafebabe','bebafeca','cafebabf','bfbafeca'].includes(head.subarray(0,4).toString('hex')))files.push(file);}}}
+ function walk(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,e.name);assert(!e.isSymbolicLink(),'distribution_symlink_forbidden');if(e.isDirectory())walk(file);else{assert(e.isFile(),'distribution_regular_files_required');const fd=fs.openSync(file,'r'),head=Buffer.alloc(8);let n;try{n=fs.readSync(fd,head,0,8,0)}finally{fs.closeSync(fd)}if(n>=4&&['feedface','cefaedfe','feedfacf','cffaedfe','cafebabe','bebafeca','cafebabf','bfbafeca'].includes(head.subarray(0,4).toString('hex')))files.push(file);}}}
  walk(root);return files.sort();
 }
 export function previewSigningReceipt(localSigning){
@@ -72,18 +71,18 @@ export function prepareNativeMacPreview(config){
  assert(prepareOnly===true&&process.platform==='darwin','native_app_prepare_only_required');
  assert(ABS(destination)&&!fs.existsSync(destination)&&/^[a-f0-9]{40}$/.test(sourceRevision??''),'fresh_native_app_destination_required');
  assert(nativeRuntime.expectedPublisher==='bbb49c2626c3d4ef3cf9e1679db5305b100cee4a8c41c29c958ede82fb868bed','original_native_app_publisher_required');
- const observedSources=macNativeSwiftSources(),sourceFiles=Object.fromEntries([observedSources.source,...observedSources.additionalSources,path.join(ROOT,'host/macos/StyxUpdater.swift'),path.join(ROOT,'host/macos/render-brand-icons.swift')].map(file=>[path.relative(ROOT,file).split(path.sep).join('/'),sha(file)]));
+ const observedSources=macNativeSwiftSources(),sourceFiles=Object.fromEntries([observedSources.source,...observedSources.additionalSources,path.join(ROOT,'host/macos/render-brand-icons.swift')].map(file=>[path.relative(ROOT,file).split(path.sep).join('/'),sha(file)]));
  const verified=verifyNativeMacRuntime(nativeRuntime,process.arch);
  assert(sourceRevision===verified.report.source_revision,'native_app_source_revision_mismatch');
  fs.mkdirSync(destination,{mode:0o700});const app=path.join(destination,'image-root/Styx.app');
- const appBuild=buildMacApp({app,nativeRuntime:true,cuaBinary,version,buildNumber,sdkPath,moduleCachePath:moduleCachePath??path.join(destination,'swift-module-cache')});
+ const appBuild=buildMacApp({app,cuaBinary,version,buildNumber,sdkPath,moduleCachePath:moduleCachePath??path.join(destination,'swift-module-cache')});
  const resources=path.join(app,'Contents/Resources');
  const metadata={schema:1,nativeRuntime:copyNativeMacRuntime(nativeRuntime,resources,process.arch)};
  fs.writeFileSync(path.join(resources,'macos-runtime.json'),JSON.stringify(metadata,null,2)+'\n',{flag:'wx',mode:0o600});
  scanPrivateMaterial(app);
  const receipt={schema:1,kind:'prepared_native_rust_app',delivery:'NOT FINALIZED',sourceRevision,version,buildNumber,arch:process.arch,appBuild,
   sourceFiles,nativeRuntime:metadata.nativeRuntime,nativeSignatureSha256:verified.signatureSha256,runtimeSourceRevision:verified.report.source_revision,
-  nativeUpdater:'native_handoff_blocked_no_legacy_core',readerActualWait:true,readerExitCode:0,files:preparedPreviewInventory(app),signing:'NOT RUN',native_gui_acceptance:'NOT RUN',tcc_attribution:'NOT RUN'};
+  readerActualWait:true,readerExitCode:0,files:preparedPreviewInventory(app),signing:'NOT RUN',native_gui_acceptance:'NOT RUN',tcc_attribution:'NOT RUN'};
  assert(Object.entries(sourceFiles).every(([name,digest])=>sha(path.join(ROOT,...name.split('/')))===digest),'native_app_source_changed');
  fs.writeFileSync(path.join(destination,'prepared-native-app.json'),JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});return receipt;
 }

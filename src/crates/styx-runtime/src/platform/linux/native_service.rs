@@ -1,18 +1,281 @@
 //! Fixed native user units. Environment variables and a matching unit name are
 //! not runtime authority: admission authenticates the actual original process.
-use super::*;
+use crate::store::{PrivateRoot, ProcessIdentity, RootIdentity};
 use nix::{
     fcntl::{OFlag, open as open_fd, openat},
     sys::stat::{Mode, mkdirat},
     unistd::{Uid, UnlinkatFlags, User, unlinkat},
 };
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    fs::File,
+    os::unix::fs::MetadataExt,
+    path::{Component, Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 use std::{
     io::Write,
     os::fd::{AsFd, OwnedFd},
 };
+use styx_contracts::identity::Sha256Digest;
 use styx_contracts::native_management::{
     NativeManager, NativeRunDesired, NativeRuntimeSelection, NativeState,
 };
+use tokio::{
+    io::AsyncReadExt,
+    process::Command,
+    sync::oneshot,
+    time::{Instant, timeout_at},
+};
+
+const OUTPUT_LIMIT: usize = 64 * 1024;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ServiceError {
+    #[error("invalid native service reference")]
+    Invalid,
+    #[error("native service conflicts with current facts")]
+    Conflict,
+    #[error("user manager or protected profile unavailable")]
+    Unavailable,
+    #[error("native service action or cleanup outcome unknown")]
+    Unknown,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+fn identity(file: &File) -> ServiceResult<FileIdentity> {
+    let m = file.metadata().map_err(|_| ServiceError::Unknown)?;
+    Ok(FileIdentity {
+        device: m.dev(),
+        inode: m.ino(),
+    })
+}
+fn environment(command: &mut Command, runtime: &Path) {
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LANG", "C.UTF-8")
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={}/bus", runtime.display()),
+        )
+        .current_dir("/");
+}
+struct Tool {
+    success: bool,
+    stdout: Vec<u8>,
+}
+/// Each utility is owned until actual wait, including timeout/cancel. A timeout
+/// terminates only this exact utility child, never the Host or its cgroup.
+async fn tool(
+    binary: &'static str,
+    args: Vec<OsString>,
+    runtime: PathBuf,
+    end: Instant,
+) -> ServiceResult<Tool> {
+    if Instant::now() >= end {
+        return Err(ServiceError::Unknown);
+    }
+    let (send, receive) = oneshot::channel();
+    tokio::spawn(async move {
+        let mut unreaped = None;
+        let result = async {
+            let mut command = Command::new(binary);
+            environment(&mut command, &runtime);
+            let mut child = command
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|_| ServiceError::Unavailable)?;
+            let mut stdout = child.stdout.take().ok_or(ServiceError::Unknown)?;
+            let mut stderr = child.stderr.take().ok_or(ServiceError::Unknown)?;
+            let mut out = vec![0u8; OUTPUT_LIMIT + 1];
+            let mut err = vec![0u8; 8193];
+            let result = timeout_at(end, async {
+                let (a, b, status) = tokio::join!(
+                    read_bounded(&mut stdout, &mut out),
+                    read_bounded(&mut stderr, &mut err),
+                    child.wait()
+                );
+                let a = a?;
+                b?;
+                let status = status.map_err(|_| ServiceError::Unknown)?;
+                out.truncate(a);
+                Ok(Tool {
+                    success: status.success(),
+                    stdout: out,
+                })
+            })
+            .await
+            .unwrap_or(Err(ServiceError::Unknown));
+            drop(stdout);
+            drop(stderr);
+            if result.is_err() && !terminate_utility(&mut child).await {
+                unreaped = Some(child);
+            }
+            result
+        }
+        .await;
+        if let Some(mut child) = unreaped {
+            // Return Unknown within the cleanup budget, while the original
+            // owned child remains retained until actual wait.
+            tokio::spawn(async move {
+                while child.wait().await.is_err() {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            });
+        }
+        let _ = send.send(result);
+    });
+    receive.await.map_err(|_| ServiceError::Unknown)?
+}
+async fn terminate_utility(child: &mut tokio::process::Child) -> bool {
+    if let Some(pid) = child.id() {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        );
+    }
+    if matches!(
+        tokio::time::timeout(Duration::from_millis(250), child.wait()).await,
+        Ok(Ok(_))
+    ) {
+        return true;
+    }
+    // Tokio retains ownership of the child. This escalation cannot target a
+    // manager-owned Host, an arbitrary caller PID, or a service cgroup.
+    let _ = child.start_kill();
+    matches!(
+        tokio::time::timeout(Duration::from_secs(2), child.wait()).await,
+        Ok(Ok(_))
+    )
+}
+// Uses only Tokio reads into preallocated bounded buffers; no unbounded output().
+async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    buffer: &mut [u8],
+) -> ServiceResult<usize> {
+    let mut used = 0;
+    loop {
+        if used == buffer.len() {
+            return Err(ServiceError::Unknown);
+        }
+        let n = reader
+            .read(&mut buffer[used..])
+            .await
+            .map_err(|_| ServiceError::Unknown)?;
+        if n == 0 {
+            return Ok(used);
+        }
+        used += n;
+    }
+}
+#[zbus::proxy(
+    interface = "org.freedesktop.systemd1.Manager",
+    default_path = "/org/freedesktop/systemd1"
+)]
+trait SystemdManager {
+    fn ref_unit(&self, name: &str) -> zbus::Result<()>;
+    fn unref_unit(&self, name: &str) -> zbus::Result<()>;
+}
+struct SystemdUnitPin {
+    connection: zbus::Connection,
+    owner: String,
+    unit: String,
+}
+impl SystemdUnitPin {
+    // Callers retain their own exact native unit definition and generation.
+    // This is the same authenticated current-user manager RefUnit port.
+    async fn open_user(runtime: &Path, uid: u32, unit: &str, end: Instant) -> ServiceResult<Self> {
+        let stream = timeout_at(end, tokio::net::UnixStream::connect(runtime.join("bus")))
+            .await
+            .map_err(|_| ServiceError::Unknown)?
+            .map_err(|_| ServiceError::Unavailable)?;
+        if stream
+            .peer_cred()
+            .map_err(|_| ServiceError::Unavailable)?
+            .uid()
+            != uid
+        {
+            return Err(ServiceError::Conflict);
+        }
+        let connection = timeout_at(
+            end,
+            zbus::connection::Builder::unix_stream(stream)
+                .max_queued(4)
+                .method_timeout(Duration::from_secs(2))
+                .build(),
+        )
+        .await
+        .map_err(|_| ServiceError::Unknown)?
+        .map_err(|_| ServiceError::Unavailable)?;
+        let result = async {
+            let bus = zbus::fdo::DBusProxy::new(&connection)
+                .await
+                .map_err(|_| ServiceError::Unavailable)?;
+            let owner = bus
+                .get_name_owner(
+                    "org.freedesktop.systemd1"
+                        .try_into()
+                        .map_err(|_| ServiceError::Invalid)?,
+                )
+                .await
+                .map_err(|_| ServiceError::Unavailable)?;
+            if bus
+                .get_connection_unix_user(owner.as_ref().into())
+                .await
+                .map_err(|_| ServiceError::Unknown)?
+                != uid
+            {
+                return Err(ServiceError::Conflict);
+            }
+            let manager = SystemdManagerProxy::builder(&connection)
+                .destination(owner.as_str())
+                .map_err(|_| ServiceError::Invalid)?
+                .build()
+                .await
+                .map_err(|_| ServiceError::Unavailable)?;
+            manager
+                .ref_unit(unit)
+                .await
+                .map_err(|_| ServiceError::Unknown)?;
+            Ok::<_, ServiceError>(owner.to_string())
+        }
+        .await;
+        match result {
+            Ok(owner) => Ok(Self {
+                connection,
+                owner,
+                unit: unit.into(),
+            }),
+            Err(error) => {
+                let _ = connection.close().await;
+                Err(error)
+            }
+        }
+    }
+    async fn unref(&self) -> ServiceResult<()> {
+        let manager = SystemdManagerProxy::builder(&self.connection)
+            .destination(self.owner.as_str())
+            .map_err(|_| ServiceError::Invalid)?
+            .build()
+            .await
+            .map_err(|_| ServiceError::Unknown)?;
+        manager
+            .unref_unit(&self.unit)
+            .await
+            .map_err(|_| ServiceError::Unknown)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -37,7 +300,7 @@ impl ServiceRole {
         }
     }
 }
-pub(crate) type ServiceError = ManagerError;
+
 pub(crate) const CONTROL_SOCKET_NAME: &str = ".styx-service-control-v1.sock";
 type ServiceResult<T> = std::result::Result<T, ServiceError>;
 fn invalid<T>(_: T) -> ServiceError {
@@ -200,7 +463,7 @@ pub(crate) struct Definition {
     operation_running: Option<RunningBinding>,
     // RefUnit prevents GC from erasing this operation's terminal exit facts.
     // Unknown keeps the original connection in the retained Definition.
-    manager_pin: Option<super::UnitPin>,
+    manager_pin: Option<SystemdUnitPin>,
 }
 impl Definition {
     /// Installation alone may create missing fixed user-unit directories. No
@@ -528,7 +791,7 @@ impl Definition {
         }
         self.operation_running = Some(self.bind_running(&before)?);
         self.manager_pin = Some(
-            super::UnitPin::open_user(
+            SystemdUnitPin::open_user(
                 &self.runtime,
                 Uid::current().as_raw(),
                 &self.unit,
@@ -930,6 +1193,56 @@ impl ServiceScope {
 #[cfg(test)]
 mod mutation_tests {
     use super::*;
+    #[tokio::test]
+    async fn stopped_owned_utility_is_reaped_without_touching_sibling() {
+        let mut stopped = Command::new("/usr/bin/sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("owned stopped utility");
+        let mut sibling = Command::new("/usr/bin/sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("owned independent sibling");
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(stopped.id().expect("utility PID") as i32),
+            nix::sys::signal::Signal::SIGSTOP,
+        )
+        .expect("stop exact owned child");
+        let stop_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let status = std::fs::read_to_string(format!(
+                "/proc/{}/status",
+                stopped.id().expect("owned utility PID")
+            ))
+            .expect("owned utility status");
+            if status.lines().any(|line| {
+                line.starts_with("State:") && line.split_whitespace().nth(1) == Some("T")
+            }) {
+                break;
+            }
+            assert!(
+                Instant::now() < stop_deadline,
+                "actual Stopped not observed"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let before = Instant::now();
+        assert!(terminate_utility(&mut stopped).await);
+        assert!(before.elapsed() < Duration::from_secs(3));
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            stopped
+                .try_wait()
+                .expect("actual wait")
+                .expect("actual exit")
+                .signal(),
+            Some(nix::libc::SIGKILL)
+        );
+        assert!(sibling.try_wait().expect("independent sibling").is_none());
+        sibling.kill().await.expect("reap exact test sibling");
+    }
     #[test]
     fn failed_units_require_both_main_process_and_cgroup_absence() {
         let mut os = ServiceObservation::absent("owned-test.service".into(), ServiceRole::Host);

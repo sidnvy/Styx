@@ -3,7 +3,7 @@
 //! kept alive together with this Rust image's fixed worker until Host cleanup.
 //! All methods perform synchronous protected I/O: call only on bounded blocking
 //! workers. This directory binding is not an owner/admission/operation ledger.
-use super::profile::LoadedLegacyProfile;
+use super::profile::LoadedProfile;
 use crate::{
     host::protocol::browser::BrowserBootstrap,
     providers::browser::{
@@ -48,7 +48,7 @@ struct OwnerProfile {
     config: OwnedBrowserConfig,
 }
 struct LocalBrowser {
-    profile: Arc<LoadedLegacyProfile>,
+    profile: Arc<LoadedProfile>,
     node: Arc<PinnedExecutable>,
     node_path: PathBuf,
     browser: PathBuf,
@@ -87,7 +87,7 @@ fn first_browser(paths: &[&str]) -> Result<PathBuf> {
         .ok_or(ErrorCategory::CapabilityUnsupported)
 }
 
-fn selected(profile: &LoadedLegacyProfile) -> Result<Option<PathBuf>> {
+fn selected(profile: &LoadedProfile) -> Result<Option<PathBuf>> {
     let source = profile.browser_source();
     let (deployment, host) = (source.deployment, source.host);
     // Missing or explicit disabled selection does not enable a Browser lane.
@@ -182,7 +182,7 @@ impl BrowserPreparationError {
 /// publisher inventory may call this. No fixture path or network input can mint
 /// this object. No browser is executed by preparation or validation.
 pub(crate) fn prepare_browser_bootstrap(
-    profile: Arc<LoadedLegacyProfile>,
+    profile: Arc<LoadedProfile>,
 ) -> std::result::Result<Option<Arc<dyn BrowserBootstrap>>, BrowserPreparationError> {
     let at = BrowserPreparationError::new;
     let Some(browser_path) = selected(&profile).map_err(|e| at("selection", e))? else {

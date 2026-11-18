@@ -14,13 +14,11 @@ pub(super) struct Conversation<B: GatewayToolBackend + GatewayOwnerLifecycle> {
 /// value in HTTP Parts; it has no Deserialize or JSON constructor.
 pub(super) struct AuthorizedCall<B: GatewayToolBackend + GatewayOwnerLifecycle> {
     pub conversation: Arc<Conversation<B>>,
-    _activity: Arc<lifecycle::ActivityGuard<B>>,
 }
 impl<B: GatewayToolBackend + GatewayOwnerLifecycle> Clone for AuthorizedCall<B> {
     fn clone(&self) -> Self {
         Self {
             conversation: self.conversation.clone(),
-            _activity: self._activity.clone(),
         }
     }
 }
@@ -63,19 +61,16 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
         } else {
             let owner = principal
                 .new_tunnel_conversation_owner()
-                .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
-            let life = self
-                .new_life(owner, lifecycle::Boundary::TunnelConversation)
-                .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
+                .map_err(|_| StatusCode::FORBIDDEN)?;
+            let life = self.new_life(owner, lifecycle::Boundary::TunnelConversation);
             let value = Arc::new(Conversation { life });
             registry.insert(key, value.clone());
             value
         };
-        let activity = conversation.life.activity().ok_or(StatusCode::NOT_FOUND)?;
-        Ok(AuthorizedCall {
-            conversation,
-            _activity: Arc::new(activity),
-        })
+        if !conversation.life.is_active() {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        Ok(AuthorizedCall { conversation })
     }
     pub(super) fn collect_closed_conversations(&self) {
         // Idle conversations keep their owner and resources. Only an explicitly

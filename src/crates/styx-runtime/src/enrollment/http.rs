@@ -182,16 +182,12 @@ impl EnrollmentHttp {
             Box::pin(async move {
                 match mcp.handle(request).await {
                     Ok(mut response) => {
-                        // These headers exist only on the authenticated status
-                        // probe already accepted by GatewayHttp.
-                        if response.headers().contains_key("x-styx-sessions-capacity") {
-                            let (connected, capacity) = relay.connection_counts();
+                        // Add device counts only after GatewayHttp authenticates the request.
+                        if response.headers().contains_key("x-styx-sessions-open") {
+                            let connected = relay.connection_count();
                             response
                                 .headers_mut()
                                 .insert("x-styx-computers-connected", connected.into());
-                            response
-                                .headers_mut()
-                                .insert("x-styx-computers-capacity", capacity.into());
                         }
                         response.map(BodyExt::boxed)
                     }

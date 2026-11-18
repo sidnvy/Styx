@@ -57,14 +57,14 @@ pub(crate) fn connection_profile(
     Ok((endpoint, paired_namespace, tls))
 }
 
-pub(super) fn load(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError> {
+pub(super) fn load(state_dir: &Path) -> Result<LoadedProfile, ProfileError> {
     let snapshot =
         Arc::new(NativeHostSnapshot::open(state_dir).map_err(|_| ProfileError::Changed)?);
     load_snapshot(state_dir, snapshot)
 }
 pub(super) fn load_for_app(
     scope: Arc<crate::app::HostScope>,
-) -> Result<LoadedLegacyProfile, ProfileError> {
+) -> Result<LoadedProfile, ProfileError> {
     let path = scope.state_dir().to_owned();
     let snapshot = Arc::new(
         NativeHostSnapshot::open_for_app(&path, scope).map_err(|_| ProfileError::Changed)?,
@@ -74,7 +74,7 @@ pub(super) fn load_for_app(
 pub(super) fn load_for_app_retained(
     scope: Arc<crate::app::HostScope>,
     runtime: Arc<crate::release::VerifiedNativeRelease>,
-) -> Result<LoadedLegacyProfile, ProfileError> {
+) -> Result<LoadedProfile, ProfileError> {
     let path = scope.state_dir().to_owned();
     let snapshot = Arc::new(
         NativeHostSnapshot::open_for_app_retained(&path, scope, runtime)
@@ -89,7 +89,7 @@ pub(super) fn load_for_app_retained(
 ))]
 pub(super) fn load_for_service(
     scope: Arc<crate::platform::native_service::ServiceScope>,
-) -> Result<LoadedLegacyProfile, ProfileError> {
+) -> Result<LoadedProfile, ProfileError> {
     let path = scope.state_dir().to_owned();
     let snapshot =
         Arc::new(NativeHostSnapshot::open_for_service(scope).map_err(|_| ProfileError::Changed)?);
@@ -98,7 +98,7 @@ pub(super) fn load_for_service(
 fn load_snapshot(
     state_dir: &Path,
     snapshot: Arc<NativeHostSnapshot>,
-) -> Result<LoadedLegacyProfile, ProfileError> {
+) -> Result<LoadedProfile, ProfileError> {
     absolute(state_dir)?;
     snapshot.revalidate().map_err(|_| ProfileError::Changed)?;
     let seed = snapshot.seed();
@@ -246,7 +246,7 @@ fn load_snapshot(
     #[cfg(not(target_os = "windows"))]
     let environment = unix_executor_environment(&seed.shell)?;
     let signed_version = inventory.version().to_owned();
-    let loaded = LoadedLegacyProfile {
+    let loaded = LoadedProfile {
         settings: Some(settings),
         host_base_dir: state_dir.to_path_buf(),
         device: seed.device_id.clone(),
@@ -289,7 +289,7 @@ fn load_snapshot(
             tool_health: "NOT RUN",
             account_acceptance: "NOT RUN",
         },
-        source: ProfileSource::Fresh(snapshot),
+        snapshot,
     };
     loaded.revalidate()?;
     Ok(loaded)

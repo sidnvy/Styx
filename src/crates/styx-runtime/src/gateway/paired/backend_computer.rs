@@ -84,15 +84,6 @@ impl ComputerContexts {
             })
         });
     }
-    pub(super) fn owner_has_live_work(&self, owner: &VerifiedGatewayOwner) -> bool {
-        self.entries.iter().any(|((id, _), entry)| {
-            id == owner.owner_id()
-                && entry.principal == owner.principal_fingerprint()
-                && entry.resource.try_lock().map_or(true, |r| {
-                    r.phase != Phase::Ready || r.pending_action.is_some()
-                })
-        })
-    }
     pub(super) fn clear_owner(&mut self, owner: &VerifiedGatewayOwner) {
         self.entries.retain(|(id, _), entry| {
             id != owner.owner_id() || entry.principal != owner.principal_fingerprint()

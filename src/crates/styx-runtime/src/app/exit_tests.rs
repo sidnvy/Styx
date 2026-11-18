@@ -149,29 +149,6 @@ async fn incomplete_local_cleanup_never_admits_a_local_exit() {
 }
 
 #[tokio::test]
-async fn remote_unknown_cannot_authorize_installation_handoff() {
-    let _serial = super::super::maintenance::TEST_SERIAL.lock().await;
-    let f = Fixture::new();
-    let mut app = f.app().await;
-    let install = f.0.join("Styx.app");
-    fs::DirBuilder::new().mode(0o700).create(&install).unwrap();
-    let request = serde_json::value::to_raw_value(&json!({"schema":1,"authorize":true,
-        "operation":"upgrade","requestId":"1".repeat(32),"installRoot":install,
-        "packageSha256":null,"candidatePackageSha256":null,"loginObservation":null}))
-    .unwrap();
-    app.dispatch(Operation::PrepareAppMaintenance, request)
-        .await
-        .unwrap();
-    app.cleanup = Some(outcome());
-    assert!(app.dispatch(Operation::QuitAdmission, raw()).await.is_err());
-    assert!(app.quit_ticket.is_none());
-    assert!(
-        !app.admission_fenced(),
-        "handoff refusal is not a global gate"
-    );
-}
-
-#[tokio::test]
 async fn local_stop_exception_cannot_start_work_and_pause_receipt_keeps_unknown() {
     let f = Fixture::new();
     let mut app = f.app().await;

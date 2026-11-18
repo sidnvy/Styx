@@ -103,7 +103,6 @@ pub struct NativeManagementError {
     _retained: Option<Retained>,
     // Keep the App container until the retained coordinator has been dropped.
     _app_scope: Option<Arc<crate::app::HostScope>>,
-    runtime_update_transaction: Option<TransactionId>,
 }
 enum Retained {
     #[cfg(any(
@@ -125,9 +124,6 @@ enum Retained {
     },
 }
 impl NativeManagementError {
-    pub(crate) fn runtime_update_transaction(&self) -> Option<&TransactionId> {
-        self.runtime_update_transaction.as_ref()
-    }
     fn with_app_scope(mut self, scope: Arc<crate::app::HostScope>) -> Self {
         self._app_scope = Some(scope);
         self
@@ -172,7 +168,6 @@ impl NativeManagementError {
             kind,
             _retained: None,
             _app_scope: None,
-            runtime_update_transaction: None,
         }
     }
     fn transaction(error: NativeTransactionError) -> Self {
@@ -200,7 +195,6 @@ impl NativeManagementError {
             kind,
             _retained: Some(Retained::Bootstrap { _owner: error }),
             _app_scope: None,
-            runtime_update_transaction: None,
         }
     }
     fn open(error: NativeTransactionOpenFailure) -> Self {
@@ -209,7 +203,6 @@ impl NativeManagementError {
             kind,
             _retained: Some(Retained::Open { _owner: error }),
             _app_scope: None,
-            runtime_update_transaction: None,
         }
     }
 }
@@ -368,6 +361,20 @@ pub async fn inspect(
     let path = state_dir.to_owned();
     let id = transaction_id.map(parse_transaction_id).transpose()?;
     blocking(move || platform::inspect(&path, id.as_ref())).await
+}
+
+/// Observe an interrupted install intent that never reached the native journal.
+/// Both existing operation and configuration owners must be absent. In particular,
+/// a live Gateway cannot be classified from an unlocked "not found" snapshot.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub async fn transaction_not_dispatched(
+    state_dir: &Path,
+    transaction_id: &str,
+    expected_revision: u64,
+) -> Result<bool> {
+    let path = state_dir.to_owned();
+    let id = parse_transaction_id(transaction_id)?;
+    blocking(move || platform::transaction_not_dispatched(&path, &id, expected_revision)).await
 }
 
 /// Startup inspection under the original writer. Re-establish admission only
@@ -603,34 +610,6 @@ mod platform {
             desired: state.state().desired.clone(),
             admission_fenced: admission(transactions)?,
             transaction,
-        })
-    }
-    pub(super) fn observed(
-        transactions: &NativeTransactions,
-        id: &TransactionId,
-    ) -> Result<NativeTransactionReport> {
-        let observation = transactions
-            .query(id)
-            .map_err(tx)?
-            .ok_or_else(|| NativeManagementError::new(ErrorKind::Conflict))?;
-        let observed_stage = observation
-            .phase_receipts
-            .last()
-            .map(|receipt| receipt.stage)
-            .or_else(|| {
-                observation
-                    .prepared
-                    .as_ref()
-                    .map(|prepared| prepared.journal.stage)
-            });
-        Ok(NativeTransactionReport {
-            transaction_id: id.clone(),
-            sequence: observation.intent.sequence,
-            observed_stage,
-            // Return the original validated phase receipt, not an OS-derived
-            // success claim. Read-only callers can then correlate a lost reply.
-            receipt: observation.phase_receipts.last().cloned(),
-            recovered: false,
         })
     }
     /// Only re-establish an already complete canonical tip. Never complete a
@@ -1009,6 +988,24 @@ mod platform {
             // the actual original coordinator or claim that runtime is healthy.
             admission_fenced: true,
             transaction,
+        })
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(super) fn transaction_not_dispatched(
+        path: &Path,
+        id: &TransactionId,
+        expected_revision: u64,
+    ) -> Result<bool> {
+        let root = PrivateRoot::open(path).map_err(store)?;
+        let operation = root.try_service_operation_lease().map_err(store)?;
+        use_managed_transactions(path, None, |transactions| {
+            reconcile_complete_tip(transactions, false)?;
+            let current = transactions.readstate().map_err(tx)?;
+            let absent = current.state().revision == expected_revision
+                && transactions.query(id).map_err(tx)?.is_none()
+                && !admission(transactions)?;
+            operation.validate().map_err(store)?;
+            Ok(absent)
         })
     }
     pub(super) fn inspect_completed(path: &Path) -> Result<NativeManagementReport> {

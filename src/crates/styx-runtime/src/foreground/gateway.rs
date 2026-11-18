@@ -269,7 +269,7 @@ mod platform {
         enrollment::{http::EnrollmentHttp, service::EnrollmentService, shared::SharedEnrollment},
         gateway::{
             auth::GatewayBearerPolicy,
-            http::{GatewayHttp, HttpBudget},
+            http::GatewayHttp,
             paired::{PairedGatewayBackend, RelayHandle},
         },
         store::{
@@ -280,7 +280,7 @@ mod platform {
     };
     use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
     use styx_contracts::identity::{GatewayEpoch, GatewayId, Sha256Digest};
-    use tokio::{net::TcpListener, sync::Semaphore};
+    use tokio::net::TcpListener;
 
     struct Admitted {
         lease: ExecutionLeaseGuard,
@@ -767,27 +767,14 @@ mod platform {
             d.mark("reconcile_done");
         }
         let shared = SharedEnrollment::new(service);
-        let partition = Arc::new(Semaphore::new(crate::gateway::paired::GATEWAY_RELAY_BYTES));
-        // Gateway relay and MCP each own a capped reservation, independent of
-        // Host-side queues and link sizing.
+
         let relay = RelayHandle::new(
             shared.clone(),
             gateway_id,
             GatewayEpoch::try_from(format!("gateway-{}", uuid::Uuid::new_v4()))
                 .map_err(|_| error("gateway_epoch_invalid"))?,
-            partition
-                .clone()
-                .try_acquire_many_owned(crate::gateway::paired::GATEWAY_RELAY_BYTES as u32)
-                .map_err(|_| error("gateway_partition_unavailable"))?,
-        )
-        .map_err(|_| error("gateway_relay_invalid"))?;
+        );
         let backend = Arc::new(PairedGatewayBackend::new(relay.clone()));
-        let budget = HttpBudget::from_reserved_partition(
-            Arc::new(Semaphore::new(crate::gateway::http::GATEWAY_HTTP_BYTES))
-                .try_acquire_many_owned(crate::gateway::http::GATEWAY_HTTP_BYTES as u32)
-                .map_err(|_| error("gateway_partition_unavailable"))?,
-        )
-        .map_err(|_| error("gateway_partition_invalid"))?;
         let tunnel_release = admitted
             .fresh
             .as_ref()
@@ -810,7 +797,7 @@ mod platform {
         } else {
             policy
         };
-        let mcp = GatewayHttp::new(policy, backend, budget);
+        let mcp = GatewayHttp::new(policy, backend);
         mcp.observe_tunnel(crate::foreground::tunnel::observe_requests(&tunnel_state)?);
         let mcp_stop = mcp.paired_shutdown_handle();
         let app = EnrollmentHttp::new_paired(tls, shared.clone(), relay.clone(), mcp, vec![host])

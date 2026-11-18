@@ -100,7 +100,7 @@ export function buildLocalMacDevelopment(config){
  }else need(!fs.existsSync(receiptFile),'orphan_development_receipt_requires_inspection');
  // Failed output and the prior signed bundle are deliberately retained; no
  // automatic retry/recovery or implicit Quit is performed by this runner.
- const built=buildMacApp({app,cuaBinary:input.cuaBinary,version:'0.4.0',nativeRuntime:true,localDevelopment:true,moduleCachePath:cache,...(input.sdkPath?{sdkPath:input.sdkPath}:{})});
+ const built=buildMacApp({app,cuaBinary:input.cuaBinary,version:'0.4.0',localDevelopment:true,moduleCachePath:cache,...(input.sdkPath?{sdkPath:input.sdkPath}:{})});
  const resources=path.join(app,'Contents/Resources');
  const runtime=copyNativeMacRuntime(input.nativeRuntime,resources,process.arch);
  fs.writeFileSync(path.join(resources,'macos-runtime.json'),JSON.stringify({schema:1,nativeRuntime:runtime})+'\n',{flag:'wx',mode:0o600});

@@ -9,7 +9,6 @@ mod gateway_ui;
 mod join_retry_tests;
 mod local_gateway;
 mod login;
-mod maintenance;
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod maintenance_integration_tests;
 mod network_interfaces;
@@ -17,7 +16,6 @@ use crate::enrollment::pairing_link;
 mod plugin;
 mod role_retire;
 mod runtime_bootstrap;
-mod runtime_update;
 mod service;
 mod startup;
 pub(crate) mod startup_diagnostic;
@@ -258,17 +256,9 @@ enum Operation {
     Disconnect,
     QuitAdmission,
     RetireRole,
-    PrepareAppMaintenance,
-    AppMaintenanceStatus,
-    CancelAppMaintenance,
     AppLifecycle,
     AppLogin,
     AppLoginResult,
-    UpdateStyx,
-    StageRuntime,
-    UpdateRuntime,
-    RuntimeUpdateStatus,
-    RecoverRuntimeUpdate,
     TransferToService,
     ServiceStatus,
     PrepareServiceFirstStart,
@@ -491,7 +481,6 @@ impl RetainedFailure {
 }
 struct HostApp {
     retire_failure: Option<crate::management::role_retire::RetireError>,
-    runtime_update: Option<runtime_update::State>,
     service: Option<service::State>,
     local_gateway: Option<local_gateway::LocalGateway>,
     resume_local_available: bool,
@@ -515,7 +504,6 @@ struct HostApp {
     unknown: bool,
     quit_ticket: Option<String>,
     login: login::Login,
-    maintenance: Option<maintenance::State>,
     startup_diagnostic: Option<startup_diagnostic::StartupDiagnostic>,
     startup_profile: Option<Arc<crate::store::native_host_snapshot::NativeHostSnapshot>>,
     // Last owner drops only after role workers, retained failures and writers.
@@ -542,7 +530,7 @@ impl HostApp {
         // history; it must not choose an older worker after the App is upgraded.
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let app_runtime = if let Some(path) = selection.as_ref() {
-            let pinned = runtime_update::SelectionPin::open(path)?;
+            let pinned = runtime_bootstrap::SelectionPin::open(path)?;
             let runtime = Arc::new(
                 crate::release::load_selected(&pinned.selection).map_err(|e| AppError(e.code()))?,
             );
@@ -560,7 +548,6 @@ impl HostApp {
         let (status, observed) = watch::channel(ConnectionStatus::stopped());
         let mut app = Self {
             retire_failure: None,
-            runtime_update: None,
             service: None,
             local_gateway: None,
             resume_local_available: false,
@@ -582,7 +569,6 @@ impl HostApp {
             unknown: false,
             quit_ticket: None,
             login: login::Login::default(),
-            maintenance: None,
             startup_diagnostic: diagnostic,
             startup_profile: None,
         };
@@ -591,9 +577,6 @@ impl HostApp {
                 return Ok(app);
             }
             if app.try_ready_startup().await? {
-                return Ok(app);
-            }
-            if app.observe_runtime_update()? {
                 return Ok(app);
             }
             if let Some(d) = &app.startup_diagnostic {
@@ -653,7 +636,7 @@ impl HostApp {
             Self::open_with_selection(state_dir, &deployment, Some(selection.to_owned())).await?;
         // A committed original Host-only root is not a fresh split App setup.
         // Its original remote Gateway and pairing are never reconstructed.
-        if app.service_client_or_unknown() || app.runtime_update_fenced() {
+        if app.service_client_or_unknown() {
             return Ok(app);
         }
         let gateway_scope = Arc::new(app.scope.gateway_sibling()?);
@@ -845,9 +828,6 @@ impl HostApp {
         self.scope.validate()?;
         if self.service_fenced() {
             return Err(AppError("app_service_original_operation_unknown"));
-        }
-        if self.runtime_update_fenced() {
-            return Err(AppError("app_runtime_update_pending"));
         }
         if let Some(error) = &self.retained {
             return Err(AppError(error.code()));
@@ -1145,7 +1125,6 @@ impl HostApp {
         Ok(())
     }
     async fn settle_all(&mut self) -> Result<(), AppError> {
-        self.reap_runtime_update(true).await;
         let host = self.settle().await;
         let gateway = match &mut self.local_gateway {
             Some(gateway) => gateway.settle().await,
@@ -1160,9 +1139,6 @@ impl HostApp {
             self.unknown = true;
         }
         host.and(gateway)?;
-        if self.runtime_update_fenced() {
-            return Err(AppError("app_runtime_update_pending"));
-        }
         Ok(())
     }
     async fn set_desired(&mut self, run: NativeRunDesired) -> Result<(), AppError> {
@@ -1233,7 +1209,6 @@ impl HostApp {
                     self.cleanup = Some(outcome);
                     if locally_joined
                         && !self.unknown
-                        && !self.maintenance_fenced()
                         && let Some(reason) = stop_reason
                     {
                         self.status
@@ -1292,7 +1267,6 @@ impl HostApp {
     }
     fn admission_fenced(&self) -> bool {
         self.service_fenced()
-            || self.runtime_update_fenced()
             || self.unknown
             || self.retained.is_some()
             || self.quit_ticket.is_some()
@@ -1340,9 +1314,6 @@ impl HostApp {
             "status",
             "networkInterfaces",
             "quitAdmission",
-            "prepareAppMaintenance",
-            "cancelAppMaintenance",
-            "appMaintenanceStatus",
         ];
         if !self.service_client_or_unknown() {
             supported.extend([
@@ -1425,51 +1396,9 @@ impl HostApp {
             }
             value
         };
-        json!({"schema":1,"capabilities":self.scope.host_settings().map(|s| s.report()),"maintenance":self.maintenance_status()["maintenance"],"runtimeUpdate":self.runtime_update,"service":self.service,"configuration":configuration,"foreground":foreground,"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
+        json!({"schema":1,"capabilities":self.scope.host_settings().map(|s| s.report()),"service":self.service,"configuration":configuration,"foreground":foreground,"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
     }
     async fn dispatch(
-        &mut self,
-        operation: Operation,
-        input: Box<serde_json::value::RawValue>,
-    ) -> Result<Value, AppError> {
-        match operation {
-            Operation::PrepareAppMaintenance => {
-                return self.prepare_maintenance(decode_input(&input)?).await;
-            }
-            Operation::CancelAppMaintenance => {
-                return self.cancel_maintenance(decode_input(&input)?).await;
-            }
-            Operation::AppMaintenanceStatus => {
-                let _: EmptyInput = decode_input(&input)?;
-                return Ok(self.maintenance_status());
-            }
-            _ => (),
-        }
-        let quitting = matches!(operation, Operation::QuitAdmission);
-        if quitting && !self.maintenance_quit_allowed() {
-            return Err(AppError("app_maintenance_original_operation_required"));
-        }
-        if self.maintenance_fenced()
-            && !matches!(
-                operation,
-                Operation::QuitAdmission
-                    | Operation::Status
-                    | Operation::StartupStatus
-                    | Operation::AppLifecycle
-                    | Operation::RuntimeUpdateStatus
-                    | Operation::ServiceStatus
-            )
-        {
-            return Err(AppError("app_maintenance_original_operation_required"));
-        }
-        let result = self.dispatch_inner(operation, input).await;
-        if quitting {
-            self.maintenance_quit_result(result).await
-        } else {
-            result
-        }
-    }
-    async fn dispatch_inner(
         &mut self,
         operation: Operation,
         input: Box<serde_json::value::RawValue>,
@@ -1507,10 +1436,6 @@ impl HostApp {
                 | Operation::Join
                 | Operation::CreateLocal
                 | Operation::ResumeLocal
-                | Operation::UpdateStyx
-                | Operation::StageRuntime
-                | Operation::UpdateRuntime
-                | Operation::RecoverRuntimeUpdate
                 | Operation::AppLifecycle
                 | Operation::AppLogin
                 | Operation::AppLoginResult
@@ -1533,13 +1458,11 @@ impl HostApp {
             Operation::Status
                 | Operation::StartupStatus
                 | Operation::ServiceStatus
-                | Operation::RuntimeUpdateStatus
                 | Operation::AppLifecycle
                 | Operation::PluginRead
         ) {
             self.startup_profile = None;
         }
-        self.reap_runtime_update(false).await;
         if matches!(operation, Operation::QuitAdmission) {
             return self.admit_quit().await;
         }
@@ -1614,18 +1537,6 @@ impl HostApp {
         }
         if matches!(operation, Operation::RetireRole) {
             return self.retire_role(decode_input(&input)?).await;
-        }
-        // App-managed execution always comes from the installed App bundle.
-        // Legacy Runtime-update commands must not activate a second copy.
-        if matches!(
-            operation,
-            Operation::UpdateStyx
-                | Operation::StageRuntime
-                | Operation::UpdateRuntime
-                | Operation::RuntimeUpdateStatus
-                | Operation::RecoverRuntimeUpdate
-        ) {
-            return Err(AppError("app_operation_not_supported"));
         }
         if matches!(operation, Operation::ResumeLocal) {
             self.resume_local(LocalInput::desktop(&input)?).await?;
@@ -1730,20 +1641,12 @@ impl HostApp {
             | Operation::PluginSave
             | Operation::PluginExport
             | Operation::RetireRole
-            | Operation::PrepareAppMaintenance
-            | Operation::AppMaintenanceStatus
-            | Operation::CancelAppMaintenance
             | Operation::AppLifecycle
             | Operation::AppLogin
             | Operation::AppLoginResult
             | Operation::StartupStatus
             | Operation::Status
             | Operation::NetworkInterfaces
-            | Operation::UpdateStyx
-            | Operation::StageRuntime
-            | Operation::UpdateRuntime
-            | Operation::RuntimeUpdateStatus
-            | Operation::RecoverRuntimeUpdate
             | Operation::TransferToService
             | Operation::ServiceStatus
             | Operation::PrepareServiceFirstStart
@@ -1830,7 +1733,7 @@ async fn serve_app<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         let response = match result {
             Ok(result) => json!({"id":request.id,"ok":true,"result":result}),
             Err(error) => {
-                let mut response = json!({"id":request.id,"ok":false,"error":error.code(),"runtimeUpdate":app.runtime_update,"retirement":app.retire_failure.as_ref().map(|error| &error.report)});
+                let mut response = json!({"id":request.id,"ok":false,"error":error.code(),"retirement":app.retire_failure.as_ref().map(|error| &error.report)});
                 if let Some((code, hint)) = app.join_retry
                     && code == error.code()
                 {

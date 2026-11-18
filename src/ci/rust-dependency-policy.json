@@ -115,30 +115,15 @@
   ],
   "source_guard_limit": "lexical defense in depth; imports/aliases/macros/FFI still need review; not a Rust sandbox or a proof of no IO",
   "known_ignored": {
-    "app::runtime_bootstrap::tests::one_desktop_update_commits_both_roles_and_requests_reconnection": {
-      "kind": "loopback_socket_fixture",
-      "input": "loopback TCP sockets and disposable signed Runtime/Tunnel fixtures; run independently",
-      "required_for": "single desktop update commits both roles, requests reconnection and leaves an up-to-date selection untouched; not installed native acceptance"
-    },
     "app::startup::tests::retained_history_existing_profile_read_only": {
       "kind": "owner_authorized_existing_mac_profile_observation",
       "input": "STYX_TEST_RETAINED_HISTORY_PROFILE existing owner-authorized macOS profile; no setup, recovery or role launch",
       "required_for": "physical retired-root and closed C07 history observation using existing locks; not GUI startup, pairing or recovery acceptance"
     },
-    "app::startup::tests::retired_dual_history_archives_before_new_root_cold_open": {
-      "kind": "explicit_signed_runtime_history_retirement_reference",
-      "input": "STYX_HISTORY_C29 and STYX_HISTORY_C30 signed payload directories; disposable private roots and loopback TLS only",
-      "required_for": "Original dual-role C07 update and cold-open, bound history retirement, foreign-input refusal, clean-parent comparison, archive removal and tampered completion fence; empty-root filesystem reference, not completed Host enrollment or native acceptance"
-    },
     "app::runtime_bootstrap::tests::desktop_gateway_setup_requires_tunnel_before_pairing_local_host": {
       "kind": "loopback_socket_fixture",
       "input": "loopback TCP sockets and a disposable signed Tunnel worker fixture",
       "required_for": "desktop Gateway onboarding validates Tunnel settings and pairs its local Host"
-    },
-    "app::runtime_bootstrap::tests::completed_runtime_update_allows_same_app_role_retirement": {
-      "kind": "loopback_socket_fixture",
-      "input": "loopback TCP sockets and disposable signed Runtime/Tunnel fixtures",
-      "required_for": "completed update releases ownership for same-App role retirement; staged work still refuses retirement; not installed native acceptance"
     },
     "app::runtime_bootstrap::tests::fresh_profile_reopens_from_external_runtime_after_bundle_replacement": {
       "kind": "explicit_signed_native_payload",
@@ -643,11 +628,6 @@
       "input": "fresh STYX_TEST_APP_SERVICE_TRANSFER_ROOT; disposable synthetic signed C08 and original App container; no installed profile",
       "required_for": "actual original-scope C07 transfer, generic/other-root refusal and immutable runtime history/identity preservation; not enrollment, registered service or installed App acceptance"
     },
-    "app::maintenance_integration_tests::original_app_maintenance_distinguishes_live_c07_from_launch_and_history": {
-      "kind": "explicit_signed_native_payload",
-      "input": "historical pre-bootstrap profile producer and protected signed Linux NativeRuntimeSelection; current default staging does not establish this old App-bound precondition",
-      "required_for": "historical live App maintenance current-runtime independence, immutable launch/bootstrap history, same-ticket cancel/full Quit and same-bytes input replacement Unknown; not a current delivery gate or installed App acceptance"
-    },
     "enrollment::service::tests::paired_journey::paired_session_capacity_turnover_requires_sockets": {
       "kind": "explicit_external_runtime",
       "input": "STYX_TEST_PAIRED_ROOT, STYX_TEST_TLS_FIXTURES, STYX_TEST_CODEX_BIN, STYX_TEST_BROWSER_NODE/WORKER/EXECUTABLE, Node22; isolated owned loopback roots",
@@ -712,6 +692,11 @@
       "kind": "explicit_owned_paired_browser_fixture",
       "input": "STYX_TEST_PAIRED_ROOT, STYX_TEST_TLS_FIXTURES, STYX_TEST_CODEX_BIN, STYX_TEST_NODE22 and STYX_TEST_BROWSER_NODE/WORKER/EXECUTABLE; real loopback TLS/MCP/WSS/Chrome/Codex",
       "required_for": "Host Browser retention after chat closure and protocol reconstruction, explicit takeover, prior operator/reference refusal, in-flight transfer Busy, capability disable/re-enable and explicit close; not installed native GUI or ChatGPT account acceptance"
+    },
+    "app::maintenance_integration_tests::reopened_app_gateway_uses_current_bundle_after_old_payload_is_removed": {
+      "kind": "owned_signed_app_gateway_bundle_fixture",
+      "input": "STYX_TEST_APP_PREVIOUS_SELECTION, STYX_TEST_APP_CONTROL_SELECTION and fresh STYX_TEST_APP_BUNDLE_ROOT with disposable previous-runtime payload; removes only that owned old copy",
+      "required_for": "Same-profile App Gateway current-bundle admission and revalidation, two clean restarts, real TLS admin/counts/invitation after old payload removal, unchanged identity and pairing; not installed desktop acceptance"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints",

@@ -28,7 +28,7 @@ function verifyNativePackage(root,expected){
 }
 export function buildInno(config){
   assert(process.platform==='win32','native_windows_required');
-  const {packageDirectory,compiler,outputDirectory,version,expectedPackageSha256,stateDirectory,legacyComparison=false,
+  const {packageDirectory,compiler,outputDirectory,version,expectedPackageSha256,stateDirectory,
     productId='Styx.Desktop',productName='Styx',installFolder='Styx'}=config;
   for(const value of [packageDirectory,compiler,outputDirectory,...(stateDirectory?[stateDirectory]:[])])assert(typeof value==='string'&&path.isAbsolute(value)&&!/["\r\n{}]/.test(value),'absolute_safe_build_path_required');
   for(const value of [productId,productName,installFolder])assert(typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9 .-]{0,63}$/.test(value)&&!value.endsWith('.'),'safe_product_identity_required');
@@ -38,10 +38,8 @@ export function buildInno(config){
   assert(hash(compiler)===pin.compilerSha256,'inno_compiler_changed');
   const manifest=path.join(packageDirectory,'windows-package.json');
   assert(hash(manifest)===expectedPackageSha256,'reviewed_package_changed');
-  const native=JSON.parse(fs.readFileSync(manifest,'utf8')).nativeRuntime===true;
-  assert(native?!legacyComparison:legacyComparison===true,'explicit_legacy_comparison_required');
   let nativeVerification=null;
-  const verify=()=>{assert(hash(manifest)===expectedPackageSha256,'reviewed_package_changed');if(native){nativeVerification=verifyNativePackage(packageDirectory,expectedPackageSha256);return;}execFileSync(path.join(packageDirectory,'runtime/node.exe'),[path.join(packageDirectory,'install-windows-preview.mjs'),'verify'],{cwd:packageDirectory,encoding:'utf8',windowsHide:true,maxBuffer:4*1024*1024});assert(JSON.parse(fs.readFileSync(manifest)).compiled===true,'compiled_package_required');};
+  const verify=()=>{assert(hash(manifest)===expectedPackageSha256,'reviewed_package_changed');nativeVerification=verifyNativePackage(packageDirectory,expectedPackageSha256);};
   verify();fs.mkdirSync(outputDirectory);
   const gate=path.join(outputDirectory,'StyxInstallGate.exe'),script=path.join(here,'product.iss');
   const csc=path.join(process.env.WINDIR,'Microsoft.NET/Framework64/v4.0.30319/csc.exe');
@@ -52,11 +50,11 @@ export function buildInno(config){
   // End the define with a sentinel so Node cannot escape its trailing slashes
   // a second time. ISPP removes exactly this one appended character.
   const shortcutStateDirectory=(stateDirectory??'').replace(/\\+$/,slashes=>slashes+slashes)+'X';
-  const defines={NativePackage:native?'1':'0',SourceDir:packageDirectory,OutputDir:outputDirectory,ProductVersion:version,PackageHash:expectedPackageSha256,GateFile:gate,ProductId:productId,ProductName:productName,InstallFolder:installFolder,StateDirectoryArgument:shortcutStateDirectory};
+  const defines={SourceDir:packageDirectory,OutputDir:outputDirectory,ProductVersion:version,PackageHash:expectedPackageSha256,GateFile:gate,ProductId:productId,ProductName:productName,InstallFolder:installFolder,StateDirectoryArgument:shortcutStateDirectory};
   const log=execFileSync(compiler,[...Object.entries(defines).map(([key,value])=>`/D${key}=${value}`),script],{windowsHide:true,encoding:'utf8',maxBuffer:8*1024*1024});
   fs.writeFileSync(path.join(outputDirectory,'compiler.log'),log);verify();
   const installer=path.join(outputDirectory,`StyxSetup-${version}.exe`);
-  const receipt={schema:1,status:'BUILT_NOT_INSTALLED',engine:pin.compiler,version,productId,productName,installFolder,packageSha256:expectedPackageSha256,compilerSha256:hash(compiler),scriptSha256:hash(script),gateSha256:hash(gate),installerSha256:hash(installer),installer,stateDirectory:stateDirectory??'existing default external Core state',scope:'current-user',nativeVerification,coreManagementRuntime:native?'fixed_rust_cli_no_node_core':'explicit_legacy_comparison',hostRuntimeUpgrade:native?'NOT RUN: normal Quit then read-only installer admission; preserved-profile reopening requires native acceptance':'legacy comparison only',authenticode:'NOT SIGNED',installation:'NOT RUN',nativeUpgrade:native?'NORMAL_QUIT_THEN_IDLE_FILE_GUARD_NATIVE_ACCEPTANCE_PENDING':'legacy_comparison',nativeUninstall:native?'NORMAL_QUIT_THEN_IDLE_FILE_GUARD_NATIVE_ACCEPTANCE_PENDING':'legacy_comparison'};
+  const receipt={schema:1,status:'BUILT_NOT_INSTALLED',engine:pin.compiler,version,productId,productName,installFolder,packageSha256:expectedPackageSha256,compilerSha256:hash(compiler),scriptSha256:hash(script),gateSha256:hash(gate),installerSha256:hash(installer),installer,stateDirectory:stateDirectory??'existing default external Core state',scope:'current-user',nativeVerification,coreManagementRuntime:'fixed_rust_cli_no_node_core',hostRuntimeUpgrade:'NOT RUN: normal Quit then read-only installer admission; preserved-profile reopening requires native acceptance',authenticode:'NOT SIGNED',installation:'NOT RUN',nativeUpgrade:'NORMAL_QUIT_THEN_IDLE_FILE_GUARD_NATIVE_ACCEPTANCE_PENDING',nativeUninstall:'NORMAL_QUIT_THEN_IDLE_FILE_GUARD_NATIVE_ACCEPTANCE_PENDING'};
   fs.writeFileSync(path.join(outputDirectory,'build-receipt.json'),JSON.stringify(receipt,null,2)+'\n');return receipt;
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){

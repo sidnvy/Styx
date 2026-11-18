@@ -12,10 +12,6 @@ mod windows_env;
 pub use profile::ProfileDiagnostics;
 use serde::Serialize;
 use std::path::Path;
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum HostWireMode {
-    PairedV3,
-}
 #[derive(Serialize)]
 pub struct ForegroundEvent {
     pub schema: u32,
@@ -41,7 +37,7 @@ pub struct ForegroundOutcome {
     pub processes_exited: bool,
     pub io_tasks_joined: bool,
     pub supervised_jobs_joined: bool,
-    /// Only negotiated paired transport settlement; legacy has no such proof.
+    /// Negotiated paired transport settlement when a link was established.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_transport_drain: Option<crate::host::protocol::wire::TransportDrainOutcome>,
 }
@@ -80,7 +76,7 @@ impl From<profile::ProfileError> for ForegroundError {
 pub async fn inspect(state_dir: &Path) -> Result<ProfileDiagnostics, ForegroundError> {
     let path = state_dir.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        profile::load_legacy(&path).and_then(|p| p.revalidate().map(|()| p.into_diagnostics()))
+        profile::load_paired(&path).and_then(|p| p.revalidate().map(|()| p.into_diagnostics()))
     })
     .await
     .map_err(|_| ForegroundError("profile_reader_failed"))?

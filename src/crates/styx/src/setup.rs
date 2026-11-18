@@ -784,14 +784,9 @@ impl Foreground {
         self.stops.push(cancel.clone());
         let events = self.send.clone();
         self.tasks.push(tokio::spawn(async move {
-            let outcome = styx_runtime::foreground::host_run(
-                &path,
-                styx_runtime::foreground::HostWireMode::PairedV3,
-                cancel,
-                events,
-            )
-            .await
-            .map_err(|e| Failure::new(e.code()))?;
+            let outcome = styx_runtime::foreground::host_run(&path, cancel, events)
+                .await
+                .map_err(|e| Failure::new(e.code()))?;
             if let Some(reason) = outcome.stop_reason {
                 Err(Failure::new(reason))
             } else if outcome.local_stop_complete() {

@@ -39,9 +39,6 @@ impl GatewayToolBackend for SlowBackend {
     }
 }
 impl GatewayOwnerLifecycle for SlowBackend {
-    fn owner_has_live_work(&self, _: &VerifiedGatewayOwner) -> bool {
-        false
-    }
     fn fence_owner(&self, owner: &VerifiedGatewayOwner) -> Result<(), OwnerFenceError> {
         owner.fence();
         Ok(())
@@ -65,12 +62,6 @@ fn fixture() -> Arc<GatewayHttp<SlowBackend>> {
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
         }),
-        HttpBudget::from_reserved_partition(
-            Arc::new(Semaphore::new(GATEWAY_HTTP_BYTES))
-                .try_acquire_many_owned(GATEWAY_HTTP_BYTES as u32)
-                .unwrap(),
-        )
-        .unwrap(),
     )
 }
 async fn request(

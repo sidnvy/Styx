@@ -31,8 +31,8 @@ pub(super) struct Options {
 }
 
 #[cfg(target_os = "linux")]
-fn link(payload: &Path, bin: &Path, previous: Option<&Path>) -> Result<(), Failure> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, symlink};
+fn prepare_bin(bin: &Path) -> Result<(), Failure> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     if !bin.is_absolute()
         || bin.components().any(|c| {
             !matches!(
@@ -62,6 +62,12 @@ fn link(payload: &Path, bin: &Path, previous: Option<&Path>) -> Result<(), Failu
     {
         return Err(Failure::new("install_owner_bin_required"));
     }
+    Ok(())
+}
+#[cfg(target_os = "linux")]
+pub(super) fn link(payload: &Path, bin: &Path, previous: Option<&Path>) -> Result<(), Failure> {
+    use std::os::unix::fs::symlink;
+    prepare_bin(bin)?;
     let target = payload.join("bin/styx");
     let destination = bin.join("styx");
     if let Ok(existing) = std::fs::read_link(&destination) {
@@ -84,6 +90,63 @@ fn link(payload: &Path, bin: &Path, previous: Option<&Path>) -> Result<(), Failu
         .map_err(|_| Failure::new("install_existing_command_preserved"))?;
     Ok(())
 }
+#[cfg(target_os = "linux")]
+pub(super) fn default_bin() -> Result<PathBuf, Failure> {
+    std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".local/bin"))
+        .ok_or_else(|| Failure::new("install_home_unavailable"))
+}
+
+#[cfg(target_os = "linux")]
+fn releases() -> Result<PathBuf, Failure> {
+    let home = PathBuf::from(
+        std::env::var_os("HOME").ok_or_else(|| Failure::new("install_home_unavailable"))?,
+    );
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share"));
+    let parent = data.join("styx/releases");
+    if !parent.is_absolute() {
+        return Err(Failure::new("install_absolute_data_directory_required"));
+    }
+    Ok(parent)
+}
+
+#[cfg(target_os = "linux")]
+pub(super) async fn previous_command(
+    bin: &Path,
+    original: Option<&super::setup::Payload>,
+    pin: &str,
+) -> Result<Option<PathBuf>, Failure> {
+    prepare_bin(bin)?;
+    let command = match std::fs::read_link(bin.join("styx")) {
+        Ok(command) => command,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(Failure::new("install_existing_command_preserved")),
+    };
+    let previous = command
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| Failure::new("install_existing_command_preserved"))?;
+    let bootstrap = original.filter(|v| previous == v.payload_dir);
+    if command != previous.join("bin/styx")
+        || !(previous.starts_with(releases()?) || bootstrap.is_some())
+    {
+        return Err(Failure::new("install_existing_command_preserved"));
+    }
+    let key = match bootstrap {
+        Some(original) => original.publisher_file.clone(),
+        None => previous
+            .parent()
+            .ok_or_else(|| Failure::new("install_existing_command_preserved"))?
+            .join("publisher.pem"),
+    };
+    styx_runtime::release::inspect_selection(previous, &key, pin)
+        .await
+        .map_err(release_failure)?;
+    Ok(Some(previous.to_owned()))
+}
+
 pub(super) async fn run(options: Options) -> Result<(), Failure> {
     let Options {
         payload,
@@ -105,22 +168,15 @@ pub(super) async fn run(options: Options) -> Result<(), Failure> {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::DirBuilderExt;
-        if setup && !super::setup_prompt::terminal() {
+        let root = super::setup::root_default()?;
+        let intent = root.join("inputs/setup-intent.json");
+        if setup && !intent.exists() && !super::setup_prompt::terminal() {
             return Err(Failure::new("install_setup_requires_terminal"));
         }
         let admitted = styx_runtime::release::inspect_selection(&payload, &publisher, &pin)
             .await
             .map_err(release_failure)?;
-        let home = PathBuf::from(
-            std::env::var_os("HOME").ok_or_else(|| Failure::new("install_home_unavailable"))?,
-        );
-        let data = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local/share"));
-        let parent = data.join("styx/releases");
-        if !parent.is_absolute() {
-            return Err(Failure::new("install_absolute_data_directory_required"));
-        }
+        let parent = releases()?;
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -129,8 +185,6 @@ pub(super) async fn run(options: Options) -> Result<(), Failure> {
         let name = admitted.manifest_sha256.to_hex();
         let destination = parent.join(&name);
         let installed = if destination.exists() {
-            // A completed identical install can be reused. Partial staging is
-            // preserved, never overwritten or treated as a successful copy.
             let existing = styx_runtime::release::inspect_selection(
                 &destination.join("payload"),
                 &destination.join("publisher.pem"),
@@ -147,109 +201,77 @@ pub(super) async fn run(options: Options) -> Result<(), Failure> {
                 .await
                 .map_err(release_failure)?
         };
-        let payload = PathBuf::from(installed.payload_path);
-        let publisher = PathBuf::from(installed.publisher_file);
-        let bin = bin.unwrap_or_else(|| home.join(".local/bin"));
-        let root = super::setup::root_default()?;
-        let intent = root.join("inputs/setup-intent.json");
-        if setup && intent.exists() {
+        let payload = PathBuf::from(&installed.payload_path);
+        let publisher = PathBuf::from(&installed.publisher_file);
+        let bin = bin.map(Ok).unwrap_or_else(default_bin)?;
+        if intent.exists() {
             let existing = super::setup::Answers::load(&intent)?;
-            let same_mode = matches!(
+            if !matches!(
                 (mode, existing.role),
                 (Mode::Gateway, super::setup::Role::Gateway)
                     | (
                         Mode::Desktop,
                         super::setup::Role::Join | super::setup::Role::Hub
                     )
-            );
-            if !same_mode {
+            ) {
                 return Err(Failure::new("install_existing_role_preserved"));
             }
-            use styx_runtime::management::native_gateway_admin as admin;
-            let previous = match std::fs::read_link(bin.join("styx")) {
-                Ok(command) => {
-                    let previous = command
-                        .parent()
-                        .and_then(Path::parent)
-                        .ok_or_else(|| Failure::new("install_existing_command_preserved"))?;
-                    if command != previous.join("bin/styx")
-                        || !(previous.starts_with(&parent)
-                            || previous == existing.payload.payload_dir)
-                    {
-                        return Err(Failure::new("install_existing_command_preserved"));
-                    }
-                    let key = if previous == existing.payload.payload_dir {
-                        existing.payload.publisher_file.clone()
-                    } else {
-                        previous
-                            .parent()
-                            .ok_or_else(|| Failure::new("install_existing_command_preserved"))?
-                            .join("publisher.pem")
-                    };
-                    styx_runtime::release::inspect_selection(previous, &key, &pin)
-                        .await
-                        .map_err(release_failure)?;
-                    Some(previous.to_owned())
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(_) => return Err(Failure::new("install_existing_command_preserved")),
-            };
-            let mut selections = Vec::new();
-            for directory in ["gateway", "host"] {
-                let path = root.join(directory);
-                if !path.exists() {
-                    continue;
-                }
-                selections.push(
-                    admin::committed_runtime_selection(&path)
-                        .await
-                        .map_err(Failure::admin)?,
-                );
-            }
-            let selected = !selections.is_empty()
-                && selections
-                    .iter()
-                    .all(|s| s.manifest_sha256 == installed.manifest_sha256);
-            let mut resume_setup = selections.is_empty();
-            if !selections.is_empty() {
-                println!("Existing Styx configuration found; checking its update progress.");
-                match super::upgrade::run(
-                    payload.clone(),
-                    Some(publisher.clone()),
-                    Some(pin.clone()),
-                    Some(root),
-                    false,
-                )
-                .await
+            // Install and update have one entry. --setup only requests first-run
+            // questions; an existing installation always updates its services
+            // and CLI together in the same independent OS job.
+            match super::upgrade::run(
+                payload.clone(),
+                Some(publisher.clone()),
+                Some(pin.clone()),
+                Some(root.clone()),
+                true,
+                Some(bin.clone()),
+            )
+            .await
+            {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if setup
+                        && matches!(
+                            error.code,
+                            "upgrade_nothing_set_up" | "upgrade_existing_linux_services_required"
+                        ) =>
                 {
-                    Ok(()) => {}
-                    Err(error) if error.code == "upgrade_already_running" => {}
-                    Err(error)
-                        if selected && error.code == "upgrade_existing_linux_services_required" =>
-                    {
-                        resume_setup = true
+                    let bootstrap = styx_runtime::release::inspect_selection(
+                        &existing.payload.payload_dir,
+                        &existing.payload.publisher_file,
+                        &pin,
+                    )
+                    .await
+                    .map_err(release_failure)?;
+                    if bootstrap.manifest_sha256 != installed.manifest_sha256 {
+                        return Err(error);
                     }
-                    Err(error) => return Err(error),
+                    for role in ["gateway", "host"] {
+                        let path = root.join(role);
+                        if path.exists() {
+                            let selected = styx_runtime::management::native_gateway_admin::committed_runtime_selection(&path)
+                                .await.map_err(Failure::admin)?;
+                            if selected.manifest_sha256 != installed.manifest_sha256 {
+                                return Err(error);
+                            }
+                        }
+                    }
+                    // Finish an interrupted first setup only on its existing
+                    // selected package; never turn an update into a fresh profile.
+                    let previous = previous_command(&bin, Some(&existing.payload), &pin).await?;
+                    link(&payload, &bin, previous.as_deref())?;
+                    if matches!(mode, Mode::Gateway) {
+                        super::install_boot::ensure_gateway_boot()?;
+                    }
+                    return super::setup::run_installed(existing.payload, mode).await;
                 }
+                Err(error) => return Err(error),
             }
-            // A completed service update may only need its CLI link published.
-            // Do not replay the update or use immutable first-setup paths as current state.
-            link(&payload, &bin, previous.as_deref())?;
-            if resume_setup {
-                if matches!(mode, Mode::Gateway) {
-                    super::install_boot::ensure_gateway_boot()?;
-                }
-                return super::setup::run_installed(existing.payload, mode).await;
-            }
-            println!("Styx updated. Existing configuration and pairing were kept.");
-            return Ok(());
         }
-        link(&payload, &bin, None)?;
-        println!("Installed: {}", bin.join("styx").display());
-        println!(
-            "Installed files: {}. The downloaded archive can now be removed.",
-            destination.display()
-        );
+        let previous = previous_command(&bin, None, &pin).await?;
+        link(&payload, &bin, previous.as_deref())?;
+        println!("Installed Styx: {}", bin.join("styx").display());
         if setup {
             if matches!(mode, Mode::Gateway) {
                 super::install_boot::ensure_gateway_boot()?;

@@ -6,10 +6,6 @@ pub use relay::{BoundOwner, DeviceStatus, RelayError, RelayHandle};
 
 pub mod backend;
 pub use backend::PairedGatewayBackend;
-/// Legacy bootstrap wire-accounting units. They do not limit connections,
-/// pending calls or retained operations; each transport owns its actual buffers.
-pub const PAIRED_LINK_BYTES: usize = 8 * 1024 * 1024;
-pub const GATEWAY_RELAY_BYTES: usize = 256 * 1024 * 1024;
 
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod namespace_tests {
