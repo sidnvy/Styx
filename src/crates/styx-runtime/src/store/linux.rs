@@ -649,6 +649,3 @@ pub(super) use payload::{PayloadSnapshot, PinnedImage};
 
 #[path = "release_stage_unix.rs"]
 mod release_staging;
-
-#[path = "app_runtime_inputs.rs"]
-mod app_runtime_inputs;
