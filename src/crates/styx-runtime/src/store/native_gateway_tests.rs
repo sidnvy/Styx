@@ -42,7 +42,7 @@ fn state(fresh: &FreshNativeRoot) -> NativeState {
         schema: NATIVE_STATE_SCHEMA,
         kind: NativeStateKind::StyxDesiredState,
         runtime_format: NativeRuntimeFormat::NativeRustV1,
-        reader_contract: ReaderContract::NativeManagementStateV1,
+        reader_contract: ReaderContract::NativeStateV1,
         scope_generation: fresh.marker().scope_generation,
         deployment_raw_sha256: Sha256Digest::of_bytes(DEPLOYMENT),
         mode: NativeDeploymentMode::CreateLocal,
@@ -56,7 +56,6 @@ fn state(fresh: &FreshNativeRoot) -> NativeState {
             }),
             host: None,
         },
-        migration: None,
         extensions: BTreeMap::new(),
     }
 }
@@ -120,7 +119,6 @@ fn fresh_gateway_material_floor_ready_and_failure_custody() {
     }
     let validated = binding.validated_readstate().unwrap();
     assert_eq!(validated.state().revision, 0);
-    assert!(validated.state().migration.is_none());
     assert_eq!(
         validated.state().desired.gateway.as_ref().unwrap().run,
         NativeRunDesired::Stopped

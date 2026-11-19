@@ -74,17 +74,14 @@ pub(super) fn require(root: &PrivateRoot, writer: &ConfigurationWriterGuard) -> 
                 }
                 let canonical = native_state::decode_state(state_raw.bytes(), &marker)
                     .map_err(|_| JournalError::Conflict)?;
-                if canonical.state().schema != 7
-                    || canonical.state().reader_contract
-                        != ReaderContract::NativePairingLifecycleStateV1
-                    || canonical.state().deployment_raw_sha256
-                        != Sha256Digest::of_bytes(deployment.bytes())
+                if canonical.state().deployment_raw_sha256
+                    != Sha256Digest::of_bytes(deployment.bytes())
                 {
                     return Err(JournalError::Conflict);
                 }
                 // Reuse the complete existing C07 parser and protected
                 // canonical/namespace pins. Pending, orphan and inconsistent
-                // history cannot be mistaken for a completed reader upgrade.
+                // history cannot authorize a new enrollment mutation.
                 let selection =
                     native_host_snapshot::validated_runtime_selection(root, &canonical, &marker)?;
                 let selected = crate::release::load_selected(&selection)
@@ -92,7 +89,7 @@ pub(super) fn require(root: &PrivateRoot, writer: &ConfigurationWriterGuard) -> 
                 if !selected
                     .manifest()
                     .minimum_reader
-                    .supports_state_reader(ReaderContract::NativePairingLifecycleStateV1)
+                    .supports_state_reader(ReaderContract::NativeStateV1)
                 {
                     return Err(JournalError::Conflict);
                 }

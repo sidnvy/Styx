@@ -70,24 +70,18 @@ test('native archive inventory rejects changed bytes, execution modes, extra fil
  const extra=path.join(app,'extra');fs.writeFileSync(extra,'unexpected');assert.throws(()=>assertNativeMacAppInventory(app,expected),/native_archive_app_inventory_changed/);fs.unlinkSync(extra);
  fs.symlinkSync(file,extra);assert.throws(()=>assertNativeMacAppInventory(app,expected),/distribution_symlink_forbidden/);
 });
-test('native reader envelopes bind signed schemas4/5/6 without upgrading old declarations',t=>{
+test('native reader envelope binds the current signed state format',t=>{
  const root=scratch(t),payload=path.join(root,'native'),publisher=path.join(root,'publisher.pem');
  fs.chmodSync(root,0o700);fs.mkdirSync(payload,{mode:0o700});fs.mkdirSync(path.join(payload,'bin'),{mode:0o700});
  const {publicKey,privateKey}=generateKeyPairSync('ed25519');fs.writeFileSync(publisher,publicKey.export({type:'spki',format:'pem'}),{mode:0o600});
  const image=Buffer.alloc(32);image.writeUInt32LE(0xfeedfacf,0);image.writeUInt32LE(0x01000007,4);image.writeUInt32LE(2,12);
  fs.writeFileSync(path.join(payload,'bin/styx'),image,{mode:0o700});
  const input={payloadDir:payload,publisherFile:publisher,expectedPublisher:hash(publicKey.export({type:'spki',format:'der'}))};
- const manifest={schema:2,runtime_format:'native_rust_v1',scope:'runtime_candidate',component:'styx',minimum_reader:'native_service_runtime_selected_v1',contracts:{control:1,management_state:5},target:'x86_64-apple-darwin',entrypoint:'bin/styx',files:[{path:'bin/styx',size:image.length,sha256:hash(image),executable:true}]};
+ const manifest={schema:2,runtime_format:'native_rust_v1',scope:'runtime_candidate',component:'styx',minimum_reader:'native_runtime_v2',contracts:{control:1,management_state:1},target:'x86_64-apple-darwin',entrypoint:'bin/styx',files:[{path:'bin/styx',size:image.length,sha256:hash(image),executable:true}]};
  const seal=()=>{const raw=Buffer.from(JSON.stringify(manifest));fs.writeFileSync(path.join(payload,'manifest.json'),raw,{mode:0o600});fs.writeFileSync(path.join(payload,'manifest.sig'),sign(null,raw,privateKey),{mode:0o600});};
- seal();assert.equal(authenticateNativeMacRuntimeEnvelope(input,'x64').manifest.minimum_reader,'native_service_runtime_selected_v1');
- manifest.contracts.management_state=4;seal();assert.throws(()=>authenticateNativeMacRuntimeEnvelope(input,'x64'),/native_macos_c08_required/);
- manifest.minimum_reader='native_app_runtime_selected_v1';seal();assert.equal(authenticateNativeMacRuntimeEnvelope(input,'x64').manifest.contracts.management_state,4);
- manifest.contracts.management_state=5;seal();assert.throws(()=>authenticateNativeMacRuntimeEnvelope(input,'x64'),/native_macos_c08_required/);
- manifest.minimum_reader='native_app_service_transferred_v1';seal();assert.throws(()=>authenticateNativeMacRuntimeEnvelope(input,'x64'),/native_macos_c08_required/);
- manifest.contracts.management_state=6;seal();assert.equal(authenticateNativeMacRuntimeEnvelope(input,'x64').manifest.minimum_reader,'native_app_service_transferred_v1');
- manifest.minimum_reader='native_pairing_lifecycle_v1';seal();assert.throws(()=>authenticateNativeMacRuntimeEnvelope(input,'x64'),/native_macos_c08_required/);
- manifest.contracts.management_state=7;seal();assert.equal(authenticateNativeMacRuntimeEnvelope(input,'x64').manifest.minimum_reader,'native_pairing_lifecycle_v1');
- manifest.minimum_reader='native_service_runtime_selected_v1';seal();assert.throws(()=>authenticateNativeMacRuntimeEnvelope(input,'x64'),/native_macos_c08_required/);
+ seal();assert.equal(authenticateNativeMacRuntimeEnvelope(input,'x64').manifest.minimum_reader,'native_runtime_v2');
+ manifest.contracts.management_state=2;seal();assert.throws(()=>authenticateNativeMacRuntimeEnvelope(input,'x64'),/native_macos_c08_required/);
+ manifest.contracts.management_state=1;manifest.minimum_reader='native_runtime_v3';seal();assert.throws(()=>authenticateNativeMacRuntimeEnvelope(input,'x64'),/native_macos_c08_required/);
 });
 
 test('failed DMG attach detaches only a structured exact image and fresh mount match',t=>{

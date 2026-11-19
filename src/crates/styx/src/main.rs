@@ -6,10 +6,6 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = cli::Cli::parse();
-    #[cfg(target_os = "windows")]
-    if let Some(result) = arguments.dispatch_windows_service() {
-        return result;
-    }
     let worker = arguments.is_desktop_probe_worker();
     // Bind the worker to its original parent before Tokio starts.
     // Disable core dumps without imposing CPU, memory or file-count quotas.

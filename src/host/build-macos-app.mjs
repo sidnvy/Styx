@@ -203,7 +203,7 @@ export function macSwiftBuildArguments({source,output,arch=process.arch,sdkPath,
   assert(sdkPath===undefined||moduleCachePath!==undefined,'explicit_sdk_requires_isolated_module_cache');
   return ['swiftc','-O','-warnings-as-errors','-target',`${arch==='arm64'?'arm64':'x86_64'}-apple-macosx13.0`,
     ...(sdkPath===undefined?[]:['-sdk',sdkPath]),...(moduleCachePath===undefined?[]:['-module-cache-path',moduleCachePath]),
-    ...(additionalSources.length?['-D','STYX_PRODUCT_UI']:[]),source,...additionalSources,'-o',output,'-framework','AppKit','-framework','ApplicationServices','-framework','CoreGraphics','-framework','SwiftUI','-framework','WebKit'];
+    source,...additionalSources,'-o',output,'-framework','AppKit','-framework','ApplicationServices','-framework','CoreGraphics','-framework','SwiftUI'];
 }
 export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=false,identity,teamID,notaryProfile,signingMode='distribution',localSigning,sdkPath,moduleCachePath,localDevelopment=false}={}){
   assert(process.platform==='darwin','native_macos_build_required');

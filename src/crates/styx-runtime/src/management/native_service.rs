@@ -216,13 +216,10 @@ pub async fn manage(
                 ServiceAction::Install | ServiceAction::Uninstall | ServiceAction::Start
             ) {
                 let lease_path = path.clone();
-                let lease_state = current.clone();
                 execution_lease = Some(
-                    tokio::task::spawn_blocking(move || {
-                        inactive_execution_lease(&lease_path, service_role, &lease_state)
-                    })
-                    .await
-                    .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))??,
+                    tokio::task::spawn_blocking(move || inactive_execution_lease(&lease_path))
+                        .await
+                        .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))??,
                 );
             }
             if action == ServiceAction::Stop {
@@ -488,44 +485,9 @@ pub async fn manage(
     }
 }
 
-fn inactive_execution_lease(
-    path: &Path,
-    role: ServiceRole,
-    state: &NativeState,
-) -> Result<crate::store::ExecutionLeaseGuard> {
-    let root = crate::store::PrivateRoot::open(path)
-        .map_err(|_| NativeManagementError::new(ErrorKind::Unavailable))?;
-    let execution_path = if state.has_migration_binding() {
-        match role {
-            ServiceRole::Gateway => path.join("gateway"),
-            ServiceRole::Host => {
-                let raw = root
-                    .read_raw("deployment.json", 1024 * 1024)
-                    .map_err(|_| NativeManagementError::new(ErrorKind::Unavailable))?;
-                if Sha256Digest::of_bytes(raw.bytes()) != state.deployment_raw_sha256 {
-                    return Err(NativeManagementError::new(ErrorKind::Conflict));
-                }
-                #[derive(serde::Deserialize)]
-                struct Deployment {
-                    host: Host,
-                }
-                #[derive(serde::Deserialize)]
-                struct Host {
-                    #[serde(rename = "baseDir")]
-                    base_dir: PathBuf,
-                }
-                serde_json::from_slice::<Deployment>(raw.bytes())
-                    .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?
-                    .host
-                    .base_dir
-            }
-        }
-    } else {
-        path.to_owned()
-    };
-    let execution = crate::store::PrivateRoot::open(execution_path)
-        .map_err(|_| NativeManagementError::new(ErrorKind::Unavailable))?;
-    execution
+fn inactive_execution_lease(path: &Path) -> Result<crate::store::ExecutionLeaseGuard> {
+    crate::store::PrivateRoot::open(path)
+        .map_err(|_| NativeManagementError::new(ErrorKind::Unavailable))?
         .try_execution_lease()
         .map_err(|_| NativeManagementError::new(ErrorKind::Busy))
 }

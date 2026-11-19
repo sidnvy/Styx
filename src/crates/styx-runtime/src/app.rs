@@ -16,7 +16,6 @@ use crate::enrollment::pairing_link;
 mod plugin;
 mod role_retire;
 mod runtime_bootstrap;
-mod service;
 mod startup;
 pub(crate) mod startup_diagnostic;
 
@@ -78,10 +77,6 @@ impl HostScope {
         self.settings.lock().ok()?.upgrade()
     }
 
-    #[cfg(test)]
-    pub(crate) fn open_for_test(state_dir: &Path) -> Result<Self, AppError> {
-        Self::open(state_dir)
-    }
     fn open(state_dir: &Path) -> Result<Self, AppError> {
         if !state_dir.is_absolute()
             || state_dir.components().any(|p| {
@@ -233,9 +228,6 @@ enum Operation {
     HostCapabilities,
     Computers,
     InviteComputer,
-    PendingComputers,
-    ApproveComputer,
-    RejectComputer,
     RevokeComputer,
     TunnelStatus,
     TunnelSave,
@@ -259,10 +251,6 @@ enum Operation {
     AppLifecycle,
     AppLogin,
     AppLoginResult,
-    TransferToService,
-    ServiceStatus,
-    PrepareServiceFirstStart,
-    StopService,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -481,7 +469,6 @@ impl RetainedFailure {
 }
 struct HostApp {
     retire_failure: Option<crate::management::role_retire::RetireError>,
-    service: Option<service::State>,
     local_gateway: Option<local_gateway::LocalGateway>,
     resume_local_available: bool,
     deployment_file: PathBuf,
@@ -548,7 +535,6 @@ impl HostApp {
         let (status, observed) = watch::channel(ConnectionStatus::stopped());
         let mut app = Self {
             retire_failure: None,
-            service: None,
             local_gateway: None,
             resume_local_available: false,
             scope,
@@ -573,9 +559,6 @@ impl HostApp {
             startup_profile: None,
         };
         if app.scope.root.get().is_some() {
-            if app.observe_service_client().await? {
-                return Ok(app);
-            }
             if app.try_ready_startup().await? {
                 return Ok(app);
             }
@@ -636,9 +619,6 @@ impl HostApp {
             Self::open_with_selection(state_dir, &deployment, Some(selection.to_owned())).await?;
         // A committed original Host-only root is not a fresh split App setup.
         // Its original remote Gateway and pairing are never reconstructed.
-        if app.service_client_or_unknown() {
-            return Ok(app);
-        }
         let gateway_scope = Arc::new(app.scope.gateway_sibling()?);
         if gateway_scope.root.get().is_some() {
             let gateway = match app.load_local_gateway(gateway_scope).await {
@@ -826,9 +806,6 @@ impl HostApp {
     }
     fn available_for(&self, local_exit: bool) -> Result<(), AppError> {
         self.scope.validate()?;
-        if self.service_fenced() {
-            return Err(AppError("app_service_original_operation_unknown"));
-        }
         if let Some(error) = &self.retained {
             return Err(AppError(error.code()));
         }
@@ -1266,8 +1243,7 @@ impl HostApp {
         Ok(())
     }
     fn admission_fenced(&self) -> bool {
-        self.service_fenced()
-            || self.unknown
+        self.unknown
             || self.retained.is_some()
             || self.quit_ticket.is_some()
             || self
@@ -1305,7 +1281,7 @@ impl HostApp {
     }
     async fn snapshot(&self) -> Value {
         let computer_requested = self.desktop_component_requested().await;
-        let configuration = self.service_configuration().or(self.configuration.as_ref());
+        let configuration = self.configuration.as_ref();
         let mut supported = vec![
             "appLifecycle",
             "appLogin",
@@ -1315,43 +1291,18 @@ impl HostApp {
             "networkInterfaces",
             "quitAdmission",
         ];
-        if !self.service_client_or_unknown() {
-            supported.extend([
-                "createLocal",
-                "resumeLocal",
-                "inspectJoin",
-                "join",
-                "requestJoin",
-                "claimJoin",
-                "inspectHost",
-                "connect",
-                "disconnect",
-                "retireRole",
-            ]);
-            // Advertise only the supported fresh single-Host composition.
-            // The mutation still revalidates original scope, Ready and C07.
-            if cfg!(target_os = "macos")
-                && !self.admission_fenced()
-                && self.local_gateway.is_none()
-                && self.configuration.as_ref().is_some_and(|report| {
-                    report.desired.gateway.is_none()
-                        && report.desired.host.is_some_and(|host| {
-                            host.manager == NativeManager::AppManaged
-                                && host.autostart == NativeAutostartDesired::Disabled
-                        })
-                })
-                && self.enrollment.as_ref().is_some_and(|report| {
-                    matches!(
-                        report.get("status").and_then(Value::as_str),
-                        Some("ready_to_connect" | "already_ready")
-                    )
-                })
-            {
-                supported.push("transferToService");
-            }
-        } else if cfg!(target_os = "macos") {
-            supported.extend(["serviceStatus", "prepareServiceFirstStart", "stopService"]);
-        }
+        supported.extend([
+            "createLocal",
+            "resumeLocal",
+            "inspectJoin",
+            "join",
+            "requestJoin",
+            "claimJoin",
+            "inspectHost",
+            "connect",
+            "disconnect",
+            "retireRole",
+        ]);
         if self.local_gateway.is_some() && !self.admission_fenced() {
             supported.extend([
                 "pluginRead",
@@ -1359,23 +1310,10 @@ impl HostApp {
                 "pluginExport",
                 "computers",
                 "inviteComputer",
-                "pendingComputers",
-                "approveComputer",
                 "revokeComputer",
                 "tunnelStatus",
                 "tunnelSave",
             ]);
-            if let Some(gateway) = self.local_gateway.as_ref()
-                && gateway.validate().is_ok()
-                && crate::management::native_gateway_admin::pairing_rejection_supported_for_app(
-                    gateway.scope.clone(),
-                )
-                .await
-                .unwrap_or(false)
-                && gateway.validate().is_ok()
-            {
-                supported.push("rejectComputer");
-            }
         }
         if self.running.is_some() && self.scope.host_settings().is_some() {
             supported.push("hostCapabilities");
@@ -1396,7 +1334,7 @@ impl HostApp {
             }
             value
         };
-        json!({"schema":1,"capabilities":self.scope.host_settings().map(|s| s.report()),"service":self.service,"configuration":configuration,"foreground":foreground,"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
+        json!({"schema":1,"capabilities":self.scope.host_settings().map(|s| s.report()),"configuration":configuration,"foreground":foreground,"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
     }
     async fn dispatch(
         &mut self,
@@ -1425,8 +1363,6 @@ impl HostApp {
             operation,
             Operation::HostCapabilities
                 | Operation::InviteComputer
-                | Operation::ApproveComputer
-                | Operation::RejectComputer
                 | Operation::RevokeComputer
                 | Operation::TunnelSave
                 | Operation::PluginSave
@@ -1439,9 +1375,6 @@ impl HostApp {
                 | Operation::AppLifecycle
                 | Operation::AppLogin
                 | Operation::AppLoginResult
-                | Operation::TransferToService
-                | Operation::PrepareServiceFirstStart
-                | Operation::StopService
         ) {
             let _: EmptyInput = decode_input(&input)?;
         }
@@ -1457,7 +1390,6 @@ impl HostApp {
             operation,
             Operation::Status
                 | Operation::StartupStatus
-                | Operation::ServiceStatus
                 | Operation::AppLifecycle
                 | Operation::PluginRead
         ) {
@@ -1483,9 +1415,6 @@ impl HostApp {
             }
             Operation::Computers
             | Operation::InviteComputer
-            | Operation::PendingComputers
-            | Operation::ApproveComputer
-            | Operation::RejectComputer
             | Operation::RevokeComputer
             | Operation::TunnelStatus
             | Operation::TunnelSave => {
@@ -1499,41 +1428,15 @@ impl HostApp {
             Operation::AppLoginResult => return self.login_complete(input),
             _ => (),
         }
-        if matches!(operation, Operation::TransferToService) {
-            self.transfer_to_service(decode_input(&input)?).await?;
-            return Ok(self.snapshot().await);
-        }
-        if matches!(
-            operation,
-            Operation::PrepareServiceFirstStart | Operation::StopService
-        ) {
-            self.manage_service(
-                decode_input(&input)?,
-                matches!(operation, Operation::PrepareServiceFirstStart),
-            )
-            .await?;
-            return Ok(self.snapshot().await);
-        }
-        if matches!(operation, Operation::ServiceStatus) {
-            self.refresh_service_client().await?;
-            return Ok(self.snapshot().await);
-        }
         if matches!(operation, Operation::Status | Operation::StartupStatus) {
             self.scope.validate()?;
-            if self.service_client_or_unknown() && !self.service_fenced() {
-                // A failed observation is represented in service.error; this
-                // read never opens/reconciles a service configuration writer.
-                let _ = self.refresh_service_client().await;
-            } else if matches!(operation, Operation::StartupStatus) {
+            if matches!(operation, Operation::StartupStatus) {
                 // Reopen reconnects a role the user left running, without
                 // re-pairing. Pause (Disconnect) records Stopped and is kept.
                 // A failure is visible in the snapshot; it is not this read's error.
                 let _ = self.resume_desired_running().await;
             }
             return Ok(self.snapshot().await);
-        }
-        if self.service_client_or_unknown() {
-            return Err(AppError("app_role_managed_by_service"));
         }
         if matches!(operation, Operation::RetireRole) {
             return self.retire_role(decode_input(&input)?).await;
@@ -1631,9 +1534,6 @@ impl HostApp {
             | Operation::HostCapabilities
             | Operation::Computers
             | Operation::InviteComputer
-            | Operation::PendingComputers
-            | Operation::ApproveComputer
-            | Operation::RejectComputer
             | Operation::RevokeComputer
             | Operation::TunnelStatus
             | Operation::TunnelSave
@@ -1646,11 +1546,7 @@ impl HostApp {
             | Operation::AppLoginResult
             | Operation::StartupStatus
             | Operation::Status
-            | Operation::NetworkInterfaces
-            | Operation::TransferToService
-            | Operation::ServiceStatus
-            | Operation::PrepareServiceFirstStart
-            | Operation::StopService => unreachable!(),
+            | Operation::NetworkInterfaces => unreachable!(),
         }
     }
 }

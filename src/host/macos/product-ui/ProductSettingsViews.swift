@@ -34,10 +34,6 @@ struct ProductPluginCompatibilityNote: View {
 struct ProductSettingsView: View {
     @ObservedObject var model: ProductModel
     weak var controller: ProductWindowController?
-    @State private var editTunnel = false
-    @State private var editPackage = false
-    @State private var setupChat = false
-    @State private var tryChat = false
     @State private var addComputer = false
     var body: some View {
         GeometryReader { viewport in
@@ -69,27 +65,13 @@ struct ProductSettingsView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     Text(productText("添加电脑", "Add computer")).font(.title2.weight(.semibold))
                     ProductInvitationView(model: model)
-                    ProductPendingIdentities(model: model)
                     HStack { Spacer(); Button(productText("完成", "Done")) { model.closeDeviceInvitation { addComputer = false } }.disabled(model.busy).accessibilityIdentifier("styx-invitation-done").keyboardShortcut(.cancelAction) }
                 }.padding(24).frame(width: 460)
-            }
-            .sheet(isPresented: $editTunnel) { ProductTunnelEditor(model: model) }
-            .sheet(isPresented: $editPackage) { ProductPackageEditor(model: model) }
-            .sheet(isPresented: $setupChat) {
-                ProductView(model: model, controller: controller)
-                    .frame(width: 660, height: 640)
-                    .toolbar { Button(productText("完成", "Done")) { setupChat = false } }
-            }
-            .sheet(isPresented: $tryChat) {
-                VStack(alignment: .leading, spacing: 16) {
-                    ScrollView { ProductTryoutView(model: model, controller: controller).padding(24) }
-                    HStack { Spacer(); Button(productText("关闭", "Close")) { tryChat = false }.accessibilityIdentifier("styx-tryout-close").keyboardShortcut(.cancelAction) }.padding([.horizontal, .bottom], 24)
-                }.frame(width: 580, height: 560)
             }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { notification in
                 guard let window = notification.object as? NSWindow,
                       window.identifier?.rawValue == "Styx.SettingsWindow" else { return }
-                editTunnel = false; editPackage = false; setupChat = false; tryChat = false; addComputer = false
+                addComputer = false
             }
             .task(id: model.settingsVisible || model.onboardingVisible) {
                 if model.settingsVisible || model.onboardingVisible { await model.observePresentation() }
@@ -114,34 +96,19 @@ struct ProductSettingsView: View {
                     Text(notice).font(.caption).foregroundStyle(.secondary)
                     Button(productText("登录项设置…", "Login Items settings…")) { model.openLoginSettings() }
                 }
-                Text(model.nativeHost ? model.nativeQuitDescription : productText("关闭窗口后，Styx 会在菜单栏继续运行。退出 Styx 后，ChatGPT 将无法使用这台电脑。", "Styx keeps running in the menu bar when you close a window. Quitting Styx makes this computer unavailable to ChatGPT.")).font(.caption).foregroundStyle(.secondary)
+                Text(productText("关闭窗口后，Styx 会在菜单栏继续运行。退出 Styx 后，ChatGPT 将无法使用这台电脑。", "Styx keeps running in the menu bar when you close a window. Quitting Styx makes this computer unavailable to ChatGPT.")).font(.caption).foregroundStyle(.secondary)
             }
             Section { LabeledContent(productText("版本", "Version"), value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—") }
-            if model.nativeHost {
-                if model.nativeSupportsOperation("retireRole") {
-                    Button(productText("更改这台电脑的角色…", "Change this computer's role…")) { model.nativeChangeRole() }.disabled(model.busy)
-                }
-                if model.nativeHasServiceState {
-                    ProductServiceSettings(model: model)
-                }
+
+            if model.nativeSupportsOperation("retireRole") {
+                Button(productText("更改这台电脑的角色…", "Change this computer's role…")) { model.nativeChangeRole() }.disabled(model.busy)
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
     private var local: some View {
         VStack(alignment: .leading, spacing: 16) {
             Section(productText("允许 ChatGPT 在这台电脑上做什么", "What ChatGPT can do on this computer")) {
-                if model.nativeHost {
-                    ProductHostCapabilitySettings(model: model)
-                } else {
-                    ProductCapabilityLabel(kind: .cli)
-                    Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }.disabled(model.joined)
-                    Toggle(isOn: $model.browser) { ProductCapabilityLabel(kind: .browser) }.disabled(model.joined)
-                    if !model.joined {
-                        Button(productText("应用更改", "Apply changes")) { model.updateCapabilities() }.disabled(model.busy)
-                    } else {
-                        Text(productText("这些功能在加入时选定。如需更改，请在发出邀请的电脑上管理。", "These features were selected when joining. Manage changes on the computer that sent the invitation.")).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
+                ProductHostCapabilitySettings(model: model)
             }
             if model.computerApproved {
                 Section(productText("系统权限", "System permissions")) {
@@ -149,7 +116,7 @@ struct ProductSettingsView: View {
                     permission(productText("屏幕录制", "Screen Recording"), model.screenGranted, true)
                 }
             }
-            if model.nativeHost ? (model.nativeCanCreateLocal || model.nativeCanResumeLocal) : (!model.localPrepared || model.foregroundRecoveryNeeded) {
+            if model.nativeCanCreateLocal || model.nativeCanResumeLocal {
                 Button(productText("继续设置", "Continue setup")) { controller?.showOnboarding() }
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
@@ -168,100 +135,54 @@ struct ProductSettingsView: View {
         GroupBox(productText("这台 Mac", "This Mac")) {
             VStack(alignment: .leading, spacing: 16) {
                 Label(model.localIndicator.label, systemImage: "desktopcomputer")
-                if model.nativeHost && model.localIndicator != .connected && model.status["foreground"]["status"].string != "started" && model.nativeSupportsOperation("connect") {
+                if model.status["enrollment"]["status"].string == "awaiting_approval" {
+                    Text(productText("正在完成加入。检查原申请的结果不会重新发送配对请求。", "Joining is still in progress. Checking the original result does not send another pairing request.")).font(.callout)
+                    HStack {
+                        if model.nativeSupportsOperation("claimJoin") {
+                            Button(productText("检查加入结果", "Check join result")) { model.nativeClaim() }.disabled(model.busy)
+                        }
+                        if model.nativeSupportsOperation("retireRole") {
+                            Button(productText("取消加入…", "Cancel joining…")) { model.nativeChangeRole() }.disabled(model.busy)
+                        }
+                    }
+                } else if model.status["enrollment"]["status"].string == "rejected" {
+                    Text(productText("管理电脑拒绝了此次申请，未授予访问权限。请更改这台电脑的角色，再使用新邀请加入。", "The Gateway rejected this request. No access was granted. Change this computer's role, then join with a new invitation.")).font(.callout)
+                } else if model.status["foreground"]["error"].string == "gateway_wss_admission_refused" {
+                    Text(productText("网关拒绝了这台电脑的访问。请更改这台电脑的角色并重新配对。", "The Gateway refused this computer's access. Change this computer's role to pair again.")).font(.callout)
+                }
+                if model.status["admission_fenced"].bool || model.status["gateway"]["admission_fenced"].bool {
+                    Text(productText("上次操作的结果尚未确认。请刷新状态查看；现有设置已保留。", "The last operation is unconfirmed. Refresh to review its state; existing settings are retained.")).font(.callout)
+                }
+                if model.status["foreground"]["computerStartupError"].string != nil {
+                    Text(productText("Computer Use 未能启动。请正常退出 Styx 后重新打开。", "Computer Use could not start. Quit Styx normally, then reopen it.")).font(.callout)
+                }
+                if model.localIndicator != .connected && model.status["foreground"]["status"].string != "started" && model.nativeSupportsOperation("connect") {
                     Button(productText("重新连接", "Reconnect")) { model.resumeForeground() }.disabled(model.busy || model.status["admission_fenced"].bool)
                 }
                 local
             }.padding(8)
         }
         if let notice = model.nativeLanJoinNotice { Text(notice).font(.callout).textSelection(.enabled) }
-        if model.joined || (model.nativeHost && model.status["gateway"] == .null) {
+        if model.status["gateway"] == .null {
             Label(productText("由管理电脑管理电脑连接", "Computer connections are managed on the main computer"), systemImage: "link")
         } else {
             Button(productText("添加电脑", "Add computer")) { addComputer = true; model.beginDeviceInvitation() }
                 .accessibilityIdentifier("styx-settings-add-computer").disabled(model.busy)
-            if model.nativeHost {
-                Button(productText("检查待连接的电脑", "Check waiting computers")) { model.loadPending() }
-                    .accessibilityIdentifier("styx-settings-check-pending-computers")
-                    .disabled(model.busy || !model.nativeSupportsOperation("pendingComputers"))
-                ProductPendingIdentities(model: model)
-                    .disabled(!model.nativeSupportsOperation("pendingComputers"))
-            }
             ForEach(model.devices.filter { !$0.isLocal }) { device in
                 GroupBox {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack { Label(device.label, systemImage: device.platform == "win32" ? "desktopcomputer" : "laptopcomputer"); Spacer(); ProductConnectionDot(state: device.indicator) }
                         Text(device.indicator.label).font(.caption).foregroundStyle(.secondary)
                         HStack {
-                            if !model.nativeHost && !device.isDefault { Button(productText("设为默认", "Set as default")) { model.setDefault(device.id) }.disabled(model.busy) }
                             Spacer()
                             Button(productText("移除这台电脑", "Remove computer"), role: .destructive) { model.revokeDevice(device) }.disabled(model.busy)
                         }
                     }.padding(8)
                 }
             }
-            if !model.ingress["blockers"].array.isEmpty {
-                Text(productText("暂时无法添加其他电脑：电脑之间的网络连接尚未配置。此版本暂不支持在 App 中完成这项配置。", "Other computers cannot be added until the network connection between them is configured. This version cannot configure it in the app.")).font(.callout).foregroundStyle(.secondary)
-            }
         }
     }
-    private var chat: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            if model.nativeHost {
-                ProductNativeChatView(model: model)
-            } else if model.joined {
-                Label(productText("聊天连接由管理电脑管理", "Chat is managed on the main computer"), systemImage: "globe")
-                Text(productText("这台电脑只需加入管理电脑（Gateway）。Tunnel 和 ChatGPT 插件只在管理电脑设置一次，所有已加入的电脑共用该 Styx 连接。", "This computer only needs to join the Gateway. Set up the tunnel and ChatGPT plugin once on that Gateway; all joined computers use the same Styx connection.")).font(.callout).foregroundStyle(.secondary)
-            } else {
-                GroupBox {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack { ProductConnectionDot(state: model.chatIndicator); Text(model.chatStatusTitle).font(.headline); Spacer() }
-                        if model.tunnelConnection == .connected {
-                            Text(model.chatNextStep).font(.callout).foregroundStyle(.secondary)
-                        } else {
-                            Text(productText("连接后，ChatGPT 才能通过 Styx 使用这台电脑。", "Connect to let ChatGPT use this computer through Styx.")).font(.callout).foregroundStyle(.secondary)
-                            Button(model.tunnelConnection == .notConfigured ? productText("填写连接信息", "Enter connection details") : productText("重新连接", "Reconnect")) {
-                                if model.tunnelConnection == .notConfigured { editTunnel = true } else { model.startTunnel() }
-                            }.disabled(model.busy || model.tunnelAttempt == .connecting)
-                        }
-                    }.padding(8)
-                }
-                HStack {
-                    Button(productText("试用 Styx", "Try Styx")) { tryChat = true }.accessibilityIdentifier("styx-settings-tryout")
-                    Button(productText("Custom MCP 连接指引", "Custom MCP connection guide")) { model.page = .chat; setupChat = true }
-                    Button(productText("在 ChatGPT 中管理", "Manage in ChatGPT")) { model.openOfficial("https://chatgpt.com/plugins") }
-                }
-                Divider()
-                Text(productText("连接资料", "Connection details")).font(.headline)
-                if !model.connectionTunnelID.isEmpty {
-                    HStack {
-                        Text("Tunnel ID").foregroundStyle(.secondary)
-                        Text(model.connectionTunnelID).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                        Button { model.copy(model.connectionTunnelID) } label: { Image(systemName: "doc.on.doc") }.help(productText("复制 Tunnel ID", "Copy Tunnel ID"))
-                    }
-                }
-                Button(productText("编辑连接信息", "Edit connection details")) { editTunnel = true }.accessibilityIdentifier("styx-settings-edit-tunnel")
-                Divider()
-                Text(productText("ChatGPT 中的 Styx", "Styx in ChatGPT")).font(.headline)
-                Text(productText("使用 Custom MCP → Tunnel。名称和图标在 ChatGPT 中设置；运行密钥只保存在 Styx。", "Use Custom MCP → Tunnel. Set the name and icon in ChatGPT; keep the runtime key only in Styx.")).font(.caption).foregroundStyle(.secondary)
-                Button(productText("保存 Styx 上传图标…", "Save Styx upload icon…")) { model.saveBrandIcon() }
-                DisclosureGroup(productText("高级：旧版 ZIP 导出", "Advanced: legacy ZIP export")) {
-                    ProductPluginCompatibilityNote()
-                    Button(productText("导出旧版插件 ZIP…", "Export legacy plugin ZIP…")) { editPackage = true }
-                }
-            }
-        }
-    }
-    private var tunnelTitle: String {
-        switch model.tunnelConnection {
-        case .connected: return productText("运行中", "Running")
-        case .notConfigured: return productText("未设置", "Not configured")
-        case .connecting: return productText("正在连接", "Connecting")
-        case .stopped: return productText("已停止", "Stopped")
-        case .unavailable: return productText("连接失败", "Connection failed")
-        case .unknown: return productText("状态尚未确认", "Not observed")
-        }
-    }
+    private var chat: some View { ProductNativeChatView(model: model) }
 }
 
 // The same field guide is used by first-run and Settings. All external setup
@@ -269,7 +190,6 @@ struct ProductSettingsView: View {
 struct ProductChatGPTConnectionSteps: View {
     @ObservedObject var model: ProductModel
     var identifierPrefix = "styx-custom-mcp"
-    var requireReadyToOpen = false
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(productText("一个 Gateway 只需添加一个 Styx 插件；Windows、Mac 和 Linux Host 加入同一 Gateway 后共用它。", "Add one Styx plugin for each Gateway. Windows, Mac and Linux Hosts that join it use that same connection.")).font(.callout).foregroundStyle(.secondary)
@@ -277,7 +197,6 @@ struct ProductChatGPTConnectionSteps: View {
                 Text(productText("1. 打开 ChatGPT 插件页", "1. Open ChatGPT Plugins")).font(.headline)
                 Text(productText("使用目标账号和工作区。已有这个 Gateway 的 Styx 连接时直接复用；首次添加时，点 ＋ → Add custom MCP server。", "Use the intended account and workspace. Reuse this Gateway’s existing Styx connection, or select + → Add custom MCP server to add it for the first time."))
                 Button(productText("打开 ChatGPT Plugins", "Open ChatGPT Plugins")) { model.openOfficial("https://chatgpt.com/plugins") }
-                    .disabled(requireReadyToOpen && model.tunnelConnection != .connected)
                     .accessibilityIdentifier(identifierPrefix + "-open")
             }
             VStack(alignment: .leading, spacing: 6) {
@@ -321,7 +240,7 @@ struct ProductNativeChatView: View {
             Text(productText("ChatGPT 中的 Styx", "Styx in ChatGPT")).font(.headline)
             if model.nativeSupportsOperation("tunnelSave") {
                 Text(productText("只在管理电脑（Gateway）上配置 Tunnel。先等待连接就绪，再按下面四步添加到 ChatGPT。", "Configure the tunnel only on the Gateway. Wait for it to connect, then follow the four steps below."))
-                ProductTunnelStatus(model: model, showNextStep: false)
+                ProductTunnelStatus(model: model)
                 Button(productText("配置 Tunnel…", "Configure Tunnel…")) { editTunnel = true }.disabled(model.busy)
                 Text(productText("保存时会短暂断开本 App 管理的连接，随后自动恢复。请先完成正在运行的任务。", "Saving briefly pauses connections managed by this App, then reconnects. Finish active tasks first.")).font(.caption)
                 ProductChatGPTConnectionSteps(model: model, identifierPrefix: "styx-native-custom-mcp")
@@ -333,13 +252,13 @@ struct ProductNativeChatView: View {
                 Text(productText("先完成这台 Mac 的设置。已有管理电脑（Gateway）时选择加入，Tunnel 和 ChatGPT 插件在管理电脑设置一次即可。", "Finish setting up this Mac first. If you already have a Gateway, join it; configure the tunnel and ChatGPT plugin once on that Gateway."))
                 Button(productText("打开 ChatGPT Plugins", "Open ChatGPT Plugins")) { model.openOfficial("https://chatgpt.com/plugins") }
             }
-            DisclosureGroup(productText("高级：旧版 ZIP 导出", "Advanced: legacy ZIP export")) {
+            DisclosureGroup(productText("高级：ZIP 导出", "Advanced: ZIP export")) {
                 ProductPluginCompatibilityNote()
                 if model.nativeSupportsOperation("pluginRead") {
                     Text(productText("预览并导出这台管理电脑的插件名称、描述和图标。保存后在 ChatGPT 更新已有插件。", "Preview and export this hub’s plugin name, descriptions and icon. Then update the existing plugin in ChatGPT."))
                     Button(productText("名称、图标与插件 ZIP…", "Name, icon and plugin ZIP…")) {
                         model.perform {
-                            let current = try await model.client.read("plugin")["plugin"]
+                            let current = try await model.client.native("pluginRead")["plugin"]
                             model.plugin = current
                             model.pluginIdentity = current["selection"]["pluginId"].string ?? "styx"
                             model.pluginName = current["presentation"]["displayName"].string ?? "Styx"
@@ -465,10 +384,8 @@ struct ProductPackageEditor: View {
             }
             Text(productText("完整描述", "Full description"))
             TextEditor(text: $longDescription).frame(height: 78)
-            if model.nativeHost {
-                TextField(productText("插件身份", "Plugin identity"), text: $model.pluginIdentity).disabled(model.plugin["profileSaved"].bool)
-                Text(productText("更新已有插件时，请保留其身份；更改显示名称不会更改此身份。", "Keep the existing plugin identity when updating. Changing the display name does not change its identity.")).font(.caption)
-            }
+            TextField(productText("插件身份", "Plugin identity"), text: $model.pluginIdentity).disabled(model.plugin["profileSaved"].bool)
+            Text(productText("更新已有插件时，请保留其身份；更改显示名称不会更改此身份。", "Keep the existing plugin identity when updating. Changing the display name does not change its identity.")).font(.caption)
             Text(productText("PNG · 正方形 · 48–1024 像素 · 不超过 256 KB", "Square PNG · 48–1024 pixels · up to 256 KB")).font(.caption).foregroundStyle(.secondary)
             Text(productText("ZIP 包含技能和展示信息，但安装后图标可能被替换。推荐返回连接指引，使用 Custom MCP 并单独上传图标。", "The ZIP contains skills and presentation metadata, but its icon may be replaced after installation. Use the Custom MCP connection guide and upload the icon separately.")).font(.caption).foregroundStyle(.secondary)
             if let url = model.exportedPluginURL, exported {

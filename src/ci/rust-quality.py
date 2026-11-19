@@ -60,7 +60,6 @@ HTTP_TESTS = [
 ]
 PAIRED_HOST_TEST = "enrollment::service::tests::paired_journey::actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey"
 HOST_ACTION_WIRE_TEST = "host::protocol::tests::actual_canonical_tls_wss_host_action_journey"
-MANAGEMENT_IMPORT_TEST = "management::tests::actual_legacy_management_raw_import_and_plan_batch"
 BROWSER_REFERENCE_TEST = "host::coordinator::browser::browser_tests::references::actual_snapshot_refs_navigation_tabs_owner_and_reopen_batch"
 BROWSER_HOST_TEST = "host::coordinator::browser::browser_tests::actual_owned_browser_host_nonce_policy_drop_and_cleanup"
 HOST_WIRE_TEST = "host::protocol::tests::actual_tls_wss_codex_start_read_duplicate_and_lost_response_batch"
@@ -107,7 +106,7 @@ def source_inputs(root):
     files = [root / "Cargo.toml", root / "Cargo.lock", root / "rust-toolchain.toml", POLICY, Path(__file__).resolve(), root / "src/ci/macos-quick-build.py"]
     for base in (root / "src/crates", root / "src/acceptance/oracles", root / "src/acceptance/interop-exec", root / "src/providers/browser-worker", root / "src/tools/release"):
         files += [p for p in base.rglob("*") if p.is_file() and "node_modules" not in p.parts and p.suffix in {".rs", ".toml", ".py", ".json", ".mjs"}]
-    files += [root / "src/gateway/cua-portable-0.36.0.json", root / "src/packages/styx-browser-provider/playwright-contract-0.0.83.json", root / "src/shared/enrollment-protocol.mjs", root / "src/shared/deployment-scope.mjs", root / "src/scripts/legacy-deployment-hash-vectors.mjs", *[root / "src/docs/rust-core-rewrite" / name for name in ("LEGACY-WIRE-VECTORS-V1.json", "LEGACY-DEPLOYMENT-HASH-VECTORS.json", "CONTRACT-V1.json", "FEATURE-INVENTORY-V1.json", "PUBLIC-MCP-V1.json")]]
+    files += [root / "src/gateway/cua-portable-0.36.0.json", root / "src/packages/styx-browser-provider/playwright-contract-0.0.83.json", root / "src/shared/enrollment-protocol.mjs", *[root / "src/docs/rust-core-rewrite" / name for name in ("LEGACY-WIRE-VECTORS-V1.json", "CONTRACT-V1.json", "FEATURE-INVENTORY-V1.json", "PUBLIC-MCP-V1.json")]]
     return {str(p.relative_to(root)): sha(p) for p in sorted(set(files))}
 
 
@@ -277,7 +276,6 @@ def execute(args):
     gate = Gate(evidence, target)
     receipt = {"schema": 1, "kind": "rust_foundation_development_quality", "started_at": now(), "status": "RUNNING", "root": str(ROOT), "target_dir": str(target), "cargo_build_jobs": gate.env.get("CARGO_BUILD_JOBS"), "checks": gate.checks, "native_platform_acceptance": "NOT_RUN", "package": "NOT_BUILT", "deployment": "NOT_RUN", "final_release_gate": False}
     initial = None
-    management_fixture = None
     try:
         if args.browser_references and not args.browser_host:
             raise ValueError("browser_references_requires_browser_host_inputs")
@@ -330,22 +328,6 @@ def execute(args):
                 extra_env={"STYX_TEST_HTTP_ROOT": str(http_root)})
             gate.semantic(http, [] if "1 passed; 0 failed" in gate.read(name) else ["exact_official_http_case_not_executed"])
             receipt["official_http_sdk"]["checks"][name] = http["status"]
-        receipt["management_import"] = "NOT_RUN_explicit_owned_import_not_requested"
-        if args.management_import:
-            owned = evidence / "owned-management-import"
-            owned.mkdir(mode=0o700)
-            check = gate.run("management-import", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", MANAGEMENT_IMPORT_TEST, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
-                extra_env={"STYX_TEST_MANAGEMENT_ROOT":str(owned)})
-            gate.semantic(check, [] if "1 passed; 0 failed" in gate.read("management-import") else ["exact_management_import_case_not_executed"])
-            try:
-                observed=json.loads((owned/"receipt.json").read_text())
-                fixture=Path(observed["fixture"])
-                valid=observed["status"]=="PASS" and fixture.is_absolute() and fixture.resolve()==fixture and fixture.is_relative_to(owned) and fixture.is_dir()
-                gate.semantic(check, [] if valid else ["management_fixture_receipt_not_owned"])
-                if valid: management_fixture=fixture
-            except (OSError,ValueError,KeyError,TypeError):
-                gate.semantic(check,["management_fixture_receipt_missing"])
-            receipt["management_import"]=check["status"]
         receipt["enrollment_store"] = "NOT_RUN_explicit_linux_gnu_slice_not_requested"
         if args.enrollment_store:
             payload_root = evidence / "owned-payload-store"
@@ -543,14 +525,6 @@ def execute(args):
                 except (ValueError, KeyError, TypeError):
                     valid = False
                 gate.semantic(step, [] if valid else ["candidate_diagnostics_not_unknown_only_actual_user"])
-            if args.management_import:
-                if management_fixture is None: raise ValueError("management_fixture_unavailable_for_cli")
-                check=gate.run("cli-management-plan",[str(binary),"plan","--state-dir",str(management_fixture),"--json"],timeout=10)
-                try:
-                    view=json.loads(gate.read("cli-management-plan"))
-                    valid=view["roles"]["gateway"]=="external" and view["host_manager"]=="unspecified" and view["app_login"]["desired_enabled"] is False and view["plan_execution"]=="not_authorized_read_only" and all(not step["replay_authorized"] for step in view["steps"])
-                except (ValueError,KeyError,TypeError): valid=False
-                gate.semantic(check,[] if valid else ["management_cli_did_not_preserve_read_only_unknown_intent"])
             # A skeleton must reject unimplemented business, never return empty success.
             reject = gate.run("cli-unimplemented-reject", [str(binary), "exec", "--command", "never-run"], timeout=30, expected_exit=2)
             if reject["exit_code"] is not None and reject["exit_code"] == 2 and "unrecognized subcommand" in gate.read("cli-unimplemented-reject", "stderr"):
@@ -584,8 +558,6 @@ def execute(args):
                 receipt["tls_stability"] = "FAIL"
         required = {"git-head", "git-status", "git-head-end", "git-status-end", "rustc-version", "cargo-version", "dependency-metadata", "format", "clippy", "workspace-tests", "ignored-inventory", "official-http-sdk", "python-oracles", "cli-build", "cli-help", "cli-version", "cli-build-info", "cli-unimplemented-reject"}
         required |= {name for name, _ in HTTP_TESTS}
-        if args.management_import:
-            required |= {"management-import","cli-management-plan"}
         if args.linux_discovery:
             required |= {"linux-discovery", "cli-desktop-candidates"}
         if args.enrollment_store:
@@ -618,7 +590,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", required=True, help="fresh absolute external evidence directory")
     parser.add_argument("--target-dir", help="canonical Cargo cache (default: CARGO_TARGET_DIR, otherwise workspace target/); never evidence/target")
-    parser.add_argument("--management-import", action="store_true", help="owned Linux raw legacy management import and CLI plan only; no transaction/migration claim")
     parser.add_argument("--browser-references", action="store_true", help="actual owned Browser opaque references/navigation/tab/reopen scene; requires --browser-host, not platform acceptance")
     parser.add_argument("--browser-host", action="store_true", help="actual Linux headless Browser Host scenario; requires Node22, Codex and browser executable; no desktop/account/package claim")
     parser.add_argument("--browser-executable", help="canonical explicit Chrome/Chromium binary; no download or installed profile is opened")

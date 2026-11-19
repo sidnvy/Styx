@@ -178,11 +178,7 @@ impl Failure {
     }
     pub(super) fn native(value: native::NativeManagementError) -> Self {
         let exit = value.exit_code();
-        #[cfg(any(
-            all(target_os = "linux", target_env = "gnu"),
-            target_os = "macos",
-            target_os = "windows"
-        ))]
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
         let exit = if value.requires_process_teardown() {
             4
         } else {

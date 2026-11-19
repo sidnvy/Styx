@@ -483,6 +483,7 @@ impl OwnedConfigurationRoot {
     }
     /// Call only while holding the SAME enrollment service gate for the entire
     /// prior Core->journal->publish round trip. No lock is held after return.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn begin_maintenance(
         &self,
         transaction: TransactionId,

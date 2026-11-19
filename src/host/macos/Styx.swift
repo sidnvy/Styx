@@ -4,9 +4,7 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Darwin
-import WebKit
 import UniformTypeIdentifiers
-import CryptoKit
 
 let bundleID = "app.styx.host"
 enum HostError: Error { case unsafeRuntime, alreadyRunning, socketPath, daemonUnavailable }
@@ -89,65 +87,7 @@ func makeEmbeddedDaemon(driver: URL, socketPath: String, pidFile: String) -> (Pr
     return (child, lifetime)
 }
 
-func requireNativeHostFile(_ path: String, privateFile: Bool) throws {
-    var info = stat()
-    guard lstat(path, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
-          info.st_uid == getuid(), info.st_mode & 0o022 == 0,
-          !privateFile || info.st_mode & 0o077 == 0 else { throw HostError.unsafeRuntime }
-}
-// Accept only the one private loopback bootstrap message from our owned child.
-func setupSessionURL(_ line: String) -> URL? {
-    guard line.hasPrefix("STYX_SETUP_URL\t"),
-          let parts = URLComponents(string: String(line.dropFirst(15))),
-          parts.scheme == "http", parts.host == "127.0.0.1", let port = parts.port,
-          (1...65535).contains(port), parts.path == "/", parts.query == nil,
-          parts.user == nil, parts.password == nil,
-          let fragment = parts.fragment, fragment.hasPrefix("session="),
-          fragment.dropFirst(8).count == 43,
-          fragment.dropFirst(8).allSatisfy({ "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-".contains($0) }) else { return nil }
-    return parts.url
-}
-
-// Only the owned loopback origin is rendered inside the settings window. Account
-// and OS links require a user click and native confirmation; redirects cannot
-// turn a setup response into an external browser launch or file/protocol access.
-enum SetupNavigation { case local, external, blocked }
-func setupNavigation(_ url: URL, origin: URL, userActivated: Bool) -> SetupNavigation {
-    guard let target = URLComponents(url: url, resolvingAgainstBaseURL: false),
-          target.user == nil, target.password == nil else { return .blocked }
-    if target.scheme == "http", target.host == "127.0.0.1", target.port == origin.port {
-        return .local
-    }
-    guard userActivated else { return .blocked }
-    if target.scheme == "https", let host = target.host, !host.isEmpty { return .external }
-    if target.scheme == "x-apple.systempreferences",
-       target.path == "com.apple.preference.security",
-       ["Privacy_Accessibility", "Privacy_ScreenCapture"].contains(target.query ?? "") { return .external }
-    return .blocked
-}
-
-let pluginExportHandlerName = "styxPluginExport"
-let pluginExportMaximumBytes = 2 * 1024 * 1024
 enum PluginExportError: Error { case refused }
-func pluginExportArchive(_ body: Any) throws -> Data {
-    guard let message = body as? [String: Any], message.count == 1,
-          let encoded = message["base64"] as? String, !encoded.isEmpty,
-          encoded.utf8.count <= ((pluginExportMaximumBytes + 2) / 3) * 4,
-          let bytes = Data(base64Encoded: encoded), bytes.count <= pluginExportMaximumBytes,
-          bytes.base64EncodedString() == encoded,
-          bytes.starts(with: [0x50, 0x4b, 0x03, 0x04]) else { throw PluginExportError.refused }
-    return bytes
-}
-func pluginExportPage(_ url: URL?, origin: URL) -> Bool {
-    guard let url = url else { return false }
-    return setupNavigation(url, origin: origin, userActivated: false) == .local
-}
-func pluginExportContext(origin: URL, currentURL: URL?, frameURL: URL?, isMainFrame: Bool,
-                         securityProtocol: String, securityHost: String, securityPort: Int) -> Bool {
-    origin.scheme == "http" && origin.host == "127.0.0.1" && origin.user == nil && origin.password == nil
-        && origin.port != nil && isMainFrame && securityProtocol == "http" && securityHost == "127.0.0.1"
-        && securityPort == origin.port && pluginExportPage(frameURL, origin: origin) && pluginExportPage(currentURL, origin: origin)
-}
 // This URL comes only from the user's native picker, never from JavaScript.
 // Core validates the complete PNG structure, dimensions and pixels afterward.
 func pluginIconFile(_ url: URL) throws -> URL {
@@ -167,187 +107,15 @@ func pluginIconFile(_ url: URL) throws -> URL {
     guard count == 8, header == [137, 80, 78, 71, 13, 10, 26, 10] else { throw PluginExportError.refused }
     return url
 }
-// WebKit retains its handler. This proxy must not retain the window/controller.
-final class PluginExportBridge: NSObject, WKScriptMessageHandlerWithReply {
-    weak var owner: SetupWindowController?
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage,
-                               replyHandler: @escaping (Any?, String?) -> Void) {
-        guard let owner = owner else { replyHandler(nil, "plugin_export_unavailable"); return }
-        owner.savePluginExport(message, replyHandler: replyHandler)
-    }
-}
-
-final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
-    let origin: URL
-    let webView: WKWebView
-    private let pluginExportBridge = PluginExportBridge()
-    private var pluginExportRegistered = false
-    private var pluginFilePanelInProgress = false
-    init(sessionURL: URL) {
-        origin = sessionURL
-        let configuration = WKWebViewConfiguration()
-        // Session credentials never enter the user's browser profile or disk cache.
-        configuration.websiteDataStore = .nonPersistent()
-        webView = WKWebView(frame: .zero, configuration: configuration)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 760),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "Styx — Setup & Settings"
-        window.minSize = NSSize(width: 760, height: 560)
-        window.isReleasedWhenClosed = false
-        window.contentView = webView
-        window.center()
-        super.init(window: window)
-        webView.navigationDelegate = self
-        webView.uiDelegate = self
-        window.delegate = self
-        enablePluginExport()
-        webView.load(URLRequest(url: sessionURL))
-    }
-    required init?(coder: NSCoder) { fatalError("Programmatic settings window only") }
-    func present() {
-        enablePluginExport()
-        showWindow(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        window?.makeKeyAndOrderFront(nil)
-    }
-    private func enablePluginExport() {
-        guard !pluginExportRegistered else { return }
-        pluginExportBridge.owner = self
-        webView.configuration.userContentController.addScriptMessageHandler(pluginExportBridge, contentWorld: .page, name: pluginExportHandlerName)
-        pluginExportRegistered = true
-    }
-    func windowWillClose(_ notification: Notification) {
-        webView.configuration.userContentController.removeScriptMessageHandler(forName: pluginExportHandlerName, contentWorld: .page)
-        pluginExportBridge.owner = nil
-        pluginExportRegistered = false
-    }
-    private func trustedPluginFrame(_ frame: WKFrameInfo) -> Bool {
-        pluginExportRegistered && pluginExportContext(origin: origin, currentURL: webView.url, frameURL: frame.request.url,
-            isMainFrame: frame.isMainFrame, securityProtocol: frame.securityOrigin.protocol,
-            securityHost: frame.securityOrigin.host, securityPort: frame.securityOrigin.port)
-    }
-    private func trustedPluginExport(_ message: WKScriptMessage) -> Bool {
-        message.name == pluginExportHandlerName && message.webView === webView && trustedPluginFrame(message.frameInfo)
-    }
-    func savePluginExport(_ message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
-        guard trustedPluginExport(message), !pluginFilePanelInProgress, let window = window,
-              let bytes = try? pluginExportArchive(message.body) else { replyHandler(nil, "plugin_export_refused"); return }
-        pluginFilePanelInProgress = true
-        let panel = NSSavePanel()
-        panel.title = "Export Styx plugin"
-        panel.nameFieldStringValue = "styx-native.zip"
-        panel.allowedContentTypes = [.zip]
-        panel.allowsOtherFileTypes = false
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard let owner = self else { replyHandler(nil, "plugin_export_unavailable"); return }
-            owner.pluginFilePanelInProgress = false
-            guard response == .OK else { replyHandler(["status": "cancelled"], nil); return }
-            // A closed window or page outside the owned origin loses authority.
-            // JavaScript never supplies a path, URL, or filename.
-            guard owner.trustedPluginExport(message), let destination = panel.url,
-                  destination.isFileURL, destination.pathExtension.lowercased() == "zip" else {
-                replyHandler(nil, "plugin_export_refused"); return
-            }
-            do {
-                var info = stat()
-                if lstat(destination.path, &info) == 0 && info.st_mode & S_IFMT != S_IFREG { throw PluginExportError.refused }
-                try bytes.write(to: destination, options: .atomic)
-                replyHandler(["status": "saved"], nil)
-            } catch { replyHandler(nil, "plugin_export_save_failed") }
-        }
-    }
-    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
-                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
-        guard webView === self.webView, trustedPluginFrame(frame), !pluginFilePanelInProgress,
-              !parameters.allowsDirectories, !parameters.allowsMultipleSelection, let window = window else { completionHandler(nil); return }
-        pluginFilePanelInProgress = true
-        let panel = NSOpenPanel()
-        panel.title = "Choose Styx plugin icon"
-        panel.message = "Choose one square PNG image, up to 256 KiB."
-        panel.allowedContentTypes = [.png]
-        panel.allowsOtherFileTypes = false
-        panel.canChooseFiles = true; panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false; panel.resolvesAliases = false
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard let owner = self else { completionHandler(nil); return }
-            owner.pluginFilePanelInProgress = false
-            guard response == .OK, owner.trustedPluginFrame(frame), panel.urls.count == 1,
-                  let selected = panel.urls.first, let accepted = try? pluginIconFile(selected) else { completionHandler(nil); return }
-            completionHandler([accepted])
-        }
-    }
-    func confirmExternal(_ url: URL) {
-        let alert = NSAlert()
-        alert.messageText = url.scheme == "https" ? "Continue in your browser?" : "Open macOS Settings?"
-        // Show the destination origin, never query strings containing credentials.
-        alert.informativeText = url.scheme == "https"
-            ? "Styx will open \(url.host ?? "the selected site") in your default browser."
-            : "Styx will open the selected privacy settings. You decide whether to grant access."
-        alert.addButton(withTitle: "Continue"); alert.addButton(withTitle: "Cancel")
-        if alert.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(url) }
-    }
-    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
-        switch setupNavigation(url, origin: origin, userActivated: navigationAction.navigationType == .linkActivated) {
-        case .local:
-            // Keep target=_blank local links in the same owned window.
-            if navigationAction.targetFrame == nil {
-                decisionHandler(.cancel); webView.load(navigationAction.request)
-            } else { decisionHandler(.allow) }
-        case .external:
-            decisionHandler(.cancel); confirmExternal(url)
-        case .blocked: decisionHandler(.cancel)
-        }
-    }
-    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
-                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        guard let url = navigationResponse.response.url,
-              setupNavigation(url, origin: origin, userActivated: false) == .local,
-              navigationResponse.canShowMIMEType else { decisionHandler(.cancel); return }
-        decisionHandler(.allow)
-    }
-    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
-                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
-    func trustedFrame(_ frame: WKFrameInfo) -> Bool {
-        frame.isMainFrame && frame.securityOrigin.protocol == "http"
-            && frame.securityOrigin.host == "127.0.0.1" && frame.securityOrigin.port == origin.port
-    }
-    // WKWebView does not display JavaScript dialogs itself. Preserve the setup
-    // core's explicit approval boundaries using App-owned confirmation dialogs.
-    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
-                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
-        guard trustedFrame(frame) else { completionHandler(false); return }
-        let alert = NSAlert(); alert.messageText = "Styx — Confirm change"
-        alert.informativeText = message
-        alert.addButton(withTitle: "Continue"); alert.addButton(withTitle: "Cancel")
-        completionHandler(alert.runModal() == .alertFirstButtonReturn)
-    }
-    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
-                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
-        if trustedFrame(frame) {
-            let alert = NSAlert(); alert.messageText = "Styx"; alert.informativeText = message
-            alert.runModal()
-        }
-        completionHandler()
-    }
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        if (error as NSError).code == NSURLErrorCancelled { return }
-        window?.title = "Styx — Settings unavailable; reopen Settings"
-    }
-}
-
-@MainActor func styxApplicationMenu(actionTarget: StyxDelegate? = nil) -> NSMenu {
+func styxApplicationMenu(actionTarget: StyxDelegate? = nil) -> NSMenu {
     let chinese = (Locale.preferredLanguages.first ?? "en").hasPrefix("zh")
     func text(_ zh: String, _ en: String) -> String { chinese ? zh : en }
     let main = NSMenu()
     let appItem = NSMenuItem(title: "Styx", action: nil, keyEquivalent: ""); main.addItem(appItem)
     let appMenu = NSMenu(title: "Styx"); appItem.submenu = appMenu
     appMenu.addItem(withTitle: text("打开 Styx…", "Open Styx…"), action: #selector(StyxDelegate.openSettings), keyEquivalent: "o").target = actionTarget
-    #if STYX_PRODUCT_UI
     appMenu.addItem(withTitle: text("设置…", "Settings…"), action: #selector(StyxDelegate.openProductPreferences), keyEquivalent: ",").target = actionTarget
     // Updates live in General, shared with the main window and status menu.
-    #endif
     appMenu.addItem(NSMenuItem.separator())
     appMenu.addItem(withTitle: text("退出 Styx", "Quit Styx"), action: #selector(StyxDelegate.quit), keyEquivalent: "q").target = actionTarget
     let fileItem = NSMenuItem(title: text("文件", "File"), action: nil, keyEquivalent: ""); main.addItem(fileItem)
@@ -375,27 +143,14 @@ func styxStatusItemImage(source: NSImage) -> NSImage? {
     return image
 }
 
-#if STYX_PRODUCT_UI
 func productComputerUseRequested(_ status: ProductJSON, guiAvailable: Bool, retainingSource: Bool = false) -> Bool {
-    if status["mode"].string == "rust_host" || status["desktop_intent"] != .null {
-        let intent = status["desktop_intent"]
-        return guiAvailable && status["schema"] == .number(1) && status["mode"].string == "rust_host" &&
-            status["admission_fenced"] == .bool(false) &&
-            ["started", "connected"].contains(status["foreground"]["status"].string ?? "") &&
-            intent["schema"] == .number(1) && intent["source"] == .string("approved_host_configuration") &&
-            (intent["computer_requested"] == .bool(true) ||
-             (retainingSource && intent["computer_requested"] == .bool(false)))
-    }
-    guard guiAvailable, status["deployment"]["roles"]["host"].string == "local" else { return false }
-    let change = status["deviceCapabilities"]
-    if ["running", "uncertain"].contains(change["status"].string ?? "") { return false }
-    if change["status"].string == "updated", change["phase"].string == "complete", change["computer"] == .bool(false) { return false }
-    // The deployment expresses intent; only the approved Host configuration
-    // reported by its authenticated owner can enable an App-owned component.
-    let foreground = status["foreground"]
-    return ["authenticated_foreground_owner", "current_process"].contains(foreground["observation"].string ?? "") &&
-        ["started", "connected", "using_service"].contains(foreground["status"].string ?? "") &&
-        ["foreground", "service"].contains(foreground["host"].string ?? "") && foreground["computerRequested"] == .bool(true)
+    let intent = status["desktop_intent"]
+    return guiAvailable && status["schema"] == .number(1) && status["mode"].string == "rust_host" &&
+        status["admission_fenced"] == .bool(false) &&
+        ["started", "connected"].contains(status["foreground"]["status"].string ?? "") &&
+        intent["schema"] == .number(1) && intent["source"] == .string("approved_host_configuration") &&
+        (intent["computer_requested"] == .bool(true) ||
+         (retainingSource && intent["computer_requested"] == .bool(false)))
 }
 // Match the existing owned Core operation budget. Expiry withdraws descriptor
 // availability only; it never kills/replaces the daemon or retries a mutation.
@@ -409,7 +164,6 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
     guard let reason = reason else { return false }
     return [OSType(kAEQuitAll), OSType(kAEShutDown), OSType(kAERestart), OSType(kAEReallyLogOut)].contains(reason)
 }
-#endif
 
 // Synchronous original-child wait runs off AppKit. A forced exit is reported as
 // unknown native cleanup, even though the original OS process has been reaped.
@@ -430,46 +184,25 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
 }
 
 @MainActor final class StyxDelegate: NSObject, NSApplicationDelegate {
-    var setupProcess: Process?
-    var setupInput: Pipe?
-    var setupOutput: Pipe?
-    var setupURL: URL?
-    #if STYX_PRODUCT_UI
     var setupWindow: ProductWindowController?
-    #else
-    var setupWindow: SetupWindowController?
-    #endif
-    #if STYX_PRODUCT_UI
     var nativeCore: ProductOwnedCore?
     var nativeCoreStarting = false
     var nativeCoreAttempted = false
     var componentTimer: Timer?
-    var componentObservationPending = false
     var nativeComponentObservation: UUID?
     var nativeDesktopIntentObservedAt: TimeInterval?
     var computerPermissionRecoveryRequired = false
     var nativeComputerRecoveryInProgress = false
     var computerUseRequested = false
-    #endif
-    var terminationPreservesRecovery = false
     var terminationPending = false
-    var terminationApproved = false
-    var setupBuffer = ""
     var setupOpenRequested = false
-    #if STYX_PRODUCT_UI
-    #endif
-    var setupStatusLine: NSMenuItem?
-    let setupPreference = "Styx.SetupWindowOpened.v1"
     var runtime: RuntimeDirectory?
     var daemon: Process?
     var daemonStopTask: Task<Void, Never>?
     var lifetimeWriter: FileHandle?
     var timer: Timer?
     var statusItem: NSStatusItem?
-    #if STYX_PRODUCT_UI
     var menuOpenRequested = false
-    #endif
-    var statusLine: NSMenuItem?
     var phase = "stopped"
     var generation = UUID().uuidString
     var deadline = Date()
@@ -482,19 +215,12 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         let launchEvent = NSAppleEventManager.shared().currentAppleEvent
         let launchedAtLogin = launchEvent?.eventID == AEEventID(kAEOpenApplication)
             && launchEvent?.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue == OSType(keyAELaunchedAsLogInItem)
-        #if STYX_PRODUCT_UI
-        #endif
         NSApp.mainMenu = styxApplicationMenu(actionTarget: self)
         for number in [SIGTERM, SIGINT] {
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
-            source.setEventHandler { [weak self] in
-                self?.terminationPreservesRecovery = true
-                #if STYX_PRODUCT_UI
+            source.setEventHandler {
                 productScheduleApplicationTermination()
-                #else
-                NSApp.terminate(nil)
-                #endif
             }
             source.resume(); signalSources.append(source)
         }
@@ -505,69 +231,27 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
             item.button?.image = image; item.button?.imagePosition = .imageOnly; item.button?.title = ""
         } else { item.button?.title = "Styx" }
         item.button?.setAccessibilityLabel("Styx"); item.button?.toolTip = "Styx"
-        let menu = NSMenu()
-        statusLine = menu.addItem(withTitle: "Starting…", action: nil, keyEquivalent: "")
-        menu.addItem(withTitle: "Open Styx…", action: #selector(openSettings), keyEquivalent: "o")
-        #if STYX_PRODUCT_UI
-        menu.addItem(withTitle: "Settings…", action: #selector(openProductPreferences), keyEquivalent: ",")
-        #endif
-        setupStatusLine = menu.addItem(withTitle: "Local setup is not running", action: nil, keyEquivalent: "")
-        menu.addItem(NSMenuItem.separator())
-        #if STYX_PRODUCT_UI
-        menu.addItem(withTitle: productText("Computer Use 权限…", "Computer Use permissions…"), action: #selector(requestPermissions), keyEquivalent: "")
-        #else
-        menu.addItem(withTitle: "Request macOS permissions…", action: #selector(requestPermissions), keyEquivalent: "")
-        #endif
-        menu.addItem(withTitle: "Restart embedded Cua", action: #selector(restart), keyEquivalent: "r")
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(withTitle: "Quit Styx", action: #selector(quit), keyEquivalent: "q")
-        for entry in menu.items { entry.target = self }
-        #if STYX_PRODUCT_UI
         item.button?.target = self
         item.button?.action = #selector(toggleProductPanel)
-        #else
-        item.menu = menu
-        #endif
         statusItem = item
         if let resources = Bundle.main.resourceURL,
            FileManager.default.isExecutableFile(atPath: bundledCoreExecutable(resources).path),
            Bundle.main.bundleURL.standardizedFileURL.path != "/Applications/Styx.app" {
             let alert = NSAlert(); alert.messageText = "Move Styx to Applications first"
             alert.informativeText = "Drag the complete Styx.app to /Applications, then open it there. Do not replace an existing Styx installation without reviewing it first. Settings and permissions need a stable app location."
-            alert.runModal(); terminationPreservesRecovery = true; NSApp.terminate(nil); return
+            alert.runModal(); NSApp.terminate(nil); return
         }
-        #if STYX_PRODUCT_UI
-        statusLine?.title = "Computer Use is not enabled"
-        #else
-        do { runtime = try RuntimeDirectory(); try start() }
-        catch { phase = "blocked"; statusLine?.title = "Blocked: \(error)" }
-        #endif
         // Product startup is exclusively Rust. Missing native metadata is a
         // refusal, never an implicit selection of the historical Node helper.
-        #if STYX_PRODUCT_UI
-        do { try startSetup(openWindow: !launchedAtLogin && !UserDefaults.standard.bool(forKey: setupPreference)) }
-        catch { setupStatusLine?.title = "Native Host settings unavailable; original identity retained" }
-        #else
-        // A competing Cua owner does not prevent opening this app's setup UI.
-        if let resources = Bundle.main.resourceURL,
-           (FileManager.default.isExecutableFile(atPath: bundledCoreExecutable(resources).path) || FileManager.default.fileExists(atPath: resources.appendingPathComponent("macos-runtime.json").path)) {
-            do { try startSetup(openWindow: !launchedAtLogin && !UserDefaults.standard.bool(forKey: setupPreference)) }
-            catch { setupStatusLine?.title = "Local setup unavailable; reopen Settings" }
-        }
-        #endif
+        do { try startSetup(openWindow: !launchedAtLogin) }
+        catch { openSettings() }
     }
     private func bundledCoreExecutable(_ resources: URL) -> URL {
-        let helper = resources.deletingLastPathComponent().appendingPathComponent("Helpers/Styx Core.app")
-        if FileManager.default.fileExists(atPath: helper.path) {
-            return helper.appendingPathComponent("Contents/MacOS/Styx Core")
-        }
-        return resources.appendingPathComponent("runtime/node")
+        resources.deletingLastPathComponent().appendingPathComponent("Helpers/Styx Core.app/Contents/MacOS/Styx Core")
     }
     func startSetup(openWindow: Bool) throws {
         setupOpenRequested = setupOpenRequested || openWindow
-        guard setupProcess == nil else { return }
         guard let resources = Bundle.main.resourceURL else { throw HostError.daemonUnavailable }
-        #if STYX_PRODUCT_UI
         ProductNativeDiagnostics.lifecycle(.bootstrapEntered)
         nativeCoreAttempted = true
         if let _ = nativeCore { if setupOpenRequested { setupWindow?.present(); setupOpenRequested = false }; return }
@@ -590,12 +274,12 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
                 guard model.loaded else { core.requestEOF(); nativeCore = nil; throw ProductOwnedCoreError.unavailable }
                 ProductNativeDiagnostics.lifecycle(.bootstrapCompleted)
                 observeProductComponents(core)
-                setupStatusLine?.title = "Native Host settings ready"
+
                 if setupOpenRequested { setupWindow?.present(); setupOpenRequested = false }
                 else if menuOpenRequested { toggleProductPanel() }
             } catch {
                 ProductNativeDiagnostics.lifecycle(.bootstrapFailed)
-                setupStatusLine?.title = "Native package unavailable; original identity retained"
+
                 // A status item without its panel must not hide startup failure.
                 // AppKit owns this feedback; no Core connection is required.
                 let alert = NSAlert()
@@ -609,19 +293,15 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
             }
         }
         return
-        #else
-        throw HostError.daemonUnavailable
-        #endif
     }
     @objc func openSettings() {
         do { try startSetup(openWindow: true) }
         catch {
             let alert = NSAlert(); alert.messageText = "Styx local setup is unavailable"
-            alert.informativeText = "Keep the complete Styx.app bundle together and reopen Settings. No global Node installation is needed."
+            alert.informativeText = "Keep the complete Styx.app bundle together and reopen Settings."
             alert.runModal()
         }
     }
-    #if STYX_PRODUCT_UI
     @objc func toggleProductPanel() {
         if nativeCore != nil, let controller = setupWindow, let button = statusItem?.button {
             menuOpenRequested = false
@@ -637,25 +317,23 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         openSettings()
         setupWindow?.showPreferences()
     }
-    #endif
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         openSettings(); return true
     }
-    #if STYX_PRODUCT_UI
-    func withdrawNativeComputerUse(_ message: String) {
+    func withdrawNativeComputerUse() {
         nativeDesktopIntentObservedAt = nil
         computerUseRequested = false
         if let runtime = runtime { unlink(runtime.descriptor) }
         // A live Core may still be draining this exact daemon, including after
         // its request pipe has closed. Only stop after its actual process exit.
         if nativeCore?.hasLiveProcess != true { stop() }
-        statusLine?.title = message
+
     }
     func checkNativeComponentAvailability(_ core: ProductOwnedCore) {
         guard nativeCore === core, !nativeComputerRecoveryInProgress else { return }
         if !core.isRunning {
-            withdrawNativeComputerUse("Core connection stopped; Computer Use unavailable")
+            withdrawNativeComputerUse()
         } else if !productDesktopIntentFresh(nativeDesktopIntentObservedAt, now: ProcessInfo.processInfo.systemUptime) {
             // A busy Core is not a capability revocation. Keep custody of the
             // original daemon, but expose no descriptor while its intent is stale.
@@ -688,13 +366,13 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         do {
             let status = try await core.call("status")
             guard nativeCore === core, nativeComponentObservation == observation, !terminationPending, !nativeComputerRecoveryInProgress else { return }
-            guard core.isRunning else { withdrawNativeComputerUse("Core connection stopped; Computer Use unavailable"); return }
+            guard core.isRunning else { withdrawNativeComputerUse(); return }
             guard productDesktopIntentFresh(requestedAt, now: ProcessInfo.processInfo.systemUptime) else {
                 nativeDesktopIntentObservedAt = nil
                 if let runtime = runtime { unlink(runtime.descriptor) }
                 return
             }
-            guard status["mode"].string == "rust_host" else { withdrawNativeComputerUse("Core status invalid; Computer Use unavailable"); return }
+            guard status["mode"].string == "rust_host" else { withdrawNativeComputerUse(); return }
             nativeDesktopIntentObservedAt = requestedAt
             let session = CGSessionCopyCurrentDictionary() as? [String: Any]
             // Rust stops disabled capability tasks and retains its original Cua
@@ -716,11 +394,11 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
             } else {
                 // A fenced or disconnected Host can still own native FDs.
                 // Withdraw discovery while its original Core settles them.
-                withdrawNativeComputerUse("Computer Use is not enabled in this session")
+                withdrawNativeComputerUse()
             }
         } catch {
             guard nativeCore === core, nativeComponentObservation == observation, !nativeComputerRecoveryInProgress else { return }
-            withdrawNativeComputerUse("Core status unavailable; Computer Use withdrawn")
+            withdrawNativeComputerUse()
         }
     }
     func recoverComputerUseAfterPermissions(_ core: ProductOwnedCore) async throws {
@@ -731,14 +409,14 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         let status: ProductJSON
         do { status = try await core.call("status") }
         catch {
-            if nativeCore === core { withdrawNativeComputerUse("Core status unavailable; Computer Use withdrawn") }
+            if nativeCore === core { withdrawNativeComputerUse() }
             throw error
         }
         let session = CGSessionCopyCurrentDictionary() as? [String: Any]
         guard nativeCore === core, !terminationPending else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
         guard core.isRunning, status["mode"].string == "rust_host",
               productComputerUseRequested(status, guiAvailable: session?[kCGSessionOnConsoleKey as String] as? Bool == true) else {
-            withdrawNativeComputerUse("Computer Use is not enabled in this session")
+            withdrawNativeComputerUse()
             throw ProductWorkflowError.computerPermissionRecoveryRequired
         }
         guard productDesktopIntentFresh(requestedAt, now: ProcessInfo.processInfo.systemUptime),
@@ -763,33 +441,14 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         guard daemon?.isRunning == true, daemonStopTask == nil else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
         // Permission recovery remains distinct from native effect acceptance.
     }
-    #endif
     func stopSetup() {
-        #if STYX_PRODUCT_UI
         nativeCore?.requestEOF(); nativeCore = nil
         nativeComponentObservation = nil; nativeDesktopIntentObservedAt = nil
         componentTimer?.invalidate(); componentTimer = nil; computerUseRequested = false
         stop()
-        #endif
         setupWindow?.close(); setupWindow = nil
-        setupOutput?.fileHandleForReading.readabilityHandler = nil
-        try? setupInput?.fileHandleForWriting.close()
-        if let child = setupProcess {
-            child.terminationHandler = nil
-            if child.isRunning {
-                let limit = Date().addingTimeInterval(6)
-                while child.isRunning && Date() < limit { Thread.sleep(forTimeInterval: 0.02) }
-                if child.isRunning { child.terminate() }
-                let termLimit = Date().addingTimeInterval(2)
-                while child.isRunning && Date() < termLimit { Thread.sleep(forTimeInterval: 0.02) }
-                if child.isRunning { kill(child.processIdentifier, SIGKILL) }
-                child.waitUntilExit()
-            }
-        }
-        setupProcess = nil; setupInput = nil; setupOutput = nil; setupURL = nil; setupBuffer = ""
     }
     func start() throws {
-        #if STYX_PRODUCT_UI
         let session = CGSessionCopyCurrentDictionary() as? [String: Any]
         guard computerUseRequested, !computerPermissionRecoveryRequired,
               session?[kCGSessionOnConsoleKey as String] as? Bool == true else { throw HostError.daemonUnavailable }
@@ -797,7 +456,6 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
             guard nativeCore?.isRunning == true,
                   productDesktopIntentFresh(nativeDesktopIntentObservedAt, now: ProcessInfo.processInfo.systemUptime) else { throw HostError.daemonUnavailable }
         }
-        #endif
         guard daemonStopTask == nil else { throw HostError.daemonUnavailable }
         guard let runtime = runtime, daemon == nil else { return }
         // A released owner lock does not prove a prior crashed owner's child
@@ -833,19 +491,16 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         guard daemon === terminated else { return }
         try? lifetimeWriter?.close(); lifetimeWriter = nil
         daemon = nil; timer?.invalidate(); runtime?.clear()
-        #if STYX_PRODUCT_UI
         if nativeCoreAttempted { computerPermissionRecoveryRequired = true }
-        #endif
         phase = "daemon_exited"
-        statusLine?.title = "Cua exited; reconnect after restart"
+
         // Explicit Continue must drain the original Core before replacing this
         // generation. Never replay an action or silently restart the daemon.
     }
     func poll() {
         guard let runtime = runtime, let daemon = daemon, daemon.isRunning, daemonStopTask == nil else { return }
-        #if STYX_PRODUCT_UI
         if nativeCoreAttempted {
-            guard let core = nativeCore, core.isRunning else { withdrawNativeComputerUse("Core connection stopped; Computer Use unavailable"); return }
+            guard let core = nativeCore, core.isRunning else { withdrawNativeComputerUse(); return }
             guard computerUseRequested,
                   productDesktopIntentFresh(nativeDesktopIntentObservedAt, now: ProcessInfo.processInfo.systemUptime) else { unlink(runtime.descriptor); return }
         }
@@ -853,27 +508,24 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         guard session?[kCGSessionOnConsoleKey as String] as? Bool == true else {
             if nativeCoreAttempted {
                 computerPermissionRecoveryRequired = true
-                withdrawNativeComputerUse("Computer Use is not available in this session")
-            } else { computerUseRequested = false; stop(); statusLine?.title = "Computer Use is not available in this session" }
+                withdrawNativeComputerUse()
+            } else { computerUseRequested = false; stop() }
             return
         }
         if nativeCoreAttempted && computerPermissionRecoveryRequired { unlink(runtime.descriptor); return }
-        #endif
         let ax = AXIsProcessTrusted(), screen = CGPreflightScreenCaptureAccess()
         let grants = "\(ax):\(screen)"
         if let previous = lastGrants, previous != grants {
-            #if STYX_PRODUCT_UI
             computerPermissionRecoveryRequired = true
             if nativeCoreAttempted {
                 // Withdraw admission, but leave the original daemon available
                 // for Rust's transport drain during recovery or normal Quit.
                 unlink(runtime.descriptor); phase = "permissions_changed"
-                statusLine?.title = "Permissions changed; review Computer Use permissions in Styx"
+
                 return
             }
-            #endif
-            stop(); phase = "permissions_changed"
-            statusLine?.title = "Permissions changed; review Computer Use permissions in Styx"; return
+            stop(); phase = "permissions_changed"; return
+
         }
         lastGrants = grants
         if socketAccepts(runtime.socket) {
@@ -890,10 +542,10 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
             do {
                 let data = try JSONSerialization.data(withJSONObject: descriptor, options: [.sortedKeys])
                 try runtime.publishDescriptor(data)
-            } catch { runtime.clear(); stop(); statusLine?.title = "Connection descriptor failed"; return }
-            statusLine?.title = ax && screen ? "Cua socket available; GUI check required" : "Cua socket available; permissions required"
+            } catch { runtime.clear(); stop(); return }
+
         } else if phase == "socket_accepting" || Date() > deadline {
-            stop(); statusLine?.title = "Cua unavailable; restart required"
+            stop()
         }
     }
     func stop() {
@@ -914,7 +566,7 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
             let forced = await Task.detached { stopAndWaitForOwnedDaemon(child) }.value
             if daemon === child {
                 daemon = nil; runtime?.clear()
-                if forced { phase = "cleanup_unknown"; statusLine?.title = "Cua exited; native cleanup was not confirmed" }
+                if forced { phase = "cleanup_unknown" }
                 else if phase == "stopping" { phase = "stopped" }
             }
             daemonStopTask = nil
@@ -924,50 +576,15 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         stop()
         await daemonStopTask?.value
     }
-    @objc func requestPermissions() {
-        #if STYX_PRODUCT_UI
-        // The product view owns each explicit permission action. A menu click
-        // only opens that view; it must not raise two OS prompts and an alert.
-        openSettings()
-        if let model = setupWindow?.model {
-            model.observePermissions()
-            model.page = model.computerApproved || nativeCore != nil && computerUseRequested ? .permissions : .settings
-        }
-        #else
-        // Only an explicit local menu action can trigger OS-owned permission UI.
-        _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
-        _ = CGRequestScreenCaptureAccess()
-        let alert = NSAlert()
-        alert.messageText = "Allow Styx in macOS Privacy & Security"
-        alert.informativeText = "Enable Accessibility and Screen Recording for Styx. Quit and reopen Styx after changing grants; reconnect clients to the new generation. A grant alone does not verify capture or actions. Explicit application scripts may separately request Automation approval for the target application."
-        alert.runModal()
-        #endif
-    }
-    @objc func restart() {
-        Task {
-            await stopAndJoin()
-            do { try start() } catch { statusLine?.title = "Restart blocked: \(error)" }
-        }
-    }
     @objc func quit() {
-        terminationPreservesRecovery = false
-        #if STYX_PRODUCT_UI
         productScheduleApplicationTermination()
-        #else
-        NSApp.terminate(nil)
-        #endif
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        #if STYX_PRODUCT_UI
         ProductNativeDiagnostics.lifecycle(.terminateEntered)
-        #endif
         if terminationPending {
-            #if STYX_PRODUCT_UI
             ProductNativeDiagnostics.lifecycle(.terminatePending)
-            #endif
             return .terminateLater
         }
-        #if STYX_PRODUCT_UI
         if nativeCoreAttempted {
             // Original bootstrap worker still owns its child until it completes.
             // A UI close cannot make an in-flight verified launch ownerless.
@@ -1010,7 +627,6 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
             }
             return .terminateLater
         }
-        #endif
         stopSetup()
         guard daemon != nil || daemonStopTask != nil else { return .terminateNow }
         terminationPending = true
@@ -1024,47 +640,15 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
 }
 
 #if STYX_TESTING
-#if STYX_PRODUCT_UI
-if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--invitation-self-test" {
+if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "--native-model-self-test" {
     MainActor.assumeIsolated {
         let application = NSApplication.shared
         application.setActivationPolicy(.accessory)
         Task { @MainActor in
-            do {
-                let value = try String(contentsOfFile: CommandLine.arguments[2], encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let url = URL(string: value) else { throw ProductCoreError.invalidBootstrap }
-                try await productInvitationSelfTest(sessionURL: url, mode: CommandLine.arguments[3]); exit(0)
-            } catch { fputs("Styx invitation self-test failed: \(error)\n", stderr); exit(1) }
+            do { try await productObservationSelfTest(); exit(0) }
+            catch { fputs("Styx native model self-test failed: \(error)\n", stderr); exit(1) }
         }
         application.run()
-    }
-}
-if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--observation-self-test" {
-    MainActor.assumeIsolated {
-        let application = NSApplication.shared
-        application.setActivationPolicy(.accessory)
-        Task { @MainActor in
-            do {
-                let value = try String(contentsOfFile: CommandLine.arguments[2], encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let url = URL(string: value) else { throw ProductCoreError.invalidBootstrap }
-                try await productObservationSelfTest(sessionURL: url); exit(0)
-            } catch { fputs("Styx observation self-test failed: \(error)\n", stderr); exit(1) }
-        }
-        application.run()
-    }
-}
-if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "--ui-preview" {
-    MainActor.assumeIsolated {
-        do { try productPresentationSnapshots(directory: nil); exit(0) }
-        catch { fputs("Styx UI preview failed\n", stderr); exit(1) }
-    }
-}
-// Allow process-local AppKit preferences (e.g. -AppleLanguages) without
-// accidentally falling through to the real App when rendering a fixture.
-if CommandLine.arguments.count >= 3 && CommandLine.arguments[1] == "--presentation-snapshots" {
-    MainActor.assumeIsolated {
-        do { try productPresentationSnapshots(directory: URL(fileURLWithPath: CommandLine.arguments[2])); exit(0) }
-        catch { fputs("Styx presentation render failed\n", stderr); exit(1) }
     }
 }
 if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "--permission-state-self-test" {
@@ -1084,43 +668,6 @@ if CommandLine.arguments.count >= 2 && CommandLine.arguments[1] == "--edit-menu-
         catch { fputs("Styx isolated edit-menu self-test failed\n", stderr); exit(1) }
     }
 }
-if CommandLine.arguments.count == 4 && ["--product-window-fixture", "--product-zip-window-fixture"].contains(CommandLine.arguments[1]) {
-    let input = URL(fileURLWithPath: CommandLine.arguments[2])
-    let snapshot = URL(fileURLWithPath: CommandLine.arguments[3])
-    guard let line = try? String(contentsOf: input, encoding: .utf8),
-          let sessionURL = setupSessionURL("STYX_SETUP_URL\t" + line.trimmingCharacters(in: .whitespacesAndNewlines)) else { exit(2) }
-    MainActor.assumeIsolated { ProductWindowController.runIsolatedSmoke(sessionURL: sessionURL, snapshot: snapshot, pluginZIP: CommandLine.arguments[1] == "--product-zip-window-fixture") }
-}
-#endif
-// Opt-in native WebKit acceptance against a fresh private test server only.
-if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--setup-window-fixture" {
-    let input = URL(fileURLWithPath: CommandLine.arguments[2])
-    let snapshot = URL(fileURLWithPath: CommandLine.arguments[3])
-    guard let line = try? String(contentsOf: input, encoding: .utf8),
-          let sessionURL = setupSessionURL("STYX_SETUP_URL\t" + line.trimmingCharacters(in: .whitespacesAndNewlines)) else { exit(2) }
-    let application = NSApplication.shared
-    application.setActivationPolicy(.accessory)
-    let controller = SetupWindowController(sessionURL: sessionURL)
-    controller.present()
-    var attempts = 0
-    let timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { timer in
-        attempts += 1
-        if attempts > 80 { fputs("Styx WebKit setup acceptance timed out\n", stderr); exit(2) }
-        controller.webView.evaluateJavaScript("document.querySelector('#setup')?.hidden === false && location.hash === ''") { result, error in
-            guard error == nil, result as? Bool == true else { return }
-            timer.invalidate()
-            controller.webView.takeSnapshot(with: nil) { image, error in
-                guard error == nil, let image = image, let tiff = image.tiffRepresentation,
-                      let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) else { exit(2) }
-                do { try png.write(to: snapshot); print("Styx WebKit authenticated setup and fragment removal PASS"); exit(0) }
-                catch { exit(2) }
-            }
-        }
-    }
-    withExtendedLifetime((controller,timer)) { application.run() }
-    exit(2)
-}
-
 // CI-only headless harness uses the exact production launch and lifetime
 // pipe, but creates no NSApplication, requests no TCC and invokes no GUI tool.
 if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--liveness-owner-fixture" {
@@ -1141,21 +688,7 @@ if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--liveness-o
 
 // Runs without starting NSApplication, a daemon, or permission prompts in CI.
 if CommandLine.arguments.contains("--self-test") {
-    #if STYX_PRODUCT_UI
     try productCoreSelfTest()
-    let requestedStatus: ProductJSON = .object(["deployment": .object(["roles": .object(["host": .string("local"), "computer": .string("requested")])])])
-    precondition(!productComputerUseRequested(requestedStatus, guiAvailable: true))
-    let approvedForeground: ProductJSON = .object(["status": .string("connected"), "observation": .string("authenticated_foreground_owner"), "host": .string("foreground"), "computerRequested": .bool(true)])
-    let approvedStatus: ProductJSON = .object(["deployment": requestedStatus["deployment"], "foreground": approvedForeground])
-    precondition(productComputerUseRequested(approvedStatus, guiAvailable: true))
-    precondition(!productComputerUseRequested(approvedStatus, guiAvailable: false))
-    let deniedStatus: ProductJSON = .object(["deployment": requestedStatus["deployment"], "foreground": .object(["status": .string("connected"), "observation": .string("authenticated_foreground_owner"), "host": .string("foreground"), "computerRequested": .bool(false)])])
-    precondition(!productComputerUseRequested(deniedStatus, guiAvailable: true))
-    let uncertainStatus: ProductJSON = .object(["deployment": requestedStatus["deployment"], "foreground": .object(["status": .string("needs_attention"), "observation": .string("authenticated_foreground_owner"), "host": .string("foreground"), "computerRequested": .bool(true)])])
-    precondition(!productComputerUseRequested(uncertainStatus, guiAvailable: true))
-    precondition(!productComputerUseRequested(.object([:]), guiAvailable: true))
-    let disabledStatus: ProductJSON = .object(["deployment": requestedStatus["deployment"], "foreground": approvedForeground, "deviceCapabilities": .object(["status": .string("updated"), "phase": .string("complete"), "computer": .bool(false)])])
-    precondition(!productComputerUseRequested(disabledStatus, guiAvailable: true))
     let nativeApproved: ProductJSON = .object(["schema": .number(1), "mode": .string("rust_host"),
         "admission_fenced": .bool(false), "foreground": .object(["status": .string("connected")]), "desktop_intent": .object([
         "schema": .number(1), "source": .string("approved_host_configuration"), "computer_requested": .bool(true)])])
@@ -1174,8 +707,6 @@ if CommandLine.arguments.contains("--self-test") {
     for invalidIntent in invalidNativeIntents {
         var invalid = nativeApproved.object
         invalid["desktop_intent"] = invalidIntent
-        invalid["deployment"] = requestedStatus["deployment"]
-        invalid["foreground"] = approvedForeground
         precondition(!productComputerUseRequested(.object(invalid), guiAvailable: true))
     }
     let inconsistentNativeFields: [(String, ProductJSON)] = [
@@ -1195,64 +726,6 @@ if CommandLine.arguments.contains("--self-test") {
     precondition(!productSystemQuitReason(nil))
     precondition(productSystemQuitReason(OSType(kAEReallyLogOut)))
     precondition(productSystemQuitReason(OSType(kAERestart)))
-    #endif
-    let token = String(repeating: "a", count: 43)
-    guard setupSessionURL("STYX_SETUP_URL\thttp://127.0.0.1:1234/#session=" + token) != nil else { fatalError("setup bootstrap rejected") }
-    for bad in ["STYX_SETUP_URL\thttps://example.com/#session=" + token,
-                "STYX_SETUP_URL\thttp://127.0.0.1:0/#session=" + token,
-                "STYX_SETUP_URL\thttp://127.0.0.1:1234/?secret=bad#session=" + token,
-                "STYX_SETUP_URL\thttp://user@127.0.0.1:1234/#session=" + token,
-                "STYX_SETUP_URL\thttp://127.0.0.1:1234/#session=bad"] {
-        guard setupSessionURL(bad) == nil else { fatalError("unsafe setup bootstrap accepted") }
-    }
-
-    let origin = URL(string: "http://127.0.0.1:1234/")!
-    let archive = Data([0x50, 0x4b, 0x03, 0x04, 0x00])
-    guard (try? pluginExportArchive(["base64": archive.base64EncodedString()])) == archive else { fatalError("bounded ZIP export rejected") }
-    func expectPluginExportRefused(_ input: Any) {
-        do { _ = try pluginExportArchive(input); fatalError("unsafe plugin export accepted") }
-        catch PluginExportError.refused { }
-        catch { fatalError("unexpected plugin export validation error") }
-    }
-    let invalidPluginExports: [Any] = [[:], ["base64": 123], ["base64": ""], ["path": "/tmp/no-write.zip"],
-                         ["base64": archive.base64EncodedString(), "filename": "chosen-by-page.zip"],
-                         ["base64": "UEsDBB=="], ["base64": "UEsDBA"], ["base64": "UEsDBA==\n"],
-                         ["base64": Data([0x50, 0x4b, 0x05, 0x06]).base64EncodedString()],
-                         ["base64": Data("not a ZIP".utf8).base64EncodedString()],
-                         ["base64": String(repeating: "A", count: ((pluginExportMaximumBytes + 2) / 3) * 4 + 4)]]
-    for invalid in invalidPluginExports {
-        expectPluginExportRefused(invalid)
-    }
-    var largestArchive = Data([0x50, 0x4b, 0x03, 0x04])
-    largestArchive.append(Data(repeating: 0, count: pluginExportMaximumBytes - 4))
-    guard (try? pluginExportArchive(["base64": largestArchive.base64EncodedString()])) == largestArchive else { fatalError("ZIP export size boundary rejected") }
-    largestArchive.append(0)
-    expectPluginExportRefused(["base64": largestArchive.base64EncodedString()])
-    func exportContext(_ current: URL? = origin, _ frame: URL? = origin, _ main: Bool = true,
-                       _ scheme: String = "http", _ host: String = "127.0.0.1", _ port: Int = 1234) -> Bool {
-        pluginExportContext(origin: origin, currentURL: current, frameURL: frame, isMainFrame: main,
-                            securityProtocol: scheme, securityHost: host, securityPort: port)
-    }
-    guard exportContext() else { fatalError("owned main-frame export context rejected") }
-    guard !exportContext(origin, origin, false), !exportContext(nil), !exportContext(origin, nil),
-          !exportContext(origin, origin, true, "https"), !exportContext(origin, origin, true, "http", "localhost"),
-          !exportContext(origin, origin, true, "http", "127.0.0.1", 4321) else { fatalError("foreign export frame accepted") }
-    for bad in ["https://example.com/", "http://127.0.0.1:4321/", "http://user@127.0.0.1:1234/", "file:///tmp/plugin.zip", "blob:http://127.0.0.1:1234/arbitrary"] {
-        let target = URL(string: bad)!
-        guard !exportContext(target), !exportContext(origin, target) else { fatalError("unowned page authorized export") }
-    }
-    for local in ["http://127.0.0.1:1234/", "http://127.0.0.1:1234/#progress", "http://127.0.0.1:1234/api/state"] {
-        guard setupNavigation(URL(string: local)!, origin: origin, userActivated: false) == .local else { fatalError("local navigation rejected") }
-    }
-    for bad in ["http://127.0.0.1:4321/", "http://localhost:1234/", "http://127.0.0.1:1234@example.com/", "file:///etc/passwd", "javascript:alert(1)", "data:text/html,hello", "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles", "https://user:secret@example.com/"] {
-        guard setupNavigation(URL(string: bad)!, origin: origin, userActivated: true) == .blocked else { fatalError("unsafe navigation accepted") }
-    }
-    for external in ["https://accounts.example.com/login", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility", "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"] {
-        let url = URL(string: external)!
-        guard setupNavigation(url, origin: origin, userActivated: true) == .external,
-              setupNavigation(url, origin: origin, userActivated: false) == .blocked else { fatalError("external navigation requires explicit activation") }
-    }
-
     let dir = NSTemporaryDirectory() + "styx-owner-test-" + UUID().uuidString
     do {
         var owner: RuntimeDirectory? = try RuntimeDirectory(path: dir)
@@ -1281,27 +754,6 @@ if CommandLine.arguments.contains("--self-test") {
             fatalError("withdrawn publication did not return privately")
         }
         unlink(owner!.descriptor)
-        let privateFile = dir + "/native-host-config.json"
-        try Data("{}".utf8).write(to: URL(fileURLWithPath: privateFile)); chmod(privateFile, 0o600)
-        try requireNativeHostFile(privateFile, privateFile: true)
-        chmod(privateFile, 0o644)
-        do { try requireNativeHostFile(privateFile, privateFile: true); fatalError("public native Host config accepted") }
-        catch HostError.unsafeRuntime { }
-        // Executable payloads need integrity verification by the signed release
-        // facade; this native guard permits read/execute bits, never other-user write.
-        try requireNativeHostFile(privateFile, privateFile: false)
-        chmod(privateFile, 0o622)
-        do { try requireNativeHostFile(privateFile, privateFile: false); fatalError("writable native Host runtime accepted") }
-        catch HostError.unsafeRuntime { }
-        chmod(privateFile, 0o600)
-        let fileLink = dir + "/native-host-config-link"
-        try FileManager.default.createSymbolicLink(atPath: fileLink, withDestinationPath: privateFile)
-        for invalidFile in [fileLink, dir] {
-            do { try requireNativeHostFile(invalidFile, privateFile: true); fatalError("nonregular native Host config accepted") }
-            catch HostError.unsafeRuntime { }
-        }
-        try FileManager.default.removeItem(atPath: fileLink)
-        try FileManager.default.removeItem(atPath: privateFile)
         let icon = URL(fileURLWithPath: dir + "/plugin-icon.png")
         let pngHeader = Data([137, 80, 78, 71, 13, 10, 26, 10])
         try pngHeader.write(to: icon)
@@ -1341,7 +793,7 @@ if CommandLine.arguments.contains("--self-test") {
         catch HostError.unsafeRuntime { }
         chmod(dir, 0o700)
         try FileManager.default.removeItem(atPath: dir)
-        print("Styx native ownership, settings navigation, ZIP export and PNG picker validation self-test passed; GUI file dialogs and TCC NOT RUN")
+        print("Styx native ownership and PNG picker validation self-test passed; GUI file dialogs and TCC NOT RUN")
         exit(0)
     } catch { fputs("Styx self-test failed: \(error)\n", stderr); exit(1) }
 }

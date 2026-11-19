@@ -383,14 +383,8 @@ def native_build_producer(receipt, target):
 
 
 def release_reader(receipt, binary_hash, target, inputs):
-    """Missing historical evidence never upgrades an old signed candidate.
-
-    The producer's native CLI observation is bound to the same complete frozen
-    source inputs and exact executable digest, not a packaging CLI flag.
-    """
+    """Bind the current runtime format to the producer's exact executable."""
     evidence = receipt.get('cli_build_info')
-    if evidence is None:
-        return 'native_runtime_v1'
     require(isinstance(evidence, dict) and native_build_producer(receipt, target)
             and receipt['producer'] in inputs, 'reader_evidence_original_producer_required')
     require(evidence.get('actual_wait') is True and type(evidence.get('exit_code')) is int
@@ -407,15 +401,8 @@ def release_reader(receipt, binary_hash, target, inputs):
     report = strict_json(raw)
     require(report == evidence.get('report') and report.get('schema') == 1 and report.get('target') == target,
             'reader_evidence_typed_report_mismatch')
-    require((report.get('minimum_release_reader'), report.get('supported_state_readers')) in [
-                ('native_runtime_migrated_v1', ['native_management_state_v1', 'native_migrated_state_v1']),
-                ('native_runtime_migrated_v2', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2']),
-                ('native_runtime_migrated_v3', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2']),
-                    ('native_runtime_selected_v1', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2', 'native_runtime_selected_state_v1']),
-                    ('native_app_runtime_selected_v1', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2', 'native_runtime_selected_state_v1', 'native_app_runtime_selected_state_v1']),
-                    ('native_service_runtime_selected_v1', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2', 'native_runtime_selected_state_v1', 'native_app_runtime_selected_state_v1', 'native_service_runtime_selected_state_v1']),
-                    ('native_app_service_transferred_v1', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2', 'native_runtime_selected_state_v1', 'native_app_runtime_selected_state_v1', 'native_service_runtime_selected_state_v1', 'native_app_service_transferred_state_v1']),
-                    ('native_pairing_lifecycle_v1', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2', 'native_runtime_selected_state_v1', 'native_app_runtime_selected_state_v1', 'native_service_runtime_selected_state_v1', 'native_app_service_transferred_state_v1', 'native_pairing_lifecycle_state_v1'])],
+    require(report.get('minimum_release_reader') == 'native_runtime_v2'
+            and report.get('supported_state_readers') == ['native_state_v1'],
             'reader_evidence_supported_contract_mismatch')
     return report['minimum_release_reader']
 
@@ -429,8 +416,8 @@ def validate_binary_location(receipt, binary, target, relocated, minimum_reader)
         return
     # A copied artifact is bound by the original producer's SHA and actual
     # build-info observation. Its original locator is provenance, never opened
-    # on this machine. This flag cannot upgrade historical receipts.
-    require(minimum_reader in ['native_runtime_migrated_v1', 'native_runtime_migrated_v2', 'native_runtime_migrated_v3', 'native_runtime_selected_v1', 'native_app_runtime_selected_v1', 'native_service_runtime_selected_v1', 'native_app_service_transferred_v1', 'native_pairing_lifecycle_v1']
+    # on this machine.
+    require(minimum_reader == 'native_runtime_v2'
             and native_build_producer(receipt, target)
             and isinstance(receipt.get('cli_build_info'), dict),
             'relocation_original_producer_evidence_required')
@@ -607,7 +594,7 @@ def build(args):
         manifest = dict(schema=2, runtime_format='native_rust_v1', component='styx', scope='runtime_candidate',
                         minimum_reader=minimum_reader, target=args.target, version=args.version,
                         entrypoint=entrypoint, source=dict(revision=args.source_revision, inputs_sha256=sha(source_raw)),
-                        contracts=dict(control=1, management_state=7 if minimum_reader == 'native_pairing_lifecycle_v1' else (6 if minimum_reader == 'native_app_service_transferred_v1' else (5 if minimum_reader == 'native_service_runtime_selected_v1' else (4 if minimum_reader == 'native_app_runtime_selected_v1' else (3 if minimum_reader == 'native_runtime_selected_v1' else 2))))), files=members, external_workers=kinds)
+                        contracts=dict(control=1, management_state=1), files=members, external_workers=kinds)
         if closures:
             manifest['worker_closures'] = closures
         manifest_raw = encode(manifest)

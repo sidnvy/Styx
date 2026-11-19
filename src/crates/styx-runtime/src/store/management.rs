@@ -26,11 +26,7 @@ pub(super) fn readonly_inventory(
 ) -> JournalResult<ManagementInventory> {
     parser::inventory(scan)
 }
-#[cfg(any(
-    all(target_os = "linux", target_env = "gnu"),
-    target_os = "windows",
-    target_os = "macos"
-))]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub(super) fn readonly_original(
     scan: &super::secure_journal::JournalObservation,
     id: &TransactionId,
@@ -78,31 +74,18 @@ pub(super) fn validate_observed_native_tip(
     validate_fresh_native_tip(scan, canonical, marker, pending)
 }
 
-/// Genesis has no runtime-update history. The immutable marker remains on its
-/// original base reader; a fresh schema7 canonical state declares its newer
-/// format without manufacturing an initial update transaction.
+/// Genesis has no runtime-update history or committed configuration transaction.
 #[cfg(any(
     all(target_os = "linux", target_env = "gnu"),
     target_os = "windows",
     target_os = "macos"
 ))]
 fn fresh_native_genesis(state: &styx_contracts::native_management::NativeState) -> bool {
-    use styx_contracts::{management::ReaderContract, native_management::*};
     state.revision == 0
         && state.last_transaction.is_none()
-        && match (state.schema, state.reader_contract) {
-            (NATIVE_STATE_SCHEMA, ReaderContract::NativeManagementStateV1) => true,
-            (
-                NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA,
-                ReaderContract::NativePairingLifecycleStateV1,
-            ) => {
-                !state.extensions.contains_key(NATIVE_RUNTIME_UPDATE_KEY)
-                    && !state
-                        .extensions
-                        .contains_key(NATIVE_PAIRING_RUNTIME_HISTORY_KEY)
-            }
-            _ => false,
-        }
+        && !state
+            .extensions
+            .contains_key(styx_contracts::native_management::NATIVE_RUNTIME_UPDATE_KEY)
 }
 
 /// Replay every original fresh-root assignment, including the one closed runtime
@@ -119,12 +102,8 @@ fn validate_fresh_native_tip(
     marker: &styx_contracts::native_management::NativeRootMarker,
     pending: Option<&TransactionId>,
 ) -> JournalResult<()> {
-    use styx_contracts::management::ReaderContract;
     let inventory = readonly_inventory(scan)?;
-    if marker.reader_floor != ReaderContract::NativeManagementStateV1
-        || canonical.state().has_migration_binding()
-        || !inventory.orphans.is_empty()
-    {
+    if !inventory.orphans.is_empty() {
         return Err(JournalError::Conflict);
     }
     if scan.files.is_empty() {

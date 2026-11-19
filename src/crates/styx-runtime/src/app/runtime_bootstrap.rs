@@ -72,7 +72,7 @@ impl HostApp {
         let installed =
             release::load_selected(&pinned.selection).map_err(|e| AppError(e.code()))?;
         if !installed
-            .supports_state_reader(ReaderContract::NativePairingLifecycleStateV1)
+            .supports_state_reader(ReaderContract::NativeStateV1)
             .map_err(|e| AppError(e.code()))?
         {
             return Err(AppError("app_runtime_reader_unsupported"));

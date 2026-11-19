@@ -1166,8 +1166,7 @@ async fn actual_strict_tls_enrollment_service_full_journey() {
 #[path = "paired_journey.rs"]
 mod paired_journey;
 
-/// Isolated real TLS/crypto/journal rejection closure. This deliberately does
-/// not claim a native C07 reader upgrade or GUI acceptance.
+/// Isolated real TLS/crypto/journal rejection closure; no GUI acceptance.
 #[tokio::test]
 #[ignore = "requires STYX_TEST_ENROLLMENT_SERVICE_ROOT, STYX_TEST_TLS_FIXTURES and STYX_TEST_NODE22; actual TLS rejection/new-request/restart"]
 async fn actual_strict_tls_rejection_survives_restart_without_reviving_old_claim() {
@@ -1208,44 +1207,9 @@ async fn actual_strict_tls_rejection_survives_restart_without_reviving_old_claim
             let node = worker_node.lock().await;
             (node.hello.public_a.clone(), node.hello.fingerprint_a)
         };
-        let old_path = path.with_extension("old-reader");
-        let (old_client, old_app) = start_server(
-            &worker_owner,
-            rejection_signed_store(&old_path, false),
-            tls.clone(),
-            client_tls.clone(),
-            admin.as_bytes(),
-            mcp_digest,
-        )
-        .await;
-        let old_pending =
-            rejection_test_join(&old_client, &worker_node, &admin, &device, &public_key).await;
-        let inventory = rejection_journal_inventory(&old_app);
-        let old_decision = json!({"request_id":old_pending.request_id,"device_id":device,
-            "fingerprint":fingerprint,"comparison_code":old_pending.comparison_code});
-        assert!(
-            old_client
-                .request(
-                    Method::POST,
-                    "/styx/enroll/reject",
-                    Some(&admin),
-                    &encoded(&old_decision)
-                )
-                .await
-                .status
-                >= 400,
-            "an old canonical reader must refuse before a new-format rejection write"
-        );
-        assert_eq!(
-            rejection_journal_inventory(&old_app),
-            inventory,
-            "old-reader refusal cannot append even a partial decision"
-        );
-        drop(old_app);
-        assert_joined(&stop_server(&worker_owner).await.unwrap());
         let (client, app) = start_server(
             &worker_owner,
-            rejection_signed_store(&path, true),
+            rejection_signed_store(&path),
             tls.clone(),
             client_tls.clone(),
             admin.as_bytes(),
@@ -1524,25 +1488,9 @@ async fn rejection_test_join(
     joined
 }
 
-fn rejection_journal_inventory(
-    app: &EnrollmentHttp,
-) -> std::collections::BTreeMap<String, Sha256Digest> {
-    app.with_service(|service| {
-        service.store.with_journal(|journal| {
-            Ok(journal
-                .scan()?
-                .files
-                .into_iter()
-                .map(|file| (file.name.clone(), Sha256Digest::of_bytes(file.bytes())))
-                .collect())
-        })
-    })
-    .unwrap()
-}
-
 /// Protected C07 genesis plus a genuinely signed minimal C08 closure, with a
 /// synthetic publisher. Opaque executable bytes are never run or installed.
-fn rejection_signed_store(path: &Path, pairing_reader: bool) -> OwnedEnrollmentJournal {
+fn rejection_signed_store(path: &Path) -> OwnedEnrollmentJournal {
     use crate::{crypto::PublisherVerifyingKey, release, store::native_root};
     use base64::Engine as _;
     use ed25519_dalek::{Signer as _, SigningKey, pkcs8::EncodePublicKey as _};
@@ -1618,10 +1566,10 @@ fn rejection_signed_store(path: &Path, pairing_reader: bool) -> OwnedEnrollmentJ
         .fingerprint()
         .unwrap();
     let manifest = json!({"schema":2,"runtime_format":"native_rust_v1","component":"styx",
-        "scope":"runtime_candidate","minimum_reader":if pairing_reader {"native_pairing_lifecycle_v1"} else {"native_runtime_migrated_v3"},
+        "scope":"runtime_candidate","minimum_reader":"native_runtime_v2",
         "target":"x86_64-unknown-linux-gnu","version":"0.4.0-test.pairing","entrypoint":"bin/styx",
         "source":{"revision":"1".repeat(40),"inputs_sha256":Sha256Digest::of_bytes(sources[2].1)},
-        "contracts":{"control":1,"management_state":if pairing_reader {7} else {2}},"files":files,"external_workers":[]});
+        "contracts":{"control":1,"management_state":1},"files":files,"external_workers":[]});
     let raw = serde_json::to_vec(&manifest).unwrap();
     write(&payload.join("manifest.json"), &raw, false);
     write(
@@ -1638,14 +1586,10 @@ fn rejection_signed_store(path: &Path, pairing_reader: bool) -> OwnedEnrollmentJ
         .unwrap_or_else(|failure| panic!("fresh test root: {:?}", failure.error()));
     let deployment = b"{\"synthetic_pairing_reader_fixture\":true}";
     let state = NativeState {
-        schema: if pairing_reader { 7 } else { 2 },
+        schema: NATIVE_STATE_SCHEMA,
         kind: NativeStateKind::StyxDesiredState,
         runtime_format: NativeRuntimeFormat::NativeRustV1,
-        reader_contract: if pairing_reader {
-            serde_json::from_str::<ReaderContract>("\"native_pairing_lifecycle_state_v1\"").unwrap()
-        } else {
-            ReaderContract::NativeManagementStateV1
-        },
+        reader_contract: ReaderContract::NativeStateV1,
         scope_generation: fresh.marker().scope_generation,
         deployment_raw_sha256: Sha256Digest::of_bytes(deployment),
         mode: NativeDeploymentMode::CreateLocal,
@@ -1659,7 +1603,6 @@ fn rejection_signed_store(path: &Path, pairing_reader: bool) -> OwnedEnrollmentJ
             }),
             host: None,
         },
-        migration: None,
         extensions: BTreeMap::from([(
             NATIVE_RUNTIME_SELECTION_KEY.into(),
             serde_json::value::to_raw_value(&selected).unwrap(),

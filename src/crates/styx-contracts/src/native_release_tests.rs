@@ -30,7 +30,7 @@ fn preview() -> NativeReleaseManifest {
         },
         contracts: NativeReleaseContracts {
             control: 1,
-            management_state: 2,
+            management_state: NATIVE_STATE_SCHEMA,
         },
         files: vec![member("bin/styx", true), member("LICENSE", false), source],
         external_workers: vec![],
@@ -40,7 +40,7 @@ fn preview() -> NativeReleaseManifest {
 fn runtime(target: NativeReleaseTarget, kinds: &[NativeExternalWorker]) -> NativeReleaseManifest {
     let mut manifest = preview();
     manifest.scope = NativeReleaseScope::RuntimeCandidate;
-    manifest.minimum_reader = NativeReleaseReader::NativeRuntimeV1;
+    manifest.minimum_reader = NativeReleaseReader::NativeRuntimeV2;
     manifest.target = target;
     manifest.entrypoint = target.entrypoint().into();
     manifest.files[0] = member(target.entrypoint(), true);
@@ -128,17 +128,17 @@ fn preview_wire_shape_and_reader_barrier_remain_configuration_only() {
             "scope":"configuration_preview","minimum_reader":"native_release_v1",
             "target":"x86_64-unknown-linux-gnu","version":"0.4.0-dev.1","entrypoint":"bin/styx",
             "source":{"revision":"1234567890abcdef1234567890abcdef12345678","inputs_sha256":Sha256Digest::of_bytes(b"source-inputs").to_hex()},
-            "contracts":{"control":1,"management_state":2},"external_workers":[],
+            "contracts":{"control":1,"management_state":1},"external_workers":[],
             "files":[{"path":"bin/styx","size":1,"sha256":Sha256Digest::of_bytes(b"bin/styx").to_hex(),"executable":true},
                      {"path":"LICENSE","size":1,"sha256":Sha256Digest::of_bytes(b"LICENSE").to_hex(),"executable":false},
                      {"path":"source-inputs.json","size":1,"sha256":Sha256Digest::of_bytes(b"source-inputs").to_hex(),"executable":false}]
         })
     );
-    // An omitted new field parses without changing the old serialized object.
+    // Decoding keeps a configuration preview separate from an executable Runtime.
     let decoded: NativeReleaseManifest = serde_json::from_value(raw).unwrap();
     decoded.validate().unwrap();
     let mut incompatible = original.clone();
-    incompatible.minimum_reader = NativeReleaseReader::NativeRuntimeV1;
+    incompatible.minimum_reader = NativeReleaseReader::NativeRuntimeV2;
     assert!(incompatible.validate().is_err());
     let mut incompatible = runtime(NativeReleaseTarget::LinuxX86_64Gnu, &[]);
     incompatible.minimum_reader = NativeReleaseReader::NativeReleaseV1;
@@ -269,93 +269,33 @@ fn signed_members_cannot_masquerade_cross_closure_or_escape_runtime_budget() {
     assert!(serde_json::from_value::<NativeReleaseManifest>(invalid_raw).is_err());
 }
 
+/// Manifest declarations alone are not signed-package acceptance.
 #[test]
-fn migrated_runtime_reader_is_explicit_and_old_manifest_shape_does_not_claim_it() {
-    use crate::management::ReaderContract;
-    let old = runtime(NativeReleaseTarget::LinuxX86_64Gnu, &[]);
-    let raw = serde_json::to_vec(&old).unwrap();
-    old.validate().unwrap();
-    assert!(
-        old.minimum_reader
-            .supports_state_reader(ReaderContract::NativeManagementStateV1)
-    );
-    assert!(
-        !old.minimum_reader
-            .supports_state_reader(ReaderContract::NativeMigratedStateV1)
-    );
-    let mut new = old.clone();
-    new.minimum_reader = NativeReleaseReader::NativeRuntimeMigratedV1;
-    new.validate().unwrap();
-    assert!(
-        new.minimum_reader
-            .supports_state_reader(ReaderContract::NativeMigratedStateV1)
-    );
-    assert!(
-        new.minimum_reader
-            .supports_state_reader(ReaderContract::NativeManagementStateV1)
-    );
-    assert_ne!(raw, serde_json::to_vec(&new).unwrap());
-    let decoded: NativeReleaseManifest = serde_json::from_slice(&raw).unwrap();
-    assert_eq!(raw, serde_json::to_vec(&decoded).unwrap());
-    assert_eq!(decoded.minimum_reader, NativeReleaseReader::NativeRuntimeV1);
-    let mut preview = preview();
-    preview.minimum_reader = new.minimum_reader;
-    assert!(preview.validate().is_err());
-    assert!(
-        !NativeReleaseReader::NativeReleaseV1
-            .supports_state_reader(ReaderContract::NativeMigratedStateV1)
-    );
-    let mut unknown = serde_json::to_value(&new).unwrap();
-    unknown["minimum_reader"] = "native_runtime_unknown_v1".into();
-    assert!(serde_json::from_value::<NativeReleaseManifest>(unknown).is_err());
-}
-
-/// These are manifest compatibility controls, not signed-package acceptance.
-#[test]
-fn host_admission_report_requires_explicit_signed_reader_declaration() {
-    for old in [
-        NativeReleaseReader::NativeReleaseV1,
-        NativeReleaseReader::NativeRuntimeV1,
-        NativeReleaseReader::NativeRuntimeMigratedV1,
-        NativeReleaseReader::NativeRuntimeMigratedV2,
-    ] {
-        assert!(!old.supports_host_admission_v2());
-    }
+fn current_runtime_declaration_supports_state_and_host_admission() {
+    let preview = NativeReleaseReader::NativeReleaseV1;
+    assert!(!preview.supports_host_admission_v2());
+    assert!(!preview.supports_state_reader(ReaderContract::NativeStateV1));
     for target in [
         NativeReleaseTarget::LinuxX86_64Gnu,
         NativeReleaseTarget::MacosAarch64,
         NativeReleaseTarget::MacosX86_64,
         NativeReleaseTarget::WindowsX86_64Msvc,
     ] {
-        let mut package = runtime(target, &[]);
-        package.minimum_reader = NativeReleaseReader::NativeRuntimeMigratedV3;
-        let decoded: NativeReleaseManifest =
+        let package = runtime(target, &[]);
+        let mut decoded: NativeReleaseManifest =
             serde_json::from_slice(&serde_json::to_vec(&package).unwrap()).unwrap();
         decoded.validate().unwrap();
         assert!(decoded.minimum_reader.supports_host_admission_v2());
         assert!(
             decoded
                 .minimum_reader
-                .supports_state_reader(ReaderContract::NativeMigratedStateV2)
+                .supports_state_reader(ReaderContract::NativeStateV1)
         );
-        assert!(
-            decoded
-                .minimum_reader
-                .supports_state_reader(ReaderContract::NativeMigratedStateV1)
-        );
-        assert!(
-            decoded
-                .minimum_reader
-                .supports_state_reader(ReaderContract::NativeManagementStateV1)
-        );
+        decoded.contracts.management_state = 2;
+        assert!(decoded.validate().is_err());
         let mut unsupported = serde_json::to_value(package).unwrap();
-        unsupported["minimum_reader"] = "native_runtime_migrated_v4".into();
-        assert!(
-            serde_json::from_slice::<NativeReleaseManifest>(
-                &serde_json::to_vec(&unsupported).unwrap()
-            )
-            .is_err()
-        );
+        unsupported["minimum_reader"] = "native_runtime_v1".into();
+        assert!(serde_json::from_value::<NativeReleaseManifest>(unsupported).is_err());
     }
 }
 
@@ -394,40 +334,4 @@ fn tunnel_client_is_optional_and_confined_to_its_fixed_directory() {
         serde_json::to_value(NativeExternalWorker::TunnelClient).unwrap(),
         "tunnel_client"
     );
-}
-
-#[test]
-fn pairing_reader7_signed_capability_is_explicit_and_incompatible_with_every_old_reader() {
-    let mut manifest = runtime(NativeReleaseTarget::LinuxX86_64Gnu, &[]);
-    manifest.minimum_reader = NativeReleaseReader::NativePairingLifecycleV1;
-    manifest.contracts.management_state = 7;
-    assert!(manifest.validate().is_ok());
-    assert!(manifest.minimum_reader.supports_host_admission_v2());
-    for reader in [
-        ReaderContract::NativeManagementStateV1,
-        ReaderContract::NativeMigratedStateV1,
-        ReaderContract::NativeMigratedStateV2,
-        ReaderContract::NativeRuntimeSelectedStateV1,
-        ReaderContract::NativeAppRuntimeSelectedStateV1,
-        ReaderContract::NativeServiceRuntimeSelectedStateV1,
-        ReaderContract::NativeAppServiceTransferredStateV1,
-        ReaderContract::NativePairingLifecycleStateV1,
-    ] {
-        assert!(manifest.minimum_reader.supports_state_reader(reader));
-    }
-    for old in [
-        NativeReleaseReader::NativeReleaseV1,
-        NativeReleaseReader::NativeRuntimeV1,
-        NativeReleaseReader::NativeRuntimeMigratedV1,
-        NativeReleaseReader::NativeRuntimeMigratedV2,
-        NativeReleaseReader::NativeRuntimeMigratedV3,
-        NativeReleaseReader::NativeRuntimeSelectedV1,
-        NativeReleaseReader::NativeAppRuntimeSelectedV1,
-        NativeReleaseReader::NativeServiceRuntimeSelectedV1,
-        NativeReleaseReader::NativeAppServiceTransferredV1,
-    ] {
-        assert!(!old.supports_state_reader(ReaderContract::NativePairingLifecycleStateV1));
-    }
-    manifest.contracts.management_state = 6;
-    assert!(manifest.validate().is_err());
 }

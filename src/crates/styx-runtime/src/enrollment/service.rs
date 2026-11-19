@@ -384,11 +384,7 @@ pub struct EnrollmentService {
     remote_hosts: BTreeSet<String>,
     clock: Clock,
     uncertain: bool,
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     service_tip_pending: bool,
     #[cfg(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -434,11 +430,7 @@ impl EnrollmentService {
             remote_hosts: BTreeSet::new(),
             clock: Clock::new(now),
             uncertain: false,
-            #[cfg(any(
-                all(target_os = "linux", target_env = "gnu"),
-                target_os = "macos",
-                target_os = "windows"
-            ))]
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
             service_tip_pending: false,
             #[cfg(any(
                 all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -501,31 +493,19 @@ impl EnrollmentService {
         }
         result
     }
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn service_control_owner(&self) -> crate::store::OwnedConfigurationRoot {
         // This returns the SAME owner for transaction inspection even while its
         // admission fence is retained. Mutations separately require admission.
         self.store.configuration_root()
     }
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn set_service_tip_pending(&mut self, pending: bool) {
         self.service_tip_pending = pending;
     }
     fn ordinary_admission(&self) -> Result<(), ServiceError> {
         self.healthy()?;
-        #[cfg(any(
-            all(target_os = "linux", target_env = "gnu"),
-            target_os = "macos",
-            target_os = "windows"
-        ))]
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
         if self.service_tip_pending {
             return Err(ServiceError::new(503, "service_control_pending"));
         }
@@ -597,10 +577,6 @@ impl EnrollmentService {
             if Sha256Digest::of_bytes(&token) != d.credential_hash {
                 return Err(ServiceError::new(503, "stored_credential_invalid"));
             }
-        }
-        for d in self.ledger.historical_revoked_for_recovery(&self.control)? {
-            // A tombstone has no fabricated token and can never authenticate.
-            self.load_profile(&d.profile, &d.id, d.fingerprint)?;
         }
         for p in pending {
             let profile =
@@ -1121,13 +1097,7 @@ impl EnrollmentService {
             }
             Route::Devices => {
                 let devices = self.ledger.devices_for_admin(&self.control.admin())?;
-                let tombstones = self
-                    .ledger
-                    .historical_revoked_for_admin(&self.control.admin())?;
-                let default_device = self
-                    .ledger
-                    .default_device_for_admin(&self.control.admin())?;
-                let mut out = Vec::with_capacity(devices.len() + tombstones.len());
+                let mut out = Vec::with_capacity(devices.len());
                 for d in devices {
                     let profile = self.load_profile(&d.profile, &d.id, d.fingerprint)?;
                     let states = if d.revoked {
@@ -1145,12 +1115,8 @@ impl EnrollmentService {
                         Some(ConnectionObservation::Offline) => Some(false),
                         _ => None,
                     };
-                    out.push(json!({"device_id":d.id,"label":profile.profile().label,"platform":profile.profile().platform,"is_default":!d.revoked && default_device.as_ref()==Some(&d.id),"capabilities":capabilities(d.grant,!d.revoked),
+                    out.push(json!({"device_id":d.id,"label":profile.profile().label,"platform":profile.profile().platform,"capabilities":capabilities(d.grant,!d.revoked),
                         "status":if d.revoked{"revoked"}else{"approved"},"generation":d.generation,"fingerprint":d.fingerprint,"online":boolstate(0)==Some(true),"connections":{"exec":boolstate(0),"computer":boolstate(1),"browser":boolstate(2)}}));
-                }
-                for d in tombstones {
-                    let profile = self.load_profile(&d.profile, &d.id, d.fingerprint)?;
-                    out.push(json!({"device_id":d.id,"label":profile.profile().label,"platform":profile.profile().platform,"is_default":false,"capabilities":capabilities(d.grant,false),"status":"revoked","generation":d.generation,"fingerprint":d.fingerprint,"online":false,"connections":{"exec":false,"computer":false,"browser":false}}));
                 }
                 Ok((200, Value::Array(out)))
             }
@@ -1188,16 +1154,11 @@ impl EnrollmentService {
         id: &DeviceId,
         generation: &str,
     ) -> Result<bool, ServiceError> {
-        let active = self.ledger.devices_for_admin(&self.control.admin())?;
-        let retired = self
+        Ok(self
             .ledger
-            .historical_revoked_for_admin(&self.control.admin())?;
-        Ok(active
+            .devices_for_admin(&self.control.admin())?
             .iter()
-            .any(|d| &d.id == id && d.generation == generation && d.revoked)
-            || retired
-                .iter()
-                .any(|d| &d.id == id && d.generation == generation))
+            .any(|d| &d.id == id && d.generation == generation && d.revoked))
     }
     pub(crate) fn profile_is_current(
         &self,

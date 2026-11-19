@@ -207,11 +207,7 @@ enum Command {
         #[command(subcommand)]
         command: RoleCommand,
     },
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     #[command(name = "__service-run", hide = true)]
     ServiceRun {
         #[arg(long)]
@@ -232,29 +228,6 @@ enum Command {
         transaction_id: Option<String>,
         #[arg(long)]
         expected_revision: Option<u64>,
-        #[arg(long)]
-        authorize: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Review/observe a fixed launchd definition, or stop its original Gateway.
-    /// Does not install, enable, start, or adopt an App-managed profile.
-    #[cfg(target_os = "macos")]
-    #[command(name = "service")]
-    MacService {
-        #[arg(value_enum)]
-        action: MacServiceActionArg,
-        #[arg(long)]
-        state_dir: PathBuf,
-        #[arg(long, value_enum)]
-        component: NativeComponentArg,
-        #[arg(long)]
-        transaction_id: Option<String>,
-        #[arg(long)]
-        expected_revision: Option<u64>,
-        /// Original-publisher signed candidate, only for prepare-runtime-repair.
-        #[arg(long)]
-        runtime_selection_file: Option<PathBuf>,
         #[arg(long)]
         authorize: bool,
         #[arg(long)]
@@ -359,22 +332,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Review configuration intent and unresolved legacy steps without executing them.
+    /// Prepare a native desired-state change without applying it or starting services.
     Plan {
         #[arg(long)]
         state_dir: PathBuf,
         #[arg(long)]
         json: bool,
-        #[arg(long,requires_all=["component","run","transaction_id","sequence"])]
-        native: bool,
-        #[arg(long, value_enum, requires = "native")]
-        component: Option<NativeComponentArg>,
-        #[arg(long, value_enum, requires = "native")]
-        run: Option<NativeRunArg>,
-        #[arg(long, requires = "native")]
-        transaction_id: Option<String>,
-        #[arg(long,requires="native",value_parser=clap::value_parser!(u64).range(1..))]
-        sequence: Option<u64>,
+        #[arg(long, value_enum)]
+        component: NativeComponentArg,
+        #[arg(long, value_enum)]
+        run: NativeRunArg,
+        #[arg(long)]
+        transaction_id: String,
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        sequence: u64,
     },
     /// Inspect the existing deployment without connecting or starting services.
     Status {
@@ -384,8 +355,6 @@ enum Command {
         root: Option<PathBuf>,
         #[arg(long)]
         json: bool,
-        #[arg(long, requires = "state_dir")]
-        native: bool,
     },
     /// Validate a profile, or inspect OS desktop candidates without granting access.
     Doctor {
@@ -414,6 +383,7 @@ enum NativeModeArg {
 enum NativeManagerArg {
     ForegroundCli,
     AppManaged,
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     PersistentService,
 }
 #[derive(Clone, Copy, ValueEnum)]
@@ -447,62 +417,12 @@ impl ServiceActionArg {
         }
     }
 }
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum MacServiceActionArg {
-    Definition,
-    Status,
-    PrepareInstall,
-    PrepareFirstStart,
-    /// Prepare same-identity recovery of a registered but failed inactive Gateway.
-    PrepareRecovery,
-    PrepareRuntimeRepair,
-    /// Recover the exact original target; never reissue an uncertain admin request.
-    RecoverRuntimeRepair,
-    Stop,
-    Start,
-    Enable,
-    Disable,
-    Uninstall,
-}
-#[cfg(target_os = "macos")]
-impl MacServiceActionArg {
-    fn native(self) -> styx_runtime::management::native::service::ServiceAction {
-        use styx_runtime::management::native::service::ServiceAction;
-        match self {
-            Self::Definition => ServiceAction::Definition,
-            Self::Status => ServiceAction::Status,
-            Self::PrepareInstall => ServiceAction::PrepareInstall,
-            Self::PrepareFirstStart => ServiceAction::PrepareFirstStart,
-            Self::PrepareRecovery => ServiceAction::PrepareRecovery,
-            Self::PrepareRuntimeRepair => ServiceAction::PrepareRuntimeRepair,
-            Self::RecoverRuntimeRepair => ServiceAction::RecoverRuntimeRepair,
-            Self::Stop => ServiceAction::Stop,
-            Self::Start => ServiceAction::Start,
-            Self::Enable => ServiceAction::Enable,
-            Self::Disable => ServiceAction::Disable,
-            Self::Uninstall => ServiceAction::Uninstall,
-        }
-    }
-}
 #[derive(Clone, Copy, ValueEnum)]
 enum NativeRunArg {
     Running,
     Stopped,
 }
 impl Cli {
-    /// SCM must attach on the original process main thread before Tokio exists.
-    #[cfg(target_os = "windows")]
-    pub(crate) fn dispatch_windows_service(&self) -> Option<ExitCode> {
-        let Command::ServiceRun { state_dir, role } = &self.command else {
-            return None;
-        };
-        Some(native_recovery_result(
-            styx_runtime::management::native::service::dispatch(state_dir, role.native()),
-            true,
-            "Original Windows service dispatcher and drain observations:",
-        ))
-    }
     pub(crate) fn is_desktop_probe_worker(&self) -> bool {
         matches!(
             self.command,
@@ -808,11 +728,7 @@ fn native_recovery_result<T: serde::Serialize>(
     json: bool,
     summary: &'static str,
 ) -> ExitCode {
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "windows",
-        all(target_os = "linux", target_env = "gnu")
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     if let Err(value) = &result
         && value.requires_process_teardown()
     {
@@ -936,6 +852,7 @@ impl NativeManagerArg {
         match self {
             Self::ForegroundCli => NativeManager::ForegroundCli,
             Self::AppManaged => NativeManager::AppManaged,
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
             Self::PersistentService => NativeManager::PersistentService,
         }
     }
@@ -1421,93 +1338,7 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 "Native service observations; inspect canonical intent and actual OS state:",
             )
         }
-        #[cfg(target_os = "macos")]
-        Command::MacService {
-            action,
-            state_dir,
-            component,
-            transaction_id,
-            expected_revision,
-            runtime_selection_file,
-            authorize,
-            json,
-        } => {
-            if matches!(
-                action,
-                MacServiceActionArg::PrepareInstall
-                    | MacServiceActionArg::PrepareFirstStart
-                    | MacServiceActionArg::PrepareRecovery
-                    | MacServiceActionArg::PrepareRuntimeRepair
-                    | MacServiceActionArg::RecoverRuntimeRepair
-                    | MacServiceActionArg::Stop
-                    | MacServiceActionArg::Start
-                    | MacServiceActionArg::Enable
-                    | MacServiceActionArg::Disable
-                    | MacServiceActionArg::Uninstall
-            ) {
-                if !authorize {
-                    return error("explicit_service_authorization_required");
-                }
-                if matches!(
-                    action,
-                    MacServiceActionArg::PrepareRecovery
-                        | MacServiceActionArg::PrepareRuntimeRepair
-                        | MacServiceActionArg::RecoverRuntimeRepair
-                ) && !matches!(component, NativeComponentArg::Gateway)
-                {
-                    return error("native_service_gateway_only");
-                }
-            }
-            let transaction_id = match transaction_id
-                .map(styx_contracts::identity::TransactionId::try_from)
-                .transpose()
-            {
-                Ok(value) => value,
-                Err(_) => return error("native_management_invalid_input"),
-            };
-            let result = if action == MacServiceActionArg::PrepareRuntimeRepair {
-                let (Some(selection), Some(id), Some(revision)) = (
-                    runtime_selection_file.as_deref(),
-                    transaction_id,
-                    expected_revision,
-                ) else {
-                    return error("explicit_service_repair_inputs_required");
-                };
-                styx_runtime::management::native::service::prepare_runtime_repair(
-                    &state_dir, selection, id, revision,
-                )
-                .await
-            } else if action == MacServiceActionArg::RecoverRuntimeRepair {
-                if runtime_selection_file.is_some() {
-                    return error("runtime_selection_only_for_service_repair");
-                }
-                let (Some(id), Some(revision)) = (transaction_id, expected_revision) else {
-                    return error("explicit_service_repair_inputs_required");
-                };
-                styx_runtime::management::native::service::recover_runtime_repair(
-                    &state_dir, id, revision,
-                )
-                .await
-            } else {
-                if runtime_selection_file.is_some() {
-                    return error("runtime_selection_only_for_service_repair");
-                }
-                styx_runtime::management::native::service::manage(
-                    &state_dir,
-                    action.native(),
-                    component.native(),
-                    transaction_id,
-                    expected_revision,
-                )
-                .await
-            };
-            native_recovery_result(
-                result,
-                json,
-                "Native launchd intent and observations; prepared installation does not prove registration or readiness:",
-            )
-        }
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
         Command::ServiceRun { state_dir, role } => {
             let cancel = CancellationToken::new();
             let (events, mut received) = tokio::sync::mpsc::channel(16);
@@ -1538,10 +1369,6 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 true,
                 "Native service stopped with physical cleanup observations:",
             )
-        }
-        #[cfg(target_os = "windows")]
-        Command::ServiceRun { .. } => {
-            error("windows_service_requires_original_pre_runtime_dispatch")
         }
         Command::AppCore {
             state_dir,
@@ -1630,7 +1457,6 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             )
         }
         Command::Plan {
-            native: true,
             state_dir,
             json,
             component,
@@ -1638,11 +1464,6 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             transaction_id,
             sequence,
         } => {
-            let (Some(component), Some(run), Some(transaction_id), Some(sequence)) =
-                (component, run, transaction_id, sequence)
-            else {
-                return error("native_plan_arguments_required");
-            };
             let Ok(transaction_id) =
                 styx_contracts::identity::TransactionId::try_from(transaction_id)
             else {
@@ -1702,7 +1523,6 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             "Read-only native transaction report:",
         ),
         Command::Status {
-            native: true,
             state_dir: Some(state_dir),
             json,
             ..
@@ -1711,26 +1531,6 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             json,
             "Read-only native configuration report:",
         ),
-        Command::Plan {
-            native: false,
-            state_dir,
-            json,
-            ..
-        } => match styx_runtime::management::inspect_deployment(&state_dir).await {
-            Ok(plan) => {
-                if !json {
-                    eprintln!(
-                        "Configuration intent; runtime health and management ownership are unobserved:"
-                    );
-                }
-                if write_json(&plan).is_err() {
-                    error("output_unavailable")
-                } else {
-                    ExitCode::SUCCESS
-                }
-            }
-            Err(value) => error(value.code()),
-        },
         Command::Release {
             command:
                 ReleaseCommand::Select {
@@ -2219,13 +2019,7 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             json,
             ..
         } => desktop_diagnostics(json).await,
-        Command::Status {
-            native: false,
-            state_dir: Some(state_dir),
-            json,
-            ..
-        }
-        | Command::Doctor {
+        Command::Doctor {
             state_dir: Some(state_dir),
             json,
             ..
@@ -2333,16 +2127,7 @@ fn native_build_info() -> serde_json::Value {
     };
     serde_json::json!({
         "schema": 1, "target": target,
-        "minimum_release_reader": styx_contracts::native_release::NativeReleaseReader::NativePairingLifecycleV1,
-        "supported_state_readers": [
-            styx_contracts::management::ReaderContract::NativeManagementStateV1,
-            styx_contracts::management::ReaderContract::NativeMigratedStateV1,
-            styx_contracts::management::ReaderContract::NativeMigratedStateV2,
-            styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1,
-            styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1,
-            styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1,
-            styx_contracts::management::ReaderContract::NativeAppServiceTransferredStateV1,
-            styx_contracts::management::ReaderContract::NativePairingLifecycleStateV1
-        ]
+        "minimum_release_reader": styx_contracts::native_release::NativeReleaseReader::NativeRuntimeV2,
+        "supported_state_readers": [styx_contracts::management::ReaderContract::NativeStateV1]
     })
 }

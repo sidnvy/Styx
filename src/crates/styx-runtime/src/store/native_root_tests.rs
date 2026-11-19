@@ -38,7 +38,7 @@ fn genesis(fresh: &FreshNativeRoot) -> NativeState {
         schema: NATIVE_STATE_SCHEMA,
         kind: NativeStateKind::StyxDesiredState,
         runtime_format: NativeRuntimeFormat::NativeRustV1,
-        reader_contract: ReaderContract::NativeManagementStateV1,
+        reader_contract: ReaderContract::NativeStateV1,
         scope_generation: fresh.marker().scope_generation,
         deployment_raw_sha256: Sha256Digest::of_bytes(DEPLOYMENT),
         mode: NativeDeploymentMode::JoinExisting,
@@ -52,7 +52,6 @@ fn genesis(fresh: &FreshNativeRoot) -> NativeState {
                 autostart: NativeAutostartDesired::Disabled,
             }),
         },
-        migration: None,
         extensions: BTreeMap::from([(
             "preserved_unknown".into(),
             serde_json::value::RawValue::from_string("900719925474099312345".into()).unwrap(),
@@ -112,7 +111,7 @@ fn fresh_native_root_genesis_reopen_and_retained_unknown_batch() {
     let canonical = fs::read(path.join("state.json")).unwrap();
     assert_eq!(fs::read(path.join("deployment.json")).unwrap(), DEPLOYMENT);
     let read = binding.validated_readstate().unwrap();
-    assert_eq!(read.state().schema, 2);
+    assert_eq!(read.state().schema, NATIVE_STATE_SCHEMA);
     assert_eq!(read.state().revision, 0);
     assert_eq!(
         read.state().extensions["preserved_unknown"].get(),

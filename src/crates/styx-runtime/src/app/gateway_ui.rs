@@ -2,33 +2,13 @@
 //! No remote hub credentials, second configuration store, or implicit approvals.
 use super::*;
 use crate::management::native_gateway_admin as admin;
-use styx_contracts::identity::{DeviceId, Sha256Digest};
+use styx_contracts::identity::DeviceId;
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Approval {
-    authorize: bool,
-    request_id: String,
-    device_id: DeviceId,
-    fingerprint: Sha256Digest,
-    comparison_code: String,
-    enable_computer: bool,
-    enable_browser: bool,
-}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Revoke {
     authorize: bool,
     device_id: DeviceId,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Rejection {
-    authorize: bool,
-    request_id: String,
-    device_id: DeviceId,
-    fingerprint: Sha256Digest,
-    comparison_code: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,13 +63,6 @@ impl HostApp {
                     .collect();
                 Ok(json!({"devices":rows}))
             }
-            Operation::PendingComputers => {
-                let report = admin::pending_for_app(scope.clone())
-                    .await
-                    .map_err(|e| self.gateway_admin_error(e))?;
-                scope.validate()?;
-                serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))
-            }
             Operation::InviteComputer => {
                 let selected: Authorized = decode_input(&input)?;
                 if !selected.authorize {
@@ -123,46 +96,6 @@ impl HostApp {
                 Ok(
                     json!({"link":format!("{origin} {code}"),"code":code,"expiresAt":expires,"origin":origin}),
                 )
-            }
-            Operation::ApproveComputer => {
-                let choice: Approval = decode_input(&input)?;
-                if !choice.authorize {
-                    return Err(AppError("app_confirmation_required"));
-                }
-                let report = admin::approve_for_app(
-                    scope.clone(),
-                    admin::ApprovalSelection {
-                        request_id: choice.request_id,
-                        device_id: choice.device_id,
-                        fingerprint: choice.fingerprint,
-                        comparison_code: choice.comparison_code,
-                        enable_computer: choice.enable_computer,
-                        enable_browser: choice.enable_browser,
-                    },
-                )
-                .await
-                .map_err(|e| self.gateway_admin_error(e))?;
-                scope.validate()?;
-                serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))
-            }
-            Operation::RejectComputer => {
-                let choice: Rejection = decode_input(&input)?;
-                if !choice.authorize {
-                    return Err(AppError("app_confirmation_required"));
-                }
-                let report = admin::reject_for_app(
-                    scope.clone(),
-                    admin::RejectionSelection {
-                        request_id: choice.request_id,
-                        device_id: choice.device_id,
-                        fingerprint: choice.fingerprint,
-                        comparison_code: choice.comparison_code,
-                    },
-                )
-                .await
-                .map_err(|e| self.gateway_admin_error(e))?;
-                scope.validate()?;
-                serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))
             }
             Operation::RevokeComputer => {
                 let choice: Revoke = decode_input(&input)?;

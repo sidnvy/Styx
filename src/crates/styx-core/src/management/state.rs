@@ -12,16 +12,7 @@ pub enum NativeStateRuleError {
     ChangedExtensions,
 }
 pub fn validate_marker(marker: &NativeRootMarker) -> Result<(), NativeStateRuleError> {
-    if marker.schema != NATIVE_MARKER_SCHEMA
-        || matches!(
-            marker.reader_floor,
-            styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1
-                | styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1
-                | styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1
-                | styx_contracts::management::ReaderContract::NativeAppServiceTransferredStateV1
-                | styx_contracts::management::ReaderContract::NativePairingLifecycleStateV1
-        )
-    {
+    if marker.schema != NATIVE_MARKER_SCHEMA {
         return Err(NativeStateRuleError::InvalidMarker);
     }
     Ok(())
@@ -31,103 +22,10 @@ pub fn validate_state(
     marker: &NativeRootMarker,
 ) -> Result<(), NativeStateRuleError> {
     validate_marker(marker)?;
-    let original_reader =
-        state.schema == NATIVE_STATE_SCHEMA && state.reader_contract == marker.reader_floor;
-    let selected_reader = state.schema == NATIVE_RUNTIME_SELECTED_STATE_SCHEMA
-        && state.reader_contract
-            == styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1
-        && marker.reader_floor
-            == styx_contracts::management::ReaderContract::NativeManagementStateV1;
-    let app_selected_reader = state.schema == NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA
-        && state.reader_contract
-            == styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1
-        && marker.reader_floor
-            == styx_contracts::management::ReaderContract::NativeManagementStateV1;
-    let service_selected_reader = state.schema == NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA
-        && state.reader_contract
-            == styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1
-        && marker.reader_floor
-            == styx_contracts::management::ReaderContract::NativeManagementStateV1
-        && matches!(marker.root_identity, NativeRootIdentity::Macos { .. });
-    let app_service_reader = state.schema == NATIVE_APP_SERVICE_TRANSFERRED_STATE_SCHEMA
-        && state.reader_contract
-            == styx_contracts::management::ReaderContract::NativeAppServiceTransferredStateV1
-        && marker.reader_floor
-            == styx_contracts::management::ReaderContract::NativeManagementStateV1;
-    let pairing_reader = state.schema == NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA
-        && state.reader_contract
-            == styx_contracts::management::ReaderContract::NativePairingLifecycleStateV1
-        && marker.reader_floor
-            == styx_contracts::management::ReaderContract::NativeManagementStateV1;
-    if (!original_reader
-        && !selected_reader
-        && !app_selected_reader
-        && !service_selected_reader
-        && !app_service_reader
-        && !pairing_reader)
-        || state.scope_generation != marker.scope_generation
-    {
+    if state.schema != NATIVE_STATE_SCHEMA || state.scope_generation != marker.scope_generation {
         return Err(NativeStateRuleError::InvalidState);
     }
-    let migration_v2 = state
-        .migration_v2()
-        .map_err(|_| NativeStateRuleError::InvalidState)?;
-    match (&state.migration, state.reader_contract) {
-        (None, styx_contracts::management::ReaderContract::NativeManagementStateV1) => (),
-        (
-            None,
-            styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1
-            | styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1
-            | styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1
-            | styx_contracts::management::ReaderContract::NativeAppServiceTransferredStateV1,
-        ) => {
-            runtime_update::validate_selected_state(state)?;
-        }
-        (None, styx_contracts::management::ReaderContract::NativePairingLifecycleStateV1) => {
-            runtime_update::validate_pairing_lifecycle_state(state, marker)?;
-        }
-        (Some(migration), styx_contracts::management::ReaderContract::NativeMigratedStateV1)
-            if state.revision > 0
-                && migration.original_token_relative_path
-                    == format!(
-                        "device/.styx-retired-host-token-{}",
-                        migration.transaction_id.as_str()
-                    ) => {}
-        (None, styx_contracts::management::ReaderContract::NativeMigratedStateV2) => {
-            let migration = migration_v2
-                .as_ref()
-                .ok_or(NativeStateRuleError::InvalidState)?;
-            if migration.schema != 2
-                || state.revision == 0
-                || migration.root_identity != marker.root_identity
-                || migration.original_token_relative_path
-                    != format!(
-                        "device/.styx-retired-host-token-{}",
-                        migration.transaction_id.as_str()
-                    )
-            {
-                return Err(NativeStateRuleError::InvalidState);
-            }
-            match (&migration.history, migration.endpoint_mode, state.mode) {
-                (
-                    NativeMigrationHistory::PreservedHostPair {
-                        source_bindings_sha256,
-                    },
-                    NativeMigrationEndpointMode::PreservedRemote,
-                    NativeDeploymentMode::JoinExisting,
-                ) if state.desired.gateway.is_none()
-                    && state.desired.host.is_some()
-                    && *source_bindings_sha256 == migration.host_pair_sha256 => {}
-                (
-                    NativeMigrationHistory::ImportedLocalGateway { .. },
-                    NativeMigrationEndpointMode::IssuedLocal,
-                    NativeDeploymentMode::CreateLocal,
-                ) if state.desired.gateway.is_some() => {}
-                _ => return Err(NativeStateRuleError::InvalidState),
-            }
-        }
-        _ => return Err(NativeStateRuleError::InvalidState),
-    }
+    runtime_update::validate_runtime_state(state)?;
     match (state.revision, state.last_transaction.as_ref()) {
         (0, None) => (),
         (1.., Some(tx)) if tx.sequence > 0 => (),
@@ -150,8 +48,10 @@ pub fn validate_state(
         .iter()
         .chain(state.desired.host.iter())
     {
-        if component.manager == NativeManager::ForegroundCli
-            && component.autostart == NativeAutostartDesired::Enabled
+        if (component.manager == NativeManager::ForegroundCli
+            && component.autostart == NativeAutostartDesired::Enabled)
+            || (component.manager == NativeManager::PersistentService
+                && !matches!(marker.root_identity, NativeRootIdentity::Linux { .. }))
         {
             return Err(NativeStateRuleError::InvalidState);
         }
@@ -176,12 +76,9 @@ pub fn validate_transition(
                 .checked_add(1)
                 .ok_or(NativeStateRuleError::InvalidTransition)?
         || target.schema != before.schema
-        || target.reader_contract != before.reader_contract
         || target.mode != before.mode
-        || target.migration != before.migration
         || target.deployment_raw_sha256 != before.deployment_raw_sha256
         || target.deployment_raw_sha256 != intent.deployment_raw_sha256
-        || target.reader_contract != intent.reader
         || tx.transaction_id != intent.transaction_id
         || tx.sequence != intent.sequence
         || before
@@ -231,11 +128,9 @@ fn runtime_policy_compatible(before: &NativeState, target: &NativeState, follow_
     before.schema == target.schema
         && before.kind == target.kind
         && before.runtime_format == target.runtime_format
-        && before.reader_contract == target.reader_contract
         && before.scope_generation == target.scope_generation
         && before.deployment_raw_sha256 == target.deployment_raw_sha256
         && before.mode == target.mode
-        && before.migration == target.migration
         && before.extensions_preserved_in(target)
         && role(before.desired.host, target.desired.host, follow_run)
         && role(before.desired.gateway, target.desired.gateway, follow_run)
@@ -243,8 +138,4 @@ fn runtime_policy_compatible(before: &NativeState, target: &NativeState, follow_
 
 #[path = "runtime_update.rs"]
 mod runtime_update;
-pub use runtime_update::{
-    validate_app_runtime_transition, validate_app_service_transfer_transition,
-    validate_committed_transition, validate_runtime_transition,
-    validate_service_runtime_repair_transition,
-};
+pub use runtime_update::{validate_committed_transition, validate_runtime_transition};

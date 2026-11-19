@@ -25,17 +25,15 @@ import SwiftUI
         for item in submenu.items { item.isEnabled = item.action == #selector(NSText.paste(_:)) }
     }
     app.mainMenu = menu
-    let model = try ProductModel(sessionURL: URL(string: "http://127.0.0.1:1/#session=" + String(repeating: "a", count: 43))!)
+    var requests = 0
+    let model = ProductModel(testRequest: { _, _ in requests += 1; throw ProductCoreError.unavailable })
     model.loaded = true; model.page = .chat
-    model.status = .object(["deployment": .object(["mode": .string("create-local"), "steps": .array([])])])
-    model.journey = .object(["steps": .array([.object(["id": .string("local_setup"), "status": .string("completed")])]), "tunnel": .object(["status": .string("not_configured")])])
-    model.session = .object(["tunnelSupported": .bool(true)])
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 720), styleMask: [.titled, .closable], backing: .buffered, defer: false)
     window.isReleasedWhenClosed = false
     let host = NSHostingView(rootView: ProductTunnelEditor(model: model))
     window.contentView = host; window.makeKeyAndOrderFront(nil); app.activate(ignoringOtherApps: true)
     let board = NSPasteboard.withUniqueName()
-    defer { model.runtimeKey = ""; model.tunnelID = ""; window.close(); app.mainMenu = prior; board.releaseGlobally() }
+    defer { model.tunnelID = ""; window.close(); app.mainMenu = prior; board.releaseGlobally() }
     @MainActor func checkEditing() throws {
         func fields(_ view: NSView) -> [NSTextField] {
             (view as? NSTextField).map { $0.isEditable ? [$0] : [] } ?? view.subviews.flatMap(fields)
@@ -73,7 +71,7 @@ import SwiftUI
             _ = window.makeFirstResponder(nil)
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
             try require(field.stringValue == sample)
-            try require(model.runtimeKey.isEmpty)
+            try require(requests == 0)
         }
         try require(secure is NSSecureTextField)
         guard let fileMenu = menu.items.compactMap(\.submenu).first(where: { $0.items.contains(where: { $0.action == #selector(NSWindow.performClose(_:)) }) }),

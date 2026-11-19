@@ -19,10 +19,10 @@ const DEPLOYMENT: &[u8] =
     b"{\"synthetic_native_transaction\":true,\"opaque\":900719925474099312345}\n";
 fn genesis(marker: &NativeRootMarker) -> NativeState {
     NativeState {
-        schema: 2,
+        schema: NATIVE_STATE_SCHEMA,
         kind: NativeStateKind::StyxDesiredState,
         runtime_format: NativeRuntimeFormat::NativeRustV1,
-        reader_contract: ReaderContract::NativeManagementStateV1,
+        reader_contract: ReaderContract::NativeStateV1,
         scope_generation: marker.scope_generation,
         deployment_raw_sha256: Sha256Digest::of_bytes(DEPLOYMENT),
         mode: NativeDeploymentMode::JoinExisting,
@@ -36,7 +36,6 @@ fn genesis(marker: &NativeRootMarker) -> NativeState {
                 autostart: NativeAutostartDesired::Disabled,
             }),
         },
-        migration: None,
         extensions: BTreeMap::from([(
             "opaque_extension".into(),
             serde_json::value::RawValue::from_string(

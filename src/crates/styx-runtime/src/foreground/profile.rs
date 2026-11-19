@@ -417,10 +417,12 @@ impl LoadedProfile {
             let raw = root
                 .read_raw(&o.relative, o.max)
                 .map_err(|_| ProfileError::Changed)?;
-            if raw.sha256() != o.digest.to_hex()
-                && !(o.relative == Path::new("state.json")
-                    && self.service_canonical_matches(&root, &raw)?)
-            {
+            let matches = raw.sha256() == o.digest.to_hex();
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            let matches = matches
+                || (o.relative == Path::new("state.json")
+                    && self.service_canonical_matches(&root, &raw)?);
+            if !matches {
                 return Err(ProfileError::Changed);
             }
         }
@@ -498,40 +500,22 @@ fn origin(raw: &str, scheme: &str) -> Result<url::Url, ProfileError> {
     }
     Ok(u)
 }
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 impl LoadedProfile {
     fn service_canonical_matches(
         &self,
         root: &PrivateRoot,
         raw: &crate::store::RawFile,
     ) -> Result<bool, ProfileError> {
-        #[cfg(any(
-            all(target_os = "linux", target_env = "gnu"),
-            target_os = "macos",
-            target_os = "windows"
-        ))]
-        {
-            self.snapshot
-                .service_canonical_matches(root, raw)
-                .map(|matched| matched == Some(true))
-                .map_err(service_tip_error)
-        }
-        #[cfg(not(any(
-            all(target_os = "linux", target_env = "gnu"),
-            target_os = "macos",
-            target_os = "windows"
-        )))]
-        {
-            let _ = (root, raw);
-            Err(ProfileError::Unsupported)
-        }
+        self.snapshot
+            .service_canonical_matches(root, raw)
+            .map(|matched| matched == Some(true))
+            .map_err(service_tip_error)
     }
 }
+
 fn journal_profile_error(error: crate::store::enrollment::JournalError) -> ProfileError {
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     match error {
         crate::store::enrollment::JournalError::ConfigurationPending => {
             return ProfileError::ManagementBusy;
@@ -544,11 +528,7 @@ fn journal_profile_error(error: crate::store::enrollment::JournalError) -> Profi
     let _ = error;
     ProfileError::Changed
 }
-#[cfg(any(
-    all(target_os = "linux", target_env = "gnu"),
-    target_os = "macos",
-    target_os = "windows"
-))]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn service_tip_error(error: crate::store::native_live_tip::LiveTipError) -> ProfileError {
     use crate::store::native_live_tip::LiveTipError;
     match error {
@@ -585,29 +565,10 @@ pub(crate) fn load_for_app_retained(
 }
 /// Only the native OS manager can supply this opaque scope. A CLI argument or
 /// environment variable cannot adopt the service's profile or execution lease.
-#[cfg(any(
-    all(target_os = "linux", target_env = "gnu"),
-    target_os = "macos",
-    target_os = "windows"
-))]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub(crate) fn load_for_service(
     scope: Arc<crate::platform::native_service::ServiceScope>,
 ) -> Result<LoadedProfile, ProfileError> {
-    use crate::platform::native_service::ServiceRole;
-    use styx_contracts::management::ReaderContract;
-    scope.validate().map_err(|_| ProfileError::Changed)?;
-    if scope.role() != ServiceRole::Host {
-        return Err(ProfileError::Invalid);
-    }
-    let root = PrivateRoot::open(scope.state_dir()).map_err(|_| ProfileError::ProtectedRead)?;
-    let raw = root
-        .read_raw(".styx-native-root-v1.json", 4096)
-        .map_err(|_| ProfileError::Changed)?;
-    let marker = crate::store::native_state::decode_marker(raw.bytes())
-        .map_err(|_| ProfileError::Changed)?;
-    if marker.reader_floor != ReaderContract::NativeManagementStateV1 {
-        return Err(ProfileError::Invalid);
-    }
     fresh::load_for_service(scope)
 }
 /// Load the native Host profile used by the CLI. Old JavaScript deployment

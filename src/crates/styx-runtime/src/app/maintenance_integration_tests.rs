@@ -243,11 +243,6 @@ async fn native_gui_computer_management_keeps_binding_and_local_identity() {
     let request = guest.dispatch(Operation::Join, raw(json!({"label":"GUI guest","computer":false,"browser":false,"persistLogin":false,
         "approvedGatewayOrigin":inspected["preview"]["origin"],"approvedCaSha256":inspected["preview"]["caSha256"]}))).await.unwrap();
     assert_eq!(request["status"], "ready_to_connect");
-    let pending = hub
-        .dispatch(Operation::PendingComputers, raw(json!({})))
-        .await
-        .unwrap();
-    assert!(pending["pending"].as_array().unwrap().is_empty());
     let listed = hub
         .dispatch(Operation::Computers, raw(json!({})))
         .await
@@ -577,11 +572,6 @@ async fn reopened_app_gateway_uses_current_bundle_after_old_payload_is_removed()
             .await
             .unwrap();
         assert_eq!(after, before);
-        assert!(
-            native_gateway_admin::pairing_rejection_supported_for_app(gateway_scope.clone())
-                .await
-                .unwrap()
-        );
         let invitation = app
             .local_gateway
             .as_mut()

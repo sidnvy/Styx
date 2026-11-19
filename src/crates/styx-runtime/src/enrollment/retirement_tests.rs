@@ -158,7 +158,6 @@ mod linux {
                 .unwrap();
             commit(&mut j, &mut ledger, &control, &approval, &mut head);
         }
-        drop(j);
         drop(writer);
         drop(root);
         (path, result, pairing, expiries)

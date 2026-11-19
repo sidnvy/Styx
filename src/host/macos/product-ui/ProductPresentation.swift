@@ -75,41 +75,6 @@ struct ProductCapabilityLabel: View {
         }
     }
 }
-enum ProductFeatureSelection: Equatable {
-    case selected, notSelected, notConfigured, unknown
-    static func observed(_ value: ProductJSON, unconfigured: Bool) -> Self {
-        if unconfigured { return .notConfigured }
-        switch value {
-        case .bool(true): return .selected
-        case .bool(false): return .notSelected
-        default: return .unknown
-        }
-    }
-    var title: String {
-        switch self {
-        case .selected: return productText("已选择", "Selected")
-        case .notSelected: return productText("未选择", "Not selected")
-        case .notConfigured: return productText("尚未设置", "Not configured")
-        case .unknown: return productText("暂时无法获取状态", "Status unavailable")
-        }
-    }
-}
-struct ProductNativeOptionalCapabilities: View {
-    let selected: ProductJSON
-    let unconfigured: Bool
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            row(.computer, key: "computer")
-            row(.browser, key: "browser")
-        }
-    }
-    private func row(_ kind: ProductCapabilityKind, key: String) -> some View {
-        let title = kind.title + ": " + ProductFeatureSelection.observed(selected[key], unconfigured: unconfigured).title
-        return Label(title, systemImage: kind.symbol)
-            .fixedSize(horizontal: false, vertical: true)
-            .accessibilityIdentifier("styx-settings-capability-" + key)
-    }
-}
 enum ProductTunnelInputPolicy {
     static func tunnelError(_ value: String) -> String? {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -126,235 +91,59 @@ enum ProductTunnelInputPolicy {
         return nil
     }
 }
-enum ProductChatVerification: Equatable {
-    case pending, partial, verified, confirmed, expired, needsRetest, contextChanged
-    static func observed(_ acceptance: ProductJSON, contextChanged: Bool) -> Self {
-        if contextChanged { return .contextChanged }
-        if acceptance["status"].string == "acceptance_context_changed" { return .needsRetest }
-        if acceptance["complete"].bool { return .confirmed }
-        if acceptance["status"].string == "acceptance_expired" { return .expired }
-        let exec = acceptance["requestProof"]["status"].string == "verified"
-        let browser = acceptance["browser"]["status"].string ?? ""
-        let desktop = acceptance["desktop"]["status"].string ?? ""
-        if exec && ["verified", "not_required"].contains(browser) && ["verified", "not_required"].contains(desktop) { return .verified }
-        if exec || browser == "verified" || desktop == "verified" { return .partial }
-        return .pending
-    }
-    var hasRequest: Bool { [.partial, .verified, .confirmed].contains(self) }
-    var proofComplete: Bool { self == .verified || self == .confirmed }
-    var allowsNewTest: Bool { !proofComplete && self != .contextChanged }
-    var usesCurrentTest: Bool { ![.expired, .needsRetest, .contextChanged].contains(self) }
-    var label: String {
-        switch self {
-        case .verified, .confirmed: return productText("各项功能测试通过", "All feature tests passed")
-        case .partial: return productText("部分测试已完成", "Some tests completed")
-        case .expired: return productText("这条测试消息已过期", "This test message has expired")
-        case .needsRetest: return productText("请重新测试这台电脑", "Test this computer again")
-        case .contextChanged: return productText("请先更新插件的连接信息", "Update the plugin connection first")
-        case .pending: return productText("从 ChatGPT 试用这台电脑", "Try this computer from ChatGPT")
-        }
-    }
-}
 extension ProductModel {
-    var chatVerification: ProductChatVerification { .observed(acceptance, contextChanged: plugin["contextChanged"].bool) }
-    var needsPluginSetup: Bool {
-        chatVerification == .contextChanged || (chatVerification == .pending && plugin["accountActions"]["installation"].string != "user_confirmed")
-    }
-    var chatReady: Bool {
-        chatIndicator == .connected && localIndicator == .connected && chatVerification.proofComplete
-            && (!computerApproved || axGranted && screenGranted)
-    }
-    var chatStatusTitle: String {
-        if chatIndicator == .unknown { return productText("暂时无法获取连接状态", "Connection status unavailable") }
-        if chatReady { return productText("已就绪", "Ready to use") }
-        if chatIndicator == .connected { return productText("连接已建立", "Connection established") }
-        if tunnelConnection == .connected && chatVerification == .contextChanged { return productText("插件连接需要更新", "Plugin connection needs updating") }
-        return tunnelFeedback
-    }
-    var chatNextStep: String {
-        if observationError != nil { return productText("暂时无法获取最新状态，请点击“重新检查”。", "The latest state is unavailable. Select Check again.") }
-        if localIndicator != .connected { return productText("这台电脑尚未就绪，请先完成“电脑”中的设置。", "Finish setting up this computer in Computers first.") }
-        if computerApproved && (!axGranted || !screenGranted) { return productText("操作电脑需要系统权限。请在“电脑”中开启辅助功能和屏幕录制。", "Computer interaction needs system permissions. Enable Accessibility and Screen Recording in Computers.") }
-        switch chatVerification {
-        case .confirmed, .verified: return productText("在 ChatGPT 中选择 Styx，即可使用这台电脑。", "Select Styx in ChatGPT to use this computer.")
-        case .partial: return productText("ChatGPT 已成功使用部分功能。打开“试用 Styx”查看进度。", "ChatGPT has used some features successfully. Open Try Styx to see progress.")
-        case .expired: return productText("在 ChatGPT 中选择 Styx。需要检查各项功能时，可以重新试用。", "Select Styx in ChatGPT. You can run a new test to check its features.")
-        case .needsRetest: return productText("之前的测试结果已失效。打开“试用 Styx”重新测试，无需更改插件连接。", "Previous test results are no longer current. Open Try Styx to test again without changing the plugin connection.")
-        case .contextChanged: return productText("连接信息已更改。请在 ChatGPT 中更新已有 Styx 的连接。", "Connection details changed. Update the existing Styx connection in ChatGPT.")
-        case .pending:
-            if !needsPluginSetup { return productText("打开“试用 Styx”，从 ChatGPT 检查这台电脑的功能。", "Open Try Styx to test this computer from ChatGPT.") }
-            return productText("接下来在 ChatGPT 安装 Styx。已经安装的话，可以直接试用。", "Next, install Styx in ChatGPT. If it is already installed, you can try it now.")
-        }
-    }
     var localIndicator: ProductConnectionIndicator {
         guard loaded, observationError == nil else { return .unknown }
-        if nativeHost {
-            if status["admission_fenced"].bool { return .attention }
-            switch status["foreground"]["execConnection"].string {
-            case "connected": return .connected
-            case "disconnected": return .offline
-            case "connecting": return .attention
-            default: return .unknown
-            }
-        }
-        guard localPrepared else { return .attention }
-        switch status["foreground"]["status"].string {
-        case "connected", "using_service": return .connected
-        case "not_running": return .offline
-        case "needs_attention", "stopping": return .attention
+        if status["admission_fenced"].bool { return .attention }
+        switch status["foreground"]["execConnection"].string {
+        case "connected": return .connected
+        case "disconnected": return .offline
+        case "connecting": return .attention
         default: return .unknown
         }
     }
-    var chatIndicator: ProductConnectionIndicator {
-        if observationError != nil { return .unknown }
-        if tunnelAttempt == .connecting { return .attention }
-        if tunnelConnection == .unknown { return .unknown }
-        // This dot reports the current connection, not the lifetime of a test
-        // challenge or whether the user has confirmed seeing its results.
-        if tunnelConnection == .connected && chatVerification != .contextChanged { return .connected }
-        if tunnelConnection == .notConfigured { return .offline }
-        return .attention
-    }
-    var chatMenuTitle: String {
-        if tunnelConnection == .notConfigured { return productText("连接 ChatGPT", "Connect ChatGPT") }
-        if tunnelConnection == .connected && chatVerification == .contextChanged { return productText("更新 ChatGPT 连接", "Update ChatGPT connection") }
-        // Keep navigation stable while reconnecting or when a read fails. The
-        // adjacent indicator and Settings explain the current connection state.
-        return "ChatGPT"
-    }
     var hasSavedRuntimeKey: Bool {
-        ["configured", "running", "interrupted"].contains(journey["tunnel"]["status"].string ?? "")
-    }
-    var ingressCandidates: [String] { ingress["candidates"].array.compactMap(\.string) }
-    var ingressNeedsRecovery: Bool { ["preparing", "running", "needs_reconciliation"].contains(ingressSetup["status"].string ?? "") }
-    var ingressRecoveryBlocked: Bool { ["recovery_guard", "observation_unavailable"].contains(ingressSetup["phase"].string ?? "") }
-    var joiningComparisonCode: String? {
-        status["deployment"]["steps"].array.first(where: { $0["id"].string == "host.request" })?["comparison_code"].string
-    }
-    func invitationOperation(_ operation: @escaping () async throws -> Void) {
-        perform { [self] in
-            invitationInFlight = true; invitationError = nil
-            defer { invitationInFlight = false }
-            do { try await operation() }
-            catch {
-                // A timed-out write is uncertain. Read its journal before showing
-                // recovery; never replay preparation or publish an old invitation.
-                createdInvitation = .null; invitationCopied = false
-                if nativeHost { invitationError = productText("邀请未能完成。请检查连接状态；不会自动重新发送。", "The invitation did not complete. Check the connection status; it will not be resent automatically."); return }
-                if let observed = try? await client.write("device-ingress/status", [:])["setup"] { ingressSetup = observed }
-                else { ingressSetup = .object(["status": .string("needs_reconciliation"), "phase": .string("observation_unavailable")]) }
-                invitationError = productText("未能完成。请检查网络后重试；如果准备中断，请先恢复或撤回。", "Could not finish. Check your network and try again. If preparation was interrupted, resume or undo it first.")
-            }
-        }
-    }
-    func readInvitationPlan() async throws {
-        ingressSetup = try await client.write("device-ingress/status", [:])["setup"]
-        ingress = try await client.write("device-ingress/plan", [:])["ingress"]
-        if !ingressCandidates.contains(selectedIngressAddress) { selectedIngressAddress = "" }
+        ["configured", "running", "interrupted"].contains(tunnel["status"].string ?? "")
     }
     func beginDeviceInvitation() {
         invitationExpanded = true
         guard !busy else { return }
         if let expiry = createdInvitation["expiresAt"].number, expiry > Date().timeIntervalSince1970 * 1000 { return }
-        invitationOperation { [self] in
-            invitationClosed = false; createdInvitation = .null; invitationCopied = false
-            if nativeHost {
-                guard status["gateway"]["lan"]["enabled"].bool else {
-                    invitationError = productText("此管理电脑尚未启用局域网。首次设置时选择允许其他电脑加入并填写本机的私有网络地址。", "LAN joining is not configured. During setup, enable other computers to join and enter this hub's private network address.")
-                    return
-                }
-                createdInvitation = try await client.native("inviteComputer", ["authorize": .bool(true)])
+        perform { [self] in
+            invitationInFlight = true; invitationError = nil
+            createdInvitation = .null; invitationCopied = false
+            defer { invitationInFlight = false }
+            guard status["gateway"]["lan"]["enabled"].bool else {
+                invitationError = productText("此管理电脑尚未启用局域网。首次设置时选择允许其他电脑加入并填写本机的私有网络地址。", "LAN joining is not configured. During setup, enable other computers to join and enter this hub's private network address.")
                 return
             }
-            try await readInvitationPlan()
-            guard !ingressNeedsRecovery, ingress["blockers"].array.isEmpty else { return }
-            if ingress["requiresInterfaceChoice"].bool && !ingressCandidates.contains(selectedIngressAddress) { return }
-            var options: [String: ProductJSON] = ["authorize": .bool(true)]
-            if ingress["requiresInterfaceChoice"].bool { options["listenHost"] = .string(selectedIngressAddress) }
-            if ingress["nextAction"].string == "prepare_additional_entry" {
-                _ = try await client.write("device-ingress/prepare", options)
-                ingressSetup = try await client.write("device-ingress/status", [:])["setup"]
-                guard ingressSetup["status"].string == "applied" else { throw ProductCoreError.unavailable }
+            do { createdInvitation = try await client.native("inviteComputer", ["authorize": .bool(true)]) }
+            catch {
+                invitationError = productText("邀请未能完成。请检查连接状态；不会自动重新发送。", "The invitation did not complete. Check the connection status; it will not be resent automatically.")
             }
-            // The Gateway may open its window before the response is lost.
-            // Keep close available until Core confirms that window is closed.
-            invitationWindowOpen = true
-            createdInvitation = try await client.write("pairing-link/create", options)
         }
-    }
-    func recoverDeviceInvitation(_ action: String) {
-        guard ["retry", "rollback"].contains(action), !ingressRecoveryBlocked else { return }
-        invitationOperation { [self] in
-            ingressSetup = try await client.write("device-ingress/recover", ["authorize": .bool(true), "action": .string(action)])["setup"]
-            try await readInvitationPlan()
-            if action == "rollback" { invitationClosed = true; invitationWindowOpen = false }
-            // Recovery never silently creates a new invitation.
-        }
-    }
-    func confirmIngressRollback() {
-        let alert = NSAlert()
-        alert.messageText = productText("撤回这次连接准备？", "Undo this connection setup?")
-        alert.informativeText = productText("使用这个新增入口的电脑会断开。原聊天连接和这台 Mac 的连接不受影响。", "Computers using this added connection will disconnect. Your existing chat connection and this Mac's connection remain available.")
-        alert.addButton(withTitle: productText("撤回准备", "Undo setup")); alert.addButton(withTitle: productText("取消", "Cancel"))
-        if alert.runModal() == .alertFirstButtonReturn { recoverDeviceInvitation("rollback") }
     }
     func closeDeviceInvitation(completion: @escaping () -> Void = {}) {
         guard !busy else { return }
-        if nativeHost { clearSecrets(); invitationExpanded = false; completion(); return }
-        if !invitationWindowOpen { invitationExpanded = false; completion(); return }
-        invitationOperation { [self] in
-            let result = try await client.write("pairing-link/close", ["authorize": .bool(true)])
-            guard result["ingress"]["pairing"]["status"].string == "closed" else { throw ProductCoreError.invalidResponse }
-            createdInvitation = .null; invitationCopied = false; invitationWindowOpen = false
-            invitationClosed = true; invitationExpanded = false; completion()
+        clearSecrets(); invitationExpanded = false; completion()
+    }
+    var tunnelFeedback: String {
+        if tunnelAttempt == .connecting { return productText("正在连接到 OpenAI…", "Connecting to OpenAI…") }
+        if tunnelConnection == .connected { return productText("已连接到 OpenAI", "Connected to OpenAI") }
+        switch tunnelAttempt {
+        case .connecting: return productText("正在连接到 OpenAI…", "Connecting to OpenAI…")
+        case .failed: return productText("连接未能完成", "Connection did not complete")
+        case .timedOut: return productText("未能确认连接，请检查后重试", "Connection could not be confirmed. Check and retry")
+        case .idle:
+            switch tunnelConnection {
+            case .notConfigured: return productText("尚未设置 OpenAI 连接", "OpenAI connection is not configured")
+            case .connecting: return productText("正在连接到 OpenAI…", "Connecting to OpenAI…")
+            case .stopped: return productText("OpenAI 连接已停止", "OpenAI connection is stopped")
+            case .unavailable: return productText("OpenAI 连接尚未就绪", "OpenAI connection is not ready")
+            default: return productText("暂时无法确认连接状态", "Connection status could not be confirmed")
+            }
         }
     }
-    func confirmPendingIdentity(_ request: ProductJSON) {
-        guard !busy, let code = request["comparison_code"].string else { return }
-        let alert = NSAlert()
-        alert.messageText = productText("两台电脑的配对码是否一致？", "Do both computers show the same pairing code?")
-        alert.informativeText = (request["label"].string ?? "Styx") + "\n\n" + code
-        if nativeHost {
-            guard let deviceID = request["device_id"].string, !deviceID.isEmpty,
-                  let fingerprint = request["fingerprint"].string, !fingerprint.isEmpty,
-                  let requestID = request["request_id"].string, !requestID.isEmpty else { return }
-            alert.informativeText += "\n\n" + productText("电脑 ID：", "Device ID: ") + deviceID
-                + "\n" + productText("公钥指纹：", "Public key fingerprint: ") + fingerprint
-                + "\n" + productText("申请 ID：", "Request ID: ") + requestID
-        }
-        alert.addButton(withTitle: productText("一致，批准申请", "Match — approve request"))
-        let canReject = nativeHost && nativeSupportsOperation("rejectComputer")
-        if canReject { alert.addButton(withTitle: productText("拒绝此次申请", "Reject this request")) }
-        alert.addButton(withTitle: productText("取消比较", "Cancel comparison"))
-        alert.buttons.last?.keyEquivalent = "\u{1b}"
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            selectedPending = request; comparisonConfirmation = code
-            approvePending()
-        case .alertSecondButtonReturn where canReject:
-            rejectPending(request)
-        default:
-            return // Cancelling comparison never records a rejection.
-        }
-    }
-    func rejectPending(_ request: ProductJSON) {
-        guard nativeHost, nativeSupportsOperation("rejectComputer"), !busy,
-              let requestID = request["request_id"].string, !requestID.isEmpty,
-              let deviceID = request["device_id"].string, !deviceID.isEmpty,
-              let fingerprint = request["fingerprint"].string, !fingerprint.isEmpty,
-              let code = request["comparison_code"].string, !code.isEmpty else { return }
-        // Capture the exact request shown in this comparison. Polling cannot
-        // substitute another pending identity after the user's decision.
-        let rejection: [String: ProductJSON] = ["authorize": .bool(true),
-            "requestId": .string(requestID), "deviceId": .string(deviceID),
-            "fingerprint": .string(fingerprint), "comparisonCode": .string(code)]
-        perform { [self] in
-            _ = try await client.write("pending/reject", rejection)
-            selectedPending = .null; comparisonConfirmation = ""
-            pending = try await client.write("pending/list", ["authorize": .bool(true)])["pending"].array
-        }
-    }
-
 }
 
 struct ProductMenuRow: View {
@@ -381,6 +170,7 @@ struct ProductMenuRow: View {
             .accessibilityLabel(title + (state.map { ", " + $0.label } ?? ""))
     }
 }
+
 struct ProductDailyPanel: View {
     @ObservedObject var model: ProductModel
     weak var controller: ProductWindowController?
@@ -419,37 +209,7 @@ struct ProductDailyPanel: View {
             if !model.loaded {
                 ProgressView(model.loadingMessage).padding(16)
                 if model.error != nil { Button(productText("重试", "Retry")) { Task { await model.bootstrap() } } }
-            } else if model.nativeHost {
-                nativeRows
-            } else if model.deployment == nil {
-                ProductMenuRow(title: productText("开始设置", "Get started"), symbol: "sparkles") { controller?.showOnboarding() }
-                ProductMenuRow(title: productText("加入已有 Styx", "Join an existing Styx"), symbol: "link") {
-                    model.joining = true; model.page = .invitation; controller?.showOnboarding()
-                }
-            } else {
-                ProductMenuRow(title: productText("这台 Mac", "This Mac"), symbol: "laptopcomputer", state: model.localIndicator, disclosure: true) { showSettings(.computers) }
-                Divider().padding(.vertical, 5)
-                if model.joined {
-                    ProductMenuRow(title: productText("管理电脑连接", "Main computer"), symbol: "link", state: model.localIndicator, disclosure: true) { showSettings(.computers) }
-                } else {
-                    Text(productText("电脑", "Computers")).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 5)
-                    ForEach(model.devices.filter { !$0.isLocal }) { device in
-                        ProductMenuRow(title: device.label, symbol: device.platform == "win32" ? "desktopcomputer" : "laptopcomputer", state: model.menuObservationFailed ? .unknown : device.indicator, disclosure: true) {
-                            model.selectedDeviceID = device.id; showSettings(.computers)
-                        }
-                    }
-                    ProductMenuRow(title: productText("添加电脑", "Add computer"), symbol: "plus") {
-                        if model.invitationExpanded { model.closeDeviceInvitation() }
-                        else { model.beginDeviceInvitation() }
-                    }.foregroundStyle(Color.accentColor)
-                    if model.invitationExpanded { ProductInvitationView(model: model); ProductPendingIdentities(model: model) }
-                    Divider().padding(.vertical, 5)
-                    ProductMenuRow(title: model.chatMenuTitle, symbol: "globe", state: model.chatIndicator, disclosure: true) { showSettings(.chat) }
-                }
-                if model.localIndicator != .connected && !model.localPrepared {
-                    ProductMenuRow(title: productText("继续设置", "Continue setup"), symbol: "arrow.right") { controller?.showOnboarding() }
-                }
-            }
+            } else { nativeRows }
             Divider().padding(.vertical, 5)
             ProductMenuRow(title: productText("设置", "Settings"), shortcut: "⌘,") { showSettings(.general) }.keyboardShortcut(",", modifiers: .command)
             Divider().padding(.vertical, 3)
@@ -458,6 +218,7 @@ struct ProductDailyPanel: View {
             .task(id: model.menuVisible) { if model.menuVisible { await model.observePresentation() } }
     }
 }
+
 struct ProductInvitationView: View {
     @ObservedObject var model: ProductModel
     var body: some View {
@@ -481,101 +242,21 @@ struct ProductInvitationView: View {
                         }
                     }
                 }
-            } else if model.ingressNeedsRecovery {
-                Text(productText("连接准备中断", "Connection setup was interrupted")).font(.caption.weight(.semibold))
-                if model.ingressRecoveryBlocked {
-                    Text(productText("上次恢复未完成，需要检查后才能继续。请联系 Styx 维护者。", "The previous recovery did not finish and needs inspection. Contact the Styx maintainer.")).font(.caption)
-                    Button(productText("重新检查", "Check again")) { model.beginDeviceInvitation() }
-                } else {
-                    Text(productText("可以继续准备，或撤回这次网络连接更改。", "Resume preparation or undo this network connection change.")).font(.caption).foregroundStyle(.secondary)
-                    HStack {
-                        Button(productText("继续准备", "Resume setup")) { model.recoverDeviceInvitation("retry") }
-                        Button(productText("撤回准备", "Undo setup")) { model.confirmIngressRollback() }
-                    }
-                }
-            } else if !model.ingress["blockers"].array.isEmpty {
-                Text(productText("暂时无法邀请其他电脑", "Cannot invite another computer yet")).font(.caption.weight(.semibold))
-                Text(ProductInvitationPolicy.blockerMessage(model.ingress)).font(.caption).foregroundStyle(.secondary)
-                Button(productText("重新检查", "Check again")) { model.beginDeviceInvitation() }
-            } else if model.ingress["requiresInterfaceChoice"].bool {
-                Text(productText("选择另一台电脑能够访问的网络地址。", "Choose the network address the other computer can reach.")).font(.caption)
-                Picker(productText("网络地址", "Network address"), selection: $model.selectedIngressAddress) {
-                    Text(productText("选择地址", "Choose an address")).tag("")
-                    ForEach(model.ingressCandidates, id: \.self) { Text($0).tag($0) }
-                }
-                Button(productText("创建邀请", "Create invitation")) { model.beginDeviceInvitation() }.disabled(!model.ingressCandidates.contains(model.selectedIngressAddress))
-            } else if model.invitationClosed {
-                Text(productText("邀请已关闭", "Invitation closed")).font(.caption)
-                Button(productText("创建新邀请", "Create new invitation")) { model.beginDeviceInvitation() }
             } else {
                 Button(productText("创建邀请", "Create invitation")) { model.beginDeviceInvitation() }
             }
             if let error = model.invitationError { Text(error).font(.caption).foregroundStyle(.red) }
-            if model.invitationWindowOpen || model.nativeHost && model.invitationExpanded {
-                Button(model.nativeHost ? productText("关闭面板", "Close panel") : productText("关闭邀请", "Close invitation")) { model.closeDeviceInvitation() }
+            if model.invitationExpanded {
+                Button(productText("关闭面板", "Close panel")) { model.closeDeviceInvitation() }
                 Text(productText("已连接的电脑仍可使用。", "Connected computers remain available.")).font(.caption2).foregroundStyle(.secondary)
             }
         }.padding(10).accessibilityIdentifier("styx-invitation-content").disabled(model.busy)
     }
 }
-struct ProductPendingIdentities: View {
-    @ObservedObject var model: ProductModel
-    var body: some View {
-        ForEach(model.pending.compactMap(ProductPendingIdentity.init)) { identity in
-            let request = identity.value
-            VStack(alignment: .leading, spacing: 8) {
-                Text(productText("连接", "Connect") + " " + (request["label"].string ?? productText("新电脑", "New computer")) + "?").font(.headline)
-                Text(productText("核对另一台电脑上显示的配对码。", "Compare the pairing code shown on the other computer.")).font(.caption).foregroundStyle(.secondary)
-                if let code = request["comparison_code"].string {
-                    Text(code).font(.system(.body, design: .monospaced)).textSelection(.enabled)
-                    Button(productText("核对配对码", "Verify pairing code")) { model.confirmPendingIdentity(request) }.buttonStyle(.borderedProminent).disabled(model.busy)
-                } else {
-                    Text(productText("等待配对码，请重新检查。", "Waiting for the pairing code. Check again.")).font(.caption)
-                    Button(productText("重新检查", "Check again")) { model.loadPending() }.disabled(model.busy)
-                }
-            }.padding(10)
-        }
-    }
-}
-struct ProductPendingIdentity: Identifiable {
-    let id: String
-    let value: ProductJSON
-    init?(_ value: ProductJSON) {
-        guard let request = value["request_id"].string, let fingerprint = value["fingerprint"].string else { return nil }
-        id = request + ":" + fingerprint; self.value = value
-    }
-}
-extension ProductModel {
-    func refreshMenu() async {
-        #if STYX_TESTING
-        if testSuppressObservations { return }
-        #endif
-        if nativeHost { await refresh(); return }
-        guard !busy, loaded, deployment != nil else { return }
-        guard !observationInFlight else { return }
-        await refresh()
-        guard !busy, !observationInFlight else { return }
-        let revision = mutationRevision
-        observationInFlight = true; defer { observationInFlight = false }
-        guard observationError == nil else { publish(\.menuObservationFailed, true); return }
-        guard !busy, !joined else { return }
-        // A read operation against the current owner; never creates pairing or
-        // infers online from desired configuration.
-        do {
-            let observedDevices = try await client.write("devices", [:])["devices"].array.compactMap(ProductDevice.init)
-            let observedPending = invitationExpanded ? try await client.write("pending/list", ["authorize": .bool(true)])["pending"].array : pending
-            guard revision == mutationRevision, !Task.isCancelled else { return }
-            publish(\.devices, observedDevices); publish(\.pending, observedPending)
-        } catch { publish(\.menuObservationFailed, true); return }
-        publish(\.menuObservationFailed, false)
-    }
-}
 
-// Attempt feedback is separate from observed transport and account acceptance.
 enum ProductTunnelAttempt: Equatable { case idle, connecting, failed, timedOut }
 struct ProductTunnelStatus: View {
     @ObservedObject var model: ProductModel
-    var showNextStep = true
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -583,29 +264,8 @@ struct ProductTunnelStatus: View {
                 else { Image(systemName: model.tunnelConnection == .connected ? "globe" : "exclamationmark.circle").foregroundStyle(model.tunnelConnection == .connected ? Color.green : Color.secondary) }
                 Text(model.tunnelFeedback).font(.callout)
             }.accessibilityElement(children: .combine)
-            if showNextStep && model.tunnelConnection == .connected {
-                Text(model.chatNextStep).font(.caption).foregroundStyle(.secondary)
-            } else if model.tunnelAttempt == .failed || model.tunnelAttempt == .timedOut || model.tunnelConnection == .unavailable {
+            if model.tunnelAttempt == .failed || model.tunnelAttempt == .timedOut || model.tunnelConnection == .unavailable {
                 Text(productText("请检查网络；也可以编辑 Tunnel ID 和运行密钥后再试。", "Check the network, or edit the Tunnel ID and runtime key, then retry.")).font(.caption).foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-extension ProductModel {
-    var tunnelFeedback: String {
-        if tunnelAttempt == .connecting { return productText("正在连接到 OpenAI…", "Connecting to OpenAI…") }
-        if tunnelConnection == .connected { return productText("已连接到 OpenAI", "Connected to OpenAI") }
-        switch tunnelAttempt {
-        case .connecting: return productText("正在连接到 OpenAI…", "Connecting to OpenAI…")
-        case .failed: return productText("连接未能完成", "Connection did not complete")
-        case .timedOut: return productText("未能确认连接，请检查后重试", "Connection could not be confirmed. Check and retry")
-        case .idle:
-            switch tunnelConnection {
-            case .notConfigured: return productText("尚未设置 OpenAI 连接", "OpenAI connection is not configured")
-            case .connecting: return productText("正在连接到 OpenAI…", "Connecting to OpenAI…")
-            case .stopped: return productText("OpenAI 连接已停止", "OpenAI connection is stopped")
-            case .unavailable: return productText("OpenAI 连接尚未就绪", "OpenAI connection is not ready")
-            default: return productText("暂时无法确认连接状态", "Connection status could not be confirmed")
             }
         }
     }

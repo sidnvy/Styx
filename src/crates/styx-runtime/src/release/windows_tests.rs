@@ -26,7 +26,7 @@ async fn actual_signed_windows_runtime_closure_selection_and_refusals() {
     assert!(!report.installed && !report.runtime_launched);
     assert!(
         verified
-            .supports_state_reader(ReaderContract::NativeMigratedStateV1)
+            .supports_state_reader(ReaderContract::NativeStateV1)
             .unwrap()
     );
     assert!(matches!(

@@ -1,5 +1,4 @@
 //! Versioned native configuration data, never OS/identity/writer authority.
-//! Marker/state schemas intentionally differ from legacy onboarding schema1.
 use crate::{
     identity::{Sha256Digest, TransactionId},
     management::ReaderContract,
@@ -8,13 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const NATIVE_MARKER_SCHEMA: u16 = 1;
-pub const NATIVE_STATE_SCHEMA: u16 = 2;
-/// Only the explicit runtime-selection reader may consume this state schema.
-pub const NATIVE_RUNTIME_SELECTED_STATE_SCHEMA: u16 = 3;
-pub const NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA: u16 = 4;
-pub const NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA: u16 = 5;
-pub const NATIVE_APP_SERVICE_TRANSFERRED_STATE_SCHEMA: u16 = 6;
-pub const NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA: u16 = 7;
+pub const NATIVE_STATE_SCHEMA: u16 = 1;
 pub const NATIVE_MARKER_BYTES: usize = 4096;
 pub const NATIVE_STATE_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,79 +113,6 @@ pub struct NativeStateTransaction {
     pub transaction_id: TransactionId,
     pub sequence: u64,
 }
-/// Durable original-identity bindings, never a runtime/commit authority by DTO.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NativeMigrationBinding {
-    pub transaction_id: TransactionId,
-    pub original_state_sha256: Sha256Digest,
-    pub retired_receipt_sha256: Sha256Digest,
-    pub enrollment_baseline_sha256: Sha256Digest,
-    pub enrollment_committed_sha256: Sha256Digest,
-    pub candidate_manifest_sha256: Sha256Digest,
-    pub publisher_spki_sha256: Sha256Digest,
-    pub preservation_sha256: Sha256Digest,
-    pub scope_bindings_sha256: Sha256Digest,
-    pub original_token_relative_path: String,
-}
-/// Versioned original-identity history; absence of a local Gateway is explicit.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum NativeMigrationHistory {
-    PreservedHostPair {
-        source_bindings_sha256: Sha256Digest,
-    },
-    ImportedLocalGateway {
-        baseline_sha256: Sha256Digest,
-        committed_sha256: Sha256Digest,
-    },
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NativeMigrationEndpointMode {
-    PreservedRemote,
-    IssuedLocal,
-}
-pub const NATIVE_MIGRATION_V2_KEY: &str = "migration_v2";
-/// Typed by the V2 reader only; data does not grant a credential or admission.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NativeMigrationBindingV2 {
-    pub host_pair_sha256: Sha256Digest,
-    pub schema: u16,
-    pub transaction_id: TransactionId,
-    pub root_identity: NativeRootIdentity,
-    pub original_state_sha256: Sha256Digest,
-    pub retired_receipt_sha256: Sha256Digest,
-    pub candidate_manifest_sha256: Sha256Digest,
-    pub publisher_spki_sha256: Sha256Digest,
-    pub preservation_sha256: Sha256Digest,
-    pub scope_bindings_sha256: Sha256Digest,
-    pub original_token_relative_path: String,
-    pub endpoint_mode: NativeMigrationEndpointMode,
-    pub history: NativeMigrationHistory,
-}
-/// Complete original Pair material hashes. No private key/token bytes or grants.
-/// Source binding requires a trusted protected-root reader and real crypto
-/// validation upstream; decoding this attachment cannot mint identity proof.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NativePreservedHostPair {
-    pub schema: u16,
-    pub transaction_id: TransactionId,
-    pub config_root: NativeRootIdentity,
-    pub host_root: NativeRootIdentity,
-    pub deployment_raw_sha256: Sha256Digest,
-    pub device_id: crate::identity::DeviceId,
-    pub fingerprint: Sha256Digest,
-    pub gateway_origin: String,
-    pub gateway_ca_pem_sha256: Sha256Digest,
-    pub identity_json_sha256: Sha256Digest,
-    pub identity_private_pem_sha256: Sha256Digest,
-    pub host_profile_sha256: Sha256Digest,
-    pub credential_sha256: Sha256Digest,
-    pub preservation_sha256: Sha256Digest,
-}
 /// No Debug/automatic logging: unknown extension values can contain secrets.
 /// Formal readers MUST first reject decoded duplicate keys at every depth.
 #[derive(Clone, Serialize)]
@@ -207,26 +127,10 @@ pub struct NativeState {
     pub revision: u64,
     pub last_transaction: Option<NativeStateTransaction>,
     pub desired: NativeDesired,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub migration: Option<NativeMigrationBinding>,
     #[serde(flatten)]
     pub extensions: BTreeMap<String, Box<serde_json::value::RawValue>>,
 }
 impl NativeState {
-    pub fn has_migration_binding(&self) -> bool {
-        self.migration.is_some() || self.reader_contract == ReaderContract::NativeMigratedStateV2
-    }
-    /// No fallback: an explicit V2 reader must consume its typed reserved key.
-    pub fn migration_v2(&self) -> Result<Option<NativeMigrationBindingV2>, serde_json::Error> {
-        // Earlier readers preserve opaque extensions without interpreting V2.
-        if self.reader_contract != ReaderContract::NativeMigratedStateV2 {
-            return Ok(None);
-        }
-        self.extensions
-            .get(NATIVE_MIGRATION_V2_KEY)
-            .map(|raw| serde_json::from_str(raw.get()))
-            .transpose()
-    }
     /// Compare opaque extension bytes, never interpret/roundtrip their numbers.
     pub fn extensions_preserved_in(&self, target: &Self) -> bool {
         self.extensions.len() == target.extensions.len()
@@ -241,7 +145,7 @@ impl NativeState {
 
 /// Explicit private configuration plan. This includes opaque target material;
 /// clients must store it privately, not treat it as a redacted status/log DTO.
-/// Parsing never supplies writer, root, maintenance or migration authority.
+/// Parsing never supplies writer, root or transaction authority.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeConfigurationPlan {
@@ -252,25 +156,8 @@ pub struct NativeConfigurationPlan {
     pub target: Box<serde_json::value::RawValue>,
 }
 
-/// Versioned DATA only: the original cutover journal and retained maintenance
-/// custody select it. Private endpoint key hashes remain in the private journal.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NativeGatewayEndpointBinding {
-    pub schema: u16,
-    pub transaction_id: TransactionId,
-    pub root_identity: NativeRootIdentity,
-    pub candidate_manifest_sha256: Sha256Digest,
-    pub origin: String,
-    pub anchor_sha256: Sha256Digest,
-    pub leaf_sha256: Sha256Digest,
-    pub chain_sha256: Sha256Digest,
-    pub not_before_unix: i64,
-    pub not_after_unix: i64,
-}
-
 /// Canonical configuration DATA selecting a retained publisher-verified runtime.
-/// Paths and kernel identity are locators/bindings, never execution, migration
+/// Paths and kernel identity are locators/bindings; they do not grant execution,
 /// commit, installation or publisher approval authority by themselves.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -283,51 +170,9 @@ pub struct NativeRuntimeSelection {
     pub publisher_spki_sha256: Sha256Digest,
 }
 
-/// Committed runtime-selection history DATA. The same original C07 chain,
-/// configuration/execution custody and signed C08 verifier supply authority.
-/// Distinct schema7 history kind; ordinary desired-state transitions preserve
-/// these opaque canonical bytes and cannot turn App history into foreground.
-pub const NATIVE_PAIRING_RUNTIME_HISTORY_KEY: &str = "pairing_runtime_history_v1";
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NativePairingRuntimeHistory {
-    Foreground,
-    App,
-}
 pub const NATIVE_RUNTIME_UPDATE_KEY: &str = "runtime_update_v1";
 pub const NATIVE_RUNTIME_SELECTION_KEY: &str = "runtime_selection_v1";
-/// Persisted repair DATA. Native file pins, manager observations and the
-/// original writer/execution leases must be re-established before recovery.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NativeServiceDefinitionIdentity {
-    pub device: u64,
-    pub inode: u64,
-    pub uid: u32,
-    pub mode: u32,
-    pub links: u64,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NativeServiceRegistrationObservation {
-    pub path: std::path::PathBuf,
-    pub program: std::path::PathBuf,
-    pub username: String,
-    pub arguments: Vec<String>,
-    pub pid: Option<u32>,
-    pub runs: u64,
-    pub last_exit_code: Option<i32>,
-    pub signaled_exit: bool,
-    pub state: String,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NativeServiceRepairBinding {
-    pub schema: u16,
-    pub old_definition_identity: NativeServiceDefinitionIdentity,
-    pub old_definition_sha256: Sha256Digest,
-    pub original_registration: NativeServiceRegistrationObservation,
-}
+/// Runtime selection history; the native journal and signed release supply authority.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeRuntimeUpdate {
@@ -336,23 +181,8 @@ pub struct NativeRuntimeUpdate {
     pub bootstrap_runtime: NativeRuntimeSelection,
     pub previous_runtime: NativeRuntimeSelection,
     pub transaction: NativeStateTransaction,
-    /// Schema5 repair provenance only; earlier foreground/App histories retain
-    /// their exact serialized shape and cannot smuggle this field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service_repair: Option<NativeServiceRepairBinding>,
 }
 impl NativeState {
-    pub fn pairing_runtime_history(
-        &self,
-    ) -> Result<Option<NativePairingRuntimeHistory>, serde_json::Error> {
-        if self.reader_contract != ReaderContract::NativePairingLifecycleStateV1 {
-            return Ok(None);
-        }
-        self.extensions
-            .get(NATIVE_PAIRING_RUNTIME_HISTORY_KEY)
-            .map(|raw| serde_json::from_str(raw.get()))
-            .transpose()
-    }
     pub fn runtime_selection(&self) -> Result<Option<NativeRuntimeSelection>, serde_json::Error> {
         self.extensions
             .get(NATIVE_RUNTIME_SELECTION_KEY)
@@ -360,16 +190,6 @@ impl NativeState {
             .transpose()
     }
     pub fn runtime_update(&self) -> Result<Option<NativeRuntimeUpdate>, serde_json::Error> {
-        if !matches!(
-            self.reader_contract,
-            ReaderContract::NativeRuntimeSelectedStateV1
-                | ReaderContract::NativeAppRuntimeSelectedStateV1
-                | ReaderContract::NativeServiceRuntimeSelectedStateV1
-                | ReaderContract::NativeAppServiceTransferredStateV1
-                | ReaderContract::NativePairingLifecycleStateV1
-        ) {
-            return Ok(None);
-        }
         self.extensions
             .get(NATIVE_RUNTIME_UPDATE_KEY)
             .map(|raw| serde_json::from_str(raw.get()))

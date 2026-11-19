@@ -25,10 +25,10 @@ fn native_service_partial_publication_preserves_original_pending_and_follows_tip
         .unwrap_or_else(|e| panic!("fresh: {:?}", e.error()));
     let deployment = b"{\"owned_journal_fixture\":true}\n";
     let state = NativeState {
-        schema: 2,
+        schema: NATIVE_STATE_SCHEMA,
         kind: NativeStateKind::StyxDesiredState,
         runtime_format: NativeRuntimeFormat::NativeRustV1,
-        reader_contract: ReaderContract::NativeManagementStateV1,
+        reader_contract: ReaderContract::NativeStateV1,
         scope_generation: fresh.marker().scope_generation,
         deployment_raw_sha256: Sha256Digest::of_bytes(deployment),
         mode: NativeDeploymentMode::JoinExisting,
@@ -42,7 +42,6 @@ fn native_service_partial_publication_preserves_original_pending_and_follows_tip
                 autostart: NativeAutostartDesired::Disabled,
             }),
         },
-        migration: None,
         extensions: BTreeMap::new(),
     };
     let binding = fresh

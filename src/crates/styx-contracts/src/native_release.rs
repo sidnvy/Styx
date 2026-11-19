@@ -1,7 +1,9 @@
 //! C08 native release metadata. Parsing data never grants publisher trust,
-//! executable admission, installation, profile migration or platform permissions.
+//! executable admission, installation or platform permissions.
 use crate::{
-    identity::Sha256Digest, management::ReaderContract, native_management::NativeRuntimeFormat,
+    identity::Sha256Digest,
+    management::ReaderContract,
+    native_management::{NATIVE_STATE_SCHEMA, NativeRuntimeFormat},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -22,101 +24,17 @@ pub enum NativeReleaseScope {
 #[serde(rename_all = "snake_case")]
 pub enum NativeReleaseReader {
     NativeReleaseV1,
-    NativeRuntimeV1,
-    /// Original-identity cutover reader barrier; old runtimes reject this variant.
-    NativeRuntimeMigratedV1,
-    /// Typed Host-only/local-Gateway migration reader; earlier readers reject it.
-    NativeRuntimeMigratedV2,
-    /// Host admission v2 and durable migration-plan journal support.
-    NativeRuntimeMigratedV3,
-    /// Fresh-root committed runtime update and compatible forward rollback.
-    NativeRuntimeSelectedV1,
-    /// Original App-scope runtime selection and recovery; a distinct signed barrier.
-    NativeAppRuntimeSelectedV1,
-    /// Original failed persistent-service registration repair and reader barrier.
-    NativeServiceRuntimeSelectedV1,
-    /// Retained App owner transfer into the original persistent-service root.
-    NativeAppServiceTransferredV1,
-    /// Signed capability for schema7 and complete terminal enrollment rejection.
-    NativePairingLifecycleV1,
+    NativeRuntimeV2,
 }
 impl NativeReleaseReader {
-    /// Signed feature declaration, not evidence of successful migration.
+    /// Signed declaration for the current Host admission report.
     pub fn supports_host_admission_v2(self) -> bool {
-        matches!(
-            self,
-            Self::NativeRuntimeMigratedV3
-                | Self::NativeRuntimeSelectedV1
-                | Self::NativeAppRuntimeSelectedV1
-                | Self::NativeServiceRuntimeSelectedV1
-                | Self::NativeAppServiceTransferredV1
-                | Self::NativePairingLifecycleV1
-        )
+        self == Self::NativeRuntimeV2
     }
 
     /// Signed reader declaration only; no runtime health or activation authority.
-    pub fn supports_state_reader(self, reader: ReaderContract) -> bool {
-        if self == Self::NativePairingLifecycleV1 {
-            return matches!(
-                reader,
-                ReaderContract::NativeManagementStateV1
-                    | ReaderContract::NativeMigratedStateV1
-                    | ReaderContract::NativeMigratedStateV2
-                    | ReaderContract::NativeRuntimeSelectedStateV1
-                    | ReaderContract::NativeAppRuntimeSelectedStateV1
-                    | ReaderContract::NativeServiceRuntimeSelectedStateV1
-                    | ReaderContract::NativeAppServiceTransferredStateV1
-                    | ReaderContract::NativePairingLifecycleStateV1
-            );
-        }
-        matches!(
-            (self, reader),
-            (
-                Self::NativeRuntimeV1
-                    | Self::NativeRuntimeMigratedV1
-                    | Self::NativeRuntimeMigratedV2
-                    | Self::NativeRuntimeMigratedV3
-                    | Self::NativeRuntimeSelectedV1
-                    | Self::NativeAppRuntimeSelectedV1
-                    | Self::NativeServiceRuntimeSelectedV1
-                    | Self::NativeAppServiceTransferredV1,
-                ReaderContract::NativeManagementStateV1
-            ) | (
-                Self::NativeRuntimeMigratedV1
-                    | Self::NativeRuntimeMigratedV2
-                    | Self::NativeRuntimeMigratedV3
-                    | Self::NativeRuntimeSelectedV1
-                    | Self::NativeAppRuntimeSelectedV1
-                    | Self::NativeServiceRuntimeSelectedV1
-                    | Self::NativeAppServiceTransferredV1,
-                ReaderContract::NativeMigratedStateV1
-            ) | (
-                Self::NativeRuntimeMigratedV2
-                    | Self::NativeRuntimeMigratedV3
-                    | Self::NativeRuntimeSelectedV1
-                    | Self::NativeAppRuntimeSelectedV1
-                    | Self::NativeServiceRuntimeSelectedV1
-                    | Self::NativeAppServiceTransferredV1,
-                ReaderContract::NativeMigratedStateV2
-            ) | (
-                Self::NativeRuntimeSelectedV1
-                    | Self::NativeAppRuntimeSelectedV1
-                    | Self::NativeServiceRuntimeSelectedV1
-                    | Self::NativeAppServiceTransferredV1,
-                ReaderContract::NativeRuntimeSelectedStateV1
-            ) | (
-                Self::NativeAppRuntimeSelectedV1
-                    | Self::NativeServiceRuntimeSelectedV1
-                    | Self::NativeAppServiceTransferredV1,
-                ReaderContract::NativeAppRuntimeSelectedStateV1
-            ) | (
-                Self::NativeServiceRuntimeSelectedV1 | Self::NativeAppServiceTransferredV1,
-                ReaderContract::NativeServiceRuntimeSelectedStateV1
-            ) | (
-                Self::NativeAppServiceTransferredV1,
-                ReaderContract::NativeAppServiceTransferredStateV1
-            )
-        )
+    pub fn supports_state_reader(self, _reader: ReaderContract) -> bool {
+        self == Self::NativeRuntimeV2
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,7 +165,7 @@ impl NativeReleaseManifest {
             NativeReleaseScope::RuntimeCandidate => self.validate_runtime(),
         }
     }
-    // Keep the original three-member preview validation and reader boundary.
+    // Configuration previews do not authorize Runtime execution.
     fn validate_preview(&self) -> Result<(), NativeReleaseManifestError> {
         let invalid = NativeReleaseManifestError;
         if self.schema != NATIVE_RELEASE_SCHEMA
@@ -265,7 +183,7 @@ impl NativeReleaseManifest {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             || self.entrypoint != self.target.entrypoint()
             || self.contracts.control != 1
-            || self.contracts.management_state != 2
+            || self.contracts.management_state != NATIVE_STATE_SCHEMA
             || self.files.len() != 3
             || !self.external_workers.is_empty()
             || !self.worker_closures.is_empty()
@@ -385,18 +303,7 @@ impl NativeReleaseManifest {
     fn validate_runtime(&self) -> Result<(), NativeReleaseManifestError> {
         let invalid = NativeReleaseManifestError;
         if self.schema != NATIVE_RELEASE_SCHEMA
-            || !matches!(
-                self.minimum_reader,
-                NativeReleaseReader::NativeRuntimeV1
-                    | NativeReleaseReader::NativeRuntimeMigratedV1
-                    | NativeReleaseReader::NativeRuntimeMigratedV2
-                    | NativeReleaseReader::NativeRuntimeMigratedV3
-                    | NativeReleaseReader::NativeRuntimeSelectedV1
-                    | NativeReleaseReader::NativeAppRuntimeSelectedV1
-                    | NativeReleaseReader::NativeServiceRuntimeSelectedV1
-                    | NativeReleaseReader::NativeAppServiceTransferredV1
-                    | NativeReleaseReader::NativePairingLifecycleV1
-            )
+            || self.minimum_reader != NativeReleaseReader::NativeRuntimeV2
             || !worker_version(&self.version)
             || self.version.contains('+')
             || self.source.revision.len() != 40
@@ -407,15 +314,7 @@ impl NativeReleaseManifest {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             || self.entrypoint != self.target.entrypoint()
             || self.contracts.control != 1
-            || self.contracts.management_state
-                != match self.minimum_reader {
-                    NativeReleaseReader::NativePairingLifecycleV1 => 7,
-                    NativeReleaseReader::NativeAppServiceTransferredV1 => 6,
-                    NativeReleaseReader::NativeServiceRuntimeSelectedV1 => 5,
-                    NativeReleaseReader::NativeAppRuntimeSelectedV1 => 4,
-                    NativeReleaseReader::NativeRuntimeSelectedV1 => 3,
-                    _ => 2,
-                }
+            || self.contracts.management_state != NATIVE_STATE_SCHEMA
             || self.files.len() < 3
             || self.files.len() > NATIVE_RUNTIME_RELEASE_FILES
             || self.external_workers.len() > 4

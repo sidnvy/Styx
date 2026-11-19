@@ -1,10 +1,7 @@
 //! Pure C07 runtime-update grammar. This validates data, never C08 trust,
 //! process settlement, a writer lease, or permission to execute a selected image.
 use super::{NativeStateRuleError, validate_state, validate_transition};
-use styx_contracts::{
-    management::{DesiredStateCommit, ReaderContract},
-    native_management::*,
-};
+use styx_contracts::{management::DesiredStateCommit, native_management::*};
 
 type Result<T> = std::result::Result<T, NativeStateRuleError>;
 fn invalid() -> NativeStateRuleError {
@@ -32,216 +29,43 @@ fn valid_selection(value: &NativeRuntimeSelection) -> bool {
         && !value.payload_path.contains('\0')
         && !value.publisher_file.contains('\0')
 }
-/// A schema7 reader is independent of the original runtime-update history kind.
-/// Projection is a pure validator input; canonical state and RawValue bytes are
-/// never rewritten to an older schema and no reader downgrade is committed.
-fn pairing_projection(state: &NativeState) -> Result<NativeState> {
-    let mut projected = state.clone();
-    if state.extensions.contains_key(NATIVE_RUNTIME_UPDATE_KEY) {
-        let kind = state
-            .pairing_runtime_history()
-            .map_err(|_| invalid())?
-            .ok_or_else(invalid)?;
-        let manager = match kind {
-            NativePairingRuntimeHistory::Foreground => NativeManager::ForegroundCli,
-            NativePairingRuntimeHistory::App => NativeManager::AppManaged,
-        };
-        if state
-            .desired
-            .host
-            .iter()
-            .chain(state.desired.gateway.iter())
-            .any(|role| {
-                role.manager != manager
-                    && !(manager == NativeManager::ForegroundCli
-                        && role.manager == NativeManager::PersistentService)
-            })
-        {
-            return Err(invalid());
-        }
-        match manager {
-            NativeManager::ForegroundCli => {
-                projected.reader_contract = ReaderContract::NativeRuntimeSelectedStateV1;
-                projected.schema = NATIVE_RUNTIME_SELECTED_STATE_SCHEMA;
-            }
-            NativeManager::AppManaged => {
-                projected.reader_contract = ReaderContract::NativeAppRuntimeSelectedStateV1;
-                projected.schema = NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA;
-            }
-            // This is selection history, not the current Linux service mode.
-            // The marker-aware validator below restricts systemd to Linux;
-            // restore/install/start keep this original selection history intact.
-            NativeManager::PersistentService => return Err(invalid()),
-        }
-    } else {
-        projected.reader_contract = ReaderContract::NativeManagementStateV1;
-        projected.schema = NATIVE_STATE_SCHEMA;
-    }
-    projected
-        .extensions
-        .remove(NATIVE_PAIRING_RUNTIME_HISTORY_KEY);
-    Ok(projected)
-}
-pub(super) fn validate_pairing_lifecycle_state(
-    state: &NativeState,
-    marker: &NativeRootMarker,
-) -> Result<()> {
-    if state.schema != NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA
-        || state.reader_contract != ReaderContract::NativePairingLifecycleStateV1
-        || state.has_migration_binding()
-        || state.extensions.contains_key(NATIVE_MIGRATION_V2_KEY)
+/// Runtime update history is optional in the one current configuration format.
+/// Fresh profiles retain their selected runtime without inventing an update.
+pub(super) fn validate_runtime_state(state: &NativeState) -> Result<()> {
+    let current = state.runtime_selection().map_err(|_| invalid())?;
+    if current
+        .as_ref()
+        .is_some_and(|selected| !valid_selection(selected))
     {
         return Err(NativeStateRuleError::InvalidState);
     }
-    // Fresh schema7 retains schema2's per-role desired-state semantics,
-    // including sequential Linux manager assignment. Only selected history is
-    // constrained by one immutable App/foreground kind.
-    if !matches!(marker.root_identity, NativeRootIdentity::Linux { .. })
-        && state
-            .desired
-            .host
-            .iter()
-            .chain(state.desired.gateway.iter())
-            .any(|role| role.manager == NativeManager::PersistentService)
-    {
-        return Err(NativeStateRuleError::InvalidState);
-    }
-    if state.extensions.contains_key(NATIVE_RUNTIME_UPDATE_KEY) {
-        let projected = pairing_projection(state)?;
-        validate_selected_state(&projected)
-    } else {
-        if state
-            .extensions
-            .contains_key(NATIVE_PAIRING_RUNTIME_HISTORY_KEY)
-        {
-            return Err(NativeStateRuleError::InvalidState);
-        }
-        // A fresh root and later desired-state commits have no update history.
-        // A generic unselected root is valid configuration DATA, but cannot
-        // activate workers or pass the signed pairing-reader store gate.
-        if let Some(selected) = state.runtime_selection().map_err(|_| invalid())?
-            && !valid_selection(&selected)
-        {
-            return Err(NativeStateRuleError::InvalidState);
-        }
-        Ok(())
-    }
-}
-pub(super) fn validate_selected_state(state: &NativeState) -> Result<()> {
-    let current = selection(state)?;
-    let update = record(state)?;
-    let expected_schema = match state.reader_contract {
-        ReaderContract::NativeRuntimeSelectedStateV1 => {
-            if update.service_repair.is_some() {
-                return Err(NativeStateRuleError::InvalidState);
-            }
-            NATIVE_RUNTIME_SELECTED_STATE_SCHEMA
-        }
-        ReaderContract::NativeAppRuntimeSelectedStateV1 => {
-            // App history is a separate reader contract, never a foreground-reader extension.
-            if update.service_repair.is_some()
-                || state.desired.host.is_some() == state.desired.gateway.is_some()
-                || state
-                    .desired
-                    .host
-                    .iter()
-                    .chain(state.desired.gateway.iter())
-                    .any(|role| {
-                        role.manager != NativeManager::AppManaged
-                            || role.autostart != NativeAutostartDesired::Disabled
-                    })
-            {
-                return Err(NativeStateRuleError::InvalidState);
-            }
-            NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA
-        }
-        ReaderContract::NativeAppServiceTransferredStateV1 => {
-            if update.service_repair.is_some()
-                || state.desired.host.is_some() == state.desired.gateway.is_some()
-                || state
-                    .desired
-                    .host
-                    .iter()
-                    .chain(state.desired.gateway.iter())
-                    .any(|role| role.manager != NativeManager::PersistentService)
-            {
-                return Err(NativeStateRuleError::InvalidState);
-            }
-            NATIVE_APP_SERVICE_TRANSFERRED_STATE_SCHEMA
-        }
-        ReaderContract::NativeServiceRuntimeSelectedStateV1 => {
-            if state.mode != NativeDeploymentMode::CreateLocal
-                || state.desired.host.is_some()
-                || state
-                    .desired
-                    .gateway
-                    .as_ref()
-                    .is_none_or(|role| role.manager != NativeManager::PersistentService)
-            {
-                return Err(NativeStateRuleError::InvalidState);
-            }
-            let binding = update
-                .service_repair
-                .as_ref()
-                .ok_or(NativeStateRuleError::InvalidState)?;
-            let old = &binding.old_definition_identity;
-            let observed = &binding.original_registration;
-            if binding.schema != 1
-                || old.uid != 0
-                || old.inode == 0
-                || old.links != 1
-                || old.mode > 0o7777
-                || old.mode & 0o022 != 0
-                || observed.pid.is_some()
-                || observed.runs == 0
-                || observed.state != "not running"
-                || (!observed.signaled_exit && observed.last_exit_code.is_none_or(|v| v == 0))
-                || observed.username.is_empty()
-                || observed.username.len() > 128
-                || !observed
-                    .username
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-                || observed.arguments.len() != 6
-                || observed.arguments[0]
-                    != format!("{}/bin/styx", update.previous_runtime.payload_path)
-                || observed.program != std::path::Path::new(&observed.arguments[0])
-                || observed.arguments[1] != "__service-run"
-                || observed.arguments[2] != "--state-dir"
-                || !std::path::Path::new(&observed.arguments[3]).is_absolute()
-                || observed.arguments[3].len() > 4096
-                || observed.arguments[3].contains('\0')
-                || observed.arguments[4] != "--role"
-                || observed.arguments[5] != "gateway"
-            {
-                return Err(NativeStateRuleError::InvalidState);
-            }
-            NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA
-        }
-        _ => return Err(NativeStateRuleError::InvalidState),
+    let Some(update) = state.runtime_update().map_err(|_| invalid())? else {
+        return Ok(());
     };
-    if state.schema != expected_schema
-        || state.migration.is_some()
-        || state.extensions.contains_key(NATIVE_MIGRATION_V2_KEY)
-        || state.revision == 0
+    let current = current.ok_or(NativeStateRuleError::InvalidState)?;
+    if state.revision == 0
         || update.schema != 1
         || update.transaction.sequence == 0
         || state
             .last_transaction
             .as_ref()
             .is_none_or(|last| last.sequence < update.transaction.sequence)
-        || !valid_selection(&current)
         || !valid_selection(&update.previous_runtime)
         || !valid_selection(&update.bootstrap_runtime)
         || current.publisher_spki_sha256 != update.bootstrap_runtime.publisher_spki_sha256
         || current.publisher_spki_sha256 != update.previous_runtime.publisher_spki_sha256
+        || state
+            .desired
+            .host
+            .iter()
+            .chain(state.desired.gateway.iter())
+            .any(|role| role.manager == NativeManager::AppManaged)
     {
         return Err(NativeStateRuleError::InvalidState);
     }
     Ok(())
 }
-/// History reader only. A generic desired-state writer must use
-/// `validate_transition`, which cannot manufacture a runtime update.
+/// The journal contains ordinary configuration commits and stopped runtime updates.
 pub fn validate_committed_transition(
     before: &NativeState,
     target: &NativeState,
@@ -250,247 +74,27 @@ pub fn validate_committed_transition(
 ) -> Result<()> {
     validate_transition(before, target, marker, intent)
         .or_else(|_| validate_runtime_transition(before, target, marker, intent))
-        .or_else(|_| validate_app_runtime_transition(before, target, marker, intent))
-        .or_else(|_| validate_app_service_transfer_transition(before, target, marker, intent))
-        .or_else(|_| validate_service_runtime_repair_transition(before, target, marker, intent))
 }
-/// Closed fresh-root, stopped foreground transition. Callers must retain the
-/// original writer/execution exclusion and both verified C08 releases as well.
+/// Only a stopped foreground profile can select a runtime. The store retains
+/// writer/execution exclusion and verifies both releases before publication.
 pub fn validate_runtime_transition(
     before: &NativeState,
     target: &NativeState,
     marker: &NativeRootMarker,
     intent: &DesiredStateCommit,
 ) -> Result<()> {
-    validate_selection_transition(
-        before,
-        target,
-        marker,
-        intent,
-        NativeManager::ForegroundCli,
-        ReaderContract::NativeRuntimeSelectedStateV1,
-        NATIVE_RUNTIME_SELECTED_STATE_SCHEMA,
-    )
-}
-/// Pure App update grammar. Only a retained native App scope can authorize its
-/// publication; neither this function nor decoded state grants that scope.
-pub fn validate_app_runtime_transition(
-    before: &NativeState,
-    target: &NativeState,
-    marker: &NativeRootMarker,
-    intent: &DesiredStateCommit,
-) -> Result<()> {
-    validate_selection_transition(
-        before,
-        target,
-        marker,
-        intent,
-        NativeManager::AppManaged,
-        ReaderContract::NativeAppRuntimeSelectedStateV1,
-        NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA,
-    )
-}
-/// Closed metadata transfer after the original App has settled its role and
-/// selected a stable runtime. This grammar is history validation only: actual
-/// publication also needs the retained App scope, C07 writer and execution lease.
-pub fn validate_app_service_transfer_transition(
-    before: &NativeState,
-    target: &NativeState,
-    marker: &NativeRootMarker,
-    intent: &DesiredStateCommit,
-) -> Result<()> {
-    validate_state(before, marker)?;
-    validate_state(target, marker)?;
-    let transaction = target.last_transaction.as_ref().ok_or_else(invalid)?;
-    let mut desired = before.desired.clone();
-    if before.reader_contract != ReaderContract::NativeAppRuntimeSelectedStateV1
-        || before.schema != NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA
-        || target.reader_contract != ReaderContract::NativeAppServiceTransferredStateV1
-        || target.schema != NATIVE_APP_SERVICE_TRANSFERRED_STATE_SCHEMA
-        || marker.reader_floor != ReaderContract::NativeManagementStateV1
-        || before.has_migration_binding()
-        || target.has_migration_binding()
-        || before.desired.host.is_some() == before.desired.gateway.is_some()
-        || desired
-            .host
-            .iter()
-            .chain(desired.gateway.iter())
-            .any(|role| {
-                *role
-                    != NativeComponentDesired {
-                        manager: NativeManager::AppManaged,
-                        run: NativeRunDesired::Stopped,
-                        autostart: NativeAutostartDesired::Disabled,
-                    }
-            })
-    {
-        return Err(invalid());
-    }
-    for role in desired.host.iter_mut().chain(desired.gateway.iter_mut()) {
-        role.manager = NativeManager::PersistentService;
-    }
-    if desired != target.desired
-        || before.mode != target.mode
-        || before.migration != target.migration
-        || before.scope_generation != target.scope_generation
-        || before.deployment_raw_sha256 != target.deployment_raw_sha256
-        || target.deployment_raw_sha256 != intent.deployment_raw_sha256
-        || target.revision != before.revision.checked_add(1).ok_or_else(invalid)?
-        || intent.validate().is_err()
-        || intent.reader != target.reader_contract
-        || transaction.transaction_id != intent.transaction_id
-        || transaction.sequence != intent.sequence
-        || before
-            .last_transaction
-            .as_ref()
-            .is_none_or(|prior| prior.sequence >= transaction.sequence)
-    {
-        return Err(invalid());
-    }
-    if !before.extensions_preserved_in(target) {
-        return Err(NativeStateRuleError::ChangedExtensions);
-    }
-    Ok(())
-}
-/// Pure history grammar for explicitly repairing a failed registered Gateway.
-/// Native publication also requires the original non-deserializable registration
-/// proof, writer/operation/execution exclusion and both original signed releases.
-/// Running/Enabled is only the requested post-installer intent, never readiness.
-pub fn validate_service_runtime_repair_transition(
-    before: &NativeState,
-    target: &NativeState,
-    marker: &NativeRootMarker,
-    intent: &DesiredStateCommit,
-) -> Result<()> {
-    let NativeRootIdentity::Macos { device, inode, uid } = marker.root_identity else {
-        return Err(invalid());
-    };
-    if uid == 0
-        || before.mode != NativeDeploymentMode::CreateLocal
-        || before.desired.host.is_some()
-        || target.desired.host.is_some()
-        || target.desired.gateway
-            != Some(NativeComponentDesired {
-                manager: NativeManager::PersistentService,
-                run: NativeRunDesired::Running,
-                autostart: NativeAutostartDesired::Enabled,
-            })
-    {
-        return Err(invalid());
-    }
-    let repair = record(target)?.service_repair.ok_or_else(invalid)?;
-    let root_hash = styx_contracts::identity::Sha256Digest::of_bytes(
-        format!("styx-native-system-service-v1:{device}:{inode}:{uid}").as_bytes(),
-    )
-    .to_hex();
-    let label = format!("app.styx.native.{uid}.{}.gateway", &root_hash[..32]);
-    if repair.original_registration.path
-        != std::path::Path::new("/Library/LaunchDaemons").join(format!("{label}.plist"))
-    {
-        return Err(invalid());
-    }
-    for value in [
-        selection(before)?,
-        selection(target)?,
-        record(target)?.bootstrap_runtime,
-    ] {
-        if !matches!(value.payload_root, NativeRootIdentity::Macos { uid: owner, .. } if owner == uid)
-        {
-            return Err(invalid());
-        }
-    }
-    validate_selection_transition(
-        before,
-        target,
-        marker,
-        intent,
-        NativeManager::PersistentService,
-        ReaderContract::NativeServiceRuntimeSelectedStateV1,
-        NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA,
-    )
-}
-fn validate_selection_transition(
-    before: &NativeState,
-    target: &NativeState,
-    marker: &NativeRootMarker,
-    intent: &DesiredStateCommit,
-    manager: NativeManager,
-    reader: ReaderContract,
-    schema: u16,
-) -> Result<()> {
-    if target.reader_contract == ReaderContract::NativePairingLifecycleStateV1 {
-        // Only the existing App/foreground runtime-update transaction promotes
-        // the floor. Generic desired-state writes cannot change reader/schema.
-        if manager == NativeManager::PersistentService
-            || target.schema != NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA
-            || intent.reader != ReaderContract::NativePairingLifecycleStateV1
-            || !matches!(
-                before.reader_contract,
-                ReaderContract::NativeManagementStateV1
-                    | ReaderContract::NativeRuntimeSelectedStateV1
-                    | ReaderContract::NativeAppRuntimeSelectedStateV1
-                    | ReaderContract::NativePairingLifecycleStateV1
-            )
-        {
-            return Err(invalid());
-        }
-        if before.reader_contract != ReaderContract::NativePairingLifecycleStateV1
-            && before
-                .extensions
-                .contains_key(NATIVE_PAIRING_RUNTIME_HISTORY_KEY)
-        {
-            return Err(invalid());
-        }
-        validate_state(before, marker)?;
-        validate_state(target, marker)?;
-        let before = if before.reader_contract == ReaderContract::NativePairingLifecycleStateV1 {
-            pairing_projection(before)?
-        } else {
-            before.clone()
-        };
-        let target = pairing_projection(target)?;
-        let mut projected_intent = intent.clone();
-        projected_intent.reader = reader;
-        return validate_selection_transition(
-            &before,
-            &target,
-            marker,
-            &projected_intent,
-            manager,
-            reader,
-            schema,
-        );
-    }
     validate_state(before, marker)?;
     validate_state(target, marker)?;
     let current = selection(before)?;
     let next = selection(target)?;
     let update = record(target)?;
     let transaction = target.last_transaction.as_ref().ok_or_else(invalid)?;
-    let service_repair = manager == NativeManager::PersistentService;
-    let mut expected_desired = before.desired.clone();
-    if service_repair {
-        let gateway = expected_desired.gateway.as_mut().ok_or_else(invalid)?;
-        gateway.run = NativeRunDesired::Running;
-        gateway.autostart = NativeAutostartDesired::Enabled;
-    }
-    if marker.reader_floor != ReaderContract::NativeManagementStateV1
-        || (before.reader_contract != ReaderContract::NativeManagementStateV1
-            && before.reader_contract != reader
-            && !(service_repair
-                && before.reader_contract == ReaderContract::NativeRuntimeSelectedStateV1))
-        || target.reader_contract != reader
-        || target.schema != schema
-        || before.has_migration_binding()
-        || target.has_migration_binding()
-        || before.extensions.contains_key(NATIVE_MIGRATION_V2_KEY)
-        || intent.validate().is_err()
+    if intent.validate().is_err()
         || target.revision != before.revision.checked_add(1).ok_or_else(invalid)?
         || before.mode != target.mode
-        || expected_desired != target.desired
+        || before.desired != target.desired
         || before.deployment_raw_sha256 != target.deployment_raw_sha256
         || target.deployment_raw_sha256 != intent.deployment_raw_sha256
-        || intent.reader != target.reader_contract
         || transaction.transaction_id != intent.transaction_id
         || transaction.sequence != intent.sequence
         || before
@@ -506,26 +110,18 @@ fn validate_selection_transition(
             .iter()
             .chain(before.desired.gateway.iter())
             .any(|role| {
-                role.manager != manager
+                role.manager != NativeManager::ForegroundCli
                     || role.run != NativeRunDesired::Stopped
                     || role.autostart != NativeAutostartDesired::Disabled
             })
     {
         return Err(invalid());
     }
-    let bootstrap = if before.reader_contract == ReaderContract::NativeManagementStateV1 {
-        if before.extensions.contains_key(NATIVE_RUNTIME_UPDATE_KEY) {
-            return Err(invalid());
-        }
-        current
-    } else if before.reader_contract == reader
-        || (service_repair
-            && before.reader_contract == ReaderContract::NativeRuntimeSelectedStateV1)
-    {
-        record(before)?.bootstrap_runtime
-    } else {
-        return Err(invalid());
-    };
+    let bootstrap = before
+        .runtime_update()
+        .map_err(|_| invalid())?
+        .map(|previous| previous.bootstrap_runtime)
+        .unwrap_or(current);
     if update.bootstrap_runtime != bootstrap {
         return Err(invalid());
     }
@@ -566,6 +162,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use styx_contracts::identity::Sha256Digest;
+    use styx_contracts::management::ReaderContract;
     fn selection_at(name: &str) -> NativeRuntimeSelection {
         NativeRuntimeSelection {
             schema: 1,
@@ -591,13 +188,13 @@ mod tests {
                 uid: 1000,
             },
             scope_generation: Sha256Digest::of_bytes(b"scope"),
-            reader_floor: ReaderContract::NativeManagementStateV1,
+            reader_floor: ReaderContract::NativeStateV1,
         };
         let state = NativeState {
-            schema: 2,
+            schema: NATIVE_STATE_SCHEMA,
             kind: NativeStateKind::StyxDesiredState,
             runtime_format: NativeRuntimeFormat::NativeRustV1,
-            reader_contract: ReaderContract::NativeManagementStateV1,
+            reader_contract: ReaderContract::NativeStateV1,
             scope_generation: marker.scope_generation,
             deployment_raw_sha256: Sha256Digest::of_bytes(b"deployment"),
             mode: NativeDeploymentMode::JoinExisting,
@@ -611,7 +208,6 @@ mod tests {
                     autostart: NativeAutostartDesired::Disabled,
                 }),
             },
-            migration: None,
             extensions: BTreeMap::from([
                 (
                     NATIVE_RUNTIME_SELECTION_KEY.into(),
@@ -628,168 +224,14 @@ mod tests {
         };
         (marker, state)
     }
-    #[test]
-    fn app_service_transfer_preserves_runtime_history_and_requires_separate_reader() {
-        use styx_contracts::native_release::NativeReleaseReader;
-        let (marker, mut seed) = fixture();
-        seed.desired.host.as_mut().unwrap().manager = NativeManager::AppManaged;
-        let (before, _) = update(&seed, selection_at("stable"), 1);
-        let mut target = before.clone();
-        target.schema = NATIVE_APP_SERVICE_TRANSFERRED_STATE_SCHEMA;
-        target.reader_contract = ReaderContract::NativeAppServiceTransferredStateV1;
-        target.desired.host.as_mut().unwrap().manager = NativeManager::PersistentService;
-        target.revision += 1;
-        target.last_transaction = Some(NativeStateTransaction {
-            transaction_id: "original-app-service-transfer".try_into().unwrap(),
-            sequence: 2,
-        });
-        let intent = DesiredStateCommit {
-            transaction_id: target
-                .last_transaction
-                .as_ref()
-                .unwrap()
-                .transaction_id
-                .clone(),
-            sequence: 2,
-            deployment_raw_sha256: target.deployment_raw_sha256,
-            before_state_sha256: Sha256Digest::of_bytes(&serde_json::to_vec(&before).unwrap()),
-            target_state_sha256: Sha256Digest::of_bytes(&serde_json::to_vec(&target).unwrap()),
-            reader: target.reader_contract,
-        };
-        assert!(
-            validate_app_service_transfer_transition(&before, &target, &marker, &intent).is_ok()
-        );
-        assert!(validate_committed_transition(&before, &target, &marker, &intent).is_ok());
-        // A generic writer or runtime selector cannot manufacture transfer.
-        assert!(validate_transition(&before, &target, &marker, &intent).is_err());
-        assert!(validate_app_runtime_transition(&before, &target, &marker, &intent).is_err());
-        assert!(
-            !NativeReleaseReader::NativeServiceRuntimeSelectedV1
-                .supports_state_reader(target.reader_contract)
-        );
-        assert!(
-            NativeReleaseReader::NativeAppServiceTransferredV1
-                .supports_state_reader(target.reader_contract)
-        );
-        for key in [
-            NATIVE_RUNTIME_SELECTION_KEY,
-            NATIVE_RUNTIME_UPDATE_KEY,
-            "preserve",
-        ] {
-            assert_eq!(
-                before.extensions[key].get().as_bytes(),
-                target.extensions[key].get().as_bytes()
-            );
-        }
-        // Service start/autostart are later metadata transactions, not another
-        // transfer or a claim that an OS service has actually started.
-        let mut running = target.clone();
-        let host = running.desired.host.as_mut().unwrap();
-        host.run = NativeRunDesired::Running;
-        host.autostart = NativeAutostartDesired::Enabled;
-        running.revision += 1;
-        running.last_transaction = Some(NativeStateTransaction {
-            transaction_id: "later-service-intent".try_into().unwrap(),
-            sequence: 3,
-        });
-        let next = DesiredStateCommit {
-            transaction_id: running
-                .last_transaction
-                .as_ref()
-                .unwrap()
-                .transaction_id
-                .clone(),
-            sequence: 3,
-            before_state_sha256: intent.target_state_sha256,
-            target_state_sha256: Sha256Digest::of_bytes(&serde_json::to_vec(&running).unwrap()),
-            ..intent.clone()
-        };
-        assert!(validate_transition(&target, &running, &marker, &next).is_ok());
-        assert!(
-            validate_app_service_transfer_transition(&before, &running, &marker, &next).is_err()
-        );
-        assert!(
-            validate_app_service_transfer_transition(&target, &running, &marker, &next).is_err()
-        );
-        for mutation in 0..9 {
-            let mut changed = target.clone();
-            match mutation {
-                0 => changed.scope_generation = Sha256Digest::of_bytes(b"foreign scope"),
-                1 => changed.desired.host.as_mut().unwrap().run = NativeRunDesired::Running,
-                2 => {
-                    changed.desired.host.as_mut().unwrap().autostart =
-                        NativeAutostartDesired::Enabled
-                }
-                3 => changed.desired.host.as_mut().unwrap().manager = NativeManager::AppManaged,
-                4 => changed.last_transaction.as_mut().unwrap().sequence = 1,
-                5 => changed.reader_contract = ReaderContract::NativeServiceRuntimeSelectedStateV1,
-                6 => {
-                    changed.extensions.insert(
-                        "preserve".into(),
-                        serde_json::value::to_raw_value(&"changed").unwrap(),
-                    );
-                }
-                7 => {
-                    changed.extensions.insert(
-                        NATIVE_RUNTIME_SELECTION_KEY.into(),
-                        serde_json::value::to_raw_value(&selection_at("different")).unwrap(),
-                    );
-                }
-                8 => {
-                    changed.extensions.remove(NATIVE_RUNTIME_UPDATE_KEY);
-                }
-                _ => unreachable!(),
-            }
-            assert!(
-                validate_app_service_transfer_transition(&before, &changed, &marker, &intent)
-                    .is_err(),
-                "mutation {mutation}"
-            );
-        }
-        let mut unsettled = before.clone();
-        unsettled.desired.host.as_mut().unwrap().run = NativeRunDesired::Running;
-        assert!(
-            validate_app_service_transfer_transition(&unsettled, &target, &marker, &intent)
-                .is_err()
-        );
-        let mut substituted = before.clone();
-        substituted.desired.host.as_mut().unwrap().manager = NativeManager::ForegroundCli;
-        assert!(
-            validate_app_service_transfer_transition(&substituted, &target, &marker, &intent)
-                .is_err()
-        );
-    }
     fn update(
         before: &NativeState,
         next: NativeRuntimeSelection,
         seq: u64,
     ) -> (NativeState, DesiredStateCommit) {
         let mut target = before.clone();
-        let app = before
-            .desired
-            .host
-            .is_some_and(|role| role.manager == NativeManager::AppManaged);
-        let service = before
-            .desired
-            .gateway
-            .is_some_and(|role| role.manager == NativeManager::PersistentService);
-        target.schema = if service {
-            NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA
-        } else if app {
-            NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA
-        } else {
-            NATIVE_RUNTIME_SELECTED_STATE_SCHEMA
-        };
-        target.reader_contract = if service {
-            let role = target.desired.gateway.as_mut().unwrap();
-            role.run = NativeRunDesired::Running;
-            role.autostart = NativeAutostartDesired::Enabled;
-            ReaderContract::NativeServiceRuntimeSelectedStateV1
-        } else if app {
-            ReaderContract::NativeAppRuntimeSelectedStateV1
-        } else {
-            ReaderContract::NativeRuntimeSelectedStateV1
-        };
+        target.schema = NATIVE_STATE_SCHEMA;
+        target.reader_contract = ReaderContract::NativeStateV1;
         target.revision += 1;
         let transaction = NativeStateTransaction {
             transaction_id: format!("update-{seq}").try_into().unwrap(),
@@ -811,55 +253,8 @@ mod tests {
             serde_json::value::to_raw_value(&NativeRuntimeUpdate {
                 schema: 1,
                 bootstrap_runtime: bootstrap,
-                previous_runtime: previous.clone(),
+                previous_runtime: previous,
                 transaction: transaction.clone(),
-                service_repair: if service {
-                    let NativeRootIdentity::Macos { device, inode, uid } =
-                        before.runtime_selection().unwrap().unwrap().payload_root
-                    else {
-                        panic!("service fixture")
-                    };
-                    let _ = (device, inode);
-                    let hash = Sha256Digest::of_bytes(
-                        format!("styx-native-system-service-v1:1:4:{uid}").as_bytes(),
-                    )
-                    .to_hex();
-                    let program = format!("{}/bin/styx", previous.payload_path);
-                    Some(NativeServiceRepairBinding {
-                        schema: 1,
-                        old_definition_identity: NativeServiceDefinitionIdentity {
-                            device: 1,
-                            inode: 88,
-                            uid: 0,
-                            mode: 0o644,
-                            links: 1,
-                        },
-                        old_definition_sha256: Sha256Digest::of_bytes(b"original registered plist"),
-                        original_registration: NativeServiceRegistrationObservation {
-                            path: std::path::PathBuf::from(format!(
-                                "/Library/LaunchDaemons/app.styx.native.{uid}.{}.gateway.plist",
-                                &hash[..32]
-                            )),
-                            program: std::path::PathBuf::from(&program),
-                            username: "owned".into(),
-                            arguments: vec![
-                                program,
-                                "__service-run".into(),
-                                "--state-dir".into(),
-                                "/private/fixture/state".into(),
-                                "--role".into(),
-                                "gateway".into(),
-                            ],
-                            pid: None,
-                            runs: 1,
-                            last_exit_code: Some(4),
-                            signaled_exit: false,
-                            state: "not running".into(),
-                        },
-                    })
-                } else {
-                    None
-                },
             })
             .unwrap(),
         );
@@ -874,7 +269,7 @@ mod tests {
         (target, intent)
     }
     #[test]
-    fn typed_promotion_and_forward_rollback_preserve_authority_boundaries() {
+    fn stopped_update_and_forward_rollback_preserve_authority_boundaries() {
         let (marker, before) = fixture();
         let (target, intent) = update(&before, selection_at("new"), 1);
         assert!(validate_runtime_transition(&before, &target, &marker, &intent).is_ok());
@@ -882,11 +277,8 @@ mod tests {
         assert!(validate_committed_transition(&before, &target, &marker, &intent).is_ok());
         let (rollback, rollback_intent) = update(&target, selection_at("old"), 2);
         assert!(validate_runtime_transition(&target, &rollback, &marker, &rollback_intent).is_ok());
-        assert_eq!(
-            rollback.reader_contract,
-            ReaderContract::NativeRuntimeSelectedStateV1
-        );
-        assert_eq!(rollback.schema, 3);
+        assert_eq!(rollback.reader_contract, ReaderContract::NativeStateV1);
+        assert_eq!(rollback.schema, NATIVE_STATE_SCHEMA);
         assert!(validate_committed_transition(&rollback, &before, &marker, &intent).is_err());
         for mutate in [
             |state: &mut NativeState| {
@@ -910,290 +302,16 @@ mod tests {
         wrong_publisher.publisher_spki_sha256 = Sha256Digest::of_bytes(b"unapproved");
         let (foreign, foreign_intent) = update(&before, wrong_publisher, 1);
         assert!(validate_runtime_transition(&before, &foreign, &marker, &foreign_intent).is_err());
-        let mut unbound = before.clone();
-        unbound.schema = 3;
-        unbound.reader_contract = ReaderContract::NativeRuntimeSelectedStateV1;
+        let mut unbound = target.clone();
+        unbound.extensions.remove(NATIVE_RUNTIME_SELECTION_KEY);
         assert!(validate_state(&unbound, &marker).is_err());
     }
     #[test]
-    fn failed_service_repair_has_a_distinct_reader_and_cannot_adopt_other_roles() {
-        use styx_contracts::native_release::NativeReleaseReader;
-        let (mut marker, mut before) = fixture();
-        marker.root_identity = NativeRootIdentity::Macos {
-            device: 1,
-            inode: 4,
-            uid: 501,
-        };
-        before.mode = NativeDeploymentMode::CreateLocal;
-        let mut gateway = before.desired.host.take().unwrap();
-        gateway.manager = NativeManager::PersistentService;
-        before.desired.gateway = Some(gateway);
-        let mut old = selection_at("old");
-        old.payload_root = NativeRootIdentity::Macos {
-            device: 1,
-            inode: 2,
-            uid: 501,
-        };
-        before.extensions.insert(
-            NATIVE_RUNTIME_SELECTION_KEY.into(),
-            serde_json::value::to_raw_value(&old).unwrap(),
-        );
-        let mut next = selection_at("new");
-        next.payload_root = NativeRootIdentity::Macos {
-            device: 1,
-            inode: 3,
-            uid: 501,
-        };
-        let (target, intent) = update(&before, next.clone(), 1);
-        assert!(
-            validate_service_runtime_repair_transition(&before, &target, &marker, &intent).is_ok()
-        );
-        assert!(validate_committed_transition(&before, &target, &marker, &intent).is_ok());
-        assert!(validate_transition(&before, &target, &marker, &intent).is_err());
-        assert!(validate_runtime_transition(&before, &target, &marker, &intent).is_err());
-        assert!(validate_app_runtime_transition(&before, &target, &marker, &intent).is_err());
-        assert_eq!(target.schema, 5);
-        assert!(
-            !NativeReleaseReader::NativeAppRuntimeSelectedV1
-                .supports_state_reader(target.reader_contract)
-        );
-        assert!(
-            NativeReleaseReader::NativeServiceRuntimeSelectedV1
-                .supports_state_reader(target.reader_contract)
-        );
-        assert_eq!(record(&target).unwrap().bootstrap_runtime, old);
-        assert_eq!(
-            before.extensions["preserve"].get(),
-            target.extensions["preserve"].get()
-        );
-        for mutate in [
-            |state: &mut NativeState| state.desired.host = state.desired.gateway,
-            |state: &mut NativeState| {
-                state.desired.gateway.as_mut().unwrap().run = NativeRunDesired::Running
-            },
-            |state: &mut NativeState| {
-                state.desired.gateway.as_mut().unwrap().manager = NativeManager::ForegroundCli
-            },
-        ] {
-            let mut changed = before.clone();
-            mutate(&mut changed);
-            assert!(
-                validate_service_runtime_repair_transition(&changed, &target, &marker, &intent)
-                    .is_err()
-            );
-        }
-        let mut other = next.clone();
-        other.publisher_spki_sha256 = Sha256Digest::of_bytes(b"foreign");
-        let (foreign, foreign_intent) = update(&before, other, 1);
-        assert!(
-            validate_service_runtime_repair_transition(&before, &foreign, &marker, &foreign_intent)
-                .is_err()
-        );
-        let mut wrong_uid = next;
-        wrong_uid.payload_root = NativeRootIdentity::Macos {
-            device: 1,
-            inode: 3,
-            uid: 502,
-        };
-        let (foreign, foreign_intent) = update(&before, wrong_uid, 1);
-        assert!(
-            validate_service_runtime_repair_transition(&before, &foreign, &marker, &foreign_intent)
-                .is_err()
-        );
-        let mut old_reader = target.clone();
-        old_reader.schema = 4;
-        old_reader.reader_contract = ReaderContract::NativeAppRuntimeSelectedStateV1;
-        assert!(validate_committed_transition(&before, &old_reader, &marker, &intent).is_err());
-        assert!(
-            validate_service_runtime_repair_transition(&before, &target, &marker, &intent).is_ok()
-        );
-        // Pure grammar grants no native inactive-registration or writer custody.
-        let original_binding = record(&target).unwrap().service_repair.unwrap();
-        for mutation in 0..6 {
-            let mut changed = target.clone();
-            let mut update = record(&changed).unwrap();
-            match mutation {
-                0 => update.service_repair = None,
-                1 => {
-                    update
-                        .service_repair
-                        .as_mut()
-                        .unwrap()
-                        .original_registration
-                        .pid = Some(123)
-                }
-                2 => {
-                    update
-                        .service_repair
-                        .as_mut()
-                        .unwrap()
-                        .original_registration
-                        .runs = 0
-                }
-                3 => {
-                    update
-                        .service_repair
-                        .as_mut()
-                        .unwrap()
-                        .old_definition_identity
-                        .uid = 501
-                }
-                4 => {
-                    update
-                        .service_repair
-                        .as_mut()
-                        .unwrap()
-                        .old_definition_identity
-                        .mode = 0o666
-                }
-                _ => {
-                    update
-                        .service_repair
-                        .as_mut()
-                        .unwrap()
-                        .original_registration
-                        .path = "/Library/LaunchDaemons/foreign.plist".into()
-                }
-            }
-            changed.extensions.insert(
-                NATIVE_RUNTIME_UPDATE_KEY.into(),
-                serde_json::value::to_raw_value(&update).unwrap(),
-            );
-            assert!(
-                validate_service_runtime_repair_transition(&before, &changed, &marker, &intent)
-                    .is_err()
-            );
-        }
-        let (foreground_marker, foreground_before) = fixture();
-        let (mut foreground_target, foreground_intent) =
-            update(&foreground_before, selection_at("new"), 1);
-        let mut foreground_record = record(&foreground_target).unwrap();
-        // Missing optional provenance preserves the previous four-field wire.
-        let ordinary = serde_json::to_value(&foreground_record).unwrap();
-        assert_eq!(ordinary.as_object().unwrap().len(), 4);
-        assert!(ordinary.get("service_repair").is_none());
-        foreground_record.service_repair = Some(original_binding);
-        foreground_target.extensions.insert(
-            NATIVE_RUNTIME_UPDATE_KEY.into(),
-            serde_json::value::to_raw_value(&foreground_record).unwrap(),
-        );
-        assert!(
-            validate_runtime_transition(
-                &foreground_before,
-                &foreground_target,
-                &foreground_marker,
-                &foreground_intent
-            )
-            .is_err()
-        );
-    }
-    #[test]
-    fn app_update_reader_barrier_and_forward_rollback_keep_original_authority() {
-        use styx_contracts::native_release::NativeReleaseReader;
-        let (marker, mut before) = fixture();
-        before.desired.host.as_mut().unwrap().manager = NativeManager::AppManaged;
-        let (target, intent) = update(&before, selection_at("app-new"), 1);
-        assert!(validate_app_runtime_transition(&before, &target, &marker, &intent).is_ok());
-        assert!(validate_committed_transition(&before, &target, &marker, &intent).is_ok());
-        assert!(validate_runtime_transition(&before, &target, &marker, &intent).is_err());
-        assert!(validate_transition(&before, &target, &marker, &intent).is_err());
-        assert!(
-            !NativeReleaseReader::NativeRuntimeSelectedV1
-                .supports_state_reader(target.reader_contract)
-        );
-        assert!(
-            NativeReleaseReader::NativeAppRuntimeSelectedV1
-                .supports_state_reader(target.reader_contract)
-        );
-        let (rollback, rollback_intent) = update(&target, selection_at("old"), 2);
-        assert!(
-            validate_app_runtime_transition(&target, &rollback, &marker, &rollback_intent).is_ok()
-        );
-        assert_eq!(rollback.schema, NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA);
-        assert_eq!(
-            record(&rollback).unwrap().bootstrap_runtime,
-            selection_at("old")
-        );
-        assert_eq!(
-            before.extensions["preserve"].get(),
-            rollback.extensions["preserve"].get()
-        );
-        let mut old_reader = rollback.clone();
-        old_reader.schema = NATIVE_RUNTIME_SELECTED_STATE_SCHEMA;
-        old_reader.reader_contract = ReaderContract::NativeRuntimeSelectedStateV1;
-        assert!(
-            validate_committed_transition(&target, &old_reader, &marker, &rollback_intent).is_err()
-        );
-        let mut wrong_marker = marker.clone();
-        wrong_marker.reader_floor = ReaderContract::NativeAppRuntimeSelectedStateV1;
-        assert!(validate_state(&target, &wrong_marker).is_err());
-        for mutate in [
-            |state: &mut NativeState| {
-                state.desired.host.as_mut().unwrap().run = NativeRunDesired::Running
-            },
-            |state: &mut NativeState| {
-                state.desired.host.as_mut().unwrap().manager = NativeManager::ForegroundCli
-            },
-            |state: &mut NativeState| {
-                state.desired.host.as_mut().unwrap().autostart = NativeAutostartDesired::Enabled
-            },
-        ] {
-            let mut changed = before.clone();
-            mutate(&mut changed);
-            assert!(validate_app_runtime_transition(&changed, &target, &marker, &intent).is_err());
-        }
-        let mut foreign = selection_at("foreign");
-        foreign.publisher_spki_sha256 = Sha256Digest::of_bytes(b"foreign publisher");
-        let (foreign_target, foreign_intent) = update(&before, foreign, 1);
-        assert!(
-            validate_app_runtime_transition(&before, &foreign_target, &marker, &foreign_intent)
-                .is_err()
-        );
-    }
-
-    fn pairing_state(mut state: NativeState) -> NativeState {
-        let had_history = state.extensions.contains_key(NATIVE_RUNTIME_UPDATE_KEY);
-        state.schema = NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA;
-        state.reader_contract = ReaderContract::NativePairingLifecycleStateV1;
-        if had_history {
-            let history = if state
-                .desired
-                .host
-                .as_ref()
-                .or(state.desired.gateway.as_ref())
-                .unwrap()
-                .manager
-                == NativeManager::AppManaged
-            {
-                NativePairingRuntimeHistory::App
-            } else {
-                NativePairingRuntimeHistory::Foreground
-            };
-            state.extensions.insert(
-                NATIVE_PAIRING_RUNTIME_HISTORY_KEY.into(),
-                serde_json::value::to_raw_value(&history).unwrap(),
-            );
-        }
-        state
-    }
-    fn pairing_update(
-        before: &NativeState,
-        next: NativeRuntimeSelection,
-        seq: u64,
-    ) -> (NativeState, DesiredStateCommit) {
-        let (target, mut intent) = update(before, next, seq);
-        let target = pairing_state(target);
-        intent.reader = target.reader_contract;
-        intent.target_state_sha256 = Sha256Digest::of_bytes(&serde_json::to_vec(&target).unwrap());
-        (target, intent)
-    }
-    #[test]
-    fn pairing_reader7_fresh_is_not_a_fabricated_update_and_preserves_linux_service_setup() {
+    fn fresh_configuration_preserves_linux_service_setup_without_update_history() {
         let (marker, state) = fixture();
-        let mut fresh = pairing_state(state);
+        let mut fresh = state;
         assert!(validate_state(&fresh, &marker).is_ok());
         assert!(fresh.runtime_update().unwrap().is_none());
-        assert!(fresh.pairing_runtime_history().unwrap().is_none());
         fresh.desired.host.as_mut().unwrap().manager = NativeManager::PersistentService;
         fresh.desired.host.as_mut().unwrap().autostart = NativeAutostartDesired::Enabled;
         assert!(validate_state(&fresh, &marker).is_ok());
@@ -1205,16 +323,16 @@ mod tests {
         };
         assert!(validate_state(&fresh, &mac).is_err());
         let mut invalid_marker = marker.clone();
-        invalid_marker.reader_floor = ReaderContract::NativePairingLifecycleStateV1;
+        invalid_marker.schema += 1;
         assert!(
             validate_state(&fresh, &invalid_marker).is_err(),
-            "immutable genesis reader is never rewritten"
+            "unknown marker formats are rejected"
         );
     }
     #[test]
-    fn pairing_selected_linux_runtime_can_restore_and_cycle_original_service() {
+    fn updated_linux_runtime_can_restore_and_cycle_original_service() {
         let (marker, fresh) = fixture();
-        let (mut before, _) = pairing_update(&pairing_state(fresh), selection_at("new"), 1);
+        let (mut before, _) = update(&fresh, selection_at("new"), 1);
         let extensions = before.extensions.clone();
         for (manager, run, autostart) in [
             (
@@ -1250,7 +368,7 @@ mod tests {
                 transaction_id,
                 sequence,
             });
-            let mut intent = pairing_update(&before, selection_at("unused"), sequence).1;
+            let mut intent = update(&before, selection_at("unused"), sequence).1;
             intent.transaction_id = target
                 .last_transaction
                 .as_ref()
@@ -1287,84 +405,32 @@ mod tests {
         }
     }
     #[test]
-    fn pairing_reader7_promotes_fresh_and_selected_histories_without_downgrade() {
-        for app in [false, true] {
-            let (marker, mut fresh) = fixture();
-            if app {
-                fresh.desired.host.as_mut().unwrap().manager = NativeManager::AppManaged;
-            }
-            let (old_selected, _) = update(&fresh, selection_at("legacy-selected"), 1);
-            for before in [
-                fresh.clone(),
-                old_selected.clone(),
-                pairing_state(fresh),
-                pairing_state(old_selected),
-            ] {
-                assert!(validate_state(&before, &marker).is_ok());
-                let (target, intent) = pairing_update(&before, selection_at("pairing-runtime"), 2);
-                let check = if app {
-                    validate_app_runtime_transition
-                } else {
-                    validate_runtime_transition
-                };
-                assert!(check(&before, &target, &marker, &intent).is_ok());
-                assert!(validate_committed_transition(&before, &target, &marker, &intent).is_ok());
-                assert!(
-                    validate_transition(&before, &target, &marker, &intent).is_err(),
-                    "generic writer cannot select runtime/promote reader"
-                );
-                let expected_bootstrap = before
-                    .runtime_update()
-                    .unwrap()
-                    .map(|v| v.bootstrap_runtime)
-                    .unwrap_or_else(|| before.runtime_selection().unwrap().unwrap());
-                assert_eq!(
-                    target.runtime_update().unwrap().unwrap().bootstrap_runtime,
-                    expected_bootstrap
-                );
-                assert_eq!(
-                    before.extensions["preserve"].get(),
-                    target.extensions["preserve"].get()
-                );
-                let (compatible_rollback, rollback_intent) =
-                    pairing_update(&target, selection_at("old"), 3);
-                assert!(check(&target, &compatible_rollback, &marker, &rollback_intent).is_ok());
-                let (downgrade, downgrade_intent) = update(&target, selection_at("old"), 3);
-                assert!(check(&target, &downgrade, &marker, &downgrade_intent).is_err());
-            }
+    fn runtime_updates_preserve_bootstrap_and_unrelated_extensions() {
+        let (marker, fresh) = fixture();
+        let (selected, _) = update(&fresh, selection_at("selected"), 1);
+        for before in [fresh, selected] {
+            assert!(validate_state(&before, &marker).is_ok());
+            let (target, intent) = update(&before, selection_at("next"), 2);
+            assert!(validate_runtime_transition(&before, &target, &marker, &intent).is_ok());
+            assert!(validate_committed_transition(&before, &target, &marker, &intent).is_ok());
+            assert!(validate_transition(&before, &target, &marker, &intent).is_err());
+            let bootstrap = before
+                .runtime_update()
+                .unwrap()
+                .map(|v| v.bootstrap_runtime)
+                .unwrap_or_else(|| before.runtime_selection().unwrap().unwrap());
+            assert_eq!(
+                target.runtime_update().unwrap().unwrap().bootstrap_runtime,
+                bootstrap
+            );
+            assert_eq!(
+                before.extensions["preserve"].get(),
+                target.extensions["preserve"].get()
+            );
+            let (rollback, rollback_intent) = update(&target, selection_at("old"), 3);
+            assert!(
+                validate_runtime_transition(&target, &rollback, &marker, &rollback_intent).is_ok()
+            );
         }
-    }
-    #[test]
-    fn pairing_reader7_history_kind_cannot_be_laundered_by_generic_manager_change() {
-        let (marker, mut before) = fixture();
-        before.desired.host.as_mut().unwrap().manager = NativeManager::AppManaged;
-        let (selected, _) = pairing_update(&before, selection_at("new"), 1);
-        assert!(validate_state(&selected, &marker).is_ok());
-        let mut forged = selected.clone();
-        forged.desired.host.as_mut().unwrap().manager = NativeManager::ForegroundCli;
-        assert!(validate_state(&forged, &marker).is_err());
-        let mut wrong_kind = selected.clone();
-        wrong_kind.extensions.insert(
-            NATIVE_PAIRING_RUNTIME_HISTORY_KEY.into(),
-            serde_json::value::to_raw_value(&NativePairingRuntimeHistory::Foreground).unwrap(),
-        );
-        assert!(validate_state(&wrong_kind, &marker).is_err());
-        let mut missing = selected.clone();
-        missing
-            .extensions
-            .remove(NATIVE_PAIRING_RUNTIME_HISTORY_KEY);
-        assert!(validate_state(&missing, &marker).is_err());
-        let mut fake_fresh = pairing_state(before);
-        fake_fresh.extensions.insert(
-            NATIVE_PAIRING_RUNTIME_HISTORY_KEY.into(),
-            serde_json::value::to_raw_value(&NativePairingRuntimeHistory::App).unwrap(),
-        );
-        assert!(validate_state(&fake_fresh, &marker).is_err());
-        let mut service = selected;
-        service.desired.host.as_mut().unwrap().manager = NativeManager::PersistentService;
-        assert!(
-            validate_state(&service, &marker).is_err(),
-            "selected service history is not invented"
-        );
     }
 }

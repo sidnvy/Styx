@@ -23,13 +23,6 @@ use styx_contracts::{
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[path = "native_service.rs"]
 pub mod service;
-#[cfg(target_os = "macos")]
-#[path = "native_service_macos.rs"]
-pub mod service;
-
-#[cfg(target_os = "windows")]
-#[path = "native_service_windows.rs"]
-pub mod service;
 
 #[path = "native_update.rs"]
 pub mod update;
@@ -105,11 +98,7 @@ pub struct NativeManagementError {
     _app_scope: Option<Arc<crate::app::HostScope>>,
 }
 enum Retained {
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     Service {
         _job: tokio::task::JoinHandle<()>,
     },
@@ -130,21 +119,9 @@ impl NativeManagementError {
     }
     /// An observed retained service task requires whole-process CLI
     /// teardown. Library/App callers retain this error and never exit here.
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "windows",
-        all(target_os = "linux", target_env = "gnu")
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub fn requires_process_teardown(&self) -> bool {
-        #[cfg(any(
-            all(target_os = "linux", target_env = "gnu"),
-            target_os = "macos",
-            target_os = "windows"
-        ))]
-        if matches!(self._retained, Some(Retained::Service { .. })) {
-            return true;
-        }
-        false
+        matches!(self._retained, Some(Retained::Service { .. }))
     }
     pub fn code(&self) -> &'static str {
         match self.kind {
@@ -503,16 +480,15 @@ mod platform {
     pub(super) fn require_state(state: &NativeState, app_owned: bool) -> Result<()> {
         require_desired(&state.desired, app_owned)?;
         if app_owned
-            && (state.has_migration_binding()
-                || !matches!(
-                    (
-                        state.mode,
-                        state.desired.host.is_some(),
-                        state.desired.gateway.is_some()
-                    ),
-                    (NativeDeploymentMode::JoinExisting, true, false)
-                        | (NativeDeploymentMode::CreateLocal, false, true)
-                ))
+            && !matches!(
+                (
+                    state.mode,
+                    state.desired.host.is_some(),
+                    state.desired.gateway.is_some()
+                ),
+                (NativeDeploymentMode::JoinExisting, true, false)
+                    | (NativeDeploymentMode::CreateLocal, false, true)
+            )
         {
             return Err(NativeManagementError::new(ErrorKind::Invalid));
         }
@@ -557,11 +533,7 @@ mod platform {
         require_state(state.state(), scope.is_some())?;
         Ok(())
     }
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(super) fn service_open(path: &Path) -> Result<NativeTransactions> {
         let mut transactions = open(path)?;
         let checked = prepare_managed_transactions(path, None, &mut transactions)
@@ -670,7 +642,49 @@ mod platform {
         Ok(output.bytes)
     }
     fn validate_deployment(bytes: &[u8], options: &NativeCreateOptions) -> Result<()> {
-        let deployment: super::super::Deployment = super::super::decode(bytes)
+        use serde::Deserialize;
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Deployment {
+            schema: u32,
+            mode: String,
+            gateway: Gateway,
+            host: Option<Host>,
+            pairing_mode: Option<String>,
+            invitation_file: Option<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Gateway {
+            url: String,
+            runtime: Option<Box<serde_json::value::RawValue>>,
+            listen_host: Option<String>,
+            device_ingress: Option<Ingress>,
+            openssl: Option<String>,
+            openssl_config: Option<String>,
+            allow_remote_hosts: Option<bool>,
+            lan_address: Option<String>,
+            lan_addresses: Option<Vec<String>>,
+        }
+        #[derive(Deserialize)]
+        struct Ingress {
+            schema: u32,
+            #[serde(rename = "enabled")]
+            _enabled: bool,
+        }
+        #[derive(Deserialize)]
+        struct Host {
+            #[serde(rename = "computer")]
+            _computer: bool,
+            #[serde(rename = "browser")]
+            _browser: Option<Browser>,
+        }
+        #[derive(Deserialize)]
+        struct Browser {
+            #[serde(rename = "enabled")]
+            _enabled: bool,
+        }
+        let deployment: Deployment = serde_json::from_slice(bytes)
             .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
         let local = options.mode == NativeDeploymentMode::CreateLocal;
         if deployment.schema != 1
@@ -747,24 +761,11 @@ mod platform {
             run: NativeRunDesired::Stopped,
             autostart: NativeAutostartDesired::Disabled,
         };
-        let pairing = options.manager != NativeManager::PersistentService
-            || matches!(
-                fresh.marker().root_identity,
-                NativeRootIdentity::Linux { .. }
-            );
         let state = NativeState {
-            schema: if pairing {
-                NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA
-            } else {
-                NATIVE_STATE_SCHEMA
-            },
+            schema: NATIVE_STATE_SCHEMA,
             kind: NativeStateKind::StyxDesiredState,
             runtime_format: NativeRuntimeFormat::NativeRustV1,
-            reader_contract: if pairing {
-                ReaderContract::NativePairingLifecycleStateV1
-            } else {
-                fresh.marker().reader_floor
-            },
+            reader_contract: ReaderContract::NativeStateV1,
             scope_generation: fresh.marker().scope_generation,
             deployment_raw_sha256: Sha256Digest::of_bytes(deployment.bytes()),
             mode: options.mode,
@@ -774,7 +775,6 @@ mod platform {
                 gateway: options.gateway.then_some(component),
                 host: options.host.then_some(component),
             },
-            migration: None,
             extensions: BTreeMap::new(),
         };
         let binding = fresh
@@ -1054,6 +1054,3 @@ mod platform {
         Err(NativeManagementError::new(ErrorKind::Unsupported))
     }
 }
-
-#[path = "native_app_service.rs"]
-pub(crate) mod app_service;

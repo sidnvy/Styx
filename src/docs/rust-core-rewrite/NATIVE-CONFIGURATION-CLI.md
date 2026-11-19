@@ -1,11 +1,11 @@
-# Native configuration CLI · development slice
+# Native configuration CLI
 
 These commands manage an offline native configuration root through the shared
 Rust management API. They do not start Gateway/Host/services, create a paired
 identity, migrate an old profile, or change permissions. A saved `running` value
 is desired configuration, not a running process. These statements concern the
-offline configuration commands below; explicit migration and native-service
-commands have their separate effect contracts. Platform acceptance is recorded
+offline configuration commands below; Linux service commands have their own
+OS effects. Platform acceptance is recorded
 against each exact candidate, not inferred from this command reference.
 
 Use an existing private, current-user-owned parent directory and a private
@@ -18,13 +18,13 @@ styx init --parent-dir /private/owned --name native \
   --deployment-file /private/deployment.json \
   --mode join-existing --manager foreground-cli --host --json
 
-styx plan --native --state-dir /private/owned/native \
+styx plan --state-dir /private/owned/native \
   --component host --run running --transaction-id config-1 --sequence 1 --json
 
 styx apply --state-dir /private/owned/native \
   --plan-file /private/owned/native/plan-config-1.json --authorize --json
 
-styx status --native --state-dir /private/owned/native --json
+styx status --state-dir /private/owned/native --json
 styx transaction --state-dir /private/owned/native \
   --transaction-id config-1 --json
 styx recover --state-dir /private/owned/native \
@@ -57,52 +57,9 @@ unavailable/unsupported/busy input, and exit4 for Unknown requiring inspection.
 Output transport failure is separately reported. A failed request does not grant
 permission to replace identity, delete locks or create another transaction.
 
-The default legacy `plan`/`status` routes remain distinct. This native-only slice
-is not a completed legacy compatibility migration or a release installation path.
-Exact source/build/actual-CLI evidence is recorded in the external Owner Control
-Report; tests of a development binary are not signed platform acceptance.
+## Linux persistent user services
 
-
-## Windows original-Host migration review (development)
-
-The additive `migrate-review` command enters the same Rust management API and
-original configuration writer. Existing commands and their arguments are unchanged.
-
-```powershell
-styx migrate-review --state-dir D:\Styx\state `
-  --runtime-selection-file D:\Styx\candidate.json `
-  --transaction-id migration-1 --run stopped --json
-```
-
-This Windows-only review may initialize the existing private management journal
-namespace. It does not publish a migration plan, exclude the original Startup
-link, retire the pairing credential, or change canonical configuration. Other
-platforms return Unsupported before reading the supplied paths.
-
-The schema1 response contains `transaction_id`, `plan_sha256`, and
-`canonical_plan` (the exact UTF-8 JSON reviewed). Its digest binds the original
-configuration and Host roots, original source observations, candidate manifest
-and publisher, selected runtime, desired state, transaction and original Startup
-maintenance plan. A new candidate, source observation or desired state requires
-new review. The digest is an explicit local request confirmation, not a reusable
-bearer credential. Executor guard randomness is generated and durably stored by
-the original transaction before effects, rather than treated as user input.
-
-This is a development entry: the complete submit/recovery CLI and App flow is
-still being connected. Windows native compilation and actual original-identity
-migration are NOT VERIFIED for this change. A review response is neither a
-migration receipt nor platform acceptance.
-
-### Windows App review integration (development work)
-
-The original private App pipe now accepts `reviewMigration` with `transactionId` and `run: "stopped"`. Review uses the original App HostScope and returns `plan_sha256` with the canonical plan. This is distinct from the foreground CLI manager: its digest cannot be substituted for an App review. An explicit `startMigration` request echoes that digest as `planSha256`; recovery continues only the original transaction. A review request cannot replace an already observed transaction. A failed review retains any original management custody.
-
-Windows startup projection uses the protected Windows directory handles and the existing journal inventory. A later-boot checkpoint is reported as `waiting_for_later_boot`, not a successful commit or an unknown replayable action. Native Windows compile and device acceptance of these changes remain pending. The private App dispatcher/recovery rejection/EOF join/read-only startup scenario group passes locally on Linux; the shared Darwin workspace typecheck passes. Neither proves Windows OS effects.
-
-
-## Linux persistent user services (development)
-
-The additive `service` command uses the selected, verified C08 Rust CLI and a
+The Linux `service` command uses the selected, verified C08 Rust CLI and a
 fixed per-profile systemd user unit. It preserves the original identity,
 configuration journal and pairing. It does not enable linger, change login
 policy, acquire root privileges, or claim survival across logout. The canonical
@@ -139,8 +96,20 @@ A retained service scope can follow only complete same-identity C07 autostart/ru
 successors. Incomplete history withdraws new execution admission; a committed
 stop for that role triggers normal draining. Existing result inspection and
 cleanup remain available. Forged environment variables do not grant a service
-scope. CLI/App readers retain their original contracts.
+scope. Current-format CLI and App readers use the same native state.
 
-Implementation is under integration. Native systemd lifecycle, logout/boot and
-final signed candidate acceptance must be read from the external per-SHA report;
-this command reference is not a PASS receipt.
+These commands are available on Linux GNU. Desktop macOS and Windows use the
+App-owned lifecycle and normal login startup; there is no export, role transfer
+or persistent OS-service repair command. Compilation and local tests do not
+establish installed-device or signed-release acceptance.
+
+## One configuration model
+
+`plan` and `status --state-dir` operate on the current native configuration. The
+old JavaScript deployment inspection and the `--native` selector have been removed.
+`plan` requires the component, desired run state, transaction ID and sequence.
+Use `doctor --state-dir` for read-only runtime/profile diagnostics, or `status
+[--root]` for the setup installation summary. These commands do not import old
+configuration formats. The current state is `native_state_v1`, schema 1;
+`native_runtime_v2` releases understand that format. Optional runtime update
+history does not create a different reader or configuration type.

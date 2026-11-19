@@ -104,11 +104,7 @@ impl NamespaceName {
         }
     }
 }
-#[cfg(any(
-    all(target_os = "linux", target_env = "gnu"),
-    target_os = "macos",
-    target_os = "windows"
-))]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub(in crate::store) fn append_temporary_name(name: &str) -> bool {
     name.strip_prefix("orphan-")
         .and_then(|s| s.strip_suffix(".temporary"))

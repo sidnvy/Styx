@@ -9,7 +9,7 @@ fn intent() -> DesiredStateCommit {
         deployment_raw_sha256: hash("original deployment bytes"),
         before_state_sha256: hash("before"),
         target_state_sha256: hash("stopped: autostart disabled"),
-        reader: ReaderContract::NativeManagementStateV1,
+        reader: ReaderContract::NativeStateV1,
     }
 }
 fn journal(

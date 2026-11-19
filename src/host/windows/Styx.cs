@@ -640,7 +640,6 @@ namespace StyxNative {
   async Task ShowNativeComputers(){
    var response=await owner.Call("computers");ShowPage("overview");
    var rows=Json.Get(response,"devices") as object[]??new object[0];
-   Action("Review pending invitations",ShowNativePending);
    foreach(var row in rows){
     string id=Json.Str(row,"device_id"),name=Json.Str(row,"label");
     Explain(name+" · "+Json.Str(row,"platform")+" · "+(Json.Get(row,"online") is bool?(Json.Yes(row,"online")?"Connected":"Disconnected"):"Status unknown"),40);
@@ -657,26 +656,6 @@ namespace StyxNative {
    string link=Json.Str(invitation,"link");
    Explain(link,65);
    Action("Copy invitation",()=>{Clipboard.SetText(link);Feedback("Invitation copied. It expires after 10 minutes.");return Task.FromResult(0);},false);
-  }
-  async Task ShowNativePending(){
-   var response=await owner.Call("pendingComputers");ShowPage("overview");
-   var rows=Json.Get(response,"pending") as object[]??new object[0];
-   if(rows.Length==0)Explain("Waiting for the other computer to request joining.",45);
-   foreach(var row in rows){
-    string code=Json.Str(row,"comparison_code"),id=Json.Str(row,"device_id"),fingerprint=Json.Str(row,"fingerprint"),request=Json.Str(row,"request_id");
-    Explain(id+"\nPublic key fingerprint: "+fingerprint+"\nPairing code: "+code,120);
-    Action("Confirm "+code,async()=>{
-     if(MessageBox.Show("Does the other computer show this exact code?\n\n"+code+"\n\nApprove requested features: Commands"+(Json.Yes(row,"browser_requested")?", Browser":"")+(Json.Yes(row,"computer_requested")?", Computer Use":""),"Confirm computer",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;
-     await owner.Call("approveComputer",Json.Obj("authorize",true,"requestId",request,"deviceId",id,"fingerprint",fingerprint,"comparisonCode",code,"enableComputer",Json.Yes(row,"computer_requested"),"enableBrowser",Json.Yes(row,"browser_requested")));
-     await ShowNativePending();Feedback("Approved. Continue joining on the other computer.");
-    });
-    NativeAction("Reject "+code,"rejectComputer",async()=>{
-     if(MessageBox.Show("Reject this exact joining request?\n\nDevice: "+id+"\nFingerprint: "+fingerprint+"\nPairing code: "+code+"\n\nNo access will be granted. The other computer can apply again with a new invitation.","Reject joining request",MessageBoxButtons.YesNo,MessageBoxIcon.Question,MessageBoxDefaultButton.Button2)!=DialogResult.Yes)return;
-     await owner.Call("rejectComputer",Json.Obj("authorize",true,"requestId",request,"deviceId",id,"fingerprint",fingerprint,"comparisonCode",code));
-     await ShowNativePending();Feedback("Request rejected. No access was granted.");
-    });
-   }
-   Action("Refresh joining requests",ShowNativePending);
   }
   async Task EditNativeTunnel(){
    var current=await owner.Call("tunnelStatus");
