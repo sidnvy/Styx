@@ -2040,6 +2040,27 @@ async fn browser_session_journey(
     use http_body_util::{BodyExt, Full, Limited};
     use hyper::{Request, Response, body::Incoming, service::service_fn};
     use hyper_util::rt::TokioIo;
+    fn snapshot_text(result: &CallToolResult) -> String {
+        assert_ne!(result.is_error, Some(true));
+        result
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    fn snapshot_ref(text: &str, label: &str) -> String {
+        let refs: Vec<_> = text
+            .lines()
+            .filter(|line| line.contains(label))
+            .filter_map(|line| line.split_once("[ref="))
+            .filter_map(|(_, rest)| rest.split_once(']'))
+            .map(|(reference, _)| reference)
+            .collect();
+        assert_eq!(refs.len(), 1, "one observed fixture control required");
+        assert!(refs[0].starts_with("styx-"));
+        refs[0].to_owned()
+    }
     let effects = Arc::new(Mutex::new(Vec::<String>::new()));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -2055,8 +2076,8 @@ async fn browser_session_journey(
             connections.spawn(async move {
                 let service=service_fn(move |request:Request<Incoming>|{let observed=observed.clone();async move {
                     let body=if request.uri().path()=="/effect" {
-                        let body=Limited::new(request.into_body(),4096).collect().await.unwrap().to_bytes();observed.lock().await.push(String::from_utf8(body.to_vec()).unwrap());"recorded".to_owned()
-                    }else{"<!doctype html><title>Browser transfer fixture</title><input id=retained><button>fixture</button>".to_owned()};
+                        let body=Limited::new(request.into_body(),4096).collect().await.unwrap().to_bytes();let value=String::from_utf8(body.to_vec()).unwrap();observed.lock().await.push(value.clone());value
+                    }else{r#"<!doctype html><title>Browser transfer fixture</title><label>Retained value<input id="retained" aria-label="Retained value"></label><button onclick="fetch('/effect',{method:'POST',body:document.querySelector('#retained').value}).then(r=>r.text()).then(value=>document.querySelector('#saved').textContent='Saved: '+value)">Commit retained value</button><output id="saved"></output>"#.to_owned()};
                     Ok::<_,std::convert::Infallible>(Response::builder().header("connection","close").header("content-type","text/html").body(Full::new(Bytes::from(body))).unwrap())
                 }});
                 let _=hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(stream),service).await;
@@ -2092,27 +2113,30 @@ async fn browser_session_journey(
         .unwrap(),
     );
     let id = opened["browser_session_id"].as_str().unwrap().to_owned();
-    data(a.call_tool(call("browser_evaluate",json!({"environment_id":device,"function":format!("() => {{document.querySelector('#retained').value={}; return true}}",serde_json::to_string(&nonce).unwrap())}))).await.unwrap());
+    let initial = a
+        .call_tool(call("browser_snapshot", json!({"environment_id":device})))
+        .await
+        .unwrap();
+    let input = snapshot_ref(&snapshot_text(&initial), "textbox \"Retained value\"");
+    data(
+        a.call_tool(call(
+            "browser_type",
+            json!({"environment_id":device,"target":input,"text":nonce}),
+        ))
+        .await
+        .unwrap(),
+    );
     let original_snapshot = a
         .call_tool(call("browser_snapshot", json!({"environment_id":device})))
         .await
         .unwrap();
-    assert_ne!(original_snapshot.is_error, Some(true));
-    let snapshot_text = original_snapshot
-        .content
-        .iter()
-        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(root.join("browser-before-transfer.txt"), &snapshot_text).unwrap();
-    let start = snapshot_text
-        .find("styx-")
-        .expect("snapshot exposes Host opaque refs");
-    let old_ref = snapshot_text[start..]
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-        .next()
-        .unwrap()
-        .to_owned();
+    let before_transfer = snapshot_text(&original_snapshot);
+    assert!(
+        before_transfer.contains(&nonce),
+        "typed value must be independently observed"
+    );
+    std::fs::write(root.join("browser-before-transfer.txt"), &before_transfer).unwrap();
+    let old_ref = snapshot_ref(&before_transfer, "button \"Commit retained value\"");
     let other = data(
         b.call_tool(call(
             "browser_navigate",
@@ -2198,13 +2222,43 @@ async fn browser_session_journey(
         .await
         .unwrap(),
     );
+    let retained = c
+        .call_tool(call("browser_snapshot", json!({"environment_id":device})))
+        .await
+        .unwrap();
+    let retained_text = snapshot_text(&retained);
+    assert!(
+        retained_text.contains(&nonce),
+        "typed state must survive transfer and reconnect"
+    );
+    let button = snapshot_ref(&retained_text, "button \"Commit retained value\"");
     data(
-        c.call_tool(call("browser_snapshot", json!({"environment_id":device})))
+        c.call_tool(call(
+            "browser_click",
+            json!({"environment_id":device,"target":button}),
+        ))
+        .await
+        .unwrap(),
+    );
+    let saved = format!("Saved: {nonce}");
+    data(
+        c.call_tool(call(
+            "browser_wait_for",
+            json!({"environment_id":device,"text":saved}),
+        ))
+        .await
+        .unwrap(),
+    );
+    let after_commit = snapshot_text(
+        &c.call_tool(call("browser_snapshot", json!({"environment_id":device})))
             .await
             .unwrap(),
     );
-    let effect=c.call_tool(call("browser_evaluate",json!({"environment_id":device,"function":"async () => {await fetch('/effect',{method:'POST',body:document.querySelector('#retained').value}); return true}"}))).await.unwrap();
-    assert_ne!(effect.is_error, Some(true));
+    assert!(
+        after_commit.contains(&saved),
+        "server-confirmed result must be independently observed"
+    );
+    std::fs::write(root.join("browser-after-commit.txt"), &after_commit).unwrap();
     assert_eq!(*effects.lock().await, vec![nonce.clone()]);
     let d = connect().await.unwrap();
     let original_action=c.call_tool(call("browser_evaluate",json!({"environment_id":device,"function":"async () => {await fetch('/effect',{method:'POST',body:'busy-original'}); await new Promise(r=>setTimeout(r,1000)); return true}"})));
@@ -2304,5 +2358,5 @@ async fn browser_session_journey(
     c.cancel().await.unwrap();
     stop.cancel();
     server.await.unwrap();
-    std::fs::write(root.join("browser-handoff.json"),serde_json::to_vec_pretty(&json!({"status":"PASS","retained_session":id,"independent_session":other_id,"independent_http_effects":*effects.lock().await,"chat_close_retained":true,"protocol_rebuilt":true,"previous_operator_denied":true,"old_snapshot_denied":true,"concurrent_transfer_busy":true,"capability_disabled_stopped_sessions":true,"explicit_close_removed_session":true})).unwrap()).unwrap();
+    std::fs::write(root.join("browser-handoff.json"),serde_json::to_vec_pretty(&json!({"status":"PASS","retained_session":id,"independent_session":other_id,"independent_http_effects":*effects.lock().await,"public_form_tools":["browser_snapshot","browser_type","browser_click","browser_wait_for"],"typed_value_independently_observed":true,"submitted_value_independently_observed":true,"chat_close_retained":true,"protocol_rebuilt":true,"previous_operator_denied":true,"old_snapshot_denied":true,"concurrent_transfer_busy":true,"capability_disabled_stopped_sessions":true,"explicit_close_removed_session":true})).unwrap()).unwrap();
 }

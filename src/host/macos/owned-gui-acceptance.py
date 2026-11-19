@@ -73,7 +73,7 @@ def run(root):
         call('click',{'pid':fixture.pid,'window_id':window_id,'element_token':button['element_token'],'session':session})
         phase='independent_readback'
         fixture.wait(timeout=8);receipt['fixture_exit_code']=fixture.returncode;assert fixture.returncode==0 and readback.exists(),'owned_independent_readback_missing'
-        result=json.loads(readback.read_text());assert result.get('pid')==fixture.pid and result.get('title')==title and result.get('status')=='PASS'
+        result=json.loads(readback.read_text());assert result.get('pid')==fixture.pid and result.get('title')==title and result.get('scope')=='fixture_observations' and result.get('clicks')==1
         receipt.update({'status':'PASS','gui':'PASS','observed_click':'PASS','independent_readback':'PASS'})
     except Exception as error:
         allowed={'native_tool_error','owned_fixture_exited','owned_window_not_found','owned_button_not_observed','owned_independent_readback_missing','native_mcp_tool_refused','native_mcp_request_failed','mcp_worker_timeout'}

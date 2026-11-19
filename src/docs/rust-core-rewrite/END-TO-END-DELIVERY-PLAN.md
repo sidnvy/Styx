@@ -1,7 +1,17 @@
 # Styx 重构当前交付清单
 
-更新：2026-11-15。唯一当前待办入口；产品规则以 [REFACTOR-PLAN](REFACTOR-PLAN.md)
-为准。C1/C2 结构清理已完成；Linux Desktop、Linux Gateway-only 和 Windows 最终包绑定
+## 当前源码与实机证据的边界（2026-11-19）
+
+PR #68 已完成当前 native model 的源码收敛，没有随之发布或部署。当前源码的
+真实 Browser Host、引用和完整配对调用链已补测；普通 Rust 质量门和真实 GUI
+读写分别记录，具体入口与范围见 [quality gates](../quality-gates.md)。
+设备上已安装 Runtime 的实机结果必须绑定其实际版本，不能当作最新 main 的安装验收。
+下方 `0.4.1` 的 GO 和安装记录均为历史证据，不表示此后的源码已经全部部署或验收。
+产品规则以 [REFACTOR-PLAN](REFACTOR-PLAN.md) 为准。
+
+## 2026-11-15 发布历史
+
+C1/C2 结构清理已完成；Linux Desktop、Linux Gateway-only 和 Windows 最终包绑定
 `d34887c1ca554b91c3246645de533e2b3e91e9cc` / `0.4.1`。Mac 绑定
 `ea84ac7f3abba4f7d7f34f0bb47df996c5aea805` 的 macOS 条件编译并发修复，不能将其他
 平台包重标为该 SHA。moedeu-apps Gateway、niuda 和 NAB5 已原配置更新并实际验证。
