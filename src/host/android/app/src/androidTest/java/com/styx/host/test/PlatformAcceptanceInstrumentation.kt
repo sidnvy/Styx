@@ -15,13 +15,14 @@ import com.styx.host.AndroidPlatform
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Real Android APIs against the test APK's own Activity; no permission adoption or Gateway. */
+/** Real Android APIs against the test APK's own Activity; launch with am instrument --no-restart. */
 class PlatformAcceptanceInstrumentation : Instrumentation() {
     private lateinit var platform: AndroidPlatform
     private lateinit var automation: UiAutomation
     private val passed = JSONArray()
     private val measurements = JSONObject()
     private var currentCase = "initialization"
+    private var lastErrorCode: String? = null
     private val callerA = "android-fixture-a"
     private val callerB = "android-fixture-b"
 
@@ -38,7 +39,10 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
             }
             context.startActivity(Intent(context, FixtureActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
-            checkCase("fixture_foreground") { await(5000) { fixtureIsForeground() } }
+            checkCase("fixture_foreground") {
+                await(5000) { fixtureIsForeground() }
+                automation.waitForIdle(500, 5000)
+            }
 
             checkCase("tree_and_independent_callers") {
                 val first = observe(callerA)
@@ -135,6 +139,8 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
             success = true
         } catch (error: Throwable) {
             result.put("failed_case", currentCase).put("error_type", error.javaClass.simpleName)
+                .put("platform_error_code", lastErrorCode ?: JSONObject.NULL)
+                .put("failed_at", error.stackTrace.firstOrNull { it.className.startsWith("com.styx.host.test.") }?.toString() ?: JSONObject.NULL)
         } finally {
             if (::platform.isInitialized) {
                 platform.execute("release_caller", JSONObject().put("__caller_id", callerA).toString())
@@ -161,7 +167,7 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
         return try { root.packageName?.toString() == context.packageName } finally { root.recycle() }
     }
     private fun call(method: String, caller: String, params: JSONObject): JSONObject =
-        JSONObject(platform.execute(method, params.put("__caller_id", caller).toString()))
+        JSONObject(platform.execute(method, params.put("__caller_id", caller).toString())).also { lastErrorCode = errorCode(it) }
     private fun observe(caller: String): JSONObject {
         check(fixtureIsForeground())
         val result = call("android_observe", caller, JSONObject())

@@ -9,41 +9,38 @@ PR #68 已完成当前 native model 的源码收敛，没有随之发布或部�
 下方 `0.4.1` 的 GO 和安装记录均为历史证据，不表示此后的源码已经全部部署或验收。
 产品规则以 [REFACTOR-PLAN](REFACTOR-PLAN.md) 为准。
 
-## 独立 Android Host 开发验收（2026-11-19）
+## 独立 Android Host 开发验收（2026-11-20）
 
 这是所有者新增的 Android 工作范围，不改变此前桌面版本的发布结果。
 
 - 源码：独立 Android 身份、共享 SPAKE2/配对/TLS 客户端、同一个 Host WSS/Core
   生命周期、独立 Android 能力与三个 MCP 工具；Kotlin/JNI App 位于
   src/host/android 与 src/crates/styx-android。桌面配对调用重用提取后的共享模块。
-- 编译与包：ARM64 Android Runtime/JNI check、真实动态库链接、Kotlin 编译和
-  带真实 native library 的 APK 构建通过；APK v2 签名与 16 KiB 对齐验证通过。
-  当前开发 APK 为 0.5.1-android-dev，SHA-256 为
+- 编译与包：ARM64 Android Runtime/JNI、真实动态库、Kotlin 与开发 APK 通过；
+  APK v2 签名与 16 KiB 对齐验证通过。0.5.1-android-dev APK SHA-256：
   681827b16362feab0be7d5b6b500135e4020fd823206b7a022b201c904813abf。
-  开发包不是正式 Release。
 - 实际协议：真实回环 SPAKE2→TLS→WSS→MCP 集成测试通过，Android executor 使用替身。
   覆盖 Android-only 发现/状态、MCP 图片、原操作响应丢失后重连不重放、权限未就绪、
-  批次阻塞时关闭能力、重新启用和配对撤销。两个配对响应丢失恢复测试及 Core
-  once-only/Unknown/撤销回归通过。旧 Host 的三项 generation 可解码为第四项为零；
-  未协商 Android 的 Host 在发出 Android capability patch 前拒绝，控制连接保持可用。
-- 仓库检查：原有 foundation quality 的 20 项检查 PASS，包括 Clippy、工作区测试、
-  HTTP/MCP 测试和 CLI 构建。原始 receipt 位于下述证据目录的 quality/receipt.json；
-  它绑定整合提交前的 b3f86e0 与当时输入，不能替代后续 clean HEAD 候选生产门。
-- 实机：Pixel 7 Pro（API 37）开发 APK 安装及 Activity 启动成功；早期开发包冷启动
-  828 ms，后续包 297 ms。JNI status 实际返回 stopped。正常系统界面曾成功授权
-  Styx AccessibilityService。最后一次 APK 更新已成功。
-- 真机测试尚未通过：测试 APK 已构建并安装，但普通 Instrumentation 启动重启了
-  目标 App，首个服务就绪检查失败，未打开测试 fixture，也未执行测试点击、输入或截图。
-  系统最后报告权限仍启用，但 Styx 服务在 crashed 列表中、未绑定；最后 APK 更新后仍如此。
-  后续设置页恢复中，前台反复回到 Google VPN 页面。此前截图显示 VPN 开启，最后只读
-  检查显示关闭，坐标点击可能误中该设置，原因未确认。已停止手机操作，交由所有者核对
-  VPN 原状态并通过正常系统界面恢复 Styx 服务。不能把安装/授权记录视为控制验收通过。
-- 待验收：恢复手机正常服务状态；现有 Gateway 对 Android 的验收部署；真实独立配对和
-  ADB 断开后的原生工具；Unicode/批次/截图、锁屏/后台/撤销及与原 ADB 控制器的延迟对照。
-  未修改生产 Gateway、既有 Host 配对或正式安装；尚未生成 Gateway 验收候选或正式发布。
+  批次阻塞时关闭能力、重新启用和撤销。旧 Host 三项 generation 解码为第四项为零；
+  未协商 Android 的 Host 在发出 Android patch 前拒绝，原控制连接保持可用。
+- 手机平台实测：Pixel 7 Pro（API 37）安装、JNI 与 Accessibility 真实 fixture 的
+  12 项检查 PASS：服务就绪、前台、UI Tree/双 caller、旧引用拒绝、Unicode、坐标手势、
+  成功批次、部分失败结果、耗时采样、截图、FLAG_SECURE 遮蔽及引用清理。
+  无障碍服务保持绑定，测试前后 PID 17730 不变，Crashed services 为空。
+  小型 fixture 的树读取中位数 8.98 ms、截图 152.94 ms，不能当作 Gateway 链路耗时，
+  也不能直接与另一 App 的 ADB 历史耗时比较。
+- 上轮验收障碍已定位：普通 Instrumentation 会停止目标进程，改用既有 --no-restart；
+  独立测试 Activity 的 Kotlin 运行库缺失，改为无额外依赖的 Java fixture；进入动画
+  期间的 stale_node 用测试开始前 waitForIdle 解决，未放宽产品目标校验。
+  Wildlife provisioning 实际反复打开 VPN 设置页，使用其既有 issuance-paused 标记
+  暂停新发行以避免前台冲突，未停止 VPN、路由续期或设备服务。
+- Gateway 候选：精确 c903a27 干净源码检查 PASS、Debian 原生构建 PASS；同 publisher
+  签名与独立验证 PASS。0.5.1-android.1 是开发验收候选，不是正式 Release。
+  manifest：0ddc9ab0869563c903b1bcde1d151d0e66e0c081dab95fc25b4f954918e859f5。
+  此记录写入时尚未部署；待确认真实独立配对、ADB 断开后的工具、后台/锁屏/撤销。
 - 证据：/home/sid/Developer/Artifacts/Styx/native-android-host-20261119/；
-  APK 和手机测试记录在 /home/sid/Developer/Artifacts/Styx/android-host/。
-  构建入口与平台接口见 src/host/android/README.md。
+  手机实际结果：/home/sid/Developer/Artifacts/Styx/android-host/platform-acceptance-result.json。
+  构建和测试入口见 src/host/android/README.md。
 
 ## 2026-11-15 发布历史
 

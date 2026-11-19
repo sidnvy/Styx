@@ -74,3 +74,28 @@ Kotlin compilation and manifest merging verify source wiring only. JNI loading,
 actual Gateway pairing, Accessibility grant, locked-screen refusal, background
 connection, revocation and measured operation latency require a physical-device
 acceptance run. They must be reported separately from compilation and APK creation.
+
+## Android platform acceptance
+
+The test APK contains its own synthetic fixture Activity. It exercises the actual
+Accessibility adapter and emits only aggregate results and timings. Install the
+Host normally, enable its Accessibility service, keep the phone unlocked, and pause
+any other automation that changes the foreground app during this run.
+
+Set `STYX_ANDROID_DEVICE` to the explicitly selected authorized device. After the
+normal native build, build and install the separate test APK:
+
+```bash
+src/host/android/gradlew -p src/host/android --offline :app:assembleDebugAndroidTest
+adb -s "$STYX_ANDROID_DEVICE" install -r -t --dont-kill \
+  src/host/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb -s "$STYX_ANDROID_DEVICE" shell am instrument --no-restart -w -r \
+  com.styx.host.test/com.styx.host.test.PlatformAcceptanceInstrumentation
+```
+
+Use `--no-restart`: ordinary instrumentation force-stops its target App, which also
+owns the AccessibilityService being tested. The runner preserves Accessibility
+services with `FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES` and checks live readiness
+before opening the fixture. A failed readiness check is not a platform-action pass.
+A successful platform run still does not establish Gateway pairing or independent
+operation after ADB disconnect.
