@@ -70,7 +70,7 @@ fn paired_wire_preserves_v2_bytes_and_typed_v3_contract() {
 }
 
 #[tokio::test]
-async fn actual_host_registry_turnover_compacts_only_complete_and_rejects_old_actions() {
+async fn actual_host_registry_releases_completed_callers_while_an_earlier_caller_stays_open() {
     let (host, device, generation) = registry_host();
     let protocol = host
         .paired_protocol(PairedTrustedProfile {
@@ -86,7 +86,27 @@ async fn actual_host_registry_turnover_compacts_only_complete_and_rejects_old_ac
         owner_id: format!("fixture:owner-{n}").try_into().unwrap(),
         owner_epoch: paired_owner_epoch(&epoch, n),
     };
-    for n in 1..=1100 {
+    let active = owner(1);
+    assert!(matches!(
+        protocol.control(&Call::OwnerOpen {
+            owner: active.clone(),
+            grant_revision: 1
+        }),
+        Some(Reply::OwnerOpened { .. })
+    ));
+    assert!(matches!(
+        protocol
+            .handle(Call::OwnerCleanup {
+                owner: active.clone(),
+                timeout_ms: 5000
+            })
+            .await,
+        Reply::Error {
+            category: ErrorCategory::Unauthorized,
+            ..
+        }
+    ));
+    for n in 2..=1101 {
         let reference = owner(n);
         assert!(
             matches!(
@@ -108,26 +128,37 @@ async fn actual_host_registry_turnover_compacts_only_complete_and_rejects_old_ac
         assert!(matches!(
             protocol
                 .handle(Call::OwnerCleanup {
-                    owner: reference,
+                    owner: reference.clone(),
                     timeout_ms: 5000
                 })
                 .await,
             Reply::OwnerCleanup { complete: true, .. }
         ));
-        assert!(
+        assert_eq!(
             protocol
                 .coordinator
                 .remote_access()
                 .lock()
                 .unwrap()
                 .owners
-                .is_empty(),
-            "old 128 lifetime cap must not accumulate"
+                .len(),
+            1,
+            "an active earlier caller must not retain completed later callers"
         );
+        assert!(protocol.owner(&active).is_ok());
+        assert!(matches!(
+            protocol
+                .handle(Call::OwnerCleanup {
+                    owner: reference,
+                    timeout_ms: 5000
+                })
+                .await,
+            Reply::OwnerCleanup { complete: true, .. }
+        ));
     }
     assert!(matches!(
         protocol.control(&Call::OwnerOpen {
-            owner: owner(1),
+            owner: owner(2),
             grant_revision: 1
         }),
         Some(Reply::Error {
@@ -135,7 +166,7 @@ async fn actual_host_registry_turnover_compacts_only_complete_and_rejects_old_ac
             ..
         })
     ));
-    assert!(protocol.owner(&owner(1)).is_err());
+    assert!(protocol.owner(&owner(2)).is_err());
     // No new epoch can revive the old key, and the retired epoch is refused.
     protocol
         .accept_epoch(&"owner-turnover-next-process".try_into().unwrap())
@@ -143,7 +174,7 @@ async fn actual_host_registry_turnover_compacts_only_complete_and_rejects_old_ac
     assert!(protocol.accept_epoch(&epoch).is_err());
     assert!(matches!(
         protocol.control(&Call::OwnerOpen {
-            owner: owner(1),
+            owner: owner(2),
             grant_revision: 1
         }),
         Some(Reply::Error {

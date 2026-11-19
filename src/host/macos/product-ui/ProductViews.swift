@@ -88,11 +88,6 @@ struct ProductView: View {
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.observePermissions() }
             .onChange(of: model.page) { _ in model.observePermissions() }
     }
-    private func nav(_ page: ProductPage, _ text: String) -> some View {
-        Button(text) { model.page = page; if page == .computers { model.loadDevices() } }
-            .buttonStyle(.plain).font(.system(size: 13, weight: model.page == page ? .semibold : .regular))
-            .foregroundStyle(model.page == page ? Color.accentColor : Color.primary)
-    }
     private func heading(_ title: String, _ subtitle: String = "") -> some View {
         VStack(alignment: .leading, spacing: 9) {
             Text(title).font(.system(size: 23, weight: .semibold))
@@ -534,16 +529,6 @@ struct ProductView: View {
         case "failed", "uncertain", "blocked", "needs_attention": return productText("需要检查", "Needs attention")
         case "session_unavailable": return productText("需要图形登录会话", "Graphical login required")
         default: return productText("尚未确认", "Not yet verified")
-        }
-    }
-    private func stepTitle(_ id: String) -> String {
-        switch id {
-        case "gateway.runtime.prepare", "gateway.prepare": return productText("准备本机连接", "Prepare local connection")
-        case "gateway.start", "gateway.verify": return productText("检查本机连接", "Check local connection")
-        case "host.prepare": return productText("准备所选能力", "Prepare selected capabilities")
-        case "host.invite", "host.pair", "host.request", "host.claim": return productText("连接这台电脑", "Connect this computer")
-        case "host.doctor": return productText("检查这台电脑", "Check this computer")
-        default: return productText("准备组件", "Prepare components")
         }
     }
 }

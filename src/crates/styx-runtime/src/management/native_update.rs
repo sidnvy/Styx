@@ -31,7 +31,7 @@ pub async fn select_runtime(
             target_os = "windows"
         ))]
         {
-            select_in_scope(&path, &selection_file, id, sequence, None)
+            select_stopped_profile(&path, &selection_file, id, sequence)
         }
         #[cfg(not(any(
             all(target_os = "linux", target_env = "gnu"),
@@ -51,22 +51,21 @@ pub async fn select_runtime(
     target_os = "macos",
     target_os = "windows"
 ))]
-fn select_in_scope(
+fn select_stopped_profile(
     path: &Path,
     selection_file: &Path,
     id: TransactionId,
     sequence: u64,
-    scope: Option<&Arc<crate::app::HostScope>>,
 ) -> Result<RuntimeSelectionReport> {
     let raw = platform::private_file(selection_file, NATIVE_STATE_BYTES)?;
     let selected: NativeRuntimeSelection = serde_json::from_slice(raw.bytes())
         .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
-    platform::use_managed_transactions(path, scope, |transactions| {
-        platform::reconcile_complete_tip(transactions, scope.is_some())?;
+    platform::use_managed_transactions(path, None, |transactions| {
+        platform::reconcile_complete_tip(transactions, false)?;
         let state = transactions
             .readstate()
             .map_err(NativeManagementError::transaction)?;
-        let initialized = require_initialized_profile(path, transactions, &state, scope)?;
+        let initialized = require_initialized_profile(path, transactions, &state)?;
         let previous = state
             .state()
             .runtime_selection()
@@ -80,17 +79,9 @@ fn select_in_scope(
         let new_release = crate::release::verify_selected(&selected)
             .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
         initialized.validate()?;
-        let committed = match scope {
-            Some(scope) => transactions.update_runtime_for_app(
-                old_release,
-                new_release,
-                id,
-                sequence,
-                scope.clone(),
-            ),
-            None => transactions.update_runtime(old_release, new_release, id, sequence),
-        }
-        .map_err(NativeManagementError::transaction)?;
+        let committed = transactions
+            .update_runtime(old_release, new_release, id, sequence)
+            .map_err(NativeManagementError::transaction)?;
         initialized.validate()?;
         let transaction = NativeTransactionReport {
             transaction_id: committed.transaction_id,
@@ -162,7 +153,6 @@ fn require_initialized_profile(
     path: &Path,
     transactions: &NativeTransactions,
     canonical: &crate::store::native_state::ValidatedNativeState,
-    scope: Option<&Arc<crate::app::HostScope>>,
 ) -> Result<InitializedProfile> {
     use serde::Deserialize;
     use styx_contracts::native_host::{NativeHostJoinSeed, NativeHostReady};
@@ -191,14 +181,9 @@ fn require_initialized_profile(
         .runtime_update()
         .map_err(|_| invalid())?
         .map_or(current, |update| update.bootstrap_runtime);
-    platform::require_scope(path, scope)?;
-    let manager = if scope.is_some() {
-        NativeManager::AppManaged
-    } else {
-        NativeManager::ForegroundCli
-    };
+    platform::require_scope(path, None)?;
     let stopped = |d: &NativeComponentDesired| {
-        d.manager == manager
+        d.manager == NativeManager::ForegroundCli
             && d.run == NativeRunDesired::Stopped
             && d.autostart == NativeAutostartDesired::Disabled
     };

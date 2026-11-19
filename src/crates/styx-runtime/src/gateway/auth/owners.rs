@@ -1,4 +1,4 @@
-//! Space for a fence is reserved at mint time. Unknown cleanup pins the floor.
+//! Admission records live until cleanup; absent records remain fenced.
 use std::{
     collections::BTreeMap,
     sync::atomic::{AtomicU64, Ordering},
@@ -8,11 +8,9 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 enum Phase {
     Open,
     Fenced,
-    Complete,
 }
 #[derive(Default)]
 pub(super) struct Owners {
-    watermark: u64,
     records: BTreeMap<u64, Phase>,
 }
 impl Owners {
@@ -24,7 +22,7 @@ impl Owners {
         Some(seq)
     }
     pub(super) fn fenced(&self, seq: u64) -> bool {
-        seq < self.watermark || self.records.get(&seq) != Some(&Phase::Open)
+        self.records.get(&seq) != Some(&Phase::Open)
     }
     pub(super) fn fence(&mut self, seq: u64) {
         if let Some(phase) = self.records.get_mut(&seq)
@@ -34,34 +32,34 @@ impl Owners {
         }
     }
     pub(super) fn complete(&mut self, seq: u64) {
-        if let Some(phase) = self.records.get_mut(&seq) {
-            *phase = Phase::Complete;
-        }
-        // Sequences belonging to another policy are never keys in this ledger.
-        while let Some((&first, &Phase::Complete)) = self.records.first_key_value() {
-            self.records.remove(&first);
-            self.watermark = first + 1;
-        }
+        self.records.remove(&seq);
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn unknown_cleanup_pins_watermark_without_blocking_other_owners() {
+    fn completed_owners_release_records_while_active_and_unknown_owners_remain() {
         let mut ledger = Owners::default();
+        let active = ledger.mint().unwrap();
         let unknown = ledger.mint().unwrap();
         ledger.fence(unknown);
         for _ in 1..5000 {
             let n = ledger.mint().unwrap();
             ledger.fence(n);
             ledger.complete(n);
+            assert_eq!(ledger.records.len(), 2);
+            assert!(!ledger.fenced(active));
+            assert!(ledger.fenced(unknown));
+            assert!(ledger.fenced(n));
         }
-        assert_eq!(ledger.watermark, 0);
         let additional = ledger.mint().unwrap();
         ledger.complete(additional);
         ledger.fence(unknown);
         ledger.complete(unknown);
+        assert!(!ledger.fenced(active));
+        ledger.complete(active);
+        assert!(ledger.fenced(active));
         assert!(ledger.records.is_empty());
         assert!(ledger.fenced(unknown));
         for _ in 0..2000 {

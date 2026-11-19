@@ -350,7 +350,7 @@ extension ProductModel {
             "fingerprint": .string(fingerprint), "comparisonCode": .string(code)]
         perform { [self] in
             _ = try await client.write("pending/reject", rejection)
-            selectedPending = .null; comparisonConfirmation = ""; fingerprintConfirmation = ""
+            selectedPending = .null; comparisonConfirmation = ""
             pending = try await client.write("pending/list", ["authorize": .bool(true)])["pending"].array
         }
     }

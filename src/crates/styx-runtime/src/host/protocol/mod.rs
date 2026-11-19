@@ -371,10 +371,7 @@ impl<'a> HostProtocol<'a> {
                         },
                     );
                 }
-                Err(e) => {
-                    registry.order.complete(owner); // authoritative NotCreated
-                    return Some(coordinator_error(e, false));
-                }
+                Err(e) => return Some(coordinator_error(e, false)),
             }
             Some(Reply::OwnerOpened {
                 owner: owner.clone(),
@@ -532,10 +529,13 @@ impl<'a> HostProtocol<'a> {
                         .remote_access()
                         .lock()
                         .expect("owner registry");
-                    return if registry
-                        .active_epoch
-                        .as_ref()
-                        .is_some_and(|epoch| registry.order.completed(epoch, &owner))
+                    return if !registry
+                        .owners
+                        .contains_key(&(owner.owner_id.clone(), owner.owner_epoch.clone()))
+                        && registry
+                            .active_epoch
+                            .as_ref()
+                            .is_some_and(|epoch| registry.order.fenced(epoch, &owner))
                     {
                         Reply::OwnerCleanup {
                             owner,
@@ -576,15 +576,9 @@ impl<'a> HostProtocol<'a> {
                         .remote_access()
                         .lock()
                         .expect("owner registry");
-                    if let Some(record) = registry
+                    registry
                         .owners
-                        .get_mut(&(owner.owner_id.clone(), owner.owner_epoch.clone()))
-                    {
-                        record.cleanup = None;
-                    }
-                    for key in registry.order.complete(&owner) {
-                        registry.owners.remove(&key);
-                    }
+                        .remove(&(owner.owner_id.clone(), owner.owner_epoch.clone()));
                 }
                 Reply::OwnerCleanup { owner, complete }
             }
