@@ -147,9 +147,9 @@ class WorkerRuntimeBudgetTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == 'linux', 'existing Runtime sealer is Linux-only')
     def test_actual_runtime_manifests_fit_budget_with_locked_npm_closure(self):
-        # This executes the real selector, copy and manifest encoder. Only source
-        # admission/signature verification is mocked: binaries are native header
-        # fixtures, and no private key, actual executor or product identity runs.
+        # This executes the real selector, copy and manifest encoder. Source
+        # admission/signatures are mocked; native headers and build-info observations
+        # are synthetic fixtures. No private key, actual executor or product identity runs.
         modules = ROOT / 'src/providers/browser-worker/node_modules'
         self.assertTrue(modules.is_dir(), 'npm ci --prefix src/providers/browser-worker is required')
         subject = runpy.run_path(str(ROOT / 'src/ci/release-workers.py'))
@@ -195,10 +195,23 @@ class WorkerRuntimeBudgetTests(unittest.TestCase):
                         observations=observations, directories=directories)
                     image = fixture / ('styx' + suffix)
                     image.write_bytes(self.native_header(target))
+                    binary_hash = subject['digest'](image)
+                    producer = 'src/tools/release/build-native-binary.py'
+                    build_info = dict(schema=1, target=target,
+                        minimum_release_reader='native_runtime_v2',
+                        supported_state_readers=['native_state_v1'])
+                    build_info_raw = json.dumps(build_info).encode('utf-8')
                     receipt = fixture / 'receipt.json'
                     receipt.write_text(json.dumps(dict(status='PASS', input_stability='PASS',
-                        source_revision='a' * 40, target=target, inputs={'Cargo.toml': 'c' * 64},
-                        cli_binary_sha256=subject['digest'](image))))
+                        source_revision='a' * 40, target=target, producer=producer,
+                        inputs={'Cargo.toml': subject['digest'](ROOT / 'Cargo.toml'),
+                                producer: subject['digest'](ROOT / producer)},
+                        cli_binary=str(image), cli_binary_sha256=binary_hash,
+                        cli_build_info=dict(actual_wait=True, exit_code=0, binary_sha256=binary_hash,
+                            command=[str(image), 'build-info', '--json'], report=build_info,
+                            stdout_utf8=build_info_raw.decode('utf-8'),
+                            stdout_sha256=sealer['sha'](build_info_raw), stdout_bytes=len(build_info_raw),
+                            stderr_sha256=sealer['sha'](b''), stderr_bytes=0))))
                     tunnel = fixture / ('tunnel-client-runtime' + suffix)
                     tunnel.write_bytes(self.native_header(target))
                     notice = fixture / 'NOTICE'
