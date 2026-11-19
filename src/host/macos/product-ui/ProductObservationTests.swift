@@ -167,7 +167,7 @@ import Combine
         switch operation {
         case "startupStatus", "status": return fresh
         case "inspectJoin": return .object(["preview": preview])
-        case "join": return configured
+        case "join": return .object(["status": .string("ready_to_connect")])
         default: throw ProductCoreError.invalidResponse
         }
     })
@@ -181,6 +181,32 @@ import Combine
     try require(submissions.count == 1 && submissions[0].1["approvedGatewayOrigin"] == preview["origin"] && submissions[0].1["approvedCaSha256"] == preview["caSha256"], "Join omitted reviewed identity or duplicated submission")
     try require(joining.joinAcceptance == .null && joining.inspection == .null, "Completed join retained invitation review state")
 
+    for outcome in ["awaiting_approval", "rejected", "ready_to_connect"] {
+        var observedJoin = fresh
+        var submissions = 0
+        let report: ProductJSON = .object(["schema": .number(1), "status": .string(outcome), "request_id": .string("original-computer-request"), "selected_features": .object(["computer": .bool(true), "browser": .bool(false)])])
+        let computerJoin = ProductModel(testRequest: { operation, _ in
+            if operation == "join" {
+                submissions += 1
+                var current = configured.object
+                current["enrollment"] = report
+                current["desktop_intent"] = .object(["computer_requested": .bool(outcome == "ready_to_connect")])
+                if outcome != "ready_to_connect" { current["configuration"] = .null; current["foreground"] = .null }
+                observedJoin = .object(current)
+                return report
+            }
+            guard ["startupStatus", "status"].contains(operation) else { throw ProductCoreError.invalidResponse }
+            return observedJoin
+        })
+        await computerJoin.bootstrap()
+        computerJoin.inspection = .object(["preview": preview]); computerJoin.acceptInvitation()
+        computerJoin.computer = true
+        computerJoin.createAndPrepare(); computerJoin.createAndPrepare(); try await settled(computerJoin)
+        let expectedPage: ProductPage = outcome == "ready_to_connect" ? .permissions : .overview
+        try require(submissions == 1 && computerJoin.page == expectedPage && computerJoin.status["enrollment"] == report,
+                    "Computer Use selection sent an unfinished or rejected join into permission recovery, or replayed its original request")
+    }
+
     var enrollment = configured.object
     enrollment["configuration"] = .null
     enrollment["supportedOperations"] = .array([.string("claimJoin"), .string("retireRole")])
@@ -191,6 +217,7 @@ import Combine
         if operation == "claimJoin" {
             claims += 1
             enrollment["enrollment"] = .object(["status": .string("rejected"), "request_id": originalRequest["request_id"]])
+            return enrollment["enrollment"]!
         } else if !["startupStatus", "status"].contains(operation) { throw ProductCoreError.invalidResponse }
         return .object(enrollment)
     })

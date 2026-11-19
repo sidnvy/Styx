@@ -445,8 +445,11 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
                       let ca = joinAcceptance["caSha256"].string else { throw ProductCoreError.rejected }
                 choice["approvedGatewayOrigin"] = .string(origin)
                 choice["approvedCaSha256"] = .string(ca)
-                _ = try await client.native("join", choice)
-                joinAcceptance = .null; inspection = .null; page = afterSetupPage
+                let report = try await client.native("join", choice)
+                joinAcceptance = .null; inspection = .null
+                // An unfinished or rejected original request belongs in Settings.
+                // Selecting Computer Use alone does not admit permission recovery.
+                page = report["status"].string == "ready_to_connect" ? afterSetupPage : .overview
             } else {
                 guard nativeCanCreateLocal, let tunnel = setupTunnelInput else { throw ProductCoreError.rejected }
                 choice["tunnel"] = tunnel; setupTunnelKey = ""
