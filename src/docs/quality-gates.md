@@ -96,7 +96,7 @@ a real input or write. Keep these existing layers distinct:
 | `--browser-host --browser-references` quality scenarios | Actual Node/Chromium Host sessions, fresh references, navigation/tabs, text input, click, independent HTTP effects, unknown outcomes and owned cleanup. Require explicit Node, Codex and browser inputs. |
 | `browser_sessions_survive_chat_close_and_transfer_requires_sockets` | Actual loopback TLS/MCP/WSS Gateway and Host with Chromium. A fresh snapshot supplies the textbox for `browser_type`; after session transfer, another snapshot supplies the submit button for `browser_click`. A separate snapshot and server-side effect ledger must agree on the saved nonce and exactly one write. |
 | Computer contract/FakeDriver/transport tests | Exact target binding, schema, dispatch and refusal behavior. They do not establish an OS effect. |
-| Native owned GUI fixture through public tools | Observe the test field, set its value, independently read the same value, then click the observed button and inspect the fixture's own facts. Report the running installed Core identity separately from the source revision. |
+| Manual native owned GUI fixture through public tools | Observe the test field, set its value, independently read the same value, then click the observed button and inspect the fixture's own facts. Report the running installed Core identity separately from the source revision. |
 
 The paired Browser test additionally retains its disconnect, takeover, stale-owner,
 stale-reference, busy-operation and capability lifecycle checks. Do not replace
@@ -104,6 +104,14 @@ normal input controls with page-side JavaScript assignment when claiming those
 controls work. JavaScript remains useful for explicit busy/unknown fault injection.
 The tests above do not claim that every exposed Browser tool, site, upload,
 download or dialog has been exercised.
+
+The paired Browser case is an explicit exact ignored test. Select it with
+`cargo test -p styx-runtime --locked --offline enrollment::service::tests::paired_journey::browser_sessions_survive_chat_close_and_transfer_requires_sockets -- --ignored --exact --nocapture`
+and its declared test-only Node, Codex, Chromium, TLS and output inputs. The
+quality flag `--paired-host` selects the separate paired Codex enrollment journey;
+it does not run this Browser case. `owned-gui-acceptance.py` retains a narrower
+direct-Cua socket screenshot/tree/click check; the public-tool text-write/readback
+sequence above is manual device verification.
 
 Run the selected real case when its boundary changes; use the existing quality
 flags and declared inputs for an integration checkpoint. Ordinary PR quality
