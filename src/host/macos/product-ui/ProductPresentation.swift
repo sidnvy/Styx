@@ -59,7 +59,7 @@ enum ProductCapabilityKind {
         switch self {
         case .cli: return productText("运行命令和脚本", "Run commands and scripts")
         case .computer: return productText("查看屏幕、点击和输入", "View the screen, click and type")
-        case .browser: return productText("打开网页、点击和填写表单", "Open websites, click and fill in forms")
+        case .browser: return productText("在可见窗口中操作网页，也可手动登录", "Use websites in a visible window and sign in yourself")
         }
     }
     var symbol: String {

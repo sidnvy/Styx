@@ -928,7 +928,8 @@ fn deployment_host(session: &Session, origin: &str, ca_hash: &str) -> Value {
     let a = &session.answers;
     let mut host = json!({"label":a.label, "cwd":a.workspace, "shell":a.shell, "exec":{"enabled":a.exec}, "computer":a.computer});
     if a.browser {
-        host["browser"] = json!({"enabled":true,"headless":true,"persistLogin":false,"channel":"chrome","executablePath":a.browser_executable});
+        host["browser"] =
+            json!({"enabled":true,"channel":"chrome","executablePath":a.browser_executable});
     }
     json!({"schema":1,"mode":"join-existing", "gateway":{"url":origin,"caFile":session.input("join-ca.pem"),"expectedCaSha256":ca_hash},"host":host,"runtimeSelectionFile":session.input("runtime-selection.json"),"invitationFile":session.input("invitation")})
 }

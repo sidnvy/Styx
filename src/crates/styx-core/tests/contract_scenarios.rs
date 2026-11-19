@@ -258,7 +258,7 @@ fn changed_device_grant_capability_and_unavailable_provider_refuse_without_poiso
     f.grant_revision += 1;
     variants.push(f);
     let mut f = facts();
-    f.descriptor.capability_id = CapabilityId::BrowserHeadless;
+    f.descriptor.capability_id = CapabilityId::Browser;
     variants.push(f);
     let mut f = facts();
     f.descriptor.availability = Availability::Unavailable;
@@ -697,9 +697,9 @@ fn resource_access_uses_fresh_policy_without_rebinding_or_reusing_start_deadline
         Err(ErrorCategory::PermissionDenied)
     );
     let mut changed = fresh.clone();
-    changed.capability = CapabilityId::BrowserHeadless;
+    changed.capability = CapabilityId::Browser;
     let mut browser = facts();
-    browser.descriptor.capability_id = CapabilityId::BrowserHeadless;
+    browser.descriptor.capability_id = CapabilityId::Browser;
     assert_eq!(
         l.authorize_resource_access(
             &a,
@@ -810,12 +810,7 @@ fn exec_and_browser_keep_their_existing_deadline_requirement() {
     let owner = ledger
         .register_verified_owner(id("deadline-owner"), id("epoch"))
         .unwrap();
-    for capability in [
-        CapabilityId::ExecRun,
-        CapabilityId::BrowserHeadless,
-        CapabilityId::BrowserHeaded,
-        CapabilityId::BrowserAttach,
-    ] {
+    for capability in [CapabilityId::ExecRun, CapabilityId::Browser] {
         let mut c = context();
         c.capability = capability;
         c.deadline = None;

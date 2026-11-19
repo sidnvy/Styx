@@ -201,7 +201,7 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
             guard nativeCanResumeLocal, let tunnel = setupTunnelInput else { throw ProductCoreError.rejected }
             nativeLocalSetupSubmitted = true
             // Explicit confirmation only; a failed or lost response is never replayed.
-            var choice: [String: ProductJSON] = ["label": .string(name), "exec": .bool(exec), "computer": .bool(computer), "persistLogin": .bool(false), "port": .number(Double(port))]
+            var choice: [String: ProductJSON] = ["label": .string(name), "exec": .bool(exec), "computer": .bool(computer), "port": .number(Double(port))]
             choice.merge(nativeBrowserChoice) { _, chosen in chosen }
             choice["tunnel"] = tunnel; setupTunnelKey = ""
             do {
@@ -438,7 +438,7 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
         perform { [self] in
             // Selecting Computer Use never grants desktop permission or invents
             // readiness; the Permissions page asks the owner for both grants.
-            var choice: [String: ProductJSON] = ["label": .string(name), "exec": .bool(exec), "computer": .bool(computer), "persistLogin": .bool(false)]
+            var choice: [String: ProductJSON] = ["label": .string(name), "exec": .bool(exec), "computer": .bool(computer)]
             choice.merge(nativeBrowserChoice) { _, chosen in chosen }
             if joinExisting {
                 guard let origin = joinAcceptance["origin"].string,

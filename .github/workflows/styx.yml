@@ -79,7 +79,7 @@ jobs:
         if: always()
         with:
           name: rust-quality-receipt
-          path: ${{ runner.temp }}/quality/receipt.json
+          path: ${{ runner.temp }}/quality
           if-no-files-found: warn
           retention-days: 14
 
@@ -121,7 +121,7 @@ jobs:
   native-contracts:
     name: Native contracts on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
@@ -129,8 +129,11 @@ jobs:
       matrix:
         include:
           - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
           - runner: macos-15
+            target: aarch64-apple-darwin
           - runner: windows-2025
+            target: x86_64-pc-windows-msvc
     defaults:
       run:
         shell: bash
@@ -145,10 +148,61 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        if: runner.os != 'Linux'
+        with:
+          toolchain: '1.97.1'
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: runner.os != 'Linux'
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+            target
+          key: native-check-${{ matrix.target }}-rust1971-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            native-check-${{ matrix.target }}-rust1971-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
+            native-check-${{ matrix.target }}-rust1971-
+            release-${{ runner.os == 'macOS' && 'macos' || 'windows' }}-${{ matrix.target }}-rust1971-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
+            release-${{ runner.os == 'macOS' && 'macos' || 'windows' }}-${{ matrix.target }}-rust1971-
+      - name: Check every Rust target on the native platform
+        if: runner.os != 'Linux'
+        run: cargo check --locked --workspace --all-targets --release --target '${{ matrix.target }}'
       - name: Install locked Host test dependencies
         run: |
           npm --prefix src ci --ignore-scripts --no-audit --no-fund
           npm --prefix src/packages/styx-browser-provider ci --ignore-scripts --no-audit --no-fund
+          npm --prefix src/providers/browser-worker ci --ignore-scripts --no-audit --no-fund
+      - name: Select the installed desktop browser
+        id: desktop_browser
+        run: |
+          python - <<'PYTHON'
+          import os, pathlib, sys
+          if sys.platform == 'darwin':
+              candidates = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
+          elif sys.platform == 'win32':
+              candidates = [os.path.join(os.environ[key], suffix) for key in ('PROGRAMFILES', 'PROGRAMFILES(X86)', 'LOCALAPPDATA') if key in os.environ for suffix in (r'Google\Chrome\Application\chrome.exe', r'Microsoft\Edge\Application\msedge.exe')]
+          else:
+              candidates = ['/opt/google/chrome/chrome', '/usr/lib/chromium/chromium']
+          selected = next((str(pathlib.Path(p).resolve()) for p in candidates if pathlib.Path(p).is_file()), None)
+          if not selected:
+              raise SystemExit('No installed desktop browser on the native runner')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('executable=' + selected + '\n')
+          PYTHON
+      - name: Provide a Linux test display
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb xauth
+      - name: Exercise the visible Browser and external-page handoff
+        env:
+          STYX_BROWSER_EXECUTABLE: ${{ steps.desktop_browser.outputs.executable }}
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a node --test src/providers/browser-worker/worker.test.mjs
+          else
+            node --test src/providers/browser-worker/worker.test.mjs
+          fi
       - name: Remaining platform contracts
         run: npm --prefix src run test:all
       - name: Validate checksum and safe archive extraction regressions

@@ -56,7 +56,7 @@ impl BrowserPort<'_> {
             grant_revision: revision,
             session: None,
             observation: None,
-            capability: CapabilityId::BrowserHeadless,
+            capability: CapabilityId::Browser,
             deadline: Some(MonotonicMillis(
                 self.coordinator.now().0.saturating_add(u64::from(timeout)),
             )),
@@ -195,7 +195,7 @@ impl BrowserPort<'_> {
             Ok(v) => v,
             Err(e) => return rejection(e),
         };
-        context.capability = CapabilityId::BrowserHeadless;
+        context.capability = CapabilityId::Browser;
         context.deadline = Some(MonotonicMillis(
             self.coordinator.now().0.saturating_add(u64::from(timeout)),
         ));
@@ -252,11 +252,18 @@ impl BrowserPort<'_> {
                         dispatch: "existing_no_replay".into(),
                     },
                     Ok(BrowserOpenSubmission::Submitted(ticket)) => match ticket.wait().await {
-                        Ok(done)
-                            if done.evidence == BrowserActionEvidence::NotDispatched
-                                && done.cause == Some(BrowserError::Busy) =>
-                        {
-                            rejection(ErrorCategory::Busy)
+                        Ok(done) if done.evidence == BrowserActionEvidence::NotDispatched => {
+                            // No Browser was started. Deferred metadata collection
+                            // cannot change that fact or require replay of this request.
+                            let _ = self
+                                .authority
+                                .collect_provider_retention(Duration::from_secs(1))
+                                .await;
+                            rejection(
+                                done.cause
+                                    .map(category)
+                                    .unwrap_or(ErrorCategory::CapabilityUnsupported),
+                            )
                         }
                         Ok(done) => Reply::Start {
                             snapshot: done.snapshot.into(),

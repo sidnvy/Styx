@@ -79,7 +79,7 @@ impl BrowserWorker {
     ) -> Result<()> {
         let s = key.snapshot();
         let target = s.target.as_ref().ok_or(BrowserError::PermissionDenied)?;
-        if key.capability() != CapabilityId::BrowserHeadless
+        if key.capability() != CapabilityId::Browser
             || key.owner() != &resource.owner
             || target.operation_id != resource.operation
             || target.payload_digest != resource.digest
@@ -135,7 +135,7 @@ impl BrowserWorker {
             .get(&target.operation_id)
             .cloned()
             .ok_or(BrowserError::Unknown)?;
-        if key.capability() != CapabilityId::BrowserHeadless
+        if key.capability() != CapabilityId::Browser
             || key.owner() != &resource.owner
             || target.payload_digest != resource.digest
         {
@@ -202,7 +202,7 @@ impl BrowserWorker {
     ) -> Result<ProviderReleaseConfirmation> {
         let key = permit.resource().ok_or(BrowserError::InvalidRequest)?;
         let s = key.snapshot();
-        if key.capability() != CapabilityId::BrowserHeadless || s.target.is_some() {
+        if key.capability() != CapabilityId::Browser || s.target.is_some() {
             return Err(BrowserError::PermissionDenied);
         }
         let resource = self
@@ -227,12 +227,17 @@ impl BrowserWorker {
         }
         let mut live = resource.state.lock().await;
         let clean = live.cleanup.ok_or(BrowserError::CleanupUnconfirmed)?;
+        let not_started = s.state == OperationState::Failed
+            && s.liveness == ExecutionLiveness::NotStarted
+            && s.output_drain == OutputDrain::NotOpened
+            && permit.actions().is_empty();
         if live.retired
             || !clean.worker_exited
             || !clean.stdio_joined
             || clean.descendants != BrowserDescendants::Confirmed
-            || s.liveness != ExecutionLiveness::Exited
-            || s.output_drain != OutputDrain::Drained
+            || (!not_started
+                && (s.liveness != ExecutionLiveness::Exited
+                    || s.output_drain != OutputDrain::Drained))
         {
             return Err(BrowserError::CleanupUnconfirmed);
         }

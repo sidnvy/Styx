@@ -14,7 +14,7 @@ import { readConfiguration } from './config.mjs';
 let factBytesRemaining = 64 * 1024, factsBlocked = false;
 function fact(event) {
   if (factsBlocked) return;
-  const line = `${JSON.stringify({ schema: 1, event, headless: true })}\n`;
+  const line = `${JSON.stringify({ schema: 1, event, headless: false })}\n`;
   const bytes = Buffer.byteLength(line);
   if (bytes > factBytesRemaining) return;
   factBytesRemaining -= bytes;
@@ -33,6 +33,7 @@ const stateTool = {
 };
 let macProcess, macProcessClose;
 let nativeEpoch = 1, nativeClosed = false, epochExhausted = false;
+let closeRequestId;
 let contextPromise, context, backend, client, server, startupPromise, closing = false, cleanupPromise;
 // Fixed Playwright 1.64 adapter only: reuse its existing in-process bridge,
 // never a new BrowserServer/listener or a process selected by remote input.
@@ -101,7 +102,7 @@ function fail() {
 async function main() {
   if (process.versions.node.split('.')[0] !== '22' || process.argv.length !== 4 || process.argv[2] !== '--config') throw new Error('browser_worker_start_rejected');
   const config = readConfiguration(process.argv[3]);
-  // No browser download, headed mode, debug takeover, or arbitrary launch args.
+  // Use the installed browser with a visible window; no debug takeover or download.
   delete process.env.PWDEBUG;
   process.env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = '1';
   const getOwnedContext = () => {
@@ -109,17 +110,16 @@ async function main() {
     // Cache the one launch promise even after closure/failure. No action, launch
     // or context recovery is replayed after transport errors or browser_close.
     contextPromise ??= chromium.launchPersistentContext(config.profile_dir, {
-      headless: true, chromiumSandbox: true, executablePath: config.browser_executable,
-      // Headless Chrome has no desktop-portal/session-bus responsibility. Recent
-      // Chromium can ask the user manager to move its main PID to another scope,
-      // outside the Rust-owned resource/cleanup boundary. Keep the supervisor's
-      // real bus, but give only this native child an explicit non-socket address.
-      // An absent address could trigger libdbus auto-discovery instead.
+      headless: false, chromiumSandbox: true, executablePath: config.browser_executable,
+      // Chromium must stay in the Rust-owned resource/cleanup boundary instead
+      // of asking the user manager to move its PID to another scope. Keep the
+      // supervisor's real bus, but give this child an explicit non-socket address;
+      // an absent address could trigger libdbus auto-discovery instead.
       ...(process.platform === 'linux' ? {
         env: { ...process.env, DBUS_SESSION_BUS_ADDRESS: 'unix:path=/dev/null' },
       } : {}),
       acceptDownloads: true, downloadsPath: config.output_dir,
-      viewport: { width: 1280, height: 800 },
+      viewport: null,
     }).then(async value => {
       context = value;
       retainMacBrowserProcess(value, config.browser_executable);
@@ -128,7 +128,16 @@ async function main() {
         advanceEpoch();
         fact('browser_native_page');
         page.on('framenavigated', () => { advanceEpoch(); fact('browser_native_navigation'); });
-        page.once('close', () => { advanceEpoch(); fact('browser_native_page_closed'); });
+        page.once('close', () => {
+          advanceEpoch();
+          fact('browser_native_page_closed');
+          if (value.pages().length === 0) {
+            nativeClosed = true;
+            // macOS can keep Chrome alive after its last window closes. End this
+            // owned context; an explicit close keeps its response before cleanup.
+            if (!closing && closeRequestId === undefined) void cleanup().catch(fail);
+          }
+        });
       };
       for (const page of value.pages()) pageObserved(page);
       value.on('page', pageObserved);
@@ -136,6 +145,7 @@ async function main() {
         nativeClosed = true;
         advanceEpoch();
         fact('browser_native_context_closed');
+        if (!closing && closeRequestId === undefined) fail();
       });
       fact('browser_native_context_open');
       return value;
@@ -191,9 +201,11 @@ async function main() {
         && ['new', 'close', 'select'].includes(params.arguments?.action)
         && !advanceEpoch()) return refused('stale');
     let result;
+    if (params.name === 'browser_close'
+        || (params.name === 'browser_tabs' && params.arguments?.action === 'close')) closeRequestId = extra.requestId;
     try {
       result = await client.callTool({ name: params.name, arguments: params.arguments ?? {} }, undefined, { signal: extra.signal });
-      if (params.name === 'browser_close') {
+      if (params.name === 'browser_close' || nativeClosed) {
         // Context closure is not Node exit/physical process-tree cleanup.
         closing = true;
         const ownedContext = await contextPromise;
@@ -212,7 +224,16 @@ async function main() {
   });
   server.onclose = () => { void cleanup().catch(fail); };
   server.onerror = fail;
-  await server.connect(new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: 256 * 1024 }));
+  const transport = new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: 256 * 1024 });
+  const send = transport.send.bind(transport);
+  transport.send = async message => {
+    await send(message);
+    if (closeRequestId !== undefined && message.id === closeRequestId) {
+      closeRequestId = undefined;
+      if (nativeClosed) void cleanup().catch(fail);
+    }
+  };
+  await server.connect(transport);
 }
 process.stdin.once('end', () => { void cleanup().catch(fail); });
 process.stdin.once('error', fail);

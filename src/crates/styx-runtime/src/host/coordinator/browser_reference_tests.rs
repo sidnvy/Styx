@@ -152,7 +152,7 @@ async fn actual_snapshot_refs_navigation_tabs_owner_and_reopen_batch() {
     )
     .unwrap();
     authority
-        .configure_browser(fixture_facts(CapabilityId::BrowserHeadless))
+        .configure_browser(fixture_facts(CapabilityId::Browser))
         .unwrap();
     let owner = authority
         .register_verified_owner(

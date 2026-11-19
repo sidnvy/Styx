@@ -9,12 +9,8 @@ use serde::{Deserialize, Serialize};
 pub enum CapabilityId {
     #[serde(rename = "exec.run")]
     ExecRun,
-    #[serde(rename = "browser.headless")]
-    BrowserHeadless,
-    #[serde(rename = "browser.headed")]
-    BrowserHeaded,
-    #[serde(rename = "browser.attach")]
-    BrowserAttach,
+    #[serde(rename = "browser")]
+    Browser,
     #[serde(rename = "desktop.windows.read")]
     DesktopWindowsRead,
     #[serde(rename = "desktop.windows.control")]
@@ -30,7 +26,7 @@ pub enum CapabilityId {
 }
 impl CapabilityId {
     pub fn requires_session(self) -> bool {
-        !matches!(self, Self::ExecRun | Self::BrowserHeadless)
+        !matches!(self, Self::ExecRun | Self::Browser)
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

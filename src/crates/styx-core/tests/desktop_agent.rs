@@ -326,7 +326,7 @@ fn ordinary_resources_and_other_owner_or_session_cannot_become_desktop_agents() 
     for c in [
         other_generation,
         other_session,
-        context(CapabilityId::BrowserHeaded),
+        context(CapabilityId::Browser),
     ] {
         assert_eq!(
             ledger

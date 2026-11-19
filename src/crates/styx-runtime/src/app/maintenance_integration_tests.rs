@@ -49,7 +49,7 @@ async fn revoked_guest_startup_refusal_allows_fresh_role_without_replay() {
         .dispatch(Operation::InspectJoin, raw(json!({"link":invite["link"]})))
         .await
         .unwrap();
-    let joined = guest.dispatch(Operation::Join, raw(json!({"label":"Revoked recovery guest","computer":false,"browser":false,"persistLogin":false,
+    let joined = guest.dispatch(Operation::Join, raw(json!({"label":"Revoked recovery guest","computer":false,"browser":false,
         "approvedGatewayOrigin":inspected["preview"]["origin"],"approvedCaSha256":inspected["preview"]["caSha256"]}))).await.unwrap();
     assert_eq!(joined["status"], "ready_to_connect");
     guest.settle_all().await.unwrap();
@@ -166,7 +166,6 @@ async fn enroll_on(
         computer: false,
         browser: false,
         browser_channel: None,
-        persist_login: false,
         port,
         lan_address,
         allow_remote_hosts: false,
@@ -240,7 +239,7 @@ async fn native_gui_computer_management_keeps_binding_and_local_identity() {
         .dispatch(Operation::InspectJoin, raw(json!({"link":invite["link"]})))
         .await
         .unwrap();
-    let request = guest.dispatch(Operation::Join, raw(json!({"label":"GUI guest","computer":false,"browser":false,"persistLogin":false,
+    let request = guest.dispatch(Operation::Join, raw(json!({"label":"GUI guest","computer":false,"browser":false,
         "approvedGatewayOrigin":inspected["preview"]["origin"],"approvedCaSha256":inspected["preview"]["caSha256"]}))).await.unwrap();
     assert_eq!(request["status"], "ready_to_connect");
     let listed = hub

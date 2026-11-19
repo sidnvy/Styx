@@ -1,4 +1,4 @@
-//! Linux headless process-tree ownership, not a desktop/session grant or sandbox.
+//! Linux process-tree ownership, not a desktop/session grant or sandbox.
 //! One random transient user service owns either the fixed Browser worker or
 //! fixed Cua MCP driver launch. Native descendants must remain in that cgroup;
 //! normal-lifecycle containment is not a hostile same-UID sandbox.
@@ -47,8 +47,8 @@ pub(crate) enum ScopeError {
     #[error("scope_cleanup_unconfirmed")]
     CleanupUnconfirmed,
 }
-/// Fixed trusted launch forms only. Paths/display names are not OS authority:
-/// callers retain verified image/config pins and an authenticated session lease.
+/// Fixed trusted launch forms only; callers retain verified image/config pins.
+/// Browser uses the user manager's desktop environment. Cua retains its session lease.
 pub(crate) struct ScopeCommand {
     executable: PathBuf,
     workspace: PathBuf,
@@ -59,6 +59,7 @@ enum Launch {
     Browser {
         worker: PathBuf,
         config: PathBuf,
+        desktop_environment: Vec<String>,
     },
     Cua {
         wayland_display: String,
@@ -73,12 +74,17 @@ impl ScopeCommand {
         config: PathBuf,
         workspace: PathBuf,
         home: PathBuf,
+        desktop_environment: Vec<String>,
     ) -> Result<Self> {
         let value = Self {
             executable: node,
             workspace,
             home,
-            launch: Launch::Browser { worker, config },
+            launch: Launch::Browser {
+                worker,
+                config,
+                desktop_environment,
+            },
         };
         value.validate()?;
         Ok(value)
@@ -121,7 +127,7 @@ impl ScopeCommand {
     }
     fn validate(&self) -> Result<()> {
         let mut paths = vec![&self.executable, &self.workspace, &self.home];
-        if let Launch::Browser { worker, config } = &self.launch {
+        if let Launch::Browser { worker, config, .. } = &self.launch {
             paths.extend([worker, config]);
         }
         for path in paths {
@@ -137,6 +143,62 @@ impl ScopeCommand {
         }
         Ok(())
     }
+}
+/// Read the ordinary desktop startup environment without requiring Computer Use.
+/// Only display-related entries are passed into the Browser's clean environment.
+pub(crate) async fn browser_desktop_environment(until: Option<Instant>) -> Result<Vec<String>> {
+    let runtime = PathBuf::from(format!(
+        "/run/user/{}",
+        nix::unistd::Uid::current().as_raw()
+    ));
+    let args = [
+        "--user",
+        "--json=short",
+        "get-property",
+        "org.freedesktop.systemd1",
+        "/org/freedesktop/systemd1",
+        "org.freedesktop.systemd1.Manager",
+        "Environment",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    let output = tool("/usr/bin/busctl", args, &runtime, until).await?;
+    if !output.status.success() {
+        return Err(ScopeError::Unsupported);
+    }
+    parse_browser_desktop_environment(&output.stdout)
+}
+fn parse_browser_desktop_environment(bytes: &[u8]) -> Result<Vec<String>> {
+    #[derive(serde::Deserialize)]
+    struct Environment {
+        data: Vec<String>,
+    }
+    let environment: Environment =
+        serde_json::from_slice(bytes).map_err(|_| ScopeError::Unsupported)?;
+    let selected: Vec<_> = environment
+        .data
+        .into_iter()
+        .filter(|entry| {
+            entry.split_once('=').is_some_and(|(key, _)| {
+                matches!(
+                    key,
+                    "DISPLAY" | "WAYLAND_DISPLAY" | "XAUTHORITY" | "XDG_SESSION_TYPE"
+                )
+            })
+        })
+        .collect();
+    if selected.iter().any(|entry| entry.contains('\0'))
+        || !selected.iter().any(|entry| {
+            entry
+                .strip_prefix("DISPLAY=")
+                .or_else(|| entry.strip_prefix("WAYLAND_DISPLAY="))
+                .is_some_and(|value| !value.is_empty())
+        })
+    {
+        return Err(ScopeError::Unsupported);
+    }
+    Ok(selected)
 }
 /// Hyprland creates its XWayland listening sockets before passing them to
 /// Xwayland (upstream src/xwayland/Server.cpp). SO_PEERCRED retains the
@@ -350,9 +412,14 @@ impl LinuxOwnedScope {
                 runtime.display()
             ));
         match &input.launch {
-            Launch::Browser { worker, config } => {
+            Launch::Browser {
+                worker,
+                config,
+                desktop_environment,
+            } => {
                 command
                     .arg("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1")
+                    .args(desktop_environment)
                     .arg(&input.executable)
                     .arg(worker)
                     .arg("--config")
@@ -1198,6 +1265,99 @@ mod tests {
             selected_xwayland_display(&directory.0, peer, Some(end())).await,
             None
         );
+    }
+    #[test]
+    fn browser_desktop_environment_requires_a_display() {
+        for entries in [
+            vec!["XAUTHORITY=/tmp/cookies"],
+            vec!["DISPLAY=", "WAYLAND_DISPLAY="],
+        ] {
+            let bytes =
+                serde_json::to_vec(&serde_json::json!({"type":"as","data":entries})).unwrap();
+            assert_eq!(
+                parse_browser_desktop_environment(&bytes),
+                Err(ScopeError::Unsupported)
+            );
+        }
+    }
+    #[tokio::test]
+    async fn browser_launch_uses_selected_desktop_environment() {
+        for expected in [
+            vec![
+                "DISPLAY=:7",
+                "XAUTHORITY=/tmp/browser cookies",
+                "XDG_SESSION_TYPE=x11",
+            ],
+            vec![
+                "WAYLAND_DISPLAY=desktop-wayland",
+                "XDG_SESSION_TYPE=wayland",
+            ],
+        ] {
+            let mut entries = expected.clone();
+            entries.push("UNRELATED=manager-value");
+            let bytes =
+                serde_json::to_vec(&serde_json::json!({"type":"as","data":entries})).unwrap();
+            let desktop_environment = parse_browser_desktop_environment(&bytes).unwrap();
+            let input = ScopeCommand::browser(
+                "/usr/bin/env".into(),
+                "/unused/worker.mjs".into(),
+                "/unused/worker.json".into(),
+                "/unused/workspace".into(),
+                "/unused/home".into(),
+                desktop_environment,
+            )
+            .unwrap();
+            let (command, _scope) = LinuxOwnedScope::command(input).unwrap();
+            let arguments = command
+                .as_std()
+                .get_args()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            let env = arguments
+                .iter()
+                .position(|arg| arg == "/usr/bin/env")
+                .unwrap();
+            // Execute the actual env -i command without the Node worker arguments.
+            // Neither unrelated manager entries nor the caller's environment leak in.
+            let output = Command::new("/usr/bin/env")
+                .args(&arguments[env + 1..arguments.len() - 3])
+                .env("DISPLAY", ":999")
+                .env("WAYLAND_DISPLAY", "wayland-999")
+                .env("XAUTHORITY", "/unused/inherited")
+                .env("XDG_SESSION_TYPE", "inherited")
+                .env("UNRELATED", "inherited")
+                .output()
+                .await
+                .unwrap();
+            assert!(output.status.success());
+            let environment = String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            for key in [
+                "DISPLAY=",
+                "WAYLAND_DISPLAY=",
+                "XAUTHORITY=",
+                "XDG_SESSION_TYPE=",
+            ] {
+                assert_eq!(
+                    environment
+                        .iter()
+                        .find(|value| value.starts_with(key))
+                        .map(String::as_str),
+                    expected
+                        .iter()
+                        .find(|value| value.starts_with(key))
+                        .copied(),
+                );
+            }
+            assert!(
+                !environment
+                    .iter()
+                    .any(|value| value.starts_with("UNRELATED="))
+            );
+        }
     }
     #[tokio::test]
     async fn desktop_cua_launch_environment_disables_telemetry_without_enabling_wayland() {

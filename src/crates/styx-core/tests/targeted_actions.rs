@@ -196,7 +196,7 @@ fn owner_incarnation_host_digest_and_resource_binding_cannot_be_substituted() {
         let mut c = context();
         match n {
             0 => c.device_id = id("other-device"),
-            1 => c.capability = CapabilityId::BrowserHeadless,
+            1 => c.capability = CapabilityId::Browser,
             _ => {
                 c.session = Some(SessionBinding {
                     id: id("s"),

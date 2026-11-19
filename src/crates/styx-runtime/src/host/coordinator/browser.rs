@@ -70,7 +70,7 @@ pub enum BrowserActionSubmission {
 }
 fn validate_facts(inner: &Inner, facts: &AdmissionFacts) -> Result<(), CoordinatorError> {
     if facts.device_id != inner.bootstrap_device
-        || facts.descriptor.capability_id != CapabilityId::BrowserHeadless
+        || facts.descriptor.capability_id != CapabilityId::Browser
         || facts.descriptor.scope != Scope::Browser
         || facts.descriptor.target_session.is_some()
         || facts.session_state.is_some()
@@ -81,7 +81,7 @@ fn validate_facts(inner: &Inner, facts: &AdmissionFacts) -> Result<(), Coordinat
     Ok(())
 }
 fn validate_context(context: &PreparedContext) -> Result<(), CoordinatorError> {
-    if context.capability != CapabilityId::BrowserHeadless
+    if context.capability != CapabilityId::Browser
         || context.session.is_some()
         || context.observation.is_some()
     {
@@ -579,7 +579,7 @@ fn settle_physical(
             .find(|key| key.snapshot().id == *operation)
             .ok_or(ErrorCategory::StateConflict)?;
         let snapshot = previous.snapshot();
-        if previous.capability() != CapabilityId::BrowserHeadless || snapshot.target.is_some() {
+        if previous.capability() != CapabilityId::Browser || snapshot.target.is_some() {
             return Err(ErrorCategory::StateConflict);
         }
         if snapshot.liveness == ExecutionLiveness::Exited {
@@ -727,7 +727,7 @@ pub(super) async fn cleanup_browser_owner(
             let state = inner.state.lock().expect("Host state mutex");
             state.ledger.retained_provider_records().iter().any(|key| {
                 key.owner() == owner
-                    && key.capability() == CapabilityId::BrowserHeadless
+                    && key.capability() == CapabilityId::Browser
                     && key.snapshot().target.is_none()
                     && !processed.contains(&key.snapshot().id)
             })
@@ -780,7 +780,7 @@ pub(super) async fn collect_browser_retention(
         .ledger
         .retained_provider_records();
     for key in inventory.iter().filter(|k| {
-        k.capability() == CapabilityId::BrowserHeadless
+        k.capability() == CapabilityId::Browser
             && k.snapshot().target.is_some()
             && owner.is_none_or(|o| k.owner() == o)
     }) {
@@ -873,7 +873,7 @@ pub(super) async fn collect_browser_retention(
         .ledger
         .retained_provider_records();
     for key in inventory.iter().filter(|k| {
-        k.capability() == CapabilityId::BrowserHeadless
+        k.capability() == CapabilityId::Browser
             && k.snapshot().target.is_none()
             && owner.is_none_or(|o| k.owner() == o)
     }) {
