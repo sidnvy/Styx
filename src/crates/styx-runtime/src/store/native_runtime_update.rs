@@ -6,11 +6,11 @@ use crate::store::ExecutionLeaseGuard;
 use styx_contracts::{
     management::ReaderContract,
     native_management::{
-        NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA, NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA,
-        NATIVE_PAIRING_RUNTIME_HISTORY_KEY, NATIVE_RUNTIME_SELECTED_STATE_SCHEMA,
-        NATIVE_RUNTIME_SELECTION_KEY, NATIVE_RUNTIME_UPDATE_KEY,
-        NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA, NativePairingRuntimeHistory,
-        NativeRuntimeSelection, NativeRuntimeUpdate, NativeState, NativeStateTransaction,
+        NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA, NATIVE_PAIRING_RUNTIME_HISTORY_KEY,
+        NATIVE_RUNTIME_SELECTED_STATE_SCHEMA, NATIVE_RUNTIME_SELECTION_KEY,
+        NATIVE_RUNTIME_UPDATE_KEY, NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA,
+        NativePairingRuntimeHistory, NativeRuntimeSelection, NativeRuntimeUpdate, NativeState,
+        NativeStateTransaction,
     },
 };
 
@@ -122,7 +122,6 @@ pub(super) struct RuntimeUpdateCustody {
     target: NativeRuntimeSelection,
     transaction: TransactionId,
     execution: Option<ExecutionLeaseGuard>,
-    app_scope: Option<std::sync::Arc<crate::app::HostScope>>,
     #[cfg(target_os = "macos")]
     service_scope: Option<std::sync::Arc<crate::platform::macos_service::RegisteredInactiveProof>>,
 }
@@ -144,11 +143,6 @@ impl RuntimeUpdateCustody {
         if let Some(proof) = &self.service_scope {
             proof
                 .validate_owner(owner)
-                .map_err(|_| NativeTransactionError::UnknownInspect)?;
-        }
-        if let Some(scope) = &self.app_scope {
-            scope
-                .validate()
                 .map_err(|_| NativeTransactionError::UnknownInspect)?;
         }
         self.previous
@@ -224,35 +218,7 @@ impl NativeTransactions {
         sequence: u64,
         observer: &dyn Fn(&str, &str),
     ) -> Result<NativeCommitResult, NativeTransactionError> {
-        self.update_runtime_scoped_observing(previous, candidate, id, sequence, None, observer)
-    }
-    pub(crate) fn update_runtime_for_app(
-        &mut self,
-        previous: VerifiedNativeRelease,
-        candidate: VerifiedNativeRelease,
-        id: TransactionId,
-        sequence: u64,
-        scope: std::sync::Arc<crate::app::HostScope>,
-    ) -> Result<NativeCommitResult, NativeTransactionError> {
-        self.update_runtime_scoped_observing(
-            previous,
-            candidate,
-            id,
-            sequence,
-            Some(scope),
-            &|_, _| {},
-        )
-    }
-    fn update_runtime_scoped_observing(
-        &mut self,
-        previous: VerifiedNativeRelease,
-        candidate: VerifiedNativeRelease,
-        id: TransactionId,
-        sequence: u64,
-        scope: Option<std::sync::Arc<crate::app::HostScope>>,
-        observer: &dyn Fn(&str, &str),
-    ) -> Result<NativeCommitResult, NativeTransactionError> {
-        self.retain_update(previous, candidate, id.clone(), scope, None)?;
+        self.retain_update(previous, candidate, id.clone(), None)?;
         self.apply_retained_runtime_update(id, sequence, observer)
     }
     fn apply_retained_runtime_update(
@@ -279,7 +245,6 @@ impl NativeTransactions {
                 return Err(NativeTransactionError::InvalidInput);
             }
             let mut target = before.state().clone();
-            let app_owned = held.app_scope.is_some();
             let service_owned = held.service_owned();
             #[cfg(target_os = "macos")]
             if let Some(proof) = &held.service_scope {
@@ -310,8 +275,6 @@ impl NativeTransactions {
                 NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA
             } else if service_owned {
                 NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA
-            } else if app_owned {
-                NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA
             } else {
                 NATIVE_RUNTIME_SELECTED_STATE_SCHEMA
             };
@@ -319,8 +282,6 @@ impl NativeTransactions {
                 ReaderContract::NativePairingLifecycleStateV1
             } else if service_owned {
                 ReaderContract::NativeServiceRuntimeSelectedStateV1
-            } else if app_owned {
-                ReaderContract::NativeAppRuntimeSelectedStateV1
             } else {
                 ReaderContract::NativeRuntimeSelectedStateV1
             };
@@ -370,14 +331,9 @@ impl NativeTransactions {
                     .map_err(|_| NativeTransactionError::InvalidInput)?,
             );
             if pairing {
-                let history = if app_owned {
-                    NativePairingRuntimeHistory::App
-                } else {
-                    NativePairingRuntimeHistory::Foreground
-                };
                 target.extensions.insert(
                     NATIVE_PAIRING_RUNTIME_HISTORY_KEY.into(),
-                    serde_json::value::to_raw_value(&history)
+                    serde_json::value::to_raw_value(&NativePairingRuntimeHistory::Foreground)
                         .map_err(|_| NativeTransactionError::InvalidInput)?,
                 );
             }
@@ -393,13 +349,6 @@ impl NativeTransactions {
             };
             if service_owned {
                 styx_core::management::state::validate_service_runtime_repair_transition(
-                    before.state(),
-                    &target,
-                    self.marker(),
-                    &intent,
-                )
-            } else if app_owned {
-                styx_core::management::state::validate_app_runtime_transition(
                     before.state(),
                     &target,
                     self.marker(),
@@ -497,7 +446,6 @@ impl NativeTransactions {
             target,
             transaction: id.clone(),
             execution: execution.take(),
-            app_scope: None,
             service_scope: Some(proof),
         });
         if !trusted {
@@ -631,7 +579,6 @@ impl NativeTransactions {
             target,
             transaction: id.clone(),
             execution: execution.take(),
-            app_scope: None,
             service_scope: Some(proof),
         });
         let result = self.recover_original(&id);
@@ -676,7 +623,7 @@ impl NativeTransactions {
         let recorded = self
             .runtime_update_selections(id)?
             .ok_or(NativeTransactionError::InvalidInput)?;
-        self.retain_update(previous, candidate, id.clone(), None, Some(recorded))?;
+        self.retain_update(previous, candidate, id.clone(), Some(recorded))?;
         let result = (|| {
             let expected = self
                 .runtime_update_selections(id)?
@@ -702,31 +649,13 @@ impl NativeTransactions {
     pub(crate) fn runtime_update_high_water(&self) -> Result<u64, NativeTransactionError> {
         Ok(self.journal.observe()?.high_water)
     }
-    fn validate_runtime_app_scope(
-        &self,
-        scope: &std::sync::Arc<crate::app::HostScope>,
-    ) -> Result<(), NativeTransactionError> {
-        scope
-            .validate()
-            .map_err(|_| NativeTransactionError::UnknownInspect)?;
-        let root = crate::store::PrivateRoot::open(scope.state_dir())
-            .map_err(|_| NativeTransactionError::UnknownInspect)?;
-        if root.identity() != self.configuration_root().identity()? {
-            return Err(NativeTransactionError::Conflict);
-        }
-        Ok(())
-    }
     fn retain_update(
         &mut self,
         previous: VerifiedNativeRelease,
         candidate: VerifiedNativeRelease,
         id: TransactionId,
-        scope: Option<std::sync::Arc<crate::app::HostScope>>,
         recorded: Option<(NativeRuntimeSelection, NativeRuntimeSelection)>,
     ) -> Result<(), NativeTransactionError> {
-        if let Some(scope) = &scope {
-            self.validate_runtime_app_scope(scope)?;
-        }
         if self.retained_runtime_update.is_some() {
             return Err(NativeTransactionError::Conflict);
         }
@@ -745,11 +674,7 @@ impl NativeTransactions {
         let trusted = before.publisher_spki_sha256 == target.publisher_spki_sha256
             && previous.manifest().target == candidate.manifest().target
             && candidate
-                .supports_state_reader(if scope.is_some() {
-                    ReaderContract::NativeAppRuntimeSelectedStateV1
-                } else {
-                    ReaderContract::NativeRuntimeSelectedStateV1
-                })
+                .supports_state_reader(ReaderContract::NativeRuntimeSelectedStateV1)
                 .map_err(|_| NativeTransactionError::InvalidInput)?
             && candidate
                 .supports_state_reader(ReaderContract::NativeManagementStateV1)
@@ -761,7 +686,6 @@ impl NativeTransactions {
             target,
             transaction: id,
             execution: None,
-            app_scope: scope,
             #[cfg(target_os = "macos")]
             service_scope: None,
         });
@@ -858,7 +782,7 @@ impl NativeTransactions {
         )
         .is_ok();
         if service_transition != held.service_owned()
-            || app_transition != held.app_scope.is_some()
+            || app_transition
             || intent.transaction_id != held.transaction
             || selection(before.state())? != held.before
             || selection(target.state())? != held.target

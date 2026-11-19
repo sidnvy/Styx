@@ -22,14 +22,81 @@ async fn app_reader7_selection_then_running_plan_apply_and_writer_busy_control()
         NativeManager::AppManaged,
     );
     let scope = Arc::new(crate::app::HostScope::open_for_test(&parent.join("native")).unwrap());
-    tx.update_runtime_for_app(
-        verified(&base, "initial"),
-        verified(&base, "reader7"),
-        "reference-select".try_into().unwrap(),
-        1,
-        scope.clone(),
+    // Preserve a committed record from the retired App updater. The fixture
+    // writes its historical target directly; no production App update writer
+    // is needed to prove that current readers and desired-state changes accept it.
+    let before = tx.readstate().unwrap();
+    let mut target = before.state().clone();
+    let transaction = NativeStateTransaction {
+        transaction_id: "reference-select".try_into().unwrap(),
+        sequence: 1,
+    };
+    target.schema = NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA;
+    target.reader_contract = ReaderContract::NativePairingLifecycleStateV1;
+    target.revision = 1;
+    target.last_transaction = Some(transaction.clone());
+    target.extensions.insert(
+        NATIVE_RUNTIME_SELECTION_KEY.into(),
+        serde_json::value::to_raw_value(&selected).unwrap(),
+    );
+    target.extensions.insert(
+        NATIVE_RUNTIME_UPDATE_KEY.into(),
+        serde_json::value::to_raw_value(&NativeRuntimeUpdate {
+            schema: 1,
+            bootstrap_runtime: initial.clone(),
+            previous_runtime: initial,
+            transaction: transaction.clone(),
+            service_repair: None,
+        })
+        .unwrap(),
+    );
+    target.extensions.insert(
+        NATIVE_PAIRING_RUNTIME_HISTORY_KEY.into(),
+        serde_json::value::to_raw_value(&NativePairingRuntimeHistory::App).unwrap(),
+    );
+    let target_bytes = serde_json::to_vec(&target).unwrap();
+    let intent = DesiredStateCommit {
+        transaction_id: transaction.transaction_id.clone(),
+        sequence: transaction.sequence,
+        deployment_raw_sha256: target.deployment_raw_sha256,
+        before_state_sha256: before.raw_sha256(),
+        target_state_sha256: Sha256Digest::of_bytes(&target_bytes),
+        reader: target.reader_contract,
+    };
+    styx_core::management::state::validate_app_runtime_transition(
+        before.state(),
+        &target,
+        tx.marker(),
+        &intent,
     )
     .unwrap();
+    let maintenance = tx
+        .configuration_root()
+        .begin_standalone_native(transaction.transaction_id, false)
+        .unwrap();
+    let prepared = tx
+        .journal
+        .prepare(
+            &maintenance,
+            &serde_json::to_vec(&intent).unwrap(),
+            before.raw_bytes(),
+            &target_bytes,
+        )
+        .unwrap();
+    let mut committed = ManagementTransaction::plan(intent.clone()).unwrap();
+    committed
+        .prepare(PreparedFacts {
+            deployment_raw_sha256: intent.deployment_raw_sha256,
+            canonical_state_sha256: intent.before_state_sha256,
+            reader: intent.reader,
+            intent,
+            journal: prepared.journal,
+        })
+        .unwrap();
+    fs::write(parent.join("native/state.json"), target_bytes).unwrap();
+    tx.complete(&maintenance, committed, false, &|_, _| {})
+        .unwrap();
+    drop(maintenance);
     complete_chain(&tx);
     let current = tx.readstate().unwrap();
     assert_eq!(

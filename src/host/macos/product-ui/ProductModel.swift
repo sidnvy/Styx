@@ -357,8 +357,6 @@ enum ProductRestorationPolicy {
     @Published var pluginDraftEdited = false
     @Published var exportedPluginURL: URL?
     @Published var exportCompletionID: UUID?
-    @Published var handoffCredential = ""
-    @Published var handoffTarget = ""
     @Published var desktopValue = ""
     @Published var axGranted = false
     @Published var screenGranted = false
@@ -422,9 +420,6 @@ enum ProductRestorationPolicy {
     @Published var invitationExpanded = false
     @Published var menuObservationFailed = false
     @Published var selectedPending: ProductJSON = .null
-    @Published var fingerprintConfirmation = ""
-    @Published var approveComputer = false
-    @Published var approveBrowser = false
     @Published var loginStartup = "unknown"
     @Published var loginOperation = "observed"
     var loginEnabled: Bool { ["enabled", "requires_approval"].contains(loginStartup) }
@@ -442,16 +437,12 @@ enum ProductRestorationPolicy {
         default: return nil
         }
     }
-    private var handoffTimer: Timer?
     private var copiedCredential: String?
     private var copiedCredentialChangeCount: Int?
     private var restoredPage = false
     private let permissionReader: () -> (accessibility: Bool, screenRecording: Bool)
     private let permissionActions: ProductPermissionActions
     private let permissionResume: ProductPermissionResume?
-    var launchPayloadUpdater: ((String) throws -> Void)?
-    private var automaticPayloadUpdateAttempted = false
-    @Published var payloadUpdateStatus: ProductJSON = .null
     var recoverComputerUse: (() async throws -> Void)?
 
     var deployment: ProductDeployment? { ProductDeployment(status["deployment"]) }
@@ -481,7 +472,7 @@ enum ProductRestorationPolicy {
         let observed = status["foreground"]["status"].string ?? "unknown"
         return ["needs_attention", "stopping"].contains(observed) || observed == "not_running" && status["nativeStartup"]["status"].string == "reconciliation_required"
     }
-    var connectionTunnelID: String { plugin["connection"]["tunnelId"].string ?? (!tunnelID.isEmpty ? tunnelID : handoffTarget) }
+    var connectionTunnelID: String { plugin["connection"]["tunnelId"].string ?? tunnelID }
     var tunnelConnection: ProductTunnelConnection { tunnelObservationStale ? .unknown : ProductTunnelConnection.observed(journey["tunnel"]) }
     var challengeID: String? { acceptance["challenge"]["id"].string }
     var targetProofReady: Bool {
@@ -543,19 +534,6 @@ enum ProductRestorationPolicy {
             label = session["defaults"]["label"].string ?? Host.current().localizedName ?? "Mac"
             try await reload()
             loaded = true
-            // The authenticated Core alone decides whether this new App may
-            // complete its bundled Host update. Never infer authority from a
-            // version string, and never retry automatically after a failure.
-            let startup = status["nativeStartup"]
-            if !automaticPayloadUpdateAttempted,
-               session["nativeAppLifecycleSupported"].bool,
-               startup["status"].string == "reconciliation_required",
-               startup["reason"].string == "host_payload_update_required",
-               startup["automaticUpdate"] == .bool(true) {
-                automaticPayloadUpdateAttempted = true
-                loadingMessage = productText("正在完成 Styx 更新…", "Finishing the Styx update…")
-                await executePayloadUpdate(automatic: true)
-            }
         } catch { reportFailure() }
     }
     func refresh() async {
@@ -740,54 +718,6 @@ enum ProductRestorationPolicy {
         }
     }
 
-    func checkPayloadUpdate() {
-        perform { [self] in payloadUpdateStatus = try await client.write("host-payload/handoff/status", [:])["handoff"] }
-    }
-    func cancelPayloadUpdate() {
-        guard let ticket = payloadUpdateStatus["ticketId"].string else { return }
-        perform { [self] in payloadUpdateStatus = try await client.write("host-payload/handoff/cancel", ["authorize": .bool(true), "ticketId": .string(ticket)])["handoff"] }
-    }
-    func finishPayloadUpdate(resume: Bool = false) {
-        guard !busy else { return }
-        let alert = NSAlert()
-        alert.messageText = productText("完成 Styx 更新？", "Finish the Styx update?")
-        alert.informativeText = productText("Styx 会短暂退出并重新打开。请先结束正在使用这台电脑的任务；现有设置和配对会保留。", "Styx will briefly quit and reopen. Finish tasks using this computer first. Settings and pairing will be preserved.")
-        alert.addButton(withTitle: productText("更新并重新打开", "Update and reopen"))
-        alert.addButton(withTitle: productText("取消", "Cancel"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        busy = true; error = nil
-        Task {
-            await executePayloadUpdate(resume: resume)
-            busy = false
-        }
-    }
-    private func executePayloadUpdate(resume: Bool = false, automatic: Bool = false) async {
-        do {
-            try await waitForObservation()
-            payloadUpdateStatus = try await client.write("host-payload/handoff/status", [:])["handoff"]
-            if automatic {
-                // Recheck the durable ticket immediately before preparing;
-                // cancelled or failed work is available only via recovery UI.
-                guard ["not_started", "applied_stopped"].contains(payloadUpdateStatus["status"].string ?? "") else { throw ProductCoreError.invalidResponse }
-                payloadUpdateStatus = try await client.write("host-payload/handoff/prepare", ["authorize": .bool(true)])["handoff"]
-                guard payloadUpdateStatus["status"].string == "awaiting_exit" else { throw ProductCoreError.invalidResponse }
-            } else {
-                let resumable = ["awaiting_exit", "blocked", "needs_recovery"].contains(payloadUpdateStatus["status"].string ?? "") || (resume && payloadUpdateStatus["status"].string == "applied_stopped")
-                if !resumable { payloadUpdateStatus = try await client.write("host-payload/handoff/prepare", ["authorize": .bool(true)])["handoff"] }
-            }
-            guard ["awaiting_exit", "blocked", "needs_recovery", "applied_stopped"].contains(payloadUpdateStatus["status"].string ?? ""), let ticket = payloadUpdateStatus["ticketId"].string, let launch = launchPayloadUpdater else { throw ProductCoreError.invalidResponse }
-            do { try launch(ticket) }
-            catch { payloadUpdateStatus = try await client.write("host-payload/handoff/cancel", ["authorize": .bool(true), "ticketId": .string(ticket)])["handoff"]; throw error }
-        } catch {
-            switch error as? ProductCoreError {
-            case .insufficientSpace(let budget, let preflight): self.error = productSpaceFeedback(budget, preflight: preflight)
-            case .workInProgress: self.error = productText("有任务仍在运行。请完成后再更新。", "Tasks are still running. Finish them before updating.")
-            case .workStateUnknown: self.error = productText("暂时无法确认任务状态。请稍后重试。", "The task state could not be confirmed. Try again shortly.")
-            default: self.error = productText("更新尚未完成。请检查更新状态后重试。", "The update has not finished. Check update status and retry.")
-            }
-            requestSettings(.general)
-        }
-    }
     func createAndPrepare() {
         if nativeHost {
             guard !busy else { return }
@@ -981,14 +911,6 @@ enum ProductRestorationPolicy {
             }
         }
     }
-    func configureTunnel() {
-        let key = runtimeKey
-        guard !busy else { return }
-        Task {
-            do { try await saveTunnel(id: tunnelID, newKey: key); runtimeKey = "" }
-            catch { tunnelAttempt = .failed; reportFailure(error); try? await reload() }
-        }
-    }
     func saveTunnel(id: String, newKey: String?) async throws {
         #if STYX_TESTING
         if testPreview { throw ProductCoreError.unavailable }
@@ -1064,24 +986,8 @@ enum ProductRestorationPolicy {
             pluginIcon = .object(["mimeType": .string("image/png"), "dataBase64": .string(bytes.base64EncodedString())]); pluginDraftEdited = true
         } catch { self.error = productText("请选择不超过 256 KB 的方形 PNG 图片（48–1024 像素）。", "Choose a square PNG, 48–1024 pixels and no larger than 256 KB.") }
     }
-    func revealHandoff() {
-        clearSecrets()
-        perform { [self] in
-            let handoff = try await client.write("connection-handoff", ["authorize": .bool(true)])["handoff"]
-            guard handoff["status"].string == "prepared", handoff["authentication"]["type"].string == "bearer",
-                  let secret = handoff["authentication"]["modelCredential"].string,
-                  let expiry = handoff["expiresAt"].number, expiry > Date().timeIntervalSince1970 * 1000 else { throw ProductCoreError.unavailable }
-            handoffCredential = secret
-            handoffTarget = handoff["connection"]["tunnelId"].string ?? handoff["connection"]["url"].string ?? ""
-            handoffTimer = Timer.scheduledTimer(withTimeInterval: min(60, expiry / 1000 - Date().timeIntervalSince1970), repeats: false) { [weak self] _ in
-                guard let owner = self else { return }
-                Task { @MainActor in owner.clearSecrets() }
-            }
-        }
-    }
     func clearSecrets() {
-        handoffTimer?.invalidate(); handoffTimer = nil
-        handoffCredential = ""; handoffTarget = ""; runtimeKey = ""; invite = ""
+        runtimeKey = ""; invite = ""
         createdInvitation = .null; invitationCopied = false
         if let copied = copiedCredential, copiedCredentialChangeCount == NSPasteboard.general.changeCount,
            NSPasteboard.general.string(forType: .string) == copied { NSPasteboard.general.clearContents() }
@@ -1119,8 +1025,6 @@ enum ProductRestorationPolicy {
     func setLoginEnabled(_ enabled: Bool) {
         perform { [self] in _ = try await client.write("app/login", ["authorize": .bool(true), "enabled": .bool(enabled)]) }
     }
-    func checkIngress() { perform { [self] in ingress = try await client.write("device-ingress/plan", [:])["ingress"] } }
-    func createInvitation() { beginDeviceInvitation() }
     func loadPending() {
         // Core advertises this read only for the owning, unfenced Gateway.
         // Reading existing requests must never create an invitation or change
@@ -1144,7 +1048,7 @@ enum ProductRestorationPolicy {
                 approval["fingerprint"] = selectedPending["fingerprint"]
             }
             _ = try await client.write("pending/approve", approval)
-            selectedPending = .null; fingerprintConfirmation = ""
+            selectedPending = .null
             pending = try await client.write("pending/list", ["authorize": .bool(true)])["pending"].array
         }
     }
@@ -1220,15 +1124,4 @@ enum ProductRestorationPolicy {
         guard official || system else { return }
         NSWorkspace.shared.open(url)
     }
-}
-
-func productSpaceFeedback(_ budget: ProductJSON, preflight: Bool) -> String {
-    var message = preflight ? productText("空间不足，升级未开始。", "Not enough disk space. The upgrade has not started.") : productText("空间不足，更新尚未完成。请先检查恢复状态。", "Not enough disk space. The update remains incomplete; review recovery before continuing.")
-    for volume in budget["volumes"].array {
-        guard let required = volume["requiredBytes"].number, let available = volume["availableBytes"].number,
-              required.isFinite, available.isFinite, required >= 0, available >= 0, required <= 9007199254740991, available <= 9007199254740991 else { continue }
-        let need = String(format: "%.2f", required / 1073741824), free = String(format: "%.2f", available / 1073741824)
-        message += "\n" + productText("需要 \(need) GB；可用 \(free) GB。", "Required: \(need) GB; available: \(free) GB.")
-    }
-    return message + "\n" + productText("释放空间后重试。", "Free up disk space, then retry.")
 }

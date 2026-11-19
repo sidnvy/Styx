@@ -1,67 +1,67 @@
 # Native product UI
 
-The AppKit owner embeds `ProductView` in `ProductWindowController` with `NSHostingView`.
-All configuration, mutations, execution and receipts remain in the existing Node Core.
-Compile all `product-ui/*.swift`, `BrandGlyph.swift` and `Styx.swift`; copy the supplied brand JPEGs and the
-validated default plugin PNG to `Resources/brand/`.
+The production App entry in `../Styx.swift` creates one `ProductOwnedCore`, then
+`ProductModel(owned:)` and `ProductWindowController(model:)`. The Rust App process
+owns configuration, identity, pairing, role and service decisions. Swift presents
+its results and performs the necessary AppKit, permissions and login-item calls.
+There is no production HTTP management backend or separate App Runtime updater.
 
-## Integration contract
+## Current ownership
 
-- `ProductWindowController(sessionURL:)` accepts the existing private child-pipe bootstrap.
-- `present()` reopens the retained window; closing the window clears temporary secrets.
-- `showPreferences()` opens language/capabilities/login settings.
-- `prepareToQuit(completion:)` invokes authenticated `/api/app/quit` before the App owner terminates.
-- `currentDesktopReadback(challengeID:)` reads an actual visible `NSTextField` with accessibility
-  identifier `styx-acceptance-target`; its localized label is `桌面验收输入框` / `Desktop acceptance field`.
-- The timer submits only matching, unexpired visible field values while desktop proof is pending.
-  Core still requires authenticated Cua before/action/after evidence for the actual App PID. A local
-  text edit or UI model state cannot establish Computer Use verification.
-- `productCoreSelfTest()` covers strict bootstrap parsing, authorization decoding, role projection
-  and read/write route separation. Invoke from the App's existing `--self-test` path. It does not
-  claim GUI, permissions or account verification.
+| Component | Responsibility |
+| --- | --- |
+| `ProductOwnedCore` | Own the Rust child, its request/reply pipe and observed process exit. |
+| `ProductCoreClient` | Map UI actions to the existing Rust operations; retain unknown login/service outcomes without replay. |
+| `ProductModel` | Present Rust observations, keep temporary form drafts, and share one observation loop among visible surfaces. |
+| `ProductWindowController` | Retain the main/settings window and menu presentation; closing a window does not quit Styx. |
+| `ProductLoginStartup` | Observe and apply the native login-item operation under the Rust intent ticket. |
+| `ProductServiceActions` | Present the committed service client and export its existing installation request. |
 
-`ProductCoreClient` is an ephemeral URLSession client with cookies, URL credentials, caches and
-proxies disabled; it rejects redirects. It obtains CSRF through the existing authenticated session
-endpoint and supplies the exact Origin on every request. Route allowlists and a fixed binary export route prevent arbitrary URL
-requests. ZIP and JSON share the same private session, Origin and CSRF checks; responses
-must match the exact requested URL and MIME type. The archive obeys Core’s existing 2 MiB
-bound and is written without extraction to a native save-panel destination. Raw transport/response error text and secret responses never appear in the status UI.
-The model credential is available only through an explicit handoff action, expires on screen after
-at most 60 seconds and is cleared on close. The clipboard is cleared only if the copied secret is
-still the exact pasteboard content/version; it never destroys unrelated newer clipboard content.
+The native model's `startupStatus` and `status` reads drive restoration. Ordinary
+reads cannot create setup or replay an unconfirmed mutation. The App menu,
+main window and status menu reuse the same settings controller.
 
-## Real workflow mapping
+## User entry points
 
-- Welcome → create or join; no language picker or technical role selection.
-- Capabilities → trusted packaged Host defaults and real create/local-setup or join advance.
-- Browser preparation → existing `browser/prepare`, then owned foreground connection.
-- Browser requested but not approved → Core's `not_approved` observation skips Browser preparation and leaves approved Exec available. Computer Use permission routing uses the actual approved foreground Host configuration, never deployment intent.
-- Computer Use panels read AX/screen preflight separately. Allow requests only that permission, once per process; the OS owns its prompt and any navigation from it. A separate Settings action only opens the matching pane. The menu navigates to the App permission page without prompting.
-- Platform Tunnel ID/runtime key → `tunnel/configure`, then `tunnel/start`.
-- Default ChatGPT connection → official Add custom MCP server → Tunnel → Choose icon (saved PNG under 10 KB) → Create as a plugin → Connect → refresh installed detail and check logo. No mandatory local create/reuse picker or presentation form. Explicit user confirmation creates a missing default local receipt profile, then uses `plugin/record`; saved custom/reused profiles are retained unchanged.
-- Optional plugin ZIP editor → name/description/icon → native save panel → `plugin/profile` only when edited/missing → authenticated binary `plugin/export`. The existing Core performs real local Gateway verification and builds the archive. Metadata and onboarding skill travel in the ZIP; the user uploads and installs in ChatGPT. No automatic platform synchronization or account success is claimed. ZIP installation has been observed to replace the logo with a placeholder; this route is confined to Advanced and is not recommended for onboarding.
-- Entering the optional ZIP editor fills only a missing icon in an unsaved draft using the real packaged brand. Custom icons are retained. Saved-file feedback appears only after atomic writing succeeds; cancelling the native save panel does not mutate Core. Existing reuse profiles stay on their official management path.
-- Connection context changes block ordinary confirmation/export. A separate explicit review action preserves the saved presentation/selection and rebinds the local receipt profile after confirmation; previous account/export receipts become invalid. Computer identity and credentials are not regenerated.
-- Target-chat challenge/results → existing acceptance APIs; independent human target-chat confirmation.
-- Overview/Computers/Chat → observed Core projections; no fabricated success events or activity page.
-- Revocation → explicit NSAlert then `device/revoke`; never removes local identity files.
-- Login preference → `app/lifecycle` observation, `app/login` mutation, gated by session capability.
-- Capability changes → inspect fresh public and current-process owner observations. Browser changes explicitly confirm pausing this App's owned connection through `foreground/stop`, retain Core's offline checks, and resume only after a confirmed complete transaction. Computer Use-only changes honor `foregroundRestartRequired`. Unconfirmed mutations are not replayed; explicit recovery remains available. Foreign, service-owned or uncertain connections require separate reconciliation and are never stopped by the UI.
+- Create Gateway + Host: collect the Tunnel configuration and local capabilities,
+  then call Rust `createLocal`; a retained setup uses `resumeLocal`.
+- Join a Gateway: inspect the invitation, review its origin and certificate, and
+  submit the device-side choices through the existing Rust join operations.
+- Settings: capability controls call Rust `hostCapabilities`. System permission
+  controls observe Accessibility and Screen Recording separately; the explicit
+  permission or settings action uses the corresponding macOS API.
+- Tunnel settings: `saveTunnel` calls Rust `tunnelSave`, then observes its status.
+  A blank key retains the saved credential; the UI does not read it back.
+- Device invitations and removal: use Rust invitation/device operations and their
+  observed results. Current pairing identity and keys remain with Rust.
+- Plugin details and optional ZIP export: Rust supplies the profile and archive;
+  the UI owns the native picker/save panel and reports a saved file only after
+  writing succeeds. Account installation is a separate user action.
+- Quit: use the owned Rust child's quit admission and observe its exit. Existing
+  service-client behavior comes from the committed native manager transfer.
 
-## Boundaries awaiting integration/validation
+Updates use the normal signed App installer: quit, replace the App and reopen the
+same profile. The current bundle supplies executable code. There is no payload
+handoff ticket, helper launch callback or second update state in this UI.
 
-The native settings view includes CLI as the current Host's built-in capability because
-Core has no independent Exec disable flag. Browser changes use Core's offline capability
-transaction; unchanged Browser is omitted when saving Computer Use. Joined Hosts show
-owner-managed optional capabilities and cannot expand their own grants through settings.
-Local-only ingress displays a prerequisite and cannot generate a misleading remote invitation.
-A controlled ingress preparation UI must be attached when its transaction API is available.
+Temporary secrets are cleared when the surface closes. A copied secret is removed
+from the clipboard only while its exact value and pasteboard version still match;
+unrelated newer clipboard content is preserved.
 
-Default plugin branding requires the packaged PNG produced from the supplied source. Custom PNG
-files are chosen through the native picker and fully validated again by Core. Language follows
-macOS preferred languages; the settings button opens Language & Region. Packaging must advertise
-both English and Simplified Chinese so macOS exposes per-App language selection.
+## Tests and build
 
-Native compile, GUI controls, keyboard/accessibility, real Cua, system permissions, actual plugin
-installation and target-account acceptance require separate platform evidence. Local protocol
-checks are not substitutes for those gates.
+Compile all `product-ui/*.swift`, `BrandGlyph.swift` and `Styx.swift` with the
+existing native build command and cache described in `../../../../WORKSPACE.md`.
+The product build defines `STYX_PRODUCT_UI`; native self-tests additionally define
+`STYX_TESTING`.
+
+`ProductCoreClient(sessionURL:)` and its loopback HTTP transport exist only under
+`STYX_TESTING`. Existing presentation, observation, invitation, permission and
+ZIP-transport fixtures still use that injection. Their synthetic legacy snapshots
+are test inputs, not a second production backend or proof of the current Rust
+user flow. The production owned-child path must be compiled separately.
+
+Run affected native tests on PilotMac through the persistent project's tools and
+cache. Compilation, self-tests, live GUI behavior, system permissions and account
+acceptance are distinct evidence. `NATIVE_VALIDATION.md` is a dated historical
+record; it does not describe the current source or a current device installation.

@@ -61,9 +61,6 @@ func productCoreSelfTest() throws {
     child.waitUntilExit()
     try require(child.terminationReason == .exit && child.terminationStatus == 2 && scanner.code == "app_scope_refused", "Core stderr drain or actual child exit was lost")
     #endif
-    let spaceBudget = ProductJSON.object(["volumes": .array([.object(["requiredBytes": .number(2147483648), "availableBytes": .number(1073741824)])])])
-    try require(productSpaceFeedback(spaceBudget, preflight: true).contains("2.00") && productSpaceFeedback(spaceBudget, preflight: true).contains("1.00"), "Space budget missing from feedback")
-    try require(productSpaceFeedback(spaceBudget, preflight: true) != productSpaceFeedback(spaceBudget, preflight: false), "Recovery incorrectly described as not started")
     try require(ProductTunnelInputPolicy.tunnelError("https://example.com") != nil, "A server URL became a Tunnel ID")
     try require(ProductTunnelInputPolicy.tunnelError(" tunnel_12345678 ") == nil, "Valid pasted Tunnel ID rejected")
     try require(ProductTunnelInputPolicy.keyError("", saved: true) == nil, "Saved key required secret readback")

@@ -88,6 +88,14 @@ Do not copy these records into another directory merely to make a second
 component answer the same question. Moving ownership includes deleting the old
 path.
 
+The Host caller registry retains active leases and unresolved cleanup. Once both
+executor cleanup and profile release are confirmed, that caller is removed
+immediately; an earlier active caller does not retain completed later callers.
+The existing per-Gateway-epoch sequence boundary prevents reopening removed
+callers. Gateway authentication records are also released individually after
+cleanup; an absent record remains unauthorized. These are separate admission
+and execution responsibilities, without a second completion-order directory.
+
 ## Installation and update
 
 The installed package supplies the executable and its fixed worker versions.
@@ -106,6 +114,9 @@ services, it also selects the active runtime. For App-managed processes, the
 current signed App bundle supplies executable code; the profile's original
 selection remains enrollment history. A replacement bundle must retain the
 publisher and support the persisted state reader.
+Previously committed App runtime-update records remain readable after removal
+of their updater. New stopped-profile runtime selection uses the existing native
+transaction writer; historical App records do not require a second live writer.
 
 OS observations report what is actually running. The Linux upgrade plan records
 unfinished installation intent and the pending dispatch; the native journal

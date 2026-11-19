@@ -623,11 +623,6 @@
       "input": "fresh STYX_TEST_MACOS_HOST_MANAGEMENT_ROOT; no installed root or service registration",
       "required_for": "fresh Host-only original C07 prepare/first-start/stopped target custody and App-managed CLI refusal; not authenticated Host or launchd acceptance"
     },
-    "store::native_transaction::runtime_update::tests::app_service_tests::original_app_scope_transfer_preserves_c07_and_refuses_generic_or_other_root_authority": {
-      "kind": "explicit_owned_private_journal_files",
-      "input": "fresh STYX_TEST_APP_SERVICE_TRANSFER_ROOT; disposable synthetic signed C08 and original App container; no installed profile",
-      "required_for": "actual original-scope C07 transfer, generic/other-root refusal and immutable runtime history/identity preservation; not enrollment, registered service or installed App acceptance"
-    },
     "enrollment::service::tests::paired_journey::paired_session_capacity_turnover_requires_sockets": {
       "kind": "explicit_external_runtime",
       "input": "STYX_TEST_PAIRED_ROOT, STYX_TEST_TLS_FIXTURES, STYX_TEST_CODEX_BIN, STYX_TEST_BROWSER_NODE/WORKER/EXECUTABLE, Node22; isolated owned loopback roots",

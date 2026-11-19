@@ -145,15 +145,6 @@ extension ProductModel {
         }
         return productText("关闭窗口后，Styx 会在菜单栏继续运行。退出 Styx 会停止它管理的本机连接和网关。", "Styx keeps running in the menu bar when you close a window. Quitting Styx stops the local connection and gateway it manages.")
     }
-    func nativeTransferToService() {
-        guard !busy, nativeSupportsOperation("transferToService"), client.nativeServiceChangeAllowed else { return }
-        let alert = NSAlert()
-        alert.messageText = productText("转为后台服务管理？", "Transfer to background service management?")
-        alert.informativeText = productText("Styx 将结束此 App 的当前连接，并将这份设置转为后台管理。身份、配对和权限会保留。转交后仍需准备、审核并安装服务。", "Styx will end this App’s current connections and transfer this profile to background management. Identity, pairing and permissions are preserved. Service preparation, review and installation are still required afterward.")
-        alert.addButton(withTitle: productText("保留设置并转交", "Keep profile and transfer")); alert.addButton(withTitle: productText("取消", "Cancel"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        perform { [self] in try applyNative(try await client.changeNativeService("transferToService")) }
-    }
     func nativeCheckService() {
         guard nativeSupportsOperation("serviceStatus") else { return }
         perform { [self] in try applyNative(try await client.native("serviceStatus")) }

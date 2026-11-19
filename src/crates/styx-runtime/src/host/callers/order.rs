@@ -1,19 +1,8 @@
 //! Ordered, epoch-bound opaque owner keys. No frame or contract fields change.
 use super::*;
 #[derive(Default)]
-struct History {
-    watermark: u64,
-    high: u64,
-}
-struct Record {
-    epoch: GatewayEpoch,
-    sequence: u64,
-    complete: bool,
-}
-#[derive(Default)]
 pub(crate) struct Order {
-    histories: BTreeMap<GatewayEpoch, History>,
-    records: BTreeMap<(OwnerId, OwnerEpoch), Record>,
+    high: BTreeMap<GatewayEpoch, u64>,
 }
 pub(crate) fn epoch_key(epoch: &GatewayEpoch, sequence: u64) -> OwnerEpoch {
     format!(
@@ -48,98 +37,29 @@ impl Order {
         owner: &OwnerRef,
     ) -> Result<(), ErrorCategory> {
         let sequence = Self::sequence(epoch, owner)?;
-        let history = self.histories.entry(epoch.clone()).or_default();
-        if sequence <= history.high {
+        let high = self.high.entry(epoch.clone()).or_default();
+        if sequence <= *high {
             return Err(ErrorCategory::Unauthorized);
         }
-
-        history.high = sequence;
-        self.records.insert(
-            (owner.owner_id.clone(), owner.owner_epoch.clone()),
-            Record {
-                epoch: epoch.clone(),
-                sequence,
-                complete: false,
-            },
-        );
+        *high = sequence;
         Ok(())
     }
     /// Unknown keys cannot own work. Advancing high refuses a late OwnerOpen
-    /// even at full capacity, without allocating a tombstone for a failed open.
+    /// without allocating a caller record for a failed or revoked open.
     pub(crate) fn fence_unseen(
         &mut self,
         epoch: &GatewayEpoch,
         owner: &OwnerRef,
     ) -> Result<(), ErrorCategory> {
         let sequence = Self::sequence(epoch, owner)?;
-        let history = self.histories.entry(epoch.clone()).or_default();
-        history.high = history.high.max(sequence);
+        let high = self.high.entry(epoch.clone()).or_default();
+        *high = (*high).max(sequence);
         Ok(())
     }
-    pub(crate) fn complete(&mut self, owner: &OwnerRef) -> Vec<(OwnerId, OwnerEpoch)> {
-        let key = (owner.owner_id.clone(), owner.owner_epoch.clone());
-        let Some(record) = self.records.get_mut(&key) else {
-            return vec![];
-        };
-        record.complete = true;
-        let epoch = record.epoch.clone();
-        let mut removed = vec![];
-        loop {
-            let first = self
-                .records
-                .iter()
-                .filter(|(_, r)| r.epoch == epoch)
-                .min_by_key(|(_, r)| r.sequence);
-            let Some((key, record)) = first else {
-                break;
-            };
-            if !record.complete {
-                break;
-            }
-            let key = key.clone();
-            self.histories
-                .get_mut(&epoch)
-                .expect("owner history")
-                .watermark = record.sequence + 1;
-            self.records.remove(&key);
-            removed.push(key);
-        }
-        removed
-    }
-    pub(crate) fn completed(&self, epoch: &GatewayEpoch, owner: &OwnerRef) -> bool {
-        let key = (owner.owner_id.clone(), owner.owner_epoch.clone());
-        if let Some(record) = self.records.get(&key) {
-            return record.complete;
-        }
+    /// Registry entries own active leases and unresolved cleanup. Once an entry
+    /// is removed, this fence still prevents opening its key again.
+    pub(crate) fn fenced(&self, epoch: &GatewayEpoch, owner: &OwnerRef) -> bool {
         Self::sequence(epoch, owner)
-            .is_ok_and(|seq| self.histories.get(epoch).is_some_and(|h| seq <= h.high))
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn unknown_pins_floor_and_full_registry_still_fences_unseen_keys() {
-        let epoch = "owner-order-test".try_into().unwrap();
-        let owner = |n| OwnerRef {
-            owner_id: format!("fixture:{n}").try_into().unwrap(),
-            owner_epoch: epoch_key(&epoch, n),
-        };
-        let mut order = Order::default();
-        order.admit(&epoch, &owner(1)).unwrap();
-        for n in 2..=256 {
-            order.admit(&epoch, &owner(n)).unwrap();
-            assert!(order.complete(&owner(n)).is_empty());
-        }
-        assert_eq!(order.histories[&epoch].watermark, 0);
-        order.fence_unseen(&epoch, &owner(257)).unwrap();
-        assert_eq!(order.complete(&owner(1)).len(), 256);
-        for n in 258..=2200 {
-            order.admit(&epoch, &owner(n)).unwrap();
-            order.complete(&owner(n));
-            assert!(order.admit(&epoch, &owner(n)).is_err());
-        }
-        assert!(order.records.is_empty());
-        assert!(order.admit(&epoch, &owner(1)).is_err());
+            .is_ok_and(|seq| self.high.get(epoch).is_some_and(|high| seq <= *high))
     }
 }

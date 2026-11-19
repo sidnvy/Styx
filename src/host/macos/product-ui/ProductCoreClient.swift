@@ -167,7 +167,7 @@ indirect enum ProductJSON: Codable, Equatable, Sendable {
     var object: [String: ProductJSON] { if case .object(let v) = self { return v }; return [:] }
 }
 
-enum ProductCoreError: Error { case invalidBootstrap, unavailable, rejected, invalidResponse, workInProgress, workStateUnknown, loginChangeUnconfirmed, serviceChangeUnconfirmed, servicePreparationRequired; case insufficientSpace(ProductJSON, Bool) }
+enum ProductCoreError: Error { case invalidBootstrap, unavailable, rejected, invalidResponse, workInProgress, workStateUnknown, loginChangeUnconfirmed, serviceChangeUnconfirmed, servicePreparationRequired }
 
 final class ProductRedirectBlocker: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask,
@@ -205,7 +205,7 @@ final class ProductCoreClient {
     private let transport: URLSession?
     private let redirectBlocker = ProductRedirectBlocker()
     static let reads: Set<String> = ["join/recovery", "native-signing/status", "app/lifecycle", "session", "snapshot", "native-status", "status", "journey", "acceptance", "plugin", "browser", "diagnostics"]
-    static let writes: Set<String> = ["join/recover", "join/rollback", "host-payload/handoff/prepare", "host-payload/handoff/status", "host-payload/handoff/cancel", "native-signing/plan", "native-signing/apply", "app/quit", "app/login", "device/revoke", "create", "local-setup", "advance", "foreground", "foreground/stop", "browser/prepare", "capabilities", "tunnel/configure", "tunnel/start", "tunnel/stop", "plugin/profile", "plugin/record", "connection-handoff", "acceptance/begin", "acceptance/confirm", "acceptance/desktop-readback", "devices", "default-device", "device-ingress/plan", "device-ingress/verify", "device-ingress/prepare", "device-ingress/status", "device-ingress/recover", "pairing-link/close", "pairing-link/inspect", "pairing-link/accept", "pairing-link/create", "pending/list", "pending/approve"]
+    static let writes: Set<String> = ["join/recover", "join/rollback", "native-signing/plan", "native-signing/apply", "app/quit", "app/login", "device/revoke", "create", "local-setup", "advance", "foreground", "foreground/stop", "browser/prepare", "capabilities", "tunnel/configure", "tunnel/start", "tunnel/stop", "plugin/profile", "plugin/record", "acceptance/begin", "acceptance/confirm", "acceptance/desktop-readback", "devices", "default-device", "device-ingress/plan", "device-ingress/verify", "device-ingress/prepare", "device-ingress/status", "device-ingress/recover", "pairing-link/close", "pairing-link/inspect", "pairing-link/accept", "pairing-link/create", "pending/list", "pending/approve"]
 
     static func bootstrap(_ url: URL) -> (origin: URL, token: String)? {
         guard var c = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -424,7 +424,6 @@ final class ProductCoreClient {
         guard let response = response as? HTTPURLResponse,
               response.url == url else { throw ProductCoreError.rejected }
         if response.statusCode == 409, data.count <= 4096, let failure = try? JSONDecoder().decode(ProductJSON.self, from: data) {
-            if failure["error"].string == "host_payload_insufficient_space" { throw ProductCoreError.insufficientSpace(failure["budget"], route == "host-payload/handoff/prepare" && failure["preflight"].bool) }
             if failure["error"].string == "work_in_progress" { throw ProductCoreError.workInProgress }
             if failure["error"].string == "work_state_unknown" { throw ProductCoreError.workStateUnknown }
         }
