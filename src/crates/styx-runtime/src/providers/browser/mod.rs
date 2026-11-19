@@ -631,6 +631,9 @@ impl BrowserOpenSlot {
             match environment {
                 Ok(environment) => environment,
                 Err(cause) => {
+                    // This registered resource has no child or I/O to stop. Record
+                    // its normal cleanup result before returning the known refusal.
+                    cleanup(&mut live, config.rpc_timeout).await;
                     return Err(BrowserOpenFailure {
                         operation,
                         handle: Some(handle),
