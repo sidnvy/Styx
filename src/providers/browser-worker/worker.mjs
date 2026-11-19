@@ -136,6 +136,9 @@ async function main() {
         nativeClosed = true;
         advanceEpoch();
         fact('browser_native_context_closed');
+        // If Chrome dies independently, terminate this owned worker so the
+        // Host can collect the exited resource rather than retain a dead session.
+        if (!closing) fail();
       });
       fact('browser_native_context_open');
       return value;

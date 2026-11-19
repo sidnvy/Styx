@@ -328,7 +328,13 @@ impl LinuxOwnedScope {
                 "--property=MemorySwapMax=0",
                 "--property=TasksMax=256",
                 "--property=LimitCORE=0",
-            ])
+            ]);
+        // Headless Chromium may use CPU-backed SwiftShader; keep a runaway
+        // page from saturating the workstation without limiting native CUA.
+        if matches!(&input.launch, Launch::Browser { .. }) {
+            command.arg("--property=CPUQuota=250%");
+        }
+        command
             .arg(format!(
                 "--property=WorkingDirectory={}",
                 input.workspace.display()
@@ -1066,6 +1072,37 @@ async fn read_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_cpu_quota_does_not_limit_cua() {
+        let browser = ScopeCommand::browser(
+            "/usr/bin/node".into(),
+            "/unused/worker.mjs".into(),
+            "/unused/config.json".into(),
+            "/unused/workspace".into(),
+            "/unused/home".into(),
+        )
+        .unwrap();
+        let cua = ScopeCommand {
+            executable: "/usr/bin/env".into(),
+            workspace: "/unused/workspace".into(),
+            home: "/unused/home".into(),
+            launch: Launch::Cua {
+                wayland_display: "wayland-1".into(),
+                hyprland_instance: "selected-instance".into(),
+                x11_display: None,
+            },
+        };
+        for (input, expected) in [(browser, true), (cua, false)] {
+            let (command, _) = LinuxOwnedScope::command(input).unwrap();
+            let quota = command
+                .as_std()
+                .get_args()
+                .any(|arg| arg == "--property=CPUQuota=250%");
+            assert_eq!(quota, expected);
+        }
+    }
+
     #[test]
     #[ignore = "requires an explicitly selected delegated cgroup v2 parent"]
     fn removed_original_cgroup_is_observed_without_zero_link_count() {
