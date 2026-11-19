@@ -509,7 +509,7 @@ jobs:
           {
             printf 'Source commit: `%s`\n' "$SOURCE_REVISION"
             printf 'CI: https://github.com/%s/actions/runs/%s\n\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
-            cat src/docs/github-release-notes.md
+            sed "s/@VERSION@/$VERSION/g" src/docs/github-release-notes.md
           } > "$RUNNER_TEMP/release-notes.md"
           # No clobber: an already-published version is never replaced in place.
           gh release create "v$VERSION" "$RUNNER_TEMP/release/"* --draft --verify-tag --title "Styx $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md" "${args[@]}"
