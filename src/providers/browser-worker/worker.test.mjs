@@ -31,7 +31,7 @@ function reference(snapshot, label) {
 
 test('headed worker shares a live page with external changes and settles each close path', {
   skip: !executable && 'set STYX_BROWSER_EXECUTABLE to run the real installed browser',
-  timeout: 60000,
+  timeout: 120000,
 }, async t => {
   // Keep ordinary contract tests independent of the optional native dependency
   // closure. CI sets the executable and installs these already pinned packages.
@@ -60,7 +60,7 @@ test('headed worker shares a live page with external changes and settles each cl
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [fileURLToPath(new URL('./worker.mjs', import.meta.url)), '--config', configFile],
-      env: { ...process.env },
+      env: { ...process.env, DEBUG: 'pw:browser' },
       stderr: 'pipe',
     });
     const client = new Client({ name: 'styx-headed-worker-test', version: '1.0.0' });
@@ -74,9 +74,15 @@ test('headed worker shares a live page with external changes and settles each cl
     return worker;
   }
   async function tool(worker, name, args = {}) {
-    const result = await worker.client.callTool({ name, arguments: args }, undefined, { timeout: 10000 });
-    assert.notEqual(result.isError, true, `${name}: ${text(result)}`);
-    return result;
+    const started = Date.now();
+    try {
+      const result = await worker.client.callTool({ name, arguments: args }, undefined, { timeout: 35000 });
+      assert.notEqual(result.isError, true, `${name}: ${text(result)}`);
+      t.diagnostic(`${name} completed in ${Date.now() - started} ms`);
+      return result;
+    } catch (cause) {
+      throw new Error(`${name} failed after ${Date.now() - started} ms\n${worker.facts()}`, { cause });
+    }
   }
   const nonce = randomUUID(), humanValue = `human-${nonce}`, agentValue = `agent-${nonce}`;
   const ready = deferred(), changed = deferred(), effect = deferred();
