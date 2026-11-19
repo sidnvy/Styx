@@ -113,6 +113,32 @@ mod linux {
         inputs::write_new(path, &bytes)
             .map_err(|_| Failure::unknown("upgrade_input_publication_unknown"))
     }
+    fn replace_input(root: &Path, name: &str, value: &impl Serialize) -> Result<()> {
+        let temporary = root.join(format!(".{name}.upgrade"));
+        match std::fs::remove_file(&temporary) {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(_) => return Err(Failure::unknown("upgrade_input_publication_unknown")),
+        }
+        write(&temporary, value)?;
+        std::fs::rename(&temporary, root.join(name))
+            .and_then(|()| std::fs::File::open(root)?.sync_all())
+            .map_err(|_| Failure::unknown("upgrade_input_publication_unknown"))
+    }
+    // The caller holds the inputs writer. A retained update plan (or the
+    // same-release path) can finish either publication after interruption.
+    fn complete_install(root: &Path, plan: &Plan, mut answers: setup::Answers) -> Result<()> {
+        install::link(
+            Path::new(&plan.target.payload_path),
+            &plan.command.bin,
+            plan.command.previous.as_deref(),
+        )?;
+        answers.payload.payload_dir = plan.target.payload_path.clone().into();
+        answers.payload.publisher_file = plan.target.publisher_file.clone().into();
+        let inputs = root.join("inputs");
+        replace_input(&inputs, "runtime-selection.json", &plan.target)?;
+        replace_input(&inputs, "setup-intent.json", &answers)
+    }
     fn remove(path: &Path) -> Result<()> {
         std::fs::remove_file(path).map_err(|_| Failure::unknown("upgrade_input_cleanup_unknown"))
     }
@@ -468,11 +494,7 @@ mod linux {
                 .ok_or_else(|| Failure::new("upgrade_device_identity_unavailable"))?;
             setup::wait_computer(&root.join("gateway"), Some(device), answers.browser).await?;
         }
-        install::link(
-            Path::new(&plan.target.payload_path),
-            &plan.command.bin,
-            plan.command.previous.as_deref(),
-        )?;
+        complete_install(&root, &plan, answers)?;
         remove(&work.join("plan.json"))?;
         remove(&work.join("selection.json"))?;
         println!(
@@ -522,12 +544,12 @@ mod linux {
         if !root.is_absolute() || !payload.is_absolute() {
             return Err(Failure::new("upgrade_absolute_paths_required"));
         }
-        let answers = setup::Answers::load(&root.join("inputs/setup-intent.json"))?;
         let input_root = PrivateRoot::open(root.join("inputs"))
             .map_err(|_| Failure::new("upgrade_private_inputs_required"))?;
         let lease = input_root
             .try_configuration_writer()
             .map_err(|_| Failure::new("upgrade_busy"))?;
+        let answers = setup::Answers::load(&root.join("inputs/setup-intent.json"))?;
         let publisher = publisher_file.unwrap_or_else(|| answers.payload.publisher_file.clone());
         let pin = setup::normalize_publisher_pin(
             &expected_publisher.unwrap_or_else(|| answers.payload.expected_publisher.clone()),
@@ -610,11 +632,7 @@ mod linux {
                 .iter()
                 .all(|r| same_release(&r.selection, &plan.target))
         {
-            install::link(
-                &payload,
-                &plan.command.bin,
-                plan.command.previous.as_deref(),
-            )?;
+            complete_install(&root, &plan, answers)?;
             println!(
                 "Styx {} is already selected; the CLI entry is up to date.",
                 plan.version
@@ -673,6 +691,120 @@ mod linux {
         use super::*;
         use serde_json::json;
         use styx_contracts::native_management::NativeDesired;
+
+        fn completion_fixture(name: &str) -> (PathBuf, Plan, Value) {
+            let root = std::env::temp_dir().join(format!(
+                "styx-update-inputs-{}-{}-{name}",
+                std::process::id(),
+                setup::now_ms().unwrap()
+            ));
+            inputs::private_directory(&root.join("inputs/update")).unwrap();
+            for release in ["old", "new"] {
+                inputs::private_directory(&root.join(release).join("runtime/bin")).unwrap();
+                inputs::write_new(&root.join(release).join("runtime/bin/styx"), b"fixture")
+                    .unwrap();
+                inputs::write_new(&root.join(release).join("publisher.pem"), b"publisher").unwrap();
+            }
+            let old = root.join("old/runtime");
+            let target: NativeRuntimeSelection = serde_json::from_value(json!({
+                "schema":1,"payload_path":root.join("new/runtime"),
+                "payload_root":{"platform":"linux","device":1,"inode":2,"uid":1000},
+                "manifest_sha256":"b".repeat(64),
+                "publisher_file":root.join("new/publisher.pem"),
+                "publisher_spki_sha256":"a".repeat(64)
+            }))
+            .unwrap();
+            let mut previous = target.clone();
+            previous.payload_path = old.to_str().unwrap().into();
+            previous.publisher_file = root.join("old/publisher.pem").to_str().unwrap().into();
+            previous.manifest_sha256 = serde_json::from_value(json!("c".repeat(64))).unwrap();
+            let answers: setup::Answers = serde_json::from_value(json!({
+                "schema":1,"role":"hub","label":"Keep my computer",
+                "workspace":root.join("workspace"),"shell":"/bin/bash",
+                "exec":false,"browser":true,"browser_executable":"/usr/bin/chromium",
+                "computer":true,"port":23456,"networks":["10.20.30.40"],
+                "payload":{"payload_dir":old,"publisher_file":previous.publisher_file,
+                    "expected_publisher":"a".repeat(64)}
+            }))
+            .unwrap();
+            write(&root.join("inputs/setup-intent.json"), &answers).unwrap();
+            write(&root.join("inputs/runtime-selection.json"), &previous).unwrap();
+            let plan = Plan {
+                schema: 2,
+                target,
+                version: "0.5.0".into(),
+                roles: vec![Original {
+                    role: Role::Host,
+                    selection: previous,
+                    version: "0.5.0-rc.1".into(),
+                    running: true,
+                    enabled: true,
+                }],
+                command: CommandLink {
+                    bin: root.join("bin"),
+                    previous: Some(old.clone()),
+                },
+            };
+            install::link(&old, &plan.command.bin, None).unwrap();
+            let mut expected = serde_json::to_value(answers).unwrap();
+            expected["payload"]["payload_dir"] = json!(plan.target.payload_path);
+            expected["payload"]["publisher_file"] = json!(plan.target.publisher_file);
+            (root, plan, expected)
+        }
+        fn assert_setup_inputs(root: &Path, plan: &Plan, expected: Value) {
+            let answers = setup::Answers::load(&root.join("inputs/setup-intent.json")).unwrap();
+            assert_eq!(serde_json::to_value(&answers).unwrap(), expected);
+            let selection: NativeRuntimeSelection =
+                read(&root.join("inputs/runtime-selection.json")).unwrap();
+            assert_eq!(selection, plan.target);
+            assert!(answers.payload.publisher_file.is_file());
+            assert!(answers.payload.payload_dir.join("bin/styx").is_file());
+            assert_eq!(
+                std::fs::read_link(plan.command.bin.join("styx")).unwrap(),
+                answers.payload.payload_dir.join("bin/styx")
+            );
+        }
+        #[test]
+        fn successful_and_same_release_updates_refresh_setup_consumers() {
+            for same in [false, true] {
+                let (root, mut plan, expected) =
+                    completion_fixture(if same { "same" } else { "new" });
+                if same {
+                    plan.roles[0].selection = plan.target.clone();
+                }
+                let inputs = PrivateRoot::open(root.join("inputs")).unwrap();
+                let _lease = inputs.try_configuration_writer().unwrap();
+                let answers = setup::Answers::load(&root.join("inputs/setup-intent.json")).unwrap();
+                complete_install(&root, &plan, answers).unwrap();
+                std::fs::remove_dir_all(root.join("old")).unwrap();
+                assert_setup_inputs(&root, &plan, expected);
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+        #[test]
+        fn interrupted_input_publication_finishes_with_the_retained_plan() {
+            let (root, plan, expected) = completion_fixture("interrupted");
+            let inputs = PrivateRoot::open(root.join("inputs")).unwrap();
+            let _lease = inputs.try_configuration_writer().unwrap();
+            let saved = directory(&root).join("plan.json");
+            write(&saved, &plan).unwrap();
+            let temporary = root.join("inputs/.setup-intent.json.upgrade");
+            std::fs::create_dir(&temporary).unwrap();
+            let answers = setup::Answers::load(&root.join("inputs/setup-intent.json")).unwrap();
+            assert_eq!(complete_install(&root, &plan, answers).unwrap_err().exit, 4);
+            let selection: NativeRuntimeSelection =
+                read(&root.join("inputs/runtime-selection.json")).unwrap();
+            assert_eq!(selection, plan.target);
+            let answers = setup::Answers::load(&root.join("inputs/setup-intent.json")).unwrap();
+            assert_eq!(answers.payload.payload_dir, root.join("old/runtime"));
+            std::fs::remove_dir(&temporary).unwrap();
+            inputs::write_new(&temporary, b"interrupted private write").unwrap();
+            let resumed: Plan = read(&saved).unwrap();
+            complete_install(&root, &resumed, answers).unwrap();
+            std::fs::remove_dir_all(root.join("old")).unwrap();
+            assert_setup_inputs(&root, &resumed, expected);
+            std::fs::remove_dir_all(root).unwrap();
+        }
 
         fn report(run: NativeRunDesired, active: &str, revision: u64) -> ServiceReport {
             ServiceReport {
