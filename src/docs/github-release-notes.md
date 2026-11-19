@@ -52,6 +52,13 @@ bundle. There is no separate desktop Runtime updater. On Linux, run the new
 package's `./install.sh` to update the existing installation. Keep the prior
 working package and configuration backup until the new installation is verified.
 
+Linux services created by `0.5.0-rc.1` need a one-time service-definition
+handoff for the corrected shutdown policy. Use the RC CLI to stop, disable and
+uninstall only the service; retain its profile. Then use the new CLI to select
+the verified Runtime and install, enable and start the service before running
+`./install.sh`. The ordinary installer rejects the old preview unit definition;
+this release does not add an old-unit compatibility path.
+
 Closing a desktop window leaves Styx in the tray/menu bar. **Quit Styx** stops
 its local tasks and connection. On Linux use `styx quit` and `styx start`;
 `styx uninstall` removes its user services while retaining configuration.
