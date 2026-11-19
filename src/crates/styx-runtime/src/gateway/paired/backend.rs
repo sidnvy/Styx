@@ -19,6 +19,7 @@ pub(crate) fn display_platform(stored: &str) -> &'static str {
         "linux" => "linux",
         "darwin" => "macos",
         "win32" => "windows",
+        "android" => "android",
         _ => "unknown",
     }
 }
@@ -337,7 +338,7 @@ struct OwnerState {
     closing: bool,
 }
 struct State {
-    capability_generations: BTreeMap<DeviceId, [u64; 3]>,
+    capability_generations: BTreeMap<DeviceId, [u64; 4]>,
     owners: BTreeMap<OwnerId, OwnerState>,
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     computers: computer::ComputerContexts,
@@ -399,7 +400,7 @@ impl PairedGatewayBackend {
         let previous = state
             .capability_generations
             .insert(device.clone(), report.generations)
-            .unwrap_or([0; 3]);
+            .unwrap_or([0; 4]);
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         if previous[2] != report.generations[2] {
             state.computers.clear_device(device);

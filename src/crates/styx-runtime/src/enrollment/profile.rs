@@ -117,32 +117,42 @@ fn fields(
     if !re.matches(label).matched(LABEL) {
         return Err(ProfileError::Label);
     }
-    if !matches!(platform, "linux" | "darwin" | "win32") {
+    if !matches!(platform, "linux" | "darwin" | "win32" | "android") {
         return Err(ProfileError::Platform);
     }
-    // Node path.posix/win32 semantics are independent of the Gateway's own OS.
-    // JS string.length counts UTF-16 code units for these two path bounds.
-    let absolute = |path: &str| {
-        if platform == "win32" {
-            re.matches(path).matched(WINDOWS_ABSOLUTE)
-        } else {
-            path.starts_with('/')
+    if platform == "android" {
+        // An Android Host has no desktop shell or working directory.
+        if !cwd.is_empty() {
+            return Err(ProfileError::Cwd);
         }
-    };
-    if cwd.contains('\0') || cwd.encode_utf16().count() > 512 || !absolute(cwd) {
-        return Err(ProfileError::Cwd);
-    }
-    let shell_pattern = if platform == "win32" {
-        WINDOWS_SHELL
+        if !shell.is_empty() {
+            return Err(ProfileError::Shell);
+        }
     } else {
-        POSIX_SHELL
-    };
-    if shell.contains('\0')
-        || shell.encode_utf16().count() > 512
-        || !absolute(shell)
-        || !re.matches(shell).matched(shell_pattern)
-    {
-        return Err(ProfileError::Shell);
+        // Node path.posix/win32 semantics are independent of the Gateway's own OS.
+        // JS string.length counts UTF-16 code units for these two path bounds.
+        let absolute = |path: &str| {
+            if platform == "win32" {
+                re.matches(path).matched(WINDOWS_ABSOLUTE)
+            } else {
+                path.starts_with('/')
+            }
+        };
+        if cwd.contains('\0') || cwd.encode_utf16().count() > 512 || !absolute(cwd) {
+            return Err(ProfileError::Cwd);
+        }
+        let shell_pattern = if platform == "win32" {
+            WINDOWS_SHELL
+        } else {
+            POSIX_SHELL
+        };
+        if shell.contains('\0')
+            || shell.encode_utf16().count() > 512
+            || !absolute(shell)
+            || !re.matches(shell).matched(shell_pattern)
+        {
+            return Err(ProfileError::Shell);
+        }
     }
     if pem.len() > MAX_PEM {
         return Err(ProfileError::PublicKey);
@@ -309,3 +319,21 @@ impl VerifiedProfile {
 #[cfg(test)]
 #[path = "profile_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod android_platform_tests {
+    use super::*;
+    #[test]
+    fn android_identity_has_no_fictitious_desktop_shell() {
+        let device = DeviceId::try_from("styx-0123456789abcdef01234567").unwrap();
+        assert!(fields(&device, "Pixel 7 Pro", "android", "", "", "test-key").is_ok());
+        assert!(matches!(
+            fields(&device, "Pixel 7 Pro", "android", "/tmp", "", "test-key"),
+            Err(ProfileError::Cwd)
+        ));
+        assert!(matches!(
+            fields(&device, "Pixel 7 Pro", "android", "", "/bin/sh", "test-key"),
+            Err(ProfileError::Shell)
+        ));
+    }
+}

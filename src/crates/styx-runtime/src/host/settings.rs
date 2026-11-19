@@ -20,6 +20,8 @@ pub struct Capabilities {
     pub exec: bool,
     pub browser: bool,
     pub computer: bool,
+    #[serde(default)]
+    pub android: bool,
 }
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +32,8 @@ pub struct CapabilityPatch {
     pub browser: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub android: Option<bool>,
 }
 impl CapabilityPatch {
     fn apply(self, previous: Capabilities) -> Capabilities {
@@ -37,16 +41,20 @@ impl CapabilityPatch {
             exec: self.exec.unwrap_or(previous.exec),
             browser: self.browser.unwrap_or(previous.browser),
             computer: self.computer.unwrap_or(previous.computer),
+            android: self.android.unwrap_or(previous.android),
         }
     }
     pub fn is_empty(&self) -> bool {
-        self.exec.is_none() && self.browser.is_none() && self.computer.is_none()
+        self.exec.is_none()
+            && self.browser.is_none()
+            && self.computer.is_none()
+            && self.android.is_none()
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsReport {
-    pub generations: [u64; 3],
+    pub generations: [u64; 4],
     pub configured: Capabilities,
     pub applied: bool,
     pub error: Option<String>,
@@ -97,7 +105,7 @@ impl HostSettings {
             root,
             current,
             report: Mutex::new(SettingsReport {
-                generations: [0; 3],
+                generations: [0; 4],
                 configured,
                 applied: true,
                 error: None,
@@ -172,6 +180,7 @@ impl HostSettings {
             before.exec != after.exec,
             before.browser != after.browser,
             before.computer != after.computer,
+            before.android != after.android,
         ]
         .into_iter()
         .enumerate()
@@ -187,7 +196,8 @@ impl HostSettings {
         if !previous.applied
             && ((after.exec && !before.exec)
                 || (after.browser && !before.browser)
-                || (after.computer && !before.computer))
+                || (after.computer && !before.computer)
+                || (after.android && !before.android))
         {
             return Err(ErrorCategory::Busy);
         }
@@ -293,6 +303,7 @@ mod tests {
         exec: false,
         browser: false,
         computer: false,
+        android: false,
     };
     #[tokio::test]
     async fn settings_preserve_import_and_reopen_independently_of_pairing_defaults() {
@@ -310,7 +321,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(enabled.generations, [0, 1, 0]);
+        assert_eq!(enabled.generations, [0, 1, 0, 0]);
         assert!(enabled.configured.browser && enabled.applied);
         assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
         let reopened = HostSettings::open(
@@ -319,6 +330,7 @@ mod tests {
                 exec: true,
                 browser: false,
                 computer: true,
+                android: false,
             },
         )
         .unwrap();
