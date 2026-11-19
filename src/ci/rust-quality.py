@@ -591,7 +591,7 @@ def main():
     parser.add_argument("--evidence", required=True, help="fresh absolute external evidence directory")
     parser.add_argument("--target-dir", help="canonical Cargo cache (default: CARGO_TARGET_DIR, otherwise workspace target/); never evidence/target")
     parser.add_argument("--browser-references", action="store_true", help="actual owned Browser opaque references/navigation/tab/reopen scene; requires --browser-host, not platform acceptance")
-    parser.add_argument("--browser-host", action="store_true", help="actual Linux headless Browser Host scenario; requires Node22, Codex and browser executable; no desktop/account/package claim")
+    parser.add_argument("--browser-host", action="store_true", help="actual Linux visible Browser Host scenario; requires Node22, Codex and browser executable; no desktop/account/package claim")
     parser.add_argument("--browser-executable", help="canonical explicit Chrome/Chromium binary; no download or installed profile is opened")
     parser.add_argument("--linux-discovery", action="store_true", help="actual read-only fixed system-bus candidate snapshot plus CLI; no desktop authorization")
     parser.add_argument("--paired-host", action="store_true", help="actual paired TLS/MCP/WSS/native scene; requires Codex, Node22, TLS and enrollment service inputs")

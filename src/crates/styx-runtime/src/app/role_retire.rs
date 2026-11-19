@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(status["admission_fenced"], false);
         // Both normal welcome choices get past the old setup guards in this
         // same process. These negative inputs never dispatch pairing/network.
-        let local = app.dispatch(Operation::CreateLocal, input(json!({"tunnel":{"tunnelId":"tunnel_testtest","apiKey":"sk-testtesttesttest"},"label":"New computer","computer":false,"browser":false,"browserChannel":null,"persistLogin":false}))).await.unwrap_err();
+        let local = app.dispatch(Operation::CreateLocal, input(json!({"tunnel":{"tunnelId":"tunnel_testtest","apiKey":"sk-testtesttesttest"},"label":"New computer","computer":false,"browser":false,"browserChannel":null}))).await.unwrap_err();
         assert_eq!(local.code(), "app_runtime_selection_invalid");
         let join = app
             .dispatch(Operation::InspectJoin, input(json!({"link":"invalid"})))

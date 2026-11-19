@@ -79,7 +79,7 @@ impl BrowserWorker {
     ) -> Result<()> {
         let s = key.snapshot();
         let target = s.target.as_ref().ok_or(BrowserError::PermissionDenied)?;
-        if key.capability() != CapabilityId::BrowserHeadless
+        if key.capability() != CapabilityId::Browser
             || key.owner() != &resource.owner
             || target.operation_id != resource.operation
             || target.payload_digest != resource.digest
@@ -135,7 +135,7 @@ impl BrowserWorker {
             .get(&target.operation_id)
             .cloned()
             .ok_or(BrowserError::Unknown)?;
-        if key.capability() != CapabilityId::BrowserHeadless
+        if key.capability() != CapabilityId::Browser
             || key.owner() != &resource.owner
             || target.payload_digest != resource.digest
         {
@@ -202,7 +202,7 @@ impl BrowserWorker {
     ) -> Result<ProviderReleaseConfirmation> {
         let key = permit.resource().ok_or(BrowserError::InvalidRequest)?;
         let s = key.snapshot();
-        if key.capability() != CapabilityId::BrowserHeadless || s.target.is_some() {
+        if key.capability() != CapabilityId::Browser || s.target.is_some() {
             return Err(BrowserError::PermissionDenied);
         }
         let resource = self

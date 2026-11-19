@@ -133,7 +133,7 @@ async fn core_permit_pre_io_and_independent_context_admission_batch() {
     assert_eq!(failed.cause, BrowserError::PermissionDenied);
     assert!(worker.resources().unwrap().is_empty());
 
-    let (_, _, old_config, _, _) = permit(payload.clone(), CapabilityId::BrowserHeadless);
+    let (_, _, old_config, _, _) = permit(payload.clone(), CapabilityId::Browser);
     let mut changed = config.clone();
     changed.rpc_timeout = Duration::from_secs(2);
     let failed = worker
@@ -146,8 +146,7 @@ async fn core_permit_pre_io_and_independent_context_admission_batch() {
     assert!(failed.handle.is_none());
     assert_eq!(failed.cause, BrowserError::InvalidRequest);
 
-    let (mut ledger, owner, parent, facts, context) =
-        permit(payload, CapabilityId::BrowserHeadless);
+    let (mut ledger, owner, parent, facts, context) = permit(payload, CapabilityId::Browser);
     let target = ResourceTarget {
         operation_id: parent.id().clone(),
         payload_digest: Sha256Digest::of_bytes(parent.payload()),
@@ -212,8 +211,7 @@ async fn missing_unknown_requires_exact_ended_bundle_and_audit() {
         (2, false, true),
         (3, false, true),
     ] {
-        let (mut ledger, owner, parent, facts, context) =
-            permit(vec![1], CapabilityId::BrowserHeadless);
+        let (mut ledger, owner, parent, facts, context) = permit(vec![1], CapabilityId::Browser);
         let target = ResourceTarget {
             operation_id: parent.id().clone(),
             payload_digest: Sha256Digest::of_bytes(parent.payload()),
@@ -462,7 +460,7 @@ fn frozen_tools_paths_and_snapshot_reference_policy_batch() {
         output["filename"],
         config.output_dir.join("result.txt").to_str().unwrap()
     );
-    let (_, owner, parent, _, _) = permit(vec![1], CapabilityId::BrowserHeadless);
+    let (_, owner, parent, _, _) = permit(vec![1], CapabilityId::Browser);
     let target = ResourceTarget {
         operation_id: parent.id().clone(),
         payload_digest: Sha256Digest::of_bytes(parent.payload()),

@@ -702,7 +702,7 @@ fn validate_registration(principal: &NativePrincipal, facts: &RegistrationFacts)
     Ok(())
 }
 fn session_capability(capability: CapabilityId) -> bool {
-    capability.requires_session() && capability != CapabilityId::BrowserAttach
+    capability.requires_session()
 }
 fn validate_provider(facts: &ProviderFacts) -> Result<()> {
     if !session_capability(facts.capability)

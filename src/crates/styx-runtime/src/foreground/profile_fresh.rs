@@ -216,11 +216,15 @@ fn load_snapshot(
     let mut browser_options = deployment
         .host
         .browser
-        .unwrap_or_else(|| serde_json::json!({"headless":true,"persistLogin":false}));
-    browser_options
+        .unwrap_or_else(|| serde_json::json!({}));
+    let options = browser_options
         .as_object_mut()
-        .ok_or(ProfileError::Invalid)?
-        .insert("enabled".into(), Value::Bool(true));
+        .ok_or(ProfileError::Invalid)?;
+    // The Host always opens a visible, session-owned browser. These former
+    // launch knobs in persisted setup data no longer select runtime behavior.
+    options.remove("headless");
+    options.remove("persistLogin");
+    options.insert("enabled".into(), Value::Bool(true));
     let deployment_browser = Some(browser_options.clone());
     browser_options
         .as_object_mut()

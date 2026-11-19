@@ -282,7 +282,6 @@ struct JoinInput {
     computer: bool,
     browser: bool,
     browser_channel: Option<String>,
-    persist_login: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -294,7 +293,6 @@ struct LocalInput {
     computer: bool,
     browser: bool,
     browser_channel: Option<String>,
-    persist_login: bool,
     #[serde(default = "local_port")]
     port: u16,
     #[serde(default)]
@@ -766,8 +764,7 @@ impl HostApp {
             .filter(|p| p.is_absolute() && p.is_file())
             .ok_or(AppError("app_shell_unavailable"))?;
         let parent = &self.scope.container.parent_path;
-        let mut browser =
-            json!({"enabled":choice.browser,"headless":true,"persistLogin":choice.persist_login});
+        let mut browser = json!({"enabled":choice.browser});
         if let Some(channel) = choice.browser_channel {
             browser["channel"] = json!(channel);
         }

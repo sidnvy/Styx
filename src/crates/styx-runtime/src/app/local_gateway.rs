@@ -504,7 +504,6 @@ impl HostApp {
             computer: input.computer,
             browser: input.browser,
             browser_channel: input.browser_channel,
-            persist_login: input.persist_login,
         };
         validate_choice(&choice)?;
         self.resume_local_available = false;
@@ -550,7 +549,6 @@ impl HostApp {
             computer: input.computer,
             browser: input.browser,
             browser_channel: input.browser_channel,
-            persist_login: input.persist_login,
         };
         validate_choice(&choice)?;
         self.bootstrap_runtime_selection(input.tunnel.is_some())
@@ -830,8 +828,10 @@ mod setup_tests {
     }
 
     fn input() -> LocalInput {
-        serde_json::from_value(json!({"label":"Test computer","computer":false,"browser":false,"browserChannel":null,"persistLogin":false}))
-            .unwrap()
+        serde_json::from_value(
+            json!({"label":"Test computer","computer":false,"browser":false,"browserChannel":null}),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -839,7 +839,10 @@ mod setup_tests {
         let input = input();
         assert!(input.lan_address.is_none());
         assert!(input.exec);
-        let explicit: LocalInput = serde_json::from_value(json!({"label":"Test computer","exec":false,"computer":false,"browser":false,"persistLogin":false})).unwrap();
+        let explicit: LocalInput = serde_json::from_value(
+            json!({"label":"Test computer","exec":false,"computer":false,"browser":false}),
+        )
+        .unwrap();
         assert!(!explicit.exec);
         assert_eq!(
             local_deployment(&input).unwrap(),
@@ -909,7 +912,7 @@ mod continuation_tests {
             "",
             "100.128.0.1",
         ] {
-            let input: LocalInput = serde_json::from_value(json!({"label":"Test computer","computer":false,"browser":false,"browserChannel":null,"persistLogin":false,"lanAddress":address})).unwrap();
+            let input: LocalInput = serde_json::from_value(json!({"label":"Test computer","computer":false,"browser":false,"browserChannel":null,"lanAddress":address})).unwrap();
             assert_eq!(
                 app.create_local(input).await.unwrap_err().code(),
                 "app_lan_address_invalid",

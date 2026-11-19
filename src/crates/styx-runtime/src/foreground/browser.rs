@@ -30,9 +30,6 @@ type Result<T> = std::result::Result<T, ErrorCategory>;
 #[serde(deny_unknown_fields)]
 struct Selection {
     enabled: bool,
-    headless: Option<bool>,
-    #[serde(rename = "persistLogin")]
-    persist_login: Option<bool>,
     #[serde(rename = "executablePath")]
     executable: Option<PathBuf>,
     channel: Option<String>,
@@ -104,10 +101,6 @@ fn selected(profile: &LoadedProfile) -> Result<Option<PathBuf>> {
         serde_json::from_value(host.ok_or(ErrorCategory::CapabilityUnsupported)?.clone())
             .map_err(|_| ErrorCategory::CapabilityUnsupported)?;
     if !h.enabled
-        || d.headless != Some(true)
-        || h.headless != Some(true)
-        || d.persist_login != Some(false)
-        || h.persist_login != Some(false)
         || d.profile_root.is_some()
         || h.profile_root.as_deref() != Some(profile.host_base_dir().join("browser").as_path())
         || d.channel != h.channel

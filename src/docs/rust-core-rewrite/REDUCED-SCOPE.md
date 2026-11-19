@@ -14,6 +14,15 @@ The implementation follows
 list remains a scope boundary unless the owner changes it; absence of new acceptance is
 not permission to promote a deferred feature into a blocking gate.
 
+## Interactive Browser (owner decision, 2026-11-20)
+
+Browser opens a visible dedicated window on the selected Host desktop. The user
+can sign in and interact in that same session; the agent waits and observes the
+current tab again before continuing. This replaces the former headless-only
+product restriction. Host session ownership and shutdown behavior remain as
+defined in [REFACTOR-PLAN.md](REFACTOR-PLAN.md). Existing-browser attachment, an
+embedded ChatGPT view and restoring sessions after Host restart are not added.
+
 ## Historical v1 baseline
 
 Owner decision, 2026-10-27: Styx is installed only on the owner's own devices. Re-pairing them is acceptable. **Legacy migration is out of the release scope.** Existing installs are retired by hand and replaced by a fresh Rust install plus a new pairing.

@@ -26,7 +26,7 @@ fn browser_context_cannot_be_replaced_with_exec_or_desktop_context() {
         grant_revision: 1,
         session: None,
         observation: None,
-        capability: CapabilityId::BrowserHeadless,
+        capability: CapabilityId::Browser,
         deadline: Some(MonotonicMillis(100)),
         disconnect_policy: DisconnectPolicy::RetainForOwner,
     };
@@ -36,7 +36,7 @@ fn browser_context_cannot_be_replaced_with_exec_or_desktop_context() {
         validate_context(&context),
         Err(CoordinatorError::Admission(ErrorCategory::StateConflict))
     ));
-    context.capability = CapabilityId::BrowserHeaded;
+    context.capability = CapabilityId::DesktopWindowsRead;
     assert!(validate_context(&context).is_err());
 }
 
@@ -79,13 +79,13 @@ fn repeated_physical_settlement_is_idempotent_and_contradictory_exit_is_refused(
             OwnerEpoch::try_from("fixture-epoch").unwrap(),
         )
         .unwrap();
-    let facts = fixture_facts(CapabilityId::BrowserHeadless);
+    let facts = fixture_facts(CapabilityId::Browser);
     let context = PreparedContext {
         device_id: facts.device_id.clone(),
         grant_revision: 7,
         session: None,
         observation: None,
-        capability: CapabilityId::BrowserHeadless,
+        capability: CapabilityId::Browser,
         deadline: Some(MonotonicMillis(1000)),
         disconnect_policy: DisconnectPolicy::RetainForOwner,
     };
@@ -170,11 +170,11 @@ fn fixture_facts(capability: CapabilityId) -> AdmissionFacts {
 }
 fn browser_context(host: &HostCoordinator) -> PreparedContext {
     PreparedContext {
-        device_id: fixture_facts(CapabilityId::BrowserHeadless).device_id,
+        device_id: fixture_facts(CapabilityId::Browser).device_id,
         grant_revision: 7,
         session: None,
         observation: None,
-        capability: CapabilityId::BrowserHeadless,
+        capability: CapabilityId::Browser,
         deadline: Some(MonotonicMillis(host.now().0 + 30000)),
         disconnect_policy: DisconnectPolicy::RetainForOwner,
     }
@@ -237,11 +237,11 @@ async fn acted(
     result
 }
 
-/// Actual Codex-backed Host + sandboxed headless Browser + independent HTTP
+/// Actual Codex-backed Host + sandboxed visible Browser + independent HTTP
 /// effects. Synthetic facts are trusted fixture bootstrap, not paired/network
 /// authorization evidence. No user browser profile, GUI or external site.
 #[tokio::test]
-#[ignore = "requires explicit STYX_TEST_BROWSER_ROOT/NODE/WORKER/EXECUTABLE and STYX_TEST_CODEX; owned Linux headless Host scenario"]
+#[ignore = "requires explicit STYX_TEST_BROWSER_ROOT/NODE/WORKER/EXECUTABLE and STYX_TEST_CODEX; owned Linux visible Host scenario"]
 async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
     use bytes::Bytes;
     use futures_util::FutureExt;
@@ -291,7 +291,7 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
     )
     .unwrap();
     authority
-        .configure_browser(fixture_facts(CapabilityId::BrowserHeadless))
+        .configure_browser(fixture_facts(CapabilityId::Browser))
         .unwrap();
     let owner = authority
         .register_verified_owner(
@@ -409,11 +409,11 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
         }).await.unwrap();
         assert!(matches!(host.dispatch_browser_action(&owner,&operation.id,operation.payload_digest).await.unwrap(),BrowserActionSubmission::Existing(_)));
         stage = "policy_denial";
-        let mut denied=fixture_facts(CapabilityId::BrowserHeadless);denied.local_policy_allowed=false;authority.replace_browser_facts(denied).unwrap();
+        let mut denied=fixture_facts(CapabilityId::Browser);denied.local_policy_allowed=false;authority.replace_browser_facts(denied).unwrap();
         let forbidden=host.prepare_browser_action(&owner,target(&open),browser_context(&host),&BrowserAction::Navigate{url:format!("http://{address}/probe/forbidden")}).unwrap();
         assert!(matches!(host.dispatch_browser_action(&owner,&forbidden.id,forbidden.payload_digest).await,Err(CoordinatorError::Admission(ErrorCategory::PermissionDenied))));
         assert_eq!(navigations.load(Ordering::SeqCst),1);assert_eq!(effects.lock().unwrap().len(),1);
-        authority.replace_browser_facts(fixture_facts(CapabilityId::BrowserHeadless)).unwrap();
+        authority.replace_browser_facts(fixture_facts(CapabilityId::Browser)).unwrap();
         stage = "close_and_retire_a";
         let closed=acted(&host,&owner,&open,BrowserAction::Close).await;assert!(closed.cleanup.as_ref().is_some_and(physical_complete));
         let retired_a=authority.collect_provider_retention(Duration::from_secs(10)).await.unwrap();
@@ -546,7 +546,7 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
                 .as_ref()
                 .is_some_and(|browser| browser.complete)
     });
-    let receipt = serde_json::json!({"schema":1,"status":if scenario.is_ok()&&completed&&server_complete{"PASS"}else{"FAIL"},"scope":"actual owned Host single-ledger headless Browser with independent HTTP nonce/cookie effects; trusted bootstrap facts, not paired-network/account/GUI/release acceptance","nonce":expected,"unknown_nonce":unknown_nonce,"last_stage":stage,"observations":observations,"http_navigations":navigations.load(Ordering::SeqCst),"http_effects":effects.lock().unwrap().clone(),"cross_profile_cookie_received":cookie_observations.lock().unwrap().clone(),"host_browser_cleanup_complete":completed,"http_server_joined":server_complete,"browser_worker_source":std::env::var_os("STYX_TEST_BROWSER_WORKER"),"source_sha256":{"browser.rs":hex::encode(<sha2::Sha256 as sha2::Digest>::digest(include_bytes!("browser.rs"))),"browser_tests.rs":hex::encode(<sha2::Sha256 as sha2::Digest>::digest(include_bytes!("browser_tests.rs")))}});
+    let receipt = serde_json::json!({"schema":1,"status":if scenario.is_ok()&&completed&&server_complete{"PASS"}else{"FAIL"},"scope":"actual owned Host single-ledger visible Browser with independent HTTP nonce/cookie effects; trusted bootstrap facts, not paired-network/account/GUI/release acceptance","nonce":expected,"unknown_nonce":unknown_nonce,"last_stage":stage,"observations":observations,"http_navigations":navigations.load(Ordering::SeqCst),"http_effects":effects.lock().unwrap().clone(),"cross_profile_cookie_received":cookie_observations.lock().unwrap().clone(),"host_browser_cleanup_complete":completed,"http_server_joined":server_complete,"browser_worker_source":std::env::var_os("STYX_TEST_BROWSER_WORKER"),"source_sha256":{"browser.rs":hex::encode(<sha2::Sha256 as sha2::Digest>::digest(include_bytes!("browser.rs"))),"browser_tests.rs":hex::encode(<sha2::Sha256 as sha2::Digest>::digest(include_bytes!("browser_tests.rs")))}});
     std::fs::write(
         root.join("receipt.json"),
         serde_json::to_vec_pretty(&receipt).unwrap(),

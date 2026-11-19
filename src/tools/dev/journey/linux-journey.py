@@ -4,7 +4,7 @@ usage: linux-journey.py PAYLOAD_DIR PUBLISHER_PEM PUBLISHER_PIN WORK_DIR PORT
 
 Fresh private Gateway and Host roots under WORK_DIR, loopback Gateway on PORT.
 Steps: verify payload, bootstrap and run Gateway, pair a Host, Exec file effect,
-headless Browser page effect, one Computer Use click on a zenity dialog this
+visible Browser page effect, one Computer Use click on a zenity dialog this
 script opens itself, quit and reopen without re-pairing, Exec again. Every step
 is logged with timings to WORK_DIR/journey.jsonl. Stops at the first unexpected
 result; never retries a command whose outcome is unknown.
@@ -270,7 +270,7 @@ ca_der = ssl.PEM_cert_to_DER_cert((gateway / "gateway-ca.pem").read_text())
 hdep = inputs / "host.json"
 hdep.write_text(json.dumps({"schema": 1, "mode": "join-existing",
     "gateway": {"url": url.rstrip("/"), "caFile": str(gateway / "gateway-ca.pem"), "expectedCaSha256": hashlib.sha256(ca_der).hexdigest()},
-    "host": {"label": "linux-journey", "cwd": str(hcwd), "shell": os.path.join(os.environ.get("SystemRoot", ""), "System32", "WindowsPowerShell", "v1.0", "powershell.exe") if WINDOWS else "/bin/bash", "computer": COMPUTER, "browser": {"enabled": BROWSER, "headless": True, "channel": "chrome", "persistLogin": False}},
+    "host": {"label": "linux-journey", "cwd": str(hcwd), "shell": os.path.join(os.environ.get("SystemRoot", ""), "System32", "WindowsPowerShell", "v1.0", "powershell.exe") if WINDOWS else "/bin/bash", "computer": COMPUTER, "browser": {"enabled": BROWSER, "channel": "chrome"}},
     "runtimeSelectionFile": str(selection), "invitationFile": str(invitation)})); os.chmod(hdep, 0o600)
 req = run("host_join_request", ["host", "join", "request", "--parent-dir", str(hparent), "--name", "host", "--deployment-file", str(hdep), "--json"])
 pending = run("gateway_pending", ["gateway", "pending", "--state-dir", str(gateway), "--json"])
