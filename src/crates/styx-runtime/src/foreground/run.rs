@@ -498,6 +498,11 @@ mod connection_recovery_tests {
                 _ => incomplete.supervised_jobs_joined = false,
             }
             assert!(!incomplete.local_stop_succeeded());
+            assert_eq!(
+                incomplete.local_runtime_joined(),
+                missing == 1,
+                "only missing command receipts can be left for the native service owner"
+            );
         }
         outcome.stop_reason = Some("gateway_pairing_revoked");
         assert!(
@@ -1211,8 +1216,9 @@ async fn run_owned(
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     computer.close_admission();
 
-    // Unknown cleanup retains the SAME owner, pin and supervisor. Never release
-    // the lease on a timer while the native child might still execute signed code.
+    // Retain the original owner until its executor, I/O and local jobs end.
+    // A Linux service can then return missing command receipts unchanged:
+    // systemd owns final descendant cleanup and the external stop observes it.
     loop {
         if let Ok(cleanup) = host.shutdown_owned(Duration::from_secs(10)).await {
             if let Some(native) = &cleanup.native {
@@ -1247,6 +1253,12 @@ async fn run_owned(
             break;
         }
         event(&events, &cancel, "cleanup_unknown", &device, None);
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if admitted.service_scope.is_some() && outcome.local_runtime_joined() {
+            // RPC is already closed. Waiting again cannot recover a lost task
+            // exit receipt, and keeps systemd from finishing the same cgroup.
+            break;
+        }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     event(&events, &cancel, "stopped", &device, None);
@@ -1311,6 +1323,13 @@ mod tests {
         assert!(
             !outcome.is_complete(),
             "joined server/I/O/jobs cannot stand in for original command exit"
+        );
+        assert!(outcome.local_runtime_joined());
+        assert!(!outcome.local_stop_complete());
+        assert!(!outcome.local_stop_succeeded());
+        assert_eq!(
+            serde_json::to_value(&outcome).unwrap()["processes_exited"],
+            false
         );
         // A second empty inventory does not remove the original Unknown identity.
         assert!(!records.values().all(|exited| *exited));

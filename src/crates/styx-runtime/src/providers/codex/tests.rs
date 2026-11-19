@@ -631,7 +631,17 @@ async fn shutdown_global_budget_does_not_wait_for_all_resource_locks_or_invent_r
     assert!(!cleanup.executor_exited);
     drop(lock);
     drop(server);
-    let _ = adapter.shutdown_owned(Duration::from_millis(100)).await;
+    let closed = adapter.shutdown_owned(Duration::from_millis(100)).await;
+    assert_eq!(closed.processes[0].1, TerminationEvidence::Unknown);
+    let later = adapter.shutdown_owned(Duration::from_millis(100)).await;
+    // The prior deadline aborted the reader; its cancelled join is collected
+    // separately. Once I/O is settled, the task receipt is still unavailable.
+    assert!(later.reader_task_reaped && later.stderr_task_reaped);
+    assert_eq!(
+        later.processes[0].1,
+        TerminationEvidence::Unknown,
+        "a closed executor cannot recover the original missing task receipt"
+    );
 }
 
 #[tokio::test]

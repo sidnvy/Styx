@@ -42,11 +42,16 @@ pub struct ForegroundOutcome {
     pub remote_transport_drain: Option<crate::host::protocol::wire::TransportDrainOutcome>,
 }
 impl ForegroundOutcome {
-    pub fn local_stop_complete(&self) -> bool {
+    /// Host-side ownership has ended. Individual command exit receipts are
+    /// separate: an authenticated service can hand remaining descendants to
+    /// systemd without inventing their results.
+    pub(crate) fn local_runtime_joined(&self) -> bool {
         (!self.executor_started || self.executor_exited)
-            && self.processes_exited
             && self.io_tasks_joined
             && self.supervised_jobs_joined
+    }
+    pub fn local_stop_complete(&self) -> bool {
+        self.local_runtime_joined() && self.processes_exited
     }
     /// Native process exit is a local fact. A missing historical remote drain
     /// receipt remains in the report, but cannot make an observed local stop fail.

@@ -5,6 +5,14 @@ Gateway. Each computer decides locally whether to enable commands, Browser
 Automation and Computer Use. One conversation can use several computers;
 several conversations can use the same computer.
 
+## Changes
+
+Linux Host services can now finish shutdown when an old command's exit receipt
+is unavailable after the executor has closed. The Host still joins its executor,
+I/O and local jobs, preserves the unknown command result, and lets systemd finish
+its existing process group. The stop command confirms the group is empty before
+reporting success. Desktop App and foreground CLI cleanup requirements are unchanged.
+
 ## Choose your download
 
 | System | Download | Role |
