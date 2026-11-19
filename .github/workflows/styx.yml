@@ -79,7 +79,7 @@ jobs:
         if: always()
         with:
           name: rust-quality-receipt
-          path: ${{ runner.temp }}/quality/receipt.json
+          path: ${{ runner.temp }}/quality
           if-no-files-found: warn
           retention-days: 14
 
