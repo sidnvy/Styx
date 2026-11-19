@@ -142,6 +142,7 @@ async fn run_cleanup(
     };
     // Persist whitelist action evidence first, including original Unknown/writeId.
     // This never sends a stdin mutation or retries an action.
+    #[cfg(not(target_os = "android"))]
     for key in owner_inventory(handle)?.iter().filter(|key| {
         key.capability() == styx_contracts::capability::CapabilityId::ExecRun
             && key.snapshot().target.is_some()
@@ -199,6 +200,7 @@ async fn run_cleanup(
             });
         }
     }
+    #[cfg(not(target_os = "android"))]
     for key in owner_inventory(handle)?.iter().filter(|key| {
         key.capability() == styx_contracts::capability::CapabilityId::ExecRun
             && key.snapshot().target.is_none()
@@ -253,6 +255,7 @@ async fn run_cleanup(
     }
     Ok(facts)
 }
+#[cfg(not(target_os = "android"))]
 async fn settle_resource(
     handle: &OwnerCleanupHandle,
     key: &ProviderRecordKey,
@@ -335,6 +338,7 @@ async fn settle_resource(
         .record_provider_release(proof)?;
     Ok(())
 }
+#[cfg(not(target_os = "android"))]
 fn note_exit(inner: &Inner, operation: &OperationId, code: i32) -> Result<(), CoordinatorError> {
     match inner
         .state

@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use styx_contracts::{
     identity::{DeviceId, Sha256Digest},
     legacy::{JoinPayload, PairingComparison},
-    native_host::NativeHostJoinSeed,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -15,27 +14,64 @@ use crate::{
     tls::GatewayLeafPin,
 };
 
+/// Identity fields used by the one enrollment protocol, independent of any
+/// desktop deployment, release selection or filesystem layout.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct JoinIdentity {
+    pub(crate) schema: u16,
+    pub(crate) gateway_origin: String,
+    pub(crate) device_id: DeviceId,
+    pub(crate) fingerprint: Sha256Digest,
+    pub(crate) public_key_pem: String,
+    pub(crate) label: String,
+    pub(crate) platform: String,
+    pub(crate) cwd: String,
+    pub(crate) shell: String,
+    pub(crate) computer_requested: bool,
+    pub(crate) browser_requested: bool,
+}
+
+#[cfg(not(target_os = "android"))]
+impl From<&styx_contracts::native_host::NativeHostJoinSeed> for JoinIdentity {
+    fn from(seed: &styx_contracts::native_host::NativeHostJoinSeed) -> Self {
+        Self {
+            schema: seed.schema,
+            gateway_origin: seed.gateway_origin.clone(),
+            device_id: seed.device_id.clone(),
+            fingerprint: seed.fingerprint,
+            public_key_pem: seed.public_key_pem.clone(),
+            label: seed.label.clone(),
+            platform: seed.platform.clone(),
+            cwd: seed.cwd.clone(),
+            shell: seed.shell.clone(),
+            computer_requested: seed.computer_requested,
+            browser_requested: seed.browser_requested,
+        }
+    }
+}
+
 const REQUEST_LIMIT: usize = 16 * 1024;
 const RESPONSE_LIMIT: usize = 32 * 1024;
 
-pub(super) struct ProtocolError(&'static str);
+pub(crate) struct ProtocolError(&'static str);
 impl ProtocolError {
-    pub(super) fn code(&self) -> &'static str {
+    pub(crate) fn code(&self) -> &'static str {
         self.0
     }
 }
 type Result<T> = std::result::Result<T, ProtocolError>;
 
-pub(super) struct PendingJoin {
-    pub(super) request_id: String,
-    pub(super) comparison_code: String,
-    pub(super) expires_at: u64,
-    pub(super) claim_secret: Zeroizing<String>,
+pub(crate) struct PendingJoin {
+    pub(crate) request_id: String,
+    pub(crate) comparison_code: String,
+    pub(crate) expires_at: u64,
+    pub(crate) claim_secret: Zeroizing<String>,
 }
-pub(super) struct ObservedSelf {
-    pub(super) generation: String,
-    pub(super) computer_approved: bool,
-    pub(super) browser_approved: bool,
+pub(crate) struct ObservedSelf {
+    pub(crate) generation: String,
+    pub(crate) computer_approved: bool,
+    pub(crate) browser_approved: bool,
 }
 
 fn parse<T: DeserializeOwned>(raw: &[u8]) -> Result<T> {
@@ -58,7 +94,7 @@ fn token(bytes: &[u8]) -> bool {
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
 }
-fn verify_seed_key(seed: &NativeHostJoinSeed, key: &DevicePrivateKey) -> Result<()> {
+fn verify_seed_key(seed: &JoinIdentity, key: &DevicePrivateKey) -> Result<()> {
     let public = DevicePublicKey::from_spki_pem(seed.public_key_pem.as_bytes())
         .map_err(|_| ProtocolError("seed_identity"))?;
     // Cryptographic inspection also reads historical schema1 seeds. This is
@@ -73,8 +109,8 @@ fn verify_seed_key(seed: &NativeHostJoinSeed, key: &DevicePrivateKey) -> Result<
     Ok(())
 }
 
-pub(super) fn make_join(
-    seed: &NativeHostJoinSeed,
+pub(crate) fn make_join(
+    seed: &JoinIdentity,
     invitation: &str,
     key: &DevicePrivateKey,
 ) -> Result<Zeroizing<Vec<u8>>> {
@@ -144,8 +180,8 @@ struct PendingResponse {
     claim_secret: Zeroizing<String>,
     ingress: Ingress,
 }
-pub(super) fn validate_pending(
-    seed: &NativeHostJoinSeed,
+pub(crate) fn validate_pending(
+    seed: &JoinIdentity,
     raw: &[u8],
     actual_leaf: &GatewayLeafPin,
     now_ms: u64,
@@ -159,8 +195,8 @@ pub(super) fn validate_pending(
 /// Validates persisted ingress/comparison facts only, without claiming current
 /// invitation liveness. A current authenticated self response is still required
 /// to resolve an already dispatched confirmation or validate an existing Ready.
-pub(super) fn validate_recorded_pending(
-    seed: &NativeHostJoinSeed,
+pub(crate) fn validate_recorded_pending(
+    seed: &JoinIdentity,
     raw: &[u8],
     actual_leaf: &GatewayLeafPin,
 ) -> Result<PendingJoin> {
@@ -198,7 +234,7 @@ struct ClaimRequest<'a> {
     request_id: &'a str,
     claim_secret: &'a str,
 }
-pub(super) fn claim_request(pending: &PendingJoin) -> Result<Zeroizing<Vec<u8>>> {
+pub(crate) fn claim_request(pending: &PendingJoin) -> Result<Zeroizing<Vec<u8>>> {
     encode(&ClaimRequest {
         request_id: &pending.request_id,
         claim_secret: &pending.claim_secret,
@@ -220,7 +256,7 @@ struct ClaimResponse {
 }
 /// A terminal refusal is accepted only for the original authenticated claim;
 /// it can never carry credentials or even one granted capability.
-pub(super) fn rejected_claim(pending: &PendingJoin, raw: &[u8]) -> Result<bool> {
+pub(crate) fn rejected_claim(pending: &PendingJoin, raw: &[u8]) -> Result<bool> {
     #[derive(Deserialize)]
     struct Decision {
         status: String,
@@ -306,8 +342,8 @@ mod rejection_tests {
         assert!(rejected_claim(&pending, br#"{"status":"rejected","status":"approved"}"#).is_err());
     }
 }
-pub(super) fn decrypt_claim(
-    seed: &NativeHostJoinSeed,
+pub(crate) fn decrypt_claim(
+    seed: &JoinIdentity,
     key: &DevicePrivateKey,
     raw: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>> {
@@ -338,7 +374,7 @@ pub(super) fn decrypt_claim(
     }
     Ok(credential)
 }
-pub(super) fn confirm_request(
+pub(crate) fn confirm_request(
     pending: &PendingJoin,
     credential: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>> {
@@ -369,7 +405,7 @@ struct Confirmation {
     device_id: DeviceId,
     approved_capabilities: Capabilities,
 }
-pub(super) fn validate_confirmation(seed: &NativeHostJoinSeed, raw: &[u8]) -> Result<()> {
+pub(crate) fn validate_confirmation(seed: &JoinIdentity, raw: &[u8]) -> Result<()> {
     let response: Confirmation = parse(raw)?;
     if response.status != "ready_to_connect"
         || response.device_id != seed.device_id
@@ -387,7 +423,7 @@ struct SelfResponse {
     generation: String,
     capabilities: Capabilities,
 }
-pub(super) fn validate_self(seed: &NativeHostJoinSeed, raw: &[u8]) -> Result<ObservedSelf> {
+pub(crate) fn validate_self(seed: &JoinIdentity, raw: &[u8]) -> Result<ObservedSelf> {
     let response: SelfResponse = parse(raw)?;
     if response.status != "approved"
         || response.device_id != seed.device_id

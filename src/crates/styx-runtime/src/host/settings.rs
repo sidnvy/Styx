@@ -1,5 +1,6 @@
 //! Host-owned mutable capability settings. Enrollment identity remains immutable.
 //! The same controller serves local UI and the authenticated Gateway connection.
+#[cfg(not(target_os = "android"))]
 use crate::store::{PrivateRoot, StoreError};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,13 @@ pub struct SettingsReport {
     pub configured: Capabilities,
     pub applied: bool,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub android_status: Option<AndroidStatus>,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct AndroidStatus {
+    pub accessibility: bool,
+    pub device_locked: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +83,7 @@ pub trait CapabilityRuntime: Send + Sync {
 }
 pub struct HostSettings {
     path: PathBuf,
+    #[cfg(not(target_os = "android"))]
     root: PrivateRoot,
     current: watch::Sender<Capabilities>,
     report: Mutex<SettingsReport>,
@@ -86,7 +95,9 @@ impl HostSettings {
     /// Absence imports the old *effective* local selection once. Callers include
     /// historical remote denials so an upgrade cannot silently enable a capability.
     pub fn open(path: &Path, initial: Capabilities) -> Result<Arc<Self>, ErrorCategory> {
+        #[cfg(not(target_os = "android"))]
         let root = PrivateRoot::open(path).map_err(|_| ErrorCategory::IntegrityFailure)?;
+        #[cfg(not(target_os = "android"))]
         let configured = match root.read_raw(FILE, 4096) {
             Ok(raw) => {
                 let value: Persisted = serde_json::from_slice(raw.bytes())
@@ -99,9 +110,24 @@ impl HostSettings {
             Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => initial,
             Err(_) => return Err(ErrorCategory::IntegrityFailure),
         };
+        // Android supplies its app-private filesDir; the OS owns its UID boundary.
+        #[cfg(target_os = "android")]
+        let configured = match std::fs::read(path.join(FILE)) {
+            Ok(bytes) => {
+                let value: Persisted =
+                    serde_json::from_slice(&bytes).map_err(|_| ErrorCategory::IntegrityFailure)?;
+                if value.schema != 1 {
+                    return Err(ErrorCategory::IntegrityFailure);
+                }
+                value.capabilities
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => initial,
+            Err(_) => return Err(ErrorCategory::IntegrityFailure),
+        };
         let (current, _) = watch::channel(configured);
         Ok(Arc::new(Self {
             path: path.to_owned(),
+            #[cfg(not(target_os = "android"))]
             root,
             current,
             report: Mutex::new(SettingsReport {
@@ -109,6 +135,7 @@ impl HostSettings {
                 configured,
                 applied: true,
                 error: None,
+                android_status: None,
             }),
             gate: Arc::new(RwLock::new(())),
             runtime: Mutex::new(None),
@@ -210,6 +237,7 @@ impl HostSettings {
             configured: after,
             applied: false,
             error: None,
+            android_status: None,
         };
         self.current.send_replace(after);
         let result = runtime.apply(before, after).await;
@@ -217,6 +245,7 @@ impl HostSettings {
             generations,
             configured: after,
             applied: result.is_ok() && persistence_warning.is_none(),
+            android_status: None,
             error: result
                 .err()
                 .or(persistence_warning)
@@ -228,6 +257,7 @@ impl HostSettings {
     // An error before rename leaves configuration unchanged. A durability/readback
     // warning after rename must still apply the committed setting to this Host.
     fn persist(&self, capabilities: Capabilities) -> Result<Option<ErrorCategory>, ErrorCategory> {
+        #[cfg(not(target_os = "android"))]
         if PrivateRoot::open(&self.path)
             .map_err(|_| ErrorCategory::IntegrityFailure)?
             .identity()
@@ -254,6 +284,12 @@ impl HostSettings {
         {
             return Ok(Some(ErrorCategory::ResultUnknown));
         }
+        #[cfg(target_os = "android")]
+        return match std::fs::read(self.path.join(FILE)) {
+            Ok(raw) if raw == bytes => Ok(None),
+            _ => Ok(Some(ErrorCategory::ResultUnknown)),
+        };
+        #[cfg(not(target_os = "android"))]
         match self.root.read_raw(FILE, 4096) {
             Ok(raw) if raw.bytes() == bytes => Ok(None),
             _ => Ok(Some(ErrorCategory::ResultUnknown)),

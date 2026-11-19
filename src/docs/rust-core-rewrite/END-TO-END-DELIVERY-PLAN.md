@@ -9,6 +9,27 @@ PR #68 已完成当前 native model 的源码收敛，没有随之发布或部�
 下方 `0.4.1` 的 GO 和安装记录均为历史证据，不表示此后的源码已经全部部署或验收。
 产品规则以 [REFACTOR-PLAN](REFACTOR-PLAN.md) 为准。
 
+## 独立 Android Host 开发验收（2026-11-19）
+
+这是所有者新增的 Android 工作范围，不改变此前桌面版本的发布结果。
+
+- 源码：独立 Android 身份、共享 SPAKE2/配对/TLS 客户端、同一个 Host WSS/Core
+  生命周期、独立 Android 能力与三个 MCP 工具；Kotlin/JNI App 位于
+  src/host/android 与 src/crates/styx-android。桌面配对调用重用提取后的共享模块。
+- 编译与包：ARM64 Android Runtime/JNI check、真实动态库链接、Kotlin 编译和
+  带真实 native library 的 APK 构建通过；APK v2 签名验证通过。开发包不是正式 Release。
+- 实际协议：真实回环 SPAKE2→TLS→WSS→MCP 集成测试通过，Android executor 使用替身。
+  覆盖 Android-only 发现/状态、MCP 图片、原操作响应丢失后重连不重放、权限未就绪、
+  批次阻塞时关闭能力、重新启用和配对撤销。两个配对响应丢失恢复测试及 Core once-only
+  授权/Unknown/撤销回归通过。
+- 实机：Pixel 7 Pro（API 37）开发 APK 安装及 Activity 启动成功，首次冷启动 828 ms。
+  尚不能将此视为手机独立配对、Accessibility 控制或后台连接已通过。
+- 待验收：手机正常授权、现有 Gateway 对 Android 的部署支持、真实独立配对和
+  ADB 断开后的原生工具、Unicode/批次/截图、锁屏/后台/撤销及与原 ADB 控制器的延迟对照。
+  当前未修改生产 Gateway、既有 Host 配对或正式安装。
+- 证据：/home/sid/Developer/Artifacts/Styx/native-android-host-20261119/；
+  构建入口与平台接口见 src/host/android/README.md。
+
 ## 2026-11-15 发布历史
 
 C1/C2 结构清理已完成；Linux Desktop、Linux Gateway-only 和 Windows 最终包绑定

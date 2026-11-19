@@ -1,8 +1,10 @@
 //! Shared conversion from Core/provider evidence to the private Host contract.
 use super::{coordinator::CoordinatorError, protocol::wire::*};
+#[cfg(not(target_os = "android"))]
 use crate::providers::codex::{ActionAcknowledgment, ActionEvidence, ActionReceipt};
 use styx_contracts::error::{ErrorCategory, ExecutionCertainty};
 use styx_core::operations::OperationSnapshot;
+#[cfg(not(target_os = "android"))]
 pub(crate) fn action_reply(
     snapshot: OperationSnapshot,
     receipt: Option<ActionReceipt>,
@@ -53,12 +55,17 @@ pub(crate) fn coordinator_error(error: CoordinatorError, read: bool) -> Reply {
         CoordinatorError::ReadDeadline => {
             (ErrorCategory::OperationTimeout, ExecutionCertainty::Unknown)
         }
+        #[cfg(not(target_os = "android"))]
         CoordinatorError::Executor(crate::providers::codex::ExecError::Capacity) if read => {
             // A decoded read buffer is reserved before any native request or
             // cursor advance. A saturated caller may wait without poisoning it.
             (ErrorCategory::Busy, ExecutionCertainty::NotDispatched)
         }
-        CoordinatorError::ResponseLost | CoordinatorError::Executor(_) => {
+        CoordinatorError::ResponseLost => {
+            (ErrorCategory::ResultUnknown, ExecutionCertainty::Unknown)
+        }
+        #[cfg(not(target_os = "android"))]
+        CoordinatorError::Executor(_) => {
             (ErrorCategory::ResultUnknown, ExecutionCertainty::Unknown)
         }
         // An executor error crossing the shared boundary carries no proof that a

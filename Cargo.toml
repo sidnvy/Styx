@@ -1,5 +1,5 @@
 [workspace]
-members = ["src/crates/styx-contracts", "src/crates/styx-core", "src/crates/styx-runtime", "src/crates/styx"]
+members = ["src/crates/styx-contracts", "src/crates/styx-core", "src/crates/styx-runtime", "src/crates/styx", "src/crates/styx-android"]
 resolver = "3"
 
 [workspace.package]
@@ -9,6 +9,7 @@ rust-version = "1.97.1"
 license = "MIT"
 
 [workspace.dependencies]
+jni = "=0.21.1"
 styx-contracts = { path = "src/crates/styx-contracts" }
 styx-core = { path = "src/crates/styx-core" }
 styx-runtime = { path = "src/crates/styx-runtime" }

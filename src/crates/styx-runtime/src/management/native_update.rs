@@ -259,7 +259,7 @@ fn require_initialized_profile(
             let leaf = crate::tls::GatewayLeafPin::parse_hex(&reply.peer_leaf_sha256.to_hex())
                 .map_err(|_| invalid())?;
             let pending = crate::management::native_join_protocol::validate_recorded_pending(
-                &seed,
+                &(&seed).into(),
                 reply.body.get().as_bytes(),
                 &leaf,
             )

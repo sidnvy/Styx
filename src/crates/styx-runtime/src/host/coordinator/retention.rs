@@ -40,6 +40,7 @@ impl HostAuthority {
             deadline_exhausted: false,
             blocked: vec![],
         };
+        #[cfg(not(target_os = "android"))]
         let inventory = self
             .inner
             .state
@@ -47,6 +48,7 @@ impl HostAuthority {
             .expect("Host state mutex")
             .ledger
             .retained_provider_records();
+        #[cfg(not(target_os = "android"))]
         for key in inventory.iter().filter(|k| {
             k.capability() == styx_contracts::capability::CapabilityId::ExecRun
                 && k.snapshot().target.is_some()
@@ -116,6 +118,7 @@ impl HostAuthority {
                 }),
             }
         }
+        #[cfg(not(target_os = "android"))]
         let resources = self
             .inner
             .state
@@ -123,6 +126,7 @@ impl HostAuthority {
             .expect("Host state mutex")
             .ledger
             .retained_provider_records();
+        #[cfg(not(target_os = "android"))]
         for key in resources.iter().filter(|k| {
             k.capability() == styx_contracts::capability::CapabilityId::ExecRun
                 && k.snapshot().target.is_none()

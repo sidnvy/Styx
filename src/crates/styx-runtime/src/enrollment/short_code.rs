@@ -1,8 +1,10 @@
 //! Bootstrap only: SPAKE2 authenticates the two endpoints, then the Host uses
 //! the existing CA-pinned TLS enrollment protocol for all device mutations.
+#[cfg(not(target_os = "android"))]
 use super::shared::SharedEnrollment;
 use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
+#[cfg(not(target_os = "android"))]
 use std::collections::BTreeMap;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -52,6 +54,7 @@ impl Issued {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 pub(super) struct Offer {
     origin: String,
     password: Zeroizing<String>,
@@ -60,8 +63,10 @@ pub(super) struct Offer {
     expires: u64,
     attempts: u8,
 }
+#[cfg(not(target_os = "android"))]
 #[derive(Default)]
 pub(super) struct Offers(BTreeMap<String, Offer>);
+#[cfg(not(target_os = "android"))]
 impl Offers {
     pub(super) fn prepare(
         &mut self,
@@ -134,6 +139,7 @@ fn key(secret: &[u8]) -> Result<LessSafeKey> {
         .map(LessSafeKey::new)
         .map_err(|_| INVALID)
 }
+#[cfg(not(target_os = "android"))]
 pub(super) async fn serve(mut tcp: TcpStream, service: &SharedEnrollment) -> Result<()> {
     let mut input = [0u8; 8 + GROUP_BYTES];
     tcp.read_exact(&mut input).await.map_err(|_| INVALID)?;
@@ -219,7 +225,7 @@ pub(crate) async fn resolve(input: &str) -> Result<(String, Zeroizing<String>)> 
     .map_err(|_| "pairing_gateway_timeout")?
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "android")))]
 mod tests {
     use super::*;
 

@@ -12,8 +12,8 @@ ROOT = Path(__file__).resolve().parents[2]
 CONTRACTS = (
     "providers::cua::public_contract::tests::branch_only_tool_projection_preserves_bound_targets_and_environment",
     "providers::cua::public_contract::tests::complete_branch_declarations_keep_the_existing_schema_admission",
-    "management::native_join_http::transport_tests::local_rejection_admits_fixed_authenticated_request_over_tls",
-    "management::native_join_http::transport_tests::local_rejection_does_not_admit_anonymous_or_generic_admin_requests",
+    "enrollment::client_http::transport_tests::local_rejection_admits_fixed_authenticated_request_over_tls",
+    "enrollment::client_http::transport_tests::local_rejection_does_not_admit_anonymous_or_generic_admin_requests",
 )
 HUB_RECOVERY = (
     "management::setup_pending_restart_reference_tests::hub_pending_across_foreground_restart_is_refused_without_approval_or_claim",

@@ -33,12 +33,23 @@ pub(crate) use desktop_source::{DesktopSource, source_stop_complete};
 mod desktop_cleanup;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use desktop_cleanup::DesktopLaneCleanup;
+#[cfg(not(target_os = "android"))]
+mod exec;
+#[cfg(not(target_os = "android"))]
+use exec::transfer_known_action;
+#[cfg(not(target_os = "android"))]
+pub use exec::{
+    ActionCompletion, ActionSubmission, ActionTicket, StartCompletion, StartSubmission, StartTicket,
+};
+mod android;
 mod owner_cleanup;
 mod retention;
+#[cfg(not(target_os = "android"))]
 mod session;
 pub use owner_cleanup::{OwnerCleanupFacts, OwnerCleanupHandle, OwnerCleanupTicket};
 pub use retention::{RetentionBlock, RetentionCollection};
 
+#[cfg(not(target_os = "android"))]
 use crate::providers::codex::{
     ActionEvidence, ActionReceipt, CleanupReceipt, CodexStdio, DispatchEvidence, ExecError,
     ProcessAction, ProcessOutput, StartProcess, TerminationEvidence,
@@ -54,6 +65,7 @@ use tokio::task::JoinSet;
 pub enum CoordinatorError {
     #[error("Host admission refused ({0:?})")]
     Admission(ErrorCategory),
+    #[cfg(not(target_os = "android"))]
     #[error("executor refused or could not resolve resource")]
     Executor(#[from] ExecError),
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -80,6 +92,7 @@ struct State {
     ledger: OperationLedger,
     facts: AdmissionFacts,
     shutting_down: bool,
+    #[cfg(not(target_os = "android"))]
     sessions: crate::session::HostSessions,
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     browser: Option<browser::BrowserLane>,
@@ -88,11 +101,13 @@ struct State {
 }
 impl State {
     fn new(ledger: OperationLedger, facts: AdmissionFacts, origin: Instant) -> Self {
+        #[cfg(not(target_os = "android"))]
         let sessions =
             crate::session::HostSessions::bootstrap(ledger.host_generation().clone(), origin);
         Self {
             ledger,
             facts,
+            #[cfg(not(target_os = "android"))]
             sessions,
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             browser: None,
@@ -103,6 +118,7 @@ impl State {
     }
     /// This coordinator owns only Codex Exec. Session facts have a separate
     /// registry; accidentally replacing Exec policy with GUI facts is refused.
+    #[cfg(not(target_os = "android"))]
     fn exec_facts(&self) -> Result<AdmissionFacts, ErrorCategory> {
         if self.facts.descriptor.capability_id != styx_contracts::capability::CapabilityId::ExecRun
         {
@@ -117,6 +133,7 @@ impl State {
         }
         Ok(self.facts.clone())
     }
+    #[cfg(not(target_os = "android"))]
     fn reserve_exec(
         &mut self,
         owner: &OwnerLease,
@@ -137,6 +154,7 @@ impl State {
             None => self.ledger.prepare(owner, context, payload, now)?,
         })
     }
+    #[cfg(not(target_os = "android"))]
     fn dispatch_exec(
         &mut self,
         owner: &OwnerLease,
@@ -147,6 +165,7 @@ impl State {
         let facts = self.exec_facts()?;
         self.ledger.dispatch(owner, id, digest, &facts, now)
     }
+    #[cfg(not(target_os = "android"))]
     fn authorize_exec_read(
         &self,
         owner: &OwnerLease,
@@ -159,6 +178,7 @@ impl State {
         self.ledger
             .authorize_resource_access(owner, id, digest, context, &self.exec_facts()?, now)
     }
+    #[cfg(not(target_os = "android"))]
     fn with_sessions<T>(
         &mut self,
         f: impl FnOnce(&mut crate::session::HostSessions) -> Result<T, crate::session::HostSessionError>,
@@ -169,6 +189,7 @@ impl State {
         f(&mut self.sessions)
     }
 }
+#[cfg(not(target_os = "android"))]
 fn validate_exec_context(context: &PreparedContext) -> Result<(), ErrorCategory> {
     if context.capability != styx_contracts::capability::CapabilityId::ExecRun {
         return Err(ErrorCategory::ProtocolMismatch);
@@ -198,6 +219,7 @@ struct Inner {
     exec_admission: Mutex<Option<Arc<dyn ExecAdmission>>>,
     bootstrap_device: DeviceId,
     host_generation: HostGeneration,
+    #[cfg(not(target_os = "android"))]
     adapter: Mutex<Option<Arc<CodexStdio>>>,
     state: Mutex<State>,
     jobs: Mutex<JoinSet<()>>,
@@ -215,7 +237,9 @@ impl Inner {
 // Kept outside Inner: caller cleanup handles retain Inner, so putting the
 // access registry inside it would create a self-owning cycle on shutdown.
 struct RuntimeState {
+    #[cfg(not(target_os = "android"))]
     browser_sessions: super::browser_sessions::State,
+    #[cfg(not(target_os = "android"))]
     exec_tasks: super::exec_tasks::State,
     remote_access: Mutex<super::callers::OwnerRegistry>,
     connection_slot: tokio::sync::Semaphore,
@@ -232,49 +256,9 @@ pub struct HostAuthority {
     inner: Arc<Inner>,
 }
 #[derive(Debug)]
-pub struct StartCompletion {
-    pub snapshot: OperationSnapshot,
-    pub dispatch: DispatchEvidence,
-    pub cause: Option<ExecError>,
-}
-pub struct StartTicket {
-    response: oneshot::Receiver<Result<StartCompletion, CoordinatorError>>,
-}
-impl StartTicket {
-    pub async fn wait(self) -> Result<StartCompletion, CoordinatorError> {
-        self.response
-            .await
-            .map_err(|_| CoordinatorError::ResponseLost)?
-    }
-}
-pub enum StartSubmission {
-    Submitted(StartTicket),
-    Existing(OperationSnapshot),
-}
-#[derive(Debug)]
-pub struct ActionCompletion {
-    pub snapshot: OperationSnapshot,
-    pub receipt: ActionReceipt,
-    /// Operation result is unchanged if physical retention needs supervision.
-    pub retention_error: Option<CoordinatorError>,
-}
-pub struct ActionTicket {
-    response: oneshot::Receiver<Result<ActionCompletion, CoordinatorError>>,
-}
-impl ActionTicket {
-    pub async fn wait(self) -> Result<ActionCompletion, CoordinatorError> {
-        self.response
-            .await
-            .map_err(|_| CoordinatorError::ResponseLost)?
-    }
-}
-pub enum ActionSubmission {
-    Submitted(ActionTicket),
-    Existing(OperationSnapshot),
-}
-#[derive(Debug)]
 pub struct HostCleanup {
     /// None means no Exec adapter was ever started, not an observed exit.
+    #[cfg(not(target_os = "android"))]
     pub native: Option<CleanupReceipt>,
     pub supervised_jobs_joined: bool,
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -297,6 +281,7 @@ impl HostCleanup {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl Inner {
     fn check_exec_admission(&self) -> Result<(), CoordinatorError> {
         #[cfg(any(
@@ -326,6 +311,7 @@ impl Inner {
 }
 impl HostCoordinator {
     /// Takes exclusive ownership of one already-started executor, never spawns a second.
+    #[cfg(not(target_os = "android"))]
     pub fn new_owned(
         adapter: CodexStdio,
         ledger: OperationLedger,
@@ -335,6 +321,7 @@ impl HostCoordinator {
     }
     /// Explicit disabled Exec composition, with the same ledger and authority.
     /// A configured executor's spawn failure must never call this as fallback.
+    #[cfg(not(target_os = "android"))]
     pub fn new_without_executor(
         ledger: OperationLedger,
         mut trusted_facts: AdmissionFacts,
@@ -346,8 +333,22 @@ impl HostCoordinator {
         trusted_facts.descriptor.reason = Some(ErrorCategory::CapabilityUnsupported);
         Self::compose(None, ledger, trusted_facts)
     }
+    /// Mobile composition keeps the same identity, owner ledger and lifecycle.
+    pub fn new_mobile(
+        ledger: OperationLedger,
+        trusted_facts: AdmissionFacts,
+    ) -> Result<(Self, HostAuthority), CoordinatorError> {
+        #[cfg(target_os = "android")]
+        {
+            Self::compose(ledger, trusted_facts)
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            Self::compose(None, ledger, trusted_facts)
+        }
+    }
     fn compose(
-        adapter: Option<CodexStdio>,
+        #[cfg(not(target_os = "android"))] adapter: Option<CodexStdio>,
         ledger: OperationLedger,
         trusted_facts: AdmissionFacts,
     ) -> Result<(Self, HostAuthority), CoordinatorError> {
@@ -361,6 +362,7 @@ impl HostCoordinator {
             exec_admission: Mutex::new(None),
             bootstrap_device: trusted_facts.device_id.clone(),
             host_generation: ledger.host_generation().clone(),
+            #[cfg(not(target_os = "android"))]
             adapter: Mutex::new(adapter.map(Arc::new)),
             state: Mutex::new(State::new(ledger, trusted_facts, origin)),
             jobs: Mutex::new(JoinSet::new()),
@@ -374,7 +376,9 @@ impl HostCoordinator {
             Self {
                 inner: inner.clone(),
                 runtime: Arc::new(RuntimeState {
+                    #[cfg(not(target_os = "android"))]
                     browser_sessions: super::browser_sessions::State::default(),
+                    #[cfg(not(target_os = "android"))]
                     exec_tasks: super::exec_tasks::State::default(),
                     remote_access: Mutex::new(super::callers::OwnerRegistry::default()),
                     connection_slot: tokio::sync::Semaphore::new(1),
@@ -384,6 +388,7 @@ impl HostCoordinator {
         ))
     }
     /// Configuration/presence only; never infer liveness from cached initialize.
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn browser_sessions(&self) -> &super::browser_sessions::State {
         &self.runtime.browser_sessions
     }
@@ -393,15 +398,23 @@ impl HostCoordinator {
     pub(crate) fn connection_slot(&self) -> &tokio::sync::Semaphore {
         &self.runtime.connection_slot
     }
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn exec_tasks(&self) -> &super::exec_tasks::State {
         &self.runtime.exec_tasks
     }
     pub fn exec_configured(&self) -> bool {
-        self.inner
-            .adapter
-            .lock()
-            .expect("Exec adapter mutex")
-            .is_some()
+        #[cfg(target_os = "android")]
+        {
+            false
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            self.inner
+                .adapter
+                .lock()
+                .expect("Exec adapter mutex")
+                .is_some()
+        }
     }
     /// Immutable, non-secret bootstrap identity; policy refresh cannot rebind it.
     pub fn bootstrap_identity(&self) -> (&DeviceId, &HostGeneration) {
@@ -436,9 +449,13 @@ impl HostCoordinator {
             tokio::time::Instant::now()
                 + Duration::from_millis(deadline.0.saturating_sub(self.now().0))
         });
-        crate::providers::cua::within(until, self.inner.execution_gate.clone().read_owned())
-            .await
-            .map_err(|_| ErrorCategory::OperationTimeout.into())
+        let wait = self.inner.execution_gate.clone().read_owned();
+        match until {
+            Some(until) => tokio::time::timeout_at(until, wait)
+                .await
+                .map_err(|_| ErrorCategory::OperationTimeout.into()),
+            None => Ok(wait.await),
+        }
     }
     async fn execution_for_operation(
         &self,
@@ -455,448 +472,7 @@ impl HostCoordinator {
         };
         self.execution_before(deadline).await
     }
-    /// No action occurs until the returned reservation is explicitly dispatched.
-    pub fn prepare_start(
-        &self,
-        owner: &OwnerLease,
-        context: PreparedContext,
-        spec: &StartProcess,
-    ) -> Result<OperationSnapshot, CoordinatorError> {
-        let _adapter = self.inner.exec_adapter()?;
-        let payload = spec.to_operation_payload()?;
-        let mut state = self.inner.state.lock().expect("Host state mutex");
-        if state.shutting_down {
-            return Err(CoordinatorError::Busy);
-        }
-        self.inner.check_exec_admission()?;
-        state.reserve_exec(owner, context, payload, None, self.now())
-    }
-    /// Admission commits before returning a ticket. Dropping the ticket cannot drop the job.
-    pub async fn dispatch_start(
-        &self,
-        owner: &OwnerLease,
-        id: &OperationId,
-        digest: Sha256Digest,
-    ) -> Result<StartSubmission, CoordinatorError> {
-        // Existing requests do not need another worker slot, but remain owner/digest checked.
-        {
-            let state = self.inner.state.lock().expect("Host state mutex");
-            validate_exec_context(&state.ledger.inspect_context(owner, id, digest)?)?;
-            let snapshot = state.ledger.inspect(owner, id, digest)?;
-            if snapshot.target.is_some() {
-                return Err(ErrorCategory::StateConflict.into());
-            }
-            if snapshot.state != OperationState::Reserved {
-                return Ok(StartSubmission::Existing(snapshot));
-            }
-        }
-        let adapter = self.inner.exec_adapter()?;
-        let execution = self.execution_for_operation(owner, id, digest).await?;
-        let runtime = tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
-
-        let mut state = self.inner.state.lock().expect("Host state mutex");
-        if state.shutting_down {
-            return Err(CoordinatorError::Busy);
-        }
-        let snapshot = state.ledger.inspect(owner, id, digest)?;
-        if snapshot.state != OperationState::Reserved {
-            return Ok(StartSubmission::Existing(snapshot));
-        }
-        self.inner.check_exec_admission()?;
-        let permit = match state.dispatch_exec(owner, id, digest, self.now())? {
-            DispatchDisposition::Existing(snapshot) => {
-                return Ok(StartSubmission::Existing(snapshot));
-            }
-            DispatchDisposition::ExecuteOnce(permit) => permit,
-        };
-        let (response, receiver) = oneshot::channel();
-        let inner = self.inner.clone();
-        let operation = id.clone();
-        // This synchronous spawn + owned handle registration occurs under admission lock.
-        // Revocation after this point fences later admissions, not already committed I/O.
-        let mut jobs = self.inner.jobs.lock().expect("Host jobs mutex");
-        while jobs.try_join_next().is_some() {}
-        // Captured before first poll: even a supervisor task dropped before it starts
-        // leaves a consumed reservation Unknown rather than reopening dispatch.
-        let mut guard = UnsettledStart {
-            inner: inner.clone(),
-            operation: operation.clone(),
-            settled: false,
-            _execution: execution,
-        };
-        jobs.spawn_on(
-            async move {
-                let result = adapter.start(permit).await;
-                let (dispatch, cause) = match result {
-                    Ok(receipt) => (receipt.dispatch, receipt.cause),
-                    Err(failure) => (failure.evidence, Some(failure.error)),
-                };
-                let mut state = inner.state.lock().expect("Host state mutex");
-                let settled = match dispatch {
-                    DispatchEvidence::NotDispatched => state.ledger.record_executor_fact(
-                        &operation,
-                        ExecutorFact::NotDispatched,
-                        inner.now(),
-                    ),
-                    DispatchEvidence::Started => state.ledger.record_executor_fact(
-                        &operation,
-                        ExecutorFact::Running,
-                        inner.now(),
-                    ),
-                    DispatchEvidence::Unknown => state.ledger.mark_result_unknown(&operation),
-                };
-                guard.settled = settled.is_ok();
-                // Never hold state while a Drop guard may reacquire it.
-                drop(state);
-                // Capture the complete Drop guard (not merely its boolean field)
-                // into the async task and settle it outside the state lock.
-                drop(guard);
-                let _ = response.send(
-                    settled
-                        .map(|snapshot| StartCompletion {
-                            snapshot,
-                            dispatch,
-                            cause,
-                        })
-                        .map_err(CoordinatorError::from),
-                );
-            },
-            &runtime,
-        );
-        drop(jobs);
-        drop(state);
-        Ok(StartSubmission::Submitted(StartTicket {
-            response: receiver,
-        }))
-    }
-    /// Reserve an independent, immutable action against an exact original
-    /// resource. First dispatch rechecks fresh policy, target and deadline.
-    pub fn prepare_action(
-        &self,
-        owner: &OwnerLease,
-        target: ResourceTarget,
-        context: PreparedContext,
-        action: &ProcessAction,
-    ) -> Result<OperationSnapshot, CoordinatorError> {
-        let _adapter = self.inner.exec_adapter()?;
-        let payload = action.to_operation_payload()?;
-        let mut state = self.inner.state.lock().expect("Host state mutex");
-        if state.shutting_down {
-            return Err(CoordinatorError::Busy);
-        }
-        if matches!(action, ProcessAction::WriteStdin { .. }) {
-            self.inner.check_exec_admission()?;
-        }
-        state.reserve_exec(owner, context, payload, Some(target), self.now())
-    }
-    /// Commit one action before returning a response ticket. Receiver loss does
-    /// not cancel the supervised job or permit a second dispatch.
-    pub async fn dispatch_action(
-        &self,
-        owner: &OwnerLease,
-        id: &OperationId,
-        digest: Sha256Digest,
-    ) -> Result<ActionSubmission, CoordinatorError> {
-        {
-            let state = self.inner.state.lock().expect("Host state mutex");
-            validate_exec_context(&state.ledger.inspect_context(owner, id, digest)?)?;
-            let snapshot = state.ledger.inspect(owner, id, digest)?;
-            if snapshot.target.is_none() {
-                return Err(ErrorCategory::StateConflict.into());
-            }
-            if snapshot.state != OperationState::Reserved {
-                return Ok(ActionSubmission::Existing(snapshot));
-            }
-        }
-        let adapter = self.inner.exec_adapter()?;
-        let execution = self.execution_for_operation(owner, id, digest).await?;
-        let runtime = tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
-
-        let mut state = self.inner.state.lock().expect("Host state mutex");
-        if state.shutting_down {
-            return Err(CoordinatorError::Busy);
-        }
-        let snapshot = state.ledger.inspect(owner, id, digest)?;
-        if snapshot.state != OperationState::Reserved {
-            return Ok(ActionSubmission::Existing(snapshot));
-        }
-        // Classify only the immutable payload in the original Core record.
-        // Existing receipts and Terminate retain their normal cleanup path.
-        let action: ProcessAction =
-            serde_json::from_slice(state.ledger.inspect_payload(owner, id, digest)?)
-                .map_err(|_| CoordinatorError::Admission(ErrorCategory::ProtocolMismatch))?;
-        if matches!(action, ProcessAction::WriteStdin { .. }) {
-            self.inner.check_exec_admission()?;
-        }
-        let permit = match state.dispatch_exec(owner, id, digest, self.now())? {
-            DispatchDisposition::Existing(snapshot) => {
-                return Ok(ActionSubmission::Existing(snapshot));
-            }
-            DispatchDisposition::ExecuteOnce(permit) => permit,
-        };
-        let (response, receiver) = oneshot::channel();
-        let inner = self.inner.clone();
-        let operation = id.clone();
-        let mut guard = UnsettledAction {
-            inner: inner.clone(),
-            operation: operation.clone(),
-            settled: false,
-            _execution: execution,
-        };
-        let mut jobs = self.inner.jobs.lock().expect("Host jobs mutex");
-        while jobs.try_join_next().is_some() {}
-        jobs.spawn_on(
-            async move {
-                let receipt = run_action(&adapter, permit).await;
-                let fact = match receipt.evidence {
-                    ActionEvidence::Acknowledged => ActionResult::Acknowledged,
-                    ActionEvidence::NotDispatched => ActionResult::NotDispatched,
-                    ActionEvidence::Unknown => ActionResult::Unknown,
-                };
-                let mut state = inner.state.lock().expect("Host state mutex");
-                let settled = state
-                    .ledger
-                    .record_action_result(&operation, fact, inner.now());
-                guard.settled = settled.is_ok();
-                let retention_error = if let Ok(snapshot) = &settled {
-                    transfer_known_action(&mut state.ledger, &adapter, &receipt, snapshot.state)
-                        .err()
-                } else {
-                    None
-                };
-                drop(state);
-                // Explicitly move/drop the WHOLE guard inside this supervised task;
-                // Rust disjoint-field capture must not leave the guard in the caller.
-                drop(guard);
-                let _ = response.send(
-                    settled
-                        .map(|snapshot| ActionCompletion {
-                            snapshot,
-                            receipt,
-                            retention_error,
-                        })
-                        .map_err(CoordinatorError::from),
-                );
-            },
-            &runtime,
-        );
-        drop(jobs);
-        drop(state);
-        Ok(ActionSubmission::Submitted(ActionTicket {
-            response: receiver,
-        }))
-    }
-    /// Read existing action history, never another dispatch instruction.
-    pub fn inspect_action(
-        &self,
-        owner: &OwnerLease,
-        id: &OperationId,
-        digest: Sha256Digest,
-    ) -> Result<OperationSnapshot, CoordinatorError> {
-        let state = self.inner.state.lock().expect("Host state mutex");
-        validate_exec_context(&state.ledger.inspect_context(owner, id, digest)?)?;
-        let snapshot = state.ledger.inspect(owner, id, digest)?;
-        if snapshot.target.is_none() {
-            return Err(ErrorCategory::StateConflict.into());
-        }
-        Ok(snapshot)
-    }
-    /// Optional provider receipt under current Core owner authority. None only
-    /// means no retained provider receipt; it never proves that I/O did not occur.
-    pub fn lookup_action(
-        &self,
-        owner: &OwnerLease,
-        id: &OperationId,
-        digest: Sha256Digest,
-    ) -> Result<Option<ActionReceipt>, CoordinatorError> {
-        let state = self.inner.state.lock().expect("Host state mutex");
-        validate_exec_context(&state.ledger.inspect_context(owner, id, digest)?)?;
-        let snapshot = state.ledger.inspect(owner, id, digest)?;
-        if snapshot.target.is_none() {
-            return Err(ErrorCategory::StateConflict.into());
-        }
-        match self.inner.exec_adapter()?.lookup_action(owner, id) {
-            Ok(receipt) => Ok(Some(receipt)),
-            Err(ExecError::UnknownHandle) => match state.ledger.provider_audit(id) {
-                Some(bytes) => Ok(Some(CodexStdio::action_from_audit(
-                    id.clone(),
-                    snapshot.target.expect("checked action"),
-                    bytes,
-                )?)),
-                None => Ok(None),
-            },
-            Err(error) => Err(error.into()),
-        }
-    }
-    pub fn inspect_start(
-        &self,
-        owner: &OwnerLease,
-        id: &OperationId,
-        digest: Sha256Digest,
-    ) -> Result<OperationSnapshot, CoordinatorError> {
-        let snapshot = self
-            .inner
-            .state
-            .lock()
-            .expect("Host state mutex")
-            .ledger
-            .inspect(owner, id, digest)?;
-        if snapshot.target.is_some() {
-            return Err(ErrorCategory::StateConflict.into());
-        }
-        Ok(snapshot)
-    }
-    /// Fresh access deadline/grant facts, not the start deadline. Read failure does not
-    /// rewrite historical start outcome or synthesize an empty successful page.
-    /// Delivery after physical release is historical output, never permission
-    /// to access the retired provider again. Recheck owner/policy under State.
-    pub(crate) fn validate_settled_exec_delivery(
-        &self,
-        owner: &OwnerLease,
-        id: &OperationId,
-        digest: Sha256Digest,
-        context: &PreparedContext,
-    ) -> Result<(), CoordinatorError> {
-        let state = self.inner.state.lock().expect("Host state mutex");
-        let check = || -> Result<(), ErrorCategory> {
-            validate_exec_context(context)?;
-            state.ledger.inspect(owner, id, digest)?;
-            styx_core::policy::check_admission(context, &state.exec_facts()?, self.now())
-        };
-        check().map_err(CoordinatorError::OutputDeliveryDenied)
-    }
-    pub async fn read(
-        &self,
-        owner: &OwnerLease,
-        id: &OperationId,
-        digest: Sha256Digest,
-        context: &PreparedContext,
-        max_bytes: usize,
-        wait: Duration,
-    ) -> Result<ProcessOutput, CoordinatorError> {
-        let adapter = self.inner.exec_adapter()?;
-        let _execution = self.execution_before(context.deadline).await?;
-        let now = self.now();
-        {
-            let state = self.inner.state.lock().expect("Host state mutex");
-            let snapshot = state.authorize_exec_read(owner, id, digest, context, now)?;
-            if snapshot.target.is_some() {
-                return Err(ErrorCategory::StateConflict.into());
-            }
-        }
-
-        let budget = Duration::from_millis(
-            context
-                .deadline
-                .ok_or(ErrorCategory::InvalidRequest)?
-                .0
-                .saturating_sub(now.0),
-        );
-        let output = tokio::time::timeout(budget, async {
-            let handle = adapter.lookup_operation(owner, id).await?;
-            if handle.operation() != id {
-                return Err(ExecError::OwnerMismatch);
-            }
-            adapter.read(owner, &handle, max_bytes, wait).await
-        })
-        .await
-        .map_err(|_| CoordinatorError::ReadDeadline)??;
-        #[cfg(test)]
-        {
-            // Deterministic policy-revocation boundary only. No production path
-            // or wire request can install or trigger this gate.
-            let gate = self
-                .inner
-                .delivery_gate
-                .lock()
-                .expect("test delivery gate")
-                .take();
-            if let Some((arrived, release)) = gate {
-                arrived.notify_one();
-                release.notified().await;
-            }
-        }
-        let mut state = self.inner.state.lock().expect("Host state mutex");
-        // Settlement is trusted executor evidence even if owner was revoked while awaiting.
-        // It updates original operation, never grants a new action or access to the caller.
-        if output.liveness == ExecutionLiveness::Exited {
-            let successful = output
-                .exit_code
-                .ok_or(CoordinatorError::Executor(ExecError::InvalidFrame))?
-                == 0;
-            match state.ledger.record_executor_fact(
-                id,
-                ExecutorFact::Exited { successful },
-                self.now(),
-            ) {
-                Ok(_) | Err(ErrorCategory::StateConflict) => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
-        if output.drain == OutputDrain::Drained {
-            state
-                .ledger
-                .record_executor_fact(id, ExecutorFact::OutputDrained, self.now())?;
-        }
-        // A later revoke does not roll back an already admitted native read.
-        // However, sensitive output must not cross a now-invalid owner/policy
-        // boundary. This explicit error acknowledges possible cursor consumption.
-        state
-            .authorize_exec_read(owner, id, digest, context, self.now())
-            .map_err(CoordinatorError::OutputDeliveryDenied)?;
-        Ok(output)
-    }
 }
-async fn run_action(adapter: &CodexStdio, permit: DispatchPermit) -> ActionReceipt {
-    let refused = |error| ActionReceipt {
-        operation: permit.id().clone(),
-        target: permit.target().cloned(),
-        evidence: ActionEvidence::NotDispatched,
-        write_id: None,
-        acknowledgment: None,
-        cause: Some(error),
-    };
-    let Some(target) = permit.target() else {
-        return refused(ExecError::InvalidRequest);
-    };
-    if permit.payload().len() > 131072 {
-        return refused(ExecError::InvalidRequest);
-    }
-    let action: ProcessAction = match serde_json::from_slice(permit.payload()) {
-        Ok(action) => action,
-        Err(_) => return refused(ExecError::InvalidRequest),
-    };
-    let handle = match adapter
-        .lookup_operation(permit.owner(), &target.operation_id)
-        .await
-    {
-        Ok(handle) if handle.operation() == &target.operation_id => handle,
-        Ok(_) => return refused(ExecError::OwnerMismatch),
-        Err(error) => return refused(error),
-    };
-    match action {
-        ProcessAction::WriteStdin { .. } => adapter.write(permit, &handle).await,
-        ProcessAction::Terminate {} => adapter.terminate(permit, &handle).await,
-    }
-}
-fn transfer_known_action(
-    ledger: &mut OperationLedger,
-    adapter: &CodexStdio,
-    receipt: &ActionReceipt,
-    historical_state: OperationState,
-) -> Result<(), CoordinatorError> {
-    ledger.record_provider_audit(&receipt.operation, adapter.action_audit(receipt)?)?;
-    if matches!(
-        historical_state,
-        OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
-    ) {
-        let permit = ledger.begin_action_release(&receipt.operation)?;
-        let proof = adapter.release_action(permit)?;
-        ledger.record_provider_release(proof)?;
-    }
-    Ok(())
-}
-
 struct UnsettledAction {
     inner: Arc<Inner>,
     operation: OperationId,
@@ -971,6 +547,7 @@ impl HostAuthority {
             .ledger
             .register_verified_owner(owner, epoch)?)
     }
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn attach_executor(
         &self,
         adapter: CodexStdio,
@@ -1001,6 +578,7 @@ impl HostAuthority {
                 .map_err(|_| ErrorCategory::Busy)?;
         let remaining = || until.saturating_duration_since(tokio::time::Instant::now());
         let mut complete = true;
+        #[cfg(not(target_os = "android"))]
         if !enabled.exec {
             let adapter = self
                 .inner
@@ -1105,12 +683,14 @@ impl HostAuthority {
         // A JoinSet aborts on drop; preserve unfinished jobs rather than implicitly
         // canceling a possible native start while forgetting its result.
         *self.inner.jobs.lock().expect("Host jobs mutex") = jobs;
+        #[cfg(not(target_os = "android"))]
         let adapter = self
             .inner
             .adapter
             .lock()
             .expect("Exec adapter mutex")
             .clone();
+        #[cfg(not(target_os = "android"))]
         let native = match adapter.as_ref() {
             Some(adapter) => Some(
                 adapter
@@ -1119,6 +699,7 @@ impl HostAuthority {
             ),
             None => None,
         };
+        #[cfg(not(target_os = "android"))]
         if let Some(receipt) = &native {
             for (handle, evidence) in &receipt.processes {
                 if let TerminationEvidence::ProcessExited(code) = evidence {
@@ -1145,6 +726,7 @@ impl HostAuthority {
         )
         .await;
         Ok(HostCleanup {
+            #[cfg(not(target_os = "android"))]
             native,
             supervised_jobs_joined: joined,
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -1154,7 +736,7 @@ impl HostAuthority {
         })
     }
 }
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "android")))]
 mod tests;
 
 impl HostCoordinator {
@@ -1166,7 +748,7 @@ impl HostCoordinator {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "android")))]
 impl HostCoordinator {
     pub(crate) fn retained_exec_processes_for_test(&self) -> usize {
         self.inner.exec_adapter().unwrap().retained_processes()

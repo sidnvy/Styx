@@ -18,6 +18,11 @@ pub struct Request {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
+    Android {
+        owner: OwnerRef,
+        grant_revision: u64,
+        command: AndroidCommand,
+    },
     BrowserSession {
         owner: OwnerRef,
         grant_revision: u64,
@@ -196,6 +201,9 @@ impl Call {
             _ => std::time::Duration::from_secs(35),
         })
     }
+    pub(crate) fn is_android(&self) -> bool {
+        matches!(self, Self::Android { .. })
+    }
     pub(crate) fn is_browser(&self) -> bool {
         matches!(self, Self::Browser { .. } | Self::BrowserSession { .. })
     }
@@ -276,6 +284,9 @@ pub struct Chunk {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Reply {
+    Android {
+        result: serde_json::Value,
+    },
     BrowserSession {
         result: rmcp::model::CallToolResult,
     },
@@ -381,4 +392,31 @@ pub struct Response {
     pub request_id: RequestId,
     pub connection_generation: ConnectionGeneration,
     pub reply: Reply,
+}
+
+/// Android calls use the same authenticated Host connection and operation owner.
+pub const ANDROID_V1: &str = "android_v1";
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AndroidCommand {
+    pub name: String,
+    pub arguments: serde_json::Map<String, serde_json::Value>,
+}
+impl AndroidCommand {
+    pub fn capability(&self) -> Result<styx_contracts::capability::CapabilityId, ErrorCategory> {
+        use styx_contracts::capability::CapabilityId;
+        match self.name.as_str() {
+            "android_observe" => Ok(CapabilityId::AndroidObserve),
+            "android_act" => Ok(CapabilityId::AndroidAct),
+            "android_run_steps" => Ok(CapabilityId::AndroidRunSteps),
+            _ => Err(ErrorCategory::CapabilityUnsupported),
+        }
+    }
+    pub fn validate(&self) -> Result<(), ErrorCategory> {
+        self.capability()?;
+        if self.arguments.keys().any(|key| key.starts_with("__")) {
+            return Err(ErrorCategory::InvalidRequest);
+        }
+        Ok(())
+    }
 }

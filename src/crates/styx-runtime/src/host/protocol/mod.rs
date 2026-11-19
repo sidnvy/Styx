@@ -12,6 +12,7 @@ pub(crate) mod browser;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) mod computer;
 use super::callers::{OwnerRecord, order as owner_order};
+#[cfg(not(target_os = "android"))]
 use super::exec_tasks::{self as tasks, operations::ExecPort};
 pub mod wire;
 #[cfg(test)]
@@ -119,6 +120,7 @@ impl From<OperationSnapshot> for Snapshot {
 /// v2 authority comes only from bootstrap; v3 owner-control DTOs are admitted
 /// only after fixed-endpoint TLS and explicit Gateway namespace negotiation.
 pub struct HostProtocol<'a> {
+    android: Option<std::sync::Arc<dyn super::android::AndroidPlatform>>,
     settings: Option<std::sync::Arc<crate::host::settings::HostSettings>>,
     profile: ProfileBinding,
     coordinator: HostCoordinator,
@@ -131,6 +133,7 @@ pub struct HostProtocol<'a> {
     computer: Option<computer::ComputerInputs>,
 }
 impl<'a> HostProtocol<'a> {
+    #[cfg(not(target_os = "android"))]
     fn exec_port(&self) -> ExecPort<'_> {
         ExecPort {
             coordinator: &self.coordinator,
@@ -176,6 +179,7 @@ impl<'a> HostProtocol<'a> {
             return Err(ProtocolError::BootstrapMismatch);
         }
         Ok(Self {
+            android: None,
             settings: None,
             profile,
             coordinator,
@@ -260,6 +264,9 @@ impl<'a> HostProtocol<'a> {
             .ok_or(ErrorCategory::Unauthorized)
     }
     fn fence_transport_stop(&self) -> Result<(), ProtocolError> {
+        if let Some(platform) = &self.android {
+            let _ = platform.execute("clear", serde_json::json!({}));
+        }
         let mut registry = self
             .coordinator
             .remote_access()
@@ -296,6 +303,9 @@ impl<'a> HostProtocol<'a> {
         }
         if registry.retired_epochs.contains(epoch) {
             return Err(ProtocolError::NegotiationRejected);
+        }
+        if let Some(platform) = &self.android {
+            let _ = platform.execute("clear", serde_json::json!({}));
         }
         // Fence all old scope leases before accepting a new authenticated server epoch.
         for entry in registry.owners.values_mut() {
@@ -385,6 +395,12 @@ impl<'a> HostProtocol<'a> {
                         Err(e) => return Some(coordinator_error(e, false)),
                     }
                     entry.lease = None;
+                    if let Some(platform) = &self.android {
+                        let _ = platform.execute(
+                            "release_caller",
+                            serde_json::json!({"__caller_id": super::android::caller_key(owner)}),
+                        );
+                    }
                 }
             } else if let Err(error) = registry.order.fence_unseen(&epoch, owner) {
                 return Some(rejection(error));
@@ -396,6 +412,24 @@ impl<'a> HostProtocol<'a> {
             })
         }
     }
+    pub fn with_android(
+        mut self,
+        platform: std::sync::Arc<dyn super::android::AndroidPlatform>,
+    ) -> Self {
+        self.android = Some(platform);
+        self
+    }
+    fn report(&self) -> Option<crate::host::settings::SettingsReport> {
+        self.settings.as_ref().map(|settings| {
+            let mut report = settings.report();
+            report.android_status = self
+                .android
+                .as_ref()
+                .and_then(|platform| platform.execute("status", serde_json::json!({})).ok())
+                .and_then(|status| serde_json::from_value(status).ok());
+            report
+        })
+    }
     pub fn with_settings(
         mut self,
         settings: std::sync::Arc<crate::host::settings::HostSettings>,
@@ -406,12 +440,24 @@ impl<'a> HostProtocol<'a> {
     async fn handle(&self, call: Call) -> Reply {
         match &call {
             Call::GetCapabilities => {
-                return self.settings.as_ref().map_or_else(
+                return self.report().map_or_else(
                     || rejection(ErrorCategory::CapabilityUnsupported),
-                    |s| Reply::Capabilities { report: s.report() },
+                    |report| Reply::Capabilities { report },
                 );
             }
             Call::SetCapabilities { patch } => {
+                if self.android.is_some()
+                    && [patch.exec, patch.browser, patch.computer].contains(&Some(true))
+                {
+                    return rejection(ErrorCategory::CapabilityUnsupported);
+                }
+                if patch.android == Some(false)
+                    && let Some(platform) = &self.android
+                {
+                    // Cancel the remaining batch before the settings writer waits for
+                    // the original dispatched step to settle under its read gate.
+                    let _ = platform.execute("clear", serde_json::json!({}));
+                }
                 return match &self.settings {
                     Some(settings) => match settings.update(*patch).await {
                         Ok(report) => Reply::Capabilities { report },
@@ -434,7 +480,9 @@ impl<'a> HostProtocol<'a> {
             match &self.settings {
                 Some(settings) => match settings
                     .admit(|caps| {
-                        if call.is_browser() {
+                        if call.is_android() {
+                            caps.android
+                        } else if call.is_browser() {
                             caps.browser
                         } else if call.is_computer() {
                             caps.computer
@@ -453,6 +501,31 @@ impl<'a> HostProtocol<'a> {
             None
         };
         match call {
+            Call::Android {
+                owner,
+                grant_revision,
+                command,
+            } => {
+                let lease = match self.owner(&owner) {
+                    Ok(lease) if self.paired => lease,
+                    _ => return rejection(ErrorCategory::Unauthorized),
+                };
+                if grant_revision != self.coordinator.grant_revision() {
+                    return rejection(ErrorCategory::StateConflict);
+                }
+                let Some(platform) = &self.android else {
+                    return rejection(ErrorCategory::CapabilityUnsupported);
+                };
+                match self
+                    .coordinator
+                    .run_android(lease, owner, command, platform.clone())
+                    .await
+                {
+                    Ok(result) => Reply::Android { result },
+                    Err(error) => coordinator_error(error, false),
+                }
+            }
+            #[cfg(not(target_os = "android"))]
             Call::BrowserSession {
                 owner,
                 grant_revision,
@@ -570,7 +643,14 @@ impl<'a> HostProtocol<'a> {
                     }
                 }
                 if complete {
+                    #[cfg(not(target_os = "android"))]
                     self.coordinator.browser_sessions().forget_caller(&owner);
+                    if let Some(platform) = &self.android {
+                        let _ = platform.execute(
+                            "release_caller",
+                            serde_json::json!({"__caller_id": super::android::caller_key(&owner)}),
+                        );
+                    }
                     let mut registry = self
                         .coordinator
                         .remote_access()
@@ -582,6 +662,7 @@ impl<'a> HostProtocol<'a> {
                 }
                 Reply::OwnerCleanup { owner, complete }
             }
+            #[cfg(not(target_os = "android"))]
             call @ (Call::PrepareStart { .. }
             | Call::DispatchStart { .. }
             | Call::InspectStart { .. }
@@ -595,6 +676,7 @@ impl<'a> HostProtocol<'a> {
                 };
                 self.exec_port().exec_operation(&owner, call).await
             }
+            #[cfg(not(target_os = "android"))]
             Call::ExecTask {
                 owner,
                 grant_revision,
@@ -613,6 +695,16 @@ impl<'a> HostProtocol<'a> {
                     .await,
                 }
             }
+            #[cfg(target_os = "android")]
+            Call::BrowserSession { .. }
+            | Call::ExecTask { .. }
+            | Call::PrepareStart { .. }
+            | Call::DispatchStart { .. }
+            | Call::InspectStart { .. }
+            | Call::Read { .. }
+            | Call::PrepareAction { .. }
+            | Call::DispatchAction { .. }
+            | Call::InspectAction { .. } => rejection(ErrorCategory::CapabilityUnsupported),
             Call::Write {} => Reply::Unsupported {
                 feature: "write".into(),
             },
@@ -629,25 +721,30 @@ impl<'a> HostProtocol<'a> {
         }
     }
     fn features(&self) -> Vec<String> {
-        let mut features: Vec<String> =
-            if self.coordinator.exec_configured() || self.settings.is_some() {
-                [
-                    "prepare_start",
-                    "dispatch_start",
-                    "inspect_start",
-                    "read",
-                    "prepare_action",
-                    "dispatch_action",
-                    "inspect_action",
-                ]
-                .into_iter()
-                .map(str::to_owned)
-                .collect()
-            } else {
-                Vec::new()
-            };
+        let mut features: Vec<String> = if self.android.is_none()
+            && cfg!(not(target_os = "android"))
+            && (self.coordinator.exec_configured() || self.settings.is_some())
+        {
+            [
+                "prepare_start",
+                "dispatch_start",
+                "inspect_start",
+                "read",
+                "prepare_action",
+                "dispatch_action",
+                "inspect_action",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        } else {
+            Vec::new()
+        };
         if self.paired {
-            features.push(wire::HOST_EXEC_TASKS_V1.into());
+            #[cfg(not(target_os = "android"))]
+            if self.android.is_none() {
+                features.push(wire::HOST_EXEC_TASKS_V1.into());
+            }
             features.extend(
                 [
                     "owner_open",
@@ -667,6 +764,9 @@ impl<'a> HostProtocol<'a> {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         if self.paired && self.computer.is_some() {
             features.push(COMPUTER_V2.into());
+        }
+        if self.paired && self.android.is_some() {
+            features.push(ANDROID_V1.into());
         }
         if self.settings.is_some() {
             features.push(crate::host::settings::FEATURE.into());
@@ -813,7 +913,7 @@ impl<'a> HostProtocol<'a> {
                                     version, challenge, device_id: self.profile.device_id.clone(),
                                     host_generation: self.profile.host_generation.clone(), connection_generation: generation.clone(),
                                     features: self.features(),
-                                    write: self.coordinator.exec_configured() || self.settings.is_some(), terminate: self.coordinator.exec_configured() || self.settings.is_some(), read_resume: false,
+                                    write: self.android.is_none() && cfg!(not(target_os = "android")) && (self.coordinator.exec_configured() || self.settings.is_some()), terminate: self.android.is_none() && cfg!(not(target_os = "android")) && (self.coordinator.exec_configured() || self.settings.is_some()), read_resume: false,
                                     owner_issuance: if self.paired { "gateway_authenticated" } else { "bootstrap_preverified_only" }.into(),
                                     grant_revision: self.paired.then(|| self.coordinator.grant_revision()),
                                 }
@@ -857,7 +957,9 @@ impl<'a> HostProtocol<'a> {
                 connection_generation: generation.clone(),
                 reply,
             };
-            let limit = if matches!(&response.reply, Reply::ComputerAction { .. }) {
+            let limit = if matches!(&response.reply, Reply::Android { .. }) {
+                super::link::MAX_MESSAGE
+            } else if matches!(&response.reply, Reply::ComputerAction { .. }) {
                 1024 * 1024 + 64 * 1024
             } else {
                 RESPONSE_LIMIT
@@ -894,7 +996,8 @@ impl<'a> HostProtocol<'a> {
 }
 fn call_owner(call: &Call) -> Option<&OwnerRef> {
     match call {
-        Call::ExecTask { owner, .. }
+        Call::Android { owner, .. }
+        | Call::ExecTask { owner, .. }
         | Call::BrowserSession { owner, .. }
         | Call::PrepareStart { owner, .. }
         | Call::DispatchStart { owner, .. }

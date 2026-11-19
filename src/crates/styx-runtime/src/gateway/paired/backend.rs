@@ -7,6 +7,8 @@ use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, sync::LazyLock};
 use styx_contracts::identity::DeviceId;
 
+#[path = "backend_android.rs"]
+mod android;
 #[path = "backend_browser.rs"]
 mod browser;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -30,7 +32,7 @@ fn display_label(stored: &str) -> String {
 }
 
 fn environment_summary(d: &super::DeviceStatus) -> Value {
-    json!({"environment_id":d.device_id.as_str(),"label":display_label(&d.label),"platform":display_platform(&d.platform),"kind":"paired","connection":if d.online || d.browser_online || d.computer_online {"connected"} else {"disconnected"}})
+    json!({"environment_id":d.device_id.as_str(),"label":display_label(&d.label),"platform":display_platform(&d.platform),"kind":"paired","connection":if d.online || d.browser_online || d.computer_online || d.android_online {"connected"} else {"disconnected"}})
 }
 
 static PUBLIC: LazyLock<Vec<Tool>> = LazyLock::new(|| {
@@ -544,6 +546,10 @@ impl GatewayToolBackend for PairedGatewayBackend {
             return Err(ErrorData::invalid_params("unknown tool", None));
         }
         Ok(match request.name.as_ref() {
+            name if android::is_public_android_tool(name) => {
+                self.android_call(owner, request.name.as_ref(), request.arguments)
+                    .await
+            }
             "exec_command" => match ExecArgs::parse(request.arguments) {
                 Ok(a) => self.execute(owner, a).await,
                 Err(e) => failure(e, None, false),
@@ -639,7 +645,7 @@ impl GatewayToolBackend for PairedGatewayBackend {
                         .find(|d| d.device_id.as_str() == a.environment_id)
                     {
                         Some(d) => {
-                            let mut status = json!({"environment_id":a.environment_id,"label":display_label(&d.label),"platform":display_platform(&d.platform),"kind":"paired","access":"allowed","exec":{"configured":"unknown","connection":if d.online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"browser":{"configured":"unknown","connection":if d.browser_online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"computer":{"configured":"unknown","connection":if d.computer_online {"connected"} else {"disconnected"},"permission":"unknown","readiness":"unknown","version":"unknown"}});
+                            let mut status = json!({"environment_id":a.environment_id,"label":display_label(&d.label),"platform":display_platform(&d.platform),"kind":"paired","access":"allowed","exec":{"configured":"unknown","connection":if d.online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"browser":{"configured":"unknown","connection":if d.browser_online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"computer":{"configured":"unknown","connection":if d.computer_online {"connected"} else {"disconnected"},"permission":"unknown","readiness":"unknown","version":"unknown"},"android":{"configured":"unknown","connection":if d.android_online {"connected"} else {"disconnected"},"permission":"unknown","readiness":"unknown","version":"unknown"}});
                             if d.host_settings {
                                 match self.relay.host_capabilities(&d.device_id, None).await {
                                     Ok(report) => {
@@ -647,11 +653,32 @@ impl GatewayToolBackend for PairedGatewayBackend {
                                             ("exec", report.configured.exec),
                                             ("browser", report.configured.browser),
                                             ("computer", report.configured.computer),
+                                            ("android", report.configured.android),
                                         ] {
                                             status[name]["configured"] = json!(enabled);
                                             if !enabled {
                                                 status[name]["readiness"] = json!("disabled");
                                             }
+                                        }
+                                        if let Some(android) = &report.android_status {
+                                            status["android"]["permission"] =
+                                                json!(if android.accessibility {
+                                                    "granted"
+                                                } else {
+                                                    "required"
+                                                });
+                                            status["android"]["device_locked"] =
+                                                json!(android.device_locked);
+                                            status["android"]["readiness"] =
+                                                json!(if !report.configured.android {
+                                                    "disabled"
+                                                } else if !android.accessibility {
+                                                    "permission_required"
+                                                } else if android.device_locked {
+                                                    "locked"
+                                                } else {
+                                                    "ready"
+                                                });
                                         }
                                         status["capabilities"] = json!(report);
                                     }

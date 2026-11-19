@@ -690,5 +690,5 @@ mod diagnostic_tests {
 }
 
 #[cfg(test)]
-#[path = "native_join_http_transport_tests.rs"]
+#[path = "client_http_transport_tests.rs"]
 mod transport_tests;
