@@ -227,12 +227,17 @@ impl BrowserWorker {
         }
         let mut live = resource.state.lock().await;
         let clean = live.cleanup.ok_or(BrowserError::CleanupUnconfirmed)?;
+        let not_started = s.state == OperationState::Failed
+            && s.liveness == ExecutionLiveness::NotStarted
+            && s.output_drain == OutputDrain::NotOpened
+            && permit.actions().is_empty();
         if live.retired
             || !clean.worker_exited
             || !clean.stdio_joined
             || clean.descendants != BrowserDescendants::Confirmed
-            || s.liveness != ExecutionLiveness::Exited
-            || s.output_drain != OutputDrain::Drained
+            || (!not_started
+                && (s.liveness != ExecutionLiveness::Exited
+                    || s.output_drain != OutputDrain::Drained))
         {
             return Err(BrowserError::CleanupUnconfirmed);
         }
