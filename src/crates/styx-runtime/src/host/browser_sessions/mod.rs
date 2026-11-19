@@ -408,7 +408,13 @@ impl Engine<'_> {
                 {
                     s.phase = Phase::Ready
                 }
-                other => return refusal(&other),
+                other => {
+                    if not_dispatched(&other) {
+                        s.target = None;
+                        s.phase = Phase::New;
+                    }
+                    return refusal(&other);
+                }
             }
         }
         let target = s.target.clone().expect("opened resource");
@@ -505,3 +511,6 @@ impl Engine<'_> {
         }
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests;
