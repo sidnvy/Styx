@@ -39,7 +39,7 @@ Accessibility and Screen Recording permissions needed for Computer Use.
 
 ## Existing installations
 
-This prerelease uses the current native state format. An existing 0.4.x profile
+This release uses the current native state format. An existing 0.4.x profile
 requires an explicit offline handoff before its first 0.5 startup; replacing the
 package alone does not convert it. Retain a complete cold backup of the old
 profile and journals, preserve identities, pairing, keys and publisher pins, and
