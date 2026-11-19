@@ -510,7 +510,11 @@ pub async fn run(
             let outcome = crate::foreground::host_run_for_service(scope, cancel, events)
                 .await
                 .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
-            if !outcome.local_stop_succeeded() {
+            // The service main process has joined its own runtime. Preserve
+            // missing command receipts in the report, then let systemd finish
+            // its cgroup. Definition::stop still requires the original process
+            // gone, cgroup empty and a successful manager result.
+            if outcome.stop_reason.is_some() || !outcome.local_runtime_joined() {
                 return Err(NativeManagementError::new(ErrorKind::Unknown));
             }
             serde_json::to_value(outcome)

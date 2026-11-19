@@ -640,7 +640,7 @@ impl Definition {
             || get("Transient")? != "no"
             || get("Restart")? != "no"
             || get("KillMode")? != "mixed"
-            || get("SendSIGKILL")? != "no"
+            || get("SendSIGKILL")? != "yes"
             || get("TimeoutStopUSec")? != "infinity"
         {
             return Err(ServiceError::Conflict);
@@ -1021,7 +1021,7 @@ fn unit_definition(executable: &Path, path: &Path, role: ServiceRole) -> Service
     let binary = safe_path(executable)?;
     let path = safe_path(path)?;
     Ok(format!(
-        "# Styx native Rust user service v1\n[Unit]\nDescription=Styx native {}\n\n[Service]\nType=exec\nExecStart={binary} __service-run --state-dir {path} --role {}\nWorkingDirectory=/\nRestart=no\nKillMode=mixed\nSendSIGKILL=no\nTimeoutStopSec=infinity\nUMask=0077\nEnvironment=PATH=/usr/bin:/bin LANG=C.UTF-8\n\n[Install]\nWantedBy=default.target\n",
+        "# Styx native Rust user service v1\n[Unit]\nDescription=Styx native {}\n\n[Service]\nType=exec\nExecStart={binary} __service-run --state-dir {path} --role {}\nWorkingDirectory=/\nRestart=no\nKillMode=mixed\nSendSIGKILL=yes\nTimeoutStopSec=infinity\nUMask=0077\nEnvironment=PATH=/usr/bin:/bin LANG=C.UTF-8\n\n[Install]\nWantedBy=default.target\n",
         role.name(),
         role.name()
     ))
