@@ -19,7 +19,7 @@ function nativeFixture(t){
  const f=fixture(t),payloadDir=path.join(f.dir,'native-payload');fs.mkdirSync(payloadDir);const pe=Buffer.alloc(256);pe.write('MZ');pe.writeUInt32LE(128,60);pe.write('PE\0\0',128,'binary');pe.writeUInt16LE(0x8664,132);pe.writeUInt16LE(2,148);pe.writeUInt16LE(2,150);pe.writeUInt16LE(0x20b,152);
  const bytes={'bin/styx.exe':pe,'LICENSE':Buffer.from('test license'),'source-inputs.json':Buffer.from('{"fixture":true}')};
  const files=Object.entries(bytes).map(([name,data])=>{const file=path.join(payloadDir,...name.split('/'));fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,data);return {path:name,size:data.length,sha256:digest(data),executable:name==='bin/styx.exe'};});
- const manifest={schema:2,runtime_format:'native_rust_v1',component:'styx',scope:'runtime_candidate',minimum_reader:'native_runtime_migrated_v1',target:'x86_64-pc-windows-msvc',version:'0.4.0-native-fixture',entrypoint:'bin/styx.exe',source:{revision:'a'.repeat(40),inputs_sha256:digest(bytes['source-inputs.json'])},contracts:{control:1,management_state:2},files,external_workers:[]};
+ const manifest={schema:2,runtime_format:'native_rust_v1',component:'styx',scope:'runtime_candidate',minimum_reader:'native_runtime_v2',target:'x86_64-pc-windows-msvc',version:'0.4.0-native-fixture',entrypoint:'bin/styx.exe',source:{revision:'a'.repeat(40),inputs_sha256:digest(bytes['source-inputs.json'])},contracts:{control:1,management_state:1},files,external_workers:[]};
  const publish=()=>{const raw=Buffer.from(JSON.stringify(manifest));fs.writeFileSync(path.join(payloadDir,'manifest.json'),raw);fs.writeFileSync(path.join(payloadDir,'manifest.sig'),sign(null,raw,f.privateKey));};publish();
  return {...f,payloadDir,manifest,publish,nativeConfig:{sourceRoot:f.config.sourceRoot,sourceFiles:f.sourceFiles,output:f.config.output,compile:false,nativeRuntime:{payloadDir,publisherFile:f.config.publisherKeyFile,expectedPublisher:f.config.publisherSha256}}};
 }
@@ -74,15 +74,12 @@ test('Windows fresh native output is private at creation and children inherit on
  assert.throws(()=>createNativeOutputDirectory(output),/native_private_output_creation_failed/);assert.equal(ps(`$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(parent)}'));[IO.Directory]::GetAccessControl($p).GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)`),before);
 });
 
-// Package compatibility only; the fixture PE is never executed or installed.
-test('native staging preserves declared migrated readers and refuses unknown versions',t=>{
- for(const reader of ['native_runtime_migrated_v2','native_runtime_migrated_v3']){
-  const f=nativeFixture(t);f.manifest.minimum_reader=reader;f.publish();
-  const original=fs.readFileSync(path.join(f.payloadDir,'manifest.json'));
-  buildWindowsApp(f.nativeConfig);
-  assert.deepEqual(fs.readFileSync(path.join(f.nativeConfig.output,'native/manifest.json')),original);
- }
- const f=nativeFixture(t);f.manifest.minimum_reader='native_runtime_migrated_v4';f.publish();
- assert.throws(()=>buildWindowsApp(f.nativeConfig),/native_windows_c08_runtime_required/);
- assert.equal(fs.existsSync(f.nativeConfig.output),false);
+// Signed format checks only; the fixture PE is never executed or installed.
+test('native staging refuses an unsupported reader or state schema',t=>{
+ const unknown=nativeFixture(t);unknown.manifest.minimum_reader='native_runtime_v3';unknown.publish();
+ assert.throws(()=>buildWindowsApp(unknown.nativeConfig),/native_windows_c08_runtime_required/);
+ assert.equal(fs.existsSync(unknown.nativeConfig.output),false);
+ const wrong=nativeFixture(t);wrong.manifest.contracts.management_state=2;wrong.publish();
+ assert.throws(()=>buildWindowsApp(wrong.nativeConfig),/native_source_contract_required/);
+ assert.equal(fs.existsSync(wrong.nativeConfig.output),false);
 });

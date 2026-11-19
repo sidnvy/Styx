@@ -124,7 +124,7 @@ def ev_name(ev):
 
 
 def plan_apply(root, component, tx, seq):
-    plan = run(f"{component}_plan_{tx}", ["plan", "--native", "--state-dir", str(root), "--component", component, "--run", "running", "--transaction-id", tx, "--sequence", str(seq), "--json"])
+    plan = run(f"{component}_plan_{tx}", ["plan", "--state-dir", str(root), "--component", component, "--run", "running", "--transaction-id", tx, "--sequence", str(seq), "--json"])
     note(f"{component}_plan_report_keys", keys=sorted(plan) if isinstance(plan, dict) else str(type(plan)))
     plan_file = plan.get("plan_file") or plan.get("planFile")
     run(f"{component}_apply_{tx}", ["apply", "--state-dir", str(root), "--plan-file", plan_file, "--authorize", "--json"])

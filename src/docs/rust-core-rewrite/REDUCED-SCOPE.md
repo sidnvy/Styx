@@ -1,11 +1,14 @@
 # Reduced release scope (2026-10-27)
 
-## Current interpretation (2026-11-15)
+## Current interpretation (2026-11-19)
 
 The 2026-10-27 migration cuts, stop conditions and execution sequence below describe the
 original v1 delivery, which has since shipped. They are not instructions to reset current
 Rust profiles, re-pair devices, restart that sequence or stop authorized refactor work.
-Current refactor implementation preserves installed profiles and pairing, follows
+Source refactoring leaves installed profiles and pairing untouched. The owner removed
+backward compatibility as a design constraint on 2026-11-19; the current format has
+no legacy import, desktop persistent-service transfer or historical reader path.
+The implementation follows
 [REFACTOR-PLAN.md](REFACTOR-PLAN.md), and uses only the remaining work in
 [END-TO-END-DELIVERY-PLAN.md](END-TO-END-DELIVERY-PLAN.md). The explicit deferred-feature
 list remains a scope boundary unless the owner changes it; absence of new acceptance is

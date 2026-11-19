@@ -12,14 +12,10 @@ use styx_contracts::{
 };
 use zeroize::Zeroizing;
 
-fn require_rejection_format(state: &NativeState, raw: &[u8]) -> JournalResult<()> {
+fn require_rejection_format(raw: &[u8]) -> JournalResult<()> {
     let seed: styx_contracts::native_host::NativeHostJoinSeed =
         serde_json::from_slice(raw).map_err(|_| JournalError::Conflict)?;
-    if seed.schema != styx_contracts::native_host::NATIVE_HOST_JOIN_SEED_SCHEMA
-        || state.schema != styx_contracts::native_management::NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA
-        || state.reader_contract
-            != styx_contracts::management::ReaderContract::NativePairingLifecycleStateV1
-    {
+    if seed.schema != styx_contracts::native_host::NATIVE_HOST_JOIN_SEED_SCHEMA {
         return Err(JournalError::Conflict);
     }
     Ok(())
@@ -111,8 +107,7 @@ pub(crate) struct NativeHostJoinStore {
     rejected: Option<Pin>,
 }
 fn seed_hash(state: &NativeState) -> JournalResult<Sha256Digest> {
-    if state.has_migration_binding()
-        || state.mode != NativeDeploymentMode::JoinExisting
+    if state.mode != NativeDeploymentMode::JoinExisting
         || state.desired.gateway.is_some()
         || state.desired.host.is_none()
     {
@@ -479,7 +474,7 @@ impl NativeHostJoinStore {
     ) -> JournalResult<ValidatedNativeState> {
         let state = self.validate_base_locked(configuration)?;
         if self.rejected.is_some() {
-            require_rejection_format(state.state(), &self.seed)?;
+            require_rejection_format(&self.seed)?;
         }
         for file in NativeHostJoinFile::ALL {
             match (
@@ -585,10 +580,10 @@ impl NativeHostJoinStore {
         ))]
         {
             let pin = self.binding.with_binding(|configuration, _| {
-                let canonical = self.validate_locked(configuration)?;
+                self.validate_locked(configuration)?;
                 let rejection = file == NativeHostJoinFile::Rejected;
                 if rejection {
-                    require_rejection_format(canonical.state(), &self.seed)?;
+                    require_rejection_format(&self.seed)?;
                 }
                 if self.rejected.is_some()
                     || (rejection && self.phases.len() != 2)

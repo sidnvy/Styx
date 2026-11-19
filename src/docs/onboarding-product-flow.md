@@ -61,7 +61,7 @@ account call or a complete calculator task succeeded.
 
 ## Acceptance gates
 
-- Native App-owned WebKit loads authenticated setup and removes its fragment.
+- Native App setup uses the Rust App protocol and the single native settings model.
 - Fresh configuration completes the fixed workflow without step-by-step prompts.
 - Default paths with spaces and Unicode work through actual plist argv parsing.
 - A blocked/interrupted operation is not automatically repeated.

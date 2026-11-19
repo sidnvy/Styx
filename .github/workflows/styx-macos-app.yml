@@ -29,7 +29,9 @@ jobs:
           node src/host/macos/ci-native-build.mjs "$RUNNER_TEMP/styx-native-ci"
           echo "STYX_NATIVE_TEST_BINARY=$RUNNER_TEMP/styx-native-ci/Styx.app/Contents/MacOS/Styx" >> "$GITHUB_ENV"
       - name: Native ownership and product protocol self-test
-        run: '"$STYX_NATIVE_TEST_BINARY" --self-test'
+        run: |
+          "$STYX_NATIVE_TEST_BINARY" --self-test
+          "$STYX_NATIVE_TEST_BINARY" --native-model-self-test
       - name: Native client and isolated Core observation fixtures
         run: node --test --test-concurrency=1 src/host/macos/test/*.test.mjs
       - uses: actions/setup-python@v5

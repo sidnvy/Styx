@@ -82,11 +82,7 @@ pub(super) fn load_for_app_retained(
     );
     load_snapshot(&path, snapshot)
 }
-#[cfg(any(
-    all(target_os = "linux", target_env = "gnu"),
-    target_os = "macos",
-    target_os = "windows"
-))]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub(super) fn load_for_service(
     scope: Arc<crate::platform::native_service::ServiceScope>,
 ) -> Result<LoadedProfile, ProfileError> {
@@ -103,10 +99,9 @@ fn load_snapshot(
     snapshot.revalidate().map_err(|_| ProfileError::Changed)?;
     let seed = snapshot.seed();
     let ready = snapshot.ready();
-    // NativeHostSnapshot already binds seed2 to canonical reader7 and the
-    // compatible signed current selection. Retained seed1 Ready profiles may
-    // continue through an original committed runtime update.
-    if !matches!(seed.schema, 1 | 2)
+    // NativeHostSnapshot binds the current seed to canonical state and the
+    // signed runtime selection.
+    if seed.schema != 2
         || ready.schema != 1
         || seed.platform
             != if cfg!(target_os = "windows") {

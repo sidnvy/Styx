@@ -84,10 +84,10 @@ impl RejectionInputs {
             .unwrap();
         let manifest = serde_json::to_vec(&serde_json::json!({
             "schema":2,"runtime_format":"native_rust_v1","component":"styx",
-            "scope":"runtime_candidate","minimum_reader":"native_pairing_lifecycle_v1",
+            "scope":"runtime_candidate","minimum_reader":"native_runtime_v2",
             "target":"x86_64-unknown-linux-gnu","version":"0.4.0-test.1","entrypoint":"bin/styx",
             "source":{"revision":"1".repeat(40),"inputs_sha256":Sha256Digest::of_bytes(b"{}")},
-            "contracts":{"control":1,"management_state":7},"files":files,"external_workers":[]
+            "contracts":{"control":1,"management_state":1},"files":files,"external_workers":[]
         }))
         .unwrap();
         rejection_fixture_file(&payload.join("manifest.json"), &manifest, false);
@@ -117,7 +117,6 @@ impl RejectionInputs {
         &self,
         parent: &PrivateRoot,
         name: &str,
-        reader: ReaderContract,
         seed_schema: u16,
     ) -> (NativeHostJoinStore, Vec<u8>) {
         let root = fresh(parent, name);
@@ -141,12 +140,6 @@ impl RejectionInputs {
         };
         let raw_seed = serde_json::to_vec(&seed).unwrap();
         let mut canonical = state(&root);
-        canonical.schema = match reader {
-            ReaderContract::NativePairingLifecycleStateV1 => NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA,
-            ReaderContract::NativeManagementStateV1 => NATIVE_STATE_SCHEMA,
-            _ => panic!("fixture reader"),
-        };
-        canonical.reader_contract = reader;
         canonical.extensions.insert(
             SEED_EXTENSION.into(),
             serde_json::value::to_raw_value(&Sha256Digest::of_bytes(&raw_seed)).unwrap(),
@@ -169,7 +162,10 @@ impl RejectionInputs {
             .unwrap_or_else(|failure| panic!("typed pending init: {:?}", failure.error()));
         let (stored, stored_seed) = store.readstate_and_seed().unwrap();
         assert_eq!(stored_seed, raw_seed.as_slice());
-        assert_eq!(stored.state().reader_contract, reader);
+        assert_eq!(
+            stored.state().reader_contract,
+            ReaderContract::NativeStateV1
+        );
         assert!(stored.state().runtime_update().unwrap().is_none());
         let rejected = serde_json::to_vec(&NativeHostRejected {
             schema: 1,
@@ -184,71 +180,43 @@ impl RejectionInputs {
 }
 
 #[test]
-fn native_host_rejection_requires_both_new_seed_and_canonical_reader_before_file_write() {
+fn native_host_rejection_requires_current_seed_before_file_write() {
     let fixture = PrefixFixture::new();
     let parent = PrivateRoot::open(&fixture.0).unwrap();
     let inputs = RejectionInputs::new(&fixture.0);
-    for (name, reader, seed_schema) in [
-        (
-            "old-seed-old-reader",
-            ReaderContract::NativeManagementStateV1,
-            1,
-        ),
-        (
-            "old-seed-new-reader",
-            ReaderContract::NativePairingLifecycleStateV1,
-            1,
-        ),
-        (
-            "new-seed-old-reader",
-            ReaderContract::NativeManagementStateV1,
-            NATIVE_HOST_JOIN_SEED_SCHEMA,
-        ),
-    ] {
-        let (mut store, rejected) = inputs.store(&parent, name, reader, seed_schema);
-        if reader == ReaderContract::NativePairingLifecycleStateV1 {
-            store
-                .configuration_root()
-                .require_pairing_lifecycle_reader()
-                .unwrap();
-        } else {
-            assert!(
-                store
-                    .configuration_root()
-                    .require_pairing_lifecycle_reader()
-                    .is_err()
-            );
-        }
-        // Complete original prefix, so refusal is the format gate rather than
-        // a missing JoinReply or an opaque/malformed schema1 seed.
-        store
-            .append(NativeHostJoinFile::JoinDispatched, b"dispatch")
-            .unwrap();
-        store
-            .append(NativeHostJoinFile::JoinReply, b"reply")
-            .unwrap();
-        assert!(matches!(
-            store.append(NativeHostJoinFile::Rejected, &rejected),
-            Err(JournalError::Conflict)
-        ));
-        assert!(
-            !fixture
-                .0
-                .join(name)
-                .join(NativeHostJoinFile::Rejected.path())
-                .exists()
-        );
-        assert!(store.read(NativeHostJoinFile::Rejected).unwrap().is_none());
-        assert!(
-            store.readstate().is_ok(),
-            "known refusal retains readable original store"
-        );
-        busy(&fixture.0.join(name));
-    }
+    let name = "unsupported-seed";
+    let (mut store, rejected) = inputs.store(&parent, name, 1);
+    store
+        .configuration_root()
+        .require_pairing_lifecycle_reader()
+        .unwrap();
+    store
+        .append(NativeHostJoinFile::JoinDispatched, b"dispatch")
+        .unwrap();
+    store
+        .append(NativeHostJoinFile::JoinReply, b"reply")
+        .unwrap();
+    assert!(matches!(
+        store.append(NativeHostJoinFile::Rejected, &rejected),
+        Err(JournalError::Conflict)
+    ));
+    assert!(
+        !fixture
+            .0
+            .join(name)
+            .join(NativeHostJoinFile::Rejected.path())
+            .exists()
+    );
+    assert!(store.read(NativeHostJoinFile::Rejected).unwrap().is_none());
+    assert!(
+        store.readstate().is_ok(),
+        "known refusal retains readable original store"
+    );
+    busy(&fixture.0.join(name));
 }
 
 #[test]
-#[ignore = "requires STYX_TEST_NATIVE_HOST_ROOT; protected fresh7 + typed seed2 + synthetic signed reader, not remote rejection or worker acceptance"]
+#[ignore = "requires STYX_TEST_NATIVE_HOST_ROOT; protected native state + typed seed + synthetic signed runtime, not remote rejection or worker acceptance"]
 fn native_host_rejection_branch_survives_reopen_and_never_admits_credentials() {
     let base = PathBuf::from(std::env::var("STYX_TEST_NATIVE_HOST_ROOT").unwrap());
     let _ = PrivateRoot::open(&base).unwrap();
@@ -258,12 +226,7 @@ fn native_host_rejection_branch_survives_reopen_and_never_admits_credentials() {
     let parent = PrivateRoot::open(&path).unwrap();
     let inputs = RejectionInputs::new(&path);
     let rejected_path = path.join("rejected");
-    let (mut store, rejected) = inputs.store(
-        &parent,
-        "rejected",
-        ReaderContract::NativePairingLifecycleStateV1,
-        NATIVE_HOST_JOIN_SEED_SCHEMA,
-    );
+    let (mut store, rejected) = inputs.store(&parent, "rejected", NATIVE_HOST_JOIN_SEED_SCHEMA);
     store
         .configuration_root()
         .require_pairing_lifecycle_reader()
@@ -362,12 +325,8 @@ fn native_host_rejection_branch_survives_reopen_and_never_admits_credentials() {
     drop(store);
 
     let contradictory = path.join("contradictory");
-    let (mut store, rejected) = inputs.store(
-        &parent,
-        "contradictory",
-        ReaderContract::NativePairingLifecycleStateV1,
-        NATIVE_HOST_JOIN_SEED_SCHEMA,
-    );
+    let (mut store, rejected) =
+        inputs.store(&parent, "contradictory", NATIVE_HOST_JOIN_SEED_SCHEMA);
     store
         .configuration_root()
         .require_pairing_lifecycle_reader()
@@ -436,7 +395,7 @@ fn state(root: &FreshNativeRoot) -> NativeState {
         schema: NATIVE_STATE_SCHEMA,
         kind: NativeStateKind::StyxDesiredState,
         runtime_format: NativeRuntimeFormat::NativeRustV1,
-        reader_contract: ReaderContract::NativeManagementStateV1,
+        reader_contract: ReaderContract::NativeStateV1,
         scope_generation: root.marker().scope_generation,
         deployment_raw_sha256: Sha256Digest::of_bytes(DEPLOYMENT),
         mode: NativeDeploymentMode::JoinExisting,
@@ -450,7 +409,6 @@ fn state(root: &FreshNativeRoot) -> NativeState {
                 autostart: NativeAutostartDesired::Disabled,
             }),
         },
-        migration: None,
         extensions: BTreeMap::from([(
             SEED_EXTENSION.into(),
             serde_json::value::RawValue::from_string(
@@ -542,7 +500,6 @@ fn native_host_pending_closed_chain_reopen_and_sticky_unknown_aggregate() {
             .as_slice()
             == phases[4]
     );
-    assert!(reopened.readstate().unwrap().state().migration.is_none());
     busy(&normal);
     // An exact material change poisons the SAME original owner. Restoring bytes
     // does not clear it, discard the writer, mint Ready, or retry network work.

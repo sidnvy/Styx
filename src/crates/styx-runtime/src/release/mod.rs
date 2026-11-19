@@ -191,7 +191,7 @@ impl VerifiedNativeRelease {
             || !self
                 .manifest
                 .minimum_reader
-                .supports_state_reader(ReaderContract::NativeMigratedStateV1)
+                .supports_state_reader(ReaderContract::NativeStateV1)
         {
             return Err(ReleaseError::Unsupported);
         }

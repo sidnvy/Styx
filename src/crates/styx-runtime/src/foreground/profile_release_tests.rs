@@ -74,9 +74,9 @@ fn fresh_profile_keeps_original_release_and_refuses_foreign_selection_or_replace
             })
             .collect();
         let manifest = serde_json::json!({"schema":2,"runtime_format":"native_rust_v1","component":"styx",
-            "scope":"runtime_candidate","minimum_reader":"native_app_service_transferred_v1","target":"x86_64-unknown-linux-gnu",
+            "scope":"runtime_candidate","minimum_reader":"native_runtime_v2","target":"x86_64-unknown-linux-gnu",
             "version":"0.4.0-test.1","entrypoint":"bin/styx","source":{"revision":"1".repeat(40),
-            "inputs_sha256":Sha256Digest::of_bytes(sources[2].1)},"contracts":{"control":1,"management_state":6},
+            "inputs_sha256":Sha256Digest::of_bytes(sources[2].1)},"contracts":{"control":1,"management_state":1},
             "files":files,"external_workers":[]});
         let raw = serde_json::to_vec(&manifest).unwrap();
         write(&payload.join("manifest.json"), &raw, false);

@@ -18,7 +18,6 @@ use std::{
 use styx_contracts::{
     identity::{DeviceId, Sha256Digest},
     legacy::PairingComparison,
-    management::ReaderContract,
     native_management::{
         NativeDeploymentMode, NativeManager, NativeRootIdentity, NativeRunDesired,
         NativeRuntimeSelection,
@@ -301,19 +300,6 @@ pub(crate) async fn computers_for_app(
         .computers
         .ok_or_else(|| refused("native_gateway_computers_invalid"))
 }
-pub(crate) async fn pending_for_app(scope: Arc<crate::app::HostScope>) -> Result<AdminReport> {
-    owned_scoped(Action::Pending(scope.state_dir().into()), Some(scope)).await
-}
-pub(crate) async fn approve_for_app(
-    scope: Arc<crate::app::HostScope>,
-    selected: ApprovalSelection,
-) -> Result<AdminReport> {
-    owned_scoped(
-        Action::Approve(scope.state_dir().into(), selected),
-        Some(scope),
-    )
-    .await
-}
 pub(crate) async fn revoke_for_app(
     scope: Arc<crate::app::HostScope>,
     device: DeviceId,
@@ -324,50 +310,6 @@ pub(crate) async fn revoke_for_app(
     )
     .await
 }
-pub(crate) async fn reject_for_app(
-    scope: Arc<crate::app::HostScope>,
-    selected: RejectionSelection,
-) -> Result<AdminReport> {
-    owned_scoped(
-        Action::Reject(scope.state_dir().into(), selected),
-        Some(scope),
-    )
-    .await
-}
-/// Read-only UI discovery, not a grant or permission to reject. The original
-/// Gateway owns its writer; this path only reuses protected material/C07 reads.
-/// Any unproven file or canonical format omits the operation from discovery.
-pub(crate) async fn pairing_rejection_supported_for_app(
-    scope: Arc<crate::app::HostScope>,
-) -> Result<bool> {
-    let path = scope.state_dir().to_owned();
-    blocking(move || {
-        let material = Material::open_scoped(path, Some(scope))?;
-        // The running App owns this implementation. The original C07 tip,
-        // role/ready binding and private file pins still gate discovery.
-        let marker = native_state::decode_marker(material.files[0].bytes())
-            .map_err(|_| refused("native_gateway_admin_material"))?;
-        let canonical = native_state::decode_state(material.files[1].bytes(), &marker)
-            .map_err(|_| refused("native_gateway_admin_material"))?;
-        Ok(pairing_rejection_projection(&canonical))
-    })
-    .await
-}
-
-fn pairing_rejection_projection(canonical: &native_state::ValidatedNativeState) -> bool {
-    let state = canonical.state();
-    state.schema == 7
-        && state.reader_contract == ReaderContract::NativePairingLifecycleStateV1
-        && state.mode == NativeDeploymentMode::CreateLocal
-        && state.desired.host.is_none()
-        && state.desired.gateway.is_some_and(|gateway| {
-            gateway.manager == NativeManager::AppManaged
-                && gateway.run == NativeRunDesired::Running
-                && gateway.autostart
-                    == styx_contracts::native_management::NativeAutostartDesired::Disabled
-        })
-}
-
 /// Read the selection committed by the original native state/journal chain.
 /// This observes configuration DATA; it does not claim a process is healthy.
 pub async fn committed_runtime_selection(state_dir: &Path) -> Result<NativeRuntimeSelection> {
@@ -753,9 +695,7 @@ impl Material {
         if !crate::store::native_root::same_persisted_identity(
             &root_identity(&root),
             &marker.root_identity,
-        ) || marker.reader_floor != ReaderContract::NativeManagementStateV1
-            || state.migration.is_some()
-            || state.mode != NativeDeploymentMode::CreateLocal
+        ) || state.mode != NativeDeploymentMode::CreateLocal
             || state.desired.host.is_some()
             || state.desired.gateway.is_none_or(|d| {
                 (d.manager == NativeManager::AppManaged) != app_scope.is_some()
@@ -1413,7 +1353,3 @@ fn invitation_origin(origins: &[String], selected: Option<InvitationOrigin>) -> 
 #[cfg(test)]
 #[path = "native_gateway_admin_tests.rs"]
 mod tests;
-
-#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-#[path = "native_gateway_advertisement_tests.rs"]
-mod advertisement_tests;

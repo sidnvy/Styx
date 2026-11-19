@@ -56,7 +56,7 @@ fn cli_gateway_reject_requires_exact_identity_and_explicit_authorization() {
     assert!(Cli::try_parse_from(args().into_iter().filter(|a| *a != "--authorize")).is_err());
 }
 #[test]
-fn cli_guided_setup_status_and_invite_preserve_low_level_status() {
+fn cli_guided_setup_status_and_invite_use_explicit_profile_roots() {
     assert!(Cli::try_parse_from(["styx", "setup"]).is_ok());
     assert!(
         Cli::try_parse_from([
@@ -75,15 +75,7 @@ fn cli_guided_setup_status_and_invite_preserve_low_level_status() {
     );
     assert!(Cli::try_parse_from(["styx", "status", "--json"]).is_ok());
     assert!(
-        Cli::try_parse_from([
-            "styx",
-            "status",
-            "--state-dir",
-            "/private/host",
-            "--native",
-            "--json"
-        ])
-        .is_ok()
+        Cli::try_parse_from(["styx", "status", "--state-dir", "/private/host", "--json"]).is_ok()
     );
     assert!(Cli::try_parse_from(["styx", "status", "--native"]).is_err());
     assert!(
@@ -251,7 +243,7 @@ fn desktop_candidate_diagnostics_cannot_supply_authority_or_change_profile_mode(
 }
 
 #[test]
-fn native_management_explicit_inputs_and_legacy_routes_are_separate_batch() {
+fn management_commands_use_one_native_configuration_model() {
     let init = Cli::try_parse_from([
         "styx",
         "init",
@@ -283,7 +275,6 @@ fn native_management_explicit_inputs_and_legacy_routes_are_separate_batch() {
     let plan = [
         "styx",
         "plan",
-        "--native",
         "--state-dir",
         "/owned/private",
         "--component",
@@ -300,10 +291,9 @@ fn native_management_explicit_inputs_and_legacy_routes_are_separate_batch() {
     assert!(matches!(
         parsed.command,
         Command::Plan {
-            native: true,
-            component: Some(NativeComponentArg::Host),
-            run: Some(NativeRunArg::Stopped),
-            sequence: Some(17),
+            component: NativeComponentArg::Host,
+            run: NativeRunArg::Stopped,
+            sequence: 17,
             ..
         }
     ));
@@ -323,8 +313,9 @@ fn native_management_explicit_inputs_and_legacy_routes_are_separate_batch() {
         }
         assert!(Cli::try_parse_from(args).is_err());
     }
-    let without_native: Vec<_> = plan.into_iter().filter(|arg| *arg != "--native").collect();
-    assert!(Cli::try_parse_from(without_native).is_err());
+    let mut obsolete_selector = plan.to_vec();
+    obsolete_selector.push("--native");
+    assert!(Cli::try_parse_from(obsolete_selector).is_err());
     for sequence in ["0", "-1", "18446744073709551616"] {
         let invalid: Vec<_> = plan
             .into_iter()
@@ -405,36 +396,17 @@ fn native_management_explicit_inputs_and_legacy_routes_are_separate_batch() {
         Command::Transaction { json: true, .. }
     ));
     assert!(matches!(
-        Cli::try_parse_from([
-            "styx",
-            "status",
-            "--native",
-            "--state-dir",
-            "/owned/private"
-        ])
-        .unwrap()
-        .command,
-        Command::Status { native: true, .. }
-    ));
-    assert!(matches!(
         Cli::try_parse_from(["styx", "status", "--state-dir", "/owned/private"])
             .unwrap()
             .command,
-        Command::Status { native: false, .. }
-    ));
-    assert!(matches!(
-        Cli::try_parse_from(["styx", "plan", "--state-dir", "/owned/private", "--json"])
-            .unwrap()
-            .command,
-        Command::Plan {
-            native: false,
-            component: None,
-            run: None,
-            transaction_id: None,
-            sequence: None,
+        Command::Status {
+            state_dir: Some(_),
             ..
         }
     ));
+    assert!(
+        Cli::try_parse_from(["styx", "plan", "--state-dir", "/owned/private", "--json"]).is_err()
+    );
     for option in [
         "--token",
         "--bearer",

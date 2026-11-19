@@ -186,9 +186,6 @@ pub struct EnrollmentLedger {
     invitations: Vec<Invitation>,
     pending: BTreeMap<RequestId, Pending>,
     devices: BTreeMap<DeviceId, Device>,
-    historical_revoked: BTreeMap<DeviceId, HistoricalRevoked>,
-    default_device: Option<DeviceId>,
-    historical_baseline: Option<HistoricalBaselineRecovery>,
     retired: Vec<Sha256Digest>,
     lanes: BTreeMap<(DeviceId, Lane), LaneState>,
     staged: Option<PendingIntent>,
@@ -373,6 +370,11 @@ impl EnrollmentControl {
     }
 }
 impl EnrollmentLedger {
+    fn registered_identity_conflict(&self, id: &DeviceId, fingerprint: Sha256Digest) -> bool {
+        self.devices
+            .values()
+            .any(|device| &device.id == id || device.fingerprint == fingerprint)
+    }
     /// Production starts closed until the trusted store adapter proves the complete
     /// original journal, material references and clock high-water mark.
     pub fn new_recovering(epoch: GatewayEpoch) -> Result<(Self, EnrollmentControl)> {
@@ -392,9 +394,6 @@ impl EnrollmentLedger {
                 invitations: vec![],
                 pending: BTreeMap::new(),
                 devices: BTreeMap::new(),
-                historical_revoked: BTreeMap::new(),
-                default_device: None,
-                historical_baseline: None,
                 retired: vec![],
                 lanes: BTreeMap::new(),
                 staged: None,
@@ -1230,9 +1229,6 @@ impl EnrollmentLedger {
                 device,
                 fingerprint,
             } => {
-                if self.default_device.as_ref() == Some(device) {
-                    self.default_device = None;
-                }
                 if let Some(d) = self.devices.get_mut(device) {
                     d.revoked = true;
                 }
@@ -1265,8 +1261,6 @@ impl EnrollmentLedger {
         Ok(())
     }
 }
-mod historical;
-pub use historical::{HistoricalBaselineRecovery, HistoricalRevoked, validate_historical_baseline};
 mod recovery;
 pub use recovery::{RecoveredLaneClosure, RecoveryClosure, RecoveryRecord, RecoveryUnresolved};
 

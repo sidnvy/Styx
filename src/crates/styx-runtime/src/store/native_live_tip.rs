@@ -7,7 +7,6 @@ use super::{
     secure_journal::{JournalBudget, JournalError, JournalObservation, JournalResult, files},
 };
 use crate::platform::native_service::ServiceScope;
-#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::{
     collections::BTreeMap,
@@ -24,21 +23,13 @@ use styx_core::management::state::{
 };
 
 fn namespace_identity(file: &File) -> JournalResult<(u64, u64)> {
-    #[cfg(target_os = "windows")]
-    {
-        // Original private directory HANDLEs forbid delete sharing. Reopening
-        // the same protected namespace below independently checks its name.
-        super::windows_file_identity(file).map_err(|_| JournalError::Unknown)
+    let m = file.metadata().map_err(|_| JournalError::Unknown)?;
+    if m.nlink() == 0 {
+        return Err(JournalError::Unknown);
     }
-    #[cfg(unix)]
-    {
-        let m = file.metadata().map_err(|_| JournalError::Unknown)?;
-        if m.nlink() == 0 {
-            return Err(JournalError::Unknown);
-        }
-        Ok((m.dev(), m.ino()))
-    }
+    Ok((m.dev(), m.ino()))
 }
+
 const NS: &str = ".styx-management-journal-v1";
 const MAX: usize = 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

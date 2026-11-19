@@ -1,7 +1,6 @@
 //! Private local control for the already authenticated service's original writer.
 //! This socket is not MCP, and neither a request nor a transaction ID is authority.
 use super::native::NativeComponent;
-#[cfg(not(target_os = "windows"))]
 use crate::platform::native_service::ServiceRole;
 use crate::platform::native_service::{ServicePeer, ServiceScope};
 use futures_util::future::BoxFuture;
@@ -9,18 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
 use styx_contracts::identity::{Sha256Digest, TransactionId};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
-#[cfg(not(target_os = "windows"))]
 mod unix;
-#[cfg(target_os = "windows")]
-mod windows;
-#[cfg(not(target_os = "windows"))]
 pub(crate) use unix::ControlServer;
-#[cfg(not(target_os = "windows"))]
 use unix::exchange;
-#[cfg(target_os = "windows")]
-pub(crate) use windows::ControlServer;
-#[cfg(target_os = "windows")]
-use windows::exchange;
 const FRAME: usize = 4096;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -125,26 +115,10 @@ pub(crate) type Handler =
 fn error() -> ServiceControlError {
     ServiceControlError::new("service_control_unknown_inspect_transaction")
 }
-// The original scope/peer remains owned by the blocking job until it finishes,
-// including when the async caller stops waiting.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-async fn checked_io<T: Send + 'static>(
-    work: impl FnOnce() -> Result<T> + Send + 'static,
-) -> Result<T> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|_| error())?
-}
-async fn validate_scope(scope: Arc<ServiceScope>) -> Result<()> {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    return checked_io(move || scope.validate().map_err(|_| error())).await;
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn validate_scope(scope: Arc<ServiceScope>) -> Result<()> {
     scope.validate().map_err(|_| error())
 }
-async fn validate_peer(peer: Arc<ServicePeer>) -> Result<()> {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    return checked_io(move || peer.validate().map_err(|_| error())).await;
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn validate_peer(peer: Arc<ServicePeer>) -> Result<()> {
     peer.validate().map_err(|_| error())
 }
 async fn frame<R: AsyncRead + Unpin>(read: &mut BufReader<R>) -> Result<Vec<u8>> {

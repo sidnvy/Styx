@@ -14,22 +14,9 @@ pub const MAX_INTENT_BYTES: usize = 4096;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReaderContract {
-    NativeManagementStateV1,
-    /// Explicit reader barrier for an original-identity runtime cutover.
-    NativeMigratedStateV1,
-    /// Explicit reader barrier: typed native migration history, including Host-only.
-    NativeMigratedStateV2,
-    /// Fresh-root runtime selection transactions; earlier state readers reject it.
-    NativeRuntimeSelectedStateV1,
-    /// App-owned runtime update history; the foreground selection reader is insufficient.
-    NativeAppRuntimeSelectedStateV1,
-    /// Same-identity inactive persistent-service repair history; prior readers reject it.
-    NativeServiceRuntimeSelectedStateV1,
-    /// Original App-to-service transfer retaining App runtime history.
-    NativeAppServiceTransferredStateV1,
-    /// Complete pending rejection lifecycle and its incompatible persistent markers.
-    NativePairingLifecycleStateV1,
+    NativeStateV1,
 }
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesiredStateCommit {
@@ -101,7 +88,7 @@ mod tests {
             deployment_raw_sha256: Sha256Digest::of_bytes(b"deployment"),
             before_state_sha256: Sha256Digest::of_bytes(b"before"),
             target_state_sha256: Sha256Digest::of_bytes(b"target"),
-            reader: ReaderContract::NativeManagementStateV1,
+            reader: ReaderContract::NativeStateV1,
         };
         let bytes = serde_json::to_vec(&intent).unwrap();
         assert_eq!(DesiredStateCommit::decode(&bytes).unwrap(), intent);

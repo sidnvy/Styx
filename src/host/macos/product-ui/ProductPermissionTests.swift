@@ -21,7 +21,6 @@ import SwiftUI
     var checks = 0, recoveries = 0
     var requests: [Bool] = [], settings: [Bool] = []
     let actions = ProductPermissionActions(request: { requests.append($0) }, openSettings: { settings.append($0) })
-    let sessionURL = URL(string: "http://127.0.0.1:1/#session=" + String(repeating: "a", count: 43))!
     // New model/defaults instances represent the OS-owned relaunch. This suite
     // stores one UI boolean only; no Core/Cua, real profile or TCC is involved.
     let resumeSuite = "Styx.PermissionResumeTest." + UUID().uuidString
@@ -35,7 +34,7 @@ import SwiftUI
         "desktop_intent": .object(["computer_requested": .bool(true)]), "admission_fenced": .bool(false)
     ])
     func newResumeModel(_ scope: String = "original-profile") throws -> ProductModel {
-        try ProductModel(sessionURL: sessionURL, permissionReader: { resumeObservation },
+        ProductModel(testRequest: { _, _ in throw ProductCoreError.unavailable }, permissionReader: { resumeObservation },
                          permissionActions: ProductPermissionActions(request: { _ in }, openSettings: { _ in }),
                          permissionResume: ProductPermissionResume(profileScope: scope, defaults: UserDefaults(suiteName: resumeSuite)!))
     }
@@ -72,20 +71,19 @@ import SwiftUI
     let freshProfile = try newResumeModel()
     try freshProfile.applyNative(.object(["mode": .string("rust_host"), "admission_fenced": .bool(false)]))
     try require(freshProfile.page == .welcome && !checkpoint.pending, "A retired/unconfigured profile inherited an old permission step")
-    let model = try ProductModel(sessionURL: sessionURL, permissionReader: {
+    let model = ProductModel(testRequest: { _, _ in throw ProductCoreError.unavailable }, permissionReader: {
         checks += 1; return observation
     }, permissionActions: actions)
     model.tunnelAttempt = .connecting
     var polls = 0
     await model.monitorTunnel(check: {
         polls += 1
-        model.journey = .object(["tunnel": .object(["status": .string("running"), "transport": .string(polls == 3 ? "ready" : "unavailable")])])
+        model.tunnel = .object(["status": .string("running"), "transport": .string(polls == 3 ? "ready" : "unavailable")])
     }, pause: {}).value
     try require(polls == 3 && model.tunnelConnection == .connected && model.tunnelAttempt == .idle, "Delayed readiness did not finish reconnect feedback")
-    try require(!model.accepted, "A ready tunnel became chat account verification")
     model.tunnelAttempt = .connecting; polls = 0
     await model.monitorTunnel(check: {
-        polls += 1; model.journey = .object(["tunnel": .object(["status": .string("running"), "transport": .string("unavailable")])])
+        polls += 1; model.tunnel = .object(["status": .string("running"), "transport": .string("unavailable")])
     }, pause: {}).value
     try require(polls == 20 && model.tunnelAttempt == .timedOut, "Unready connection remained an indefinite spinner or false success")
     model.tunnelAttempt = .idle
@@ -115,11 +113,11 @@ import SwiftUI
     model.requestPermission(false)
     model.requestPermission(false)
     try require(requests == [true, false] && settings == [true, false], "Accessibility action requested a different permission, opened Settings or looped")
-    let reopenedModel = try ProductModel(sessionURL: sessionURL, permissionReader: { observation }, permissionActions: actions)
+    let reopenedModel = ProductModel(testRequest: { _, _ in throw ProductCoreError.unavailable }, permissionReader: { observation }, permissionActions: actions)
     reopenedModel.requestPermission(true); reopenedModel.requestPermission(false)
     try require(reopenedModel.permissionWasRequested(true) && reopenedModel.permissionWasRequested(false) && requests == [true, false], "Recreating a window repeated declined permission requests")
     let grantedActions = ProductPermissionActions(request: { requests.append($0) }, openSettings: { settings.append($0) })
-    let grantedModel = try ProductModel(sessionURL: sessionURL, permissionReader: { (true, true) }, permissionActions: grantedActions)
+    let grantedModel = ProductModel(testRequest: { _, _ in throw ProductCoreError.unavailable }, permissionReader: { (true, true) }, permissionActions: grantedActions)
     grantedModel.requestPermission(true); grantedModel.requestPermission(false)
     try require(requests == [true, false] && !grantedModel.permissionWasRequested(true) && !grantedModel.permissionWasRequested(false), "An existing OS grant raised or fabricated a permission request")
     model.recoverComputerUse = { recoveries += 1 }
@@ -146,7 +144,7 @@ import SwiftUI
     do { try await model.verifyPermissionsAndRecover(); throw ProductCoreError.invalidResponse }
     catch ProductCoreError.unavailable { }
     observation = (false, false)
-    await model.refresh() // Intentionally unavailable loopback Core, no deployment.
+    await model.refresh() // Injected unavailable Core, no real profile.
     try require(!model.axGranted && !model.screenGranted && model.observationError != nil, "Core failure hid fresh native permission observations")
     model.recoverComputerUse = { recoveries += 1 }
     do { try await model.verifyPermissionsAndRecover(); throw ProductCoreError.invalidResponse }
@@ -156,6 +154,20 @@ import SwiftUI
     model.recoverComputerUse = nil
     do { try await model.verifyPermissionsAndRecover(); throw ProductCoreError.invalidResponse }
     catch ProductWorkflowError.computerPermissionRecoveryRequired { }
+    let continuation = ProductModel(testRequest: { _, _ in throw ProductCoreError.unavailable })
+    continuation.testSuppressObservations = true
+    continuation.loaded = true
+    try continuation.applyNative(.object([
+        "mode": .string("rust_host"), "admission_fenced": .bool(false),
+        "enrollment": .object(["status": .string("local_setup_pre_invite"), "can_resume_local": .bool(true)]),
+        "supportedOperations": .array([.string("resumeLocal")])
+    ]))
+    let controller = ProductWindowController(model: continuation)
+    defer { controller.close() }
+    controller.showSettings(.computers)
+    try require(continuation.settingsVisible && !continuation.onboardingVisible, "Settings route did not own the current window")
+    controller.showOnboarding()
+    try require(continuation.page == .welcome && continuation.onboardingVisible && !continuation.settingsVisible && continuation.nativeCanResumeLocal, "Continue setup routed back into Settings instead of the retained onboarding")
     print("PASS: native permission UI step survives OS relaunch with newly granted permissions, stays profile scoped, preserves Core refusal/missing-grant recovery, and clears only after successful explicit recovery or an unconfigured profile. Each explicit action requests only its matching OS prompt once per process; settings navigation never requests; requests never imply grants. Hosted permission view refreshes on App activation; partial/revoked permissions block recovery; explicit Continue calls recovery once; Core failure does not hide native observations. Injected permission actions and states only; real TCC, Cua and account acceptance NOT RUN.")
 }
 #endif

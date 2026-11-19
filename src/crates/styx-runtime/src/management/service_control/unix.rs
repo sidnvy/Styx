@@ -63,12 +63,6 @@ pub(crate) struct ControlServer {
     handler: Handler,
 }
 impl ControlServer {
-    pub(crate) async fn bind_owned(scope: Arc<ServiceScope>, handler: Handler) -> Result<Self> {
-        #[cfg(target_os = "macos")]
-        return checked_io(move || Self::bind(scope, handler)).await;
-        #[cfg(not(target_os = "macos"))]
-        Self::bind(scope, handler)
-    }
     pub(crate) fn bind(scope: Arc<ServiceScope>, handler: Handler) -> Result<Self> {
         scope.validate().map_err(|_| error())?;
         if scope.role() != ServiceRole::Gateway {
@@ -119,7 +113,7 @@ impl ControlServer {
             // Even a transient accept failure must not bypass the original
             // socket pathname and OS service identity pins.
             self.pin.validate()?;
-            validate_scope(self.scope.clone()).await?;
+            validate_scope(self.scope.clone())?;
             let (stream, _) = match accepted {
                 Ok(value) => value,
                 Err(error) if crate::enrollment::http::transient_accept_error(&error) => continue,
@@ -141,7 +135,7 @@ impl ControlServer {
                 continue;
             }
             self.pin.validate()?;
-            validate_scope(self.scope.clone()).await?;
+            validate_scope(self.scope.clone())?;
             // NO select/timeout/drop around the dispatched original owner job.
             let result = (self.handler)(request).await;
             let response = match result {
@@ -168,7 +162,7 @@ pub(super) async fn exchange(path: &Path, request: ServiceRequest) -> Result<Ser
     let peer = ServicePeer::observe(path, ServiceRole::Gateway)
         .await
         .map_err(|_| error())?;
-    validate_peer(peer.clone()).await?;
+    validate_peer(peer.clone())?;
     let stream = tokio::time::timeout(
         Duration::from_secs(2),
         UnixStream::connect(path.join(SOCKET)),
@@ -182,7 +176,7 @@ pub(super) async fn exchange(path: &Path, request: ServiceRequest) -> Result<Ser
     {
         return Err(error());
     }
-    validate_peer(peer.clone()).await?;
+    validate_peer(peer.clone())?;
     let stopping = matches!(&request, ServiceRequest::SetStopped { .. });
     let id = request.transaction_id().clone();
     let (read, mut write) = stream.into_split();
@@ -201,7 +195,7 @@ pub(super) async fn exchange(path: &Path, request: ServiceRequest) -> Result<Ser
     // A verified same-socket Stop ACK remains a configuration receipt if its
     // original service already exited. Physical completion is checked by caller.
     if !stopping {
-        validate_peer(peer.clone()).await?;
+        validate_peer(peer.clone())?;
     }
     if response.schema != 1 || !response.ok {
         return Err(error());

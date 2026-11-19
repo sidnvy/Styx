@@ -68,9 +68,9 @@ async fn signed_stage_is_exact_exclusive_and_keeps_failed_publications() {
         .fingerprint()
         .unwrap();
     let manifest = serde_json::json!({"schema":2,"runtime_format":"native_rust_v1","component":"styx",
-        "scope":"runtime_candidate","minimum_reader":"native_runtime_migrated_v3","target":"x86_64-unknown-linux-gnu",
+        "scope":"runtime_candidate","minimum_reader":"native_runtime_v2","target":"x86_64-unknown-linux-gnu",
         "version":"0.4.0-test.1","entrypoint":"bin/styx","source":{"revision":"1".repeat(40),
-        "inputs_sha256":Sha256Digest::of_bytes(&sources[2].1)},"contracts":{"control":1,"management_state":2},
+        "inputs_sha256":Sha256Digest::of_bytes(&sources[2].1)},"contracts":{"control":1,"management_state":1},
         "files":files,"external_workers":[]});
     let raw = serde_json::to_vec(&manifest).unwrap();
     write(&payload.join("manifest.json"), &raw, false);

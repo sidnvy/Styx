@@ -32,7 +32,7 @@ fn write(path: &Path, bytes: &[u8], executable: bool) {
     file.write_all(bytes).unwrap();
     file.sync_all().unwrap();
 }
-fn signed_selection(top: &Path, capable: bool) -> NativeRuntimeSelection {
+fn signed_selection(top: &Path) -> NativeRuntimeSelection {
     let payload = top.join("payload");
     directory(&payload);
     directory(&payload.join("bin"));
@@ -64,13 +64,16 @@ fn signed_selection(top: &Path, capable: bool) -> NativeRuntimeSelection {
         .unwrap()
         .fingerprint()
         .unwrap();
-    let manifest = serde_json::to_vec(&serde_json::json!({"schema":2,"runtime_format":"native_rust_v1",
+    let manifest = serde_json::to_vec(
+        &serde_json::json!({"schema":2,"runtime_format":"native_rust_v1",
         "component":"styx","scope":"runtime_candidate",
-        "minimum_reader":if capable {"native_pairing_lifecycle_v1"} else {"native_runtime_migrated_v3"},
+        "minimum_reader":"native_runtime_v2",
         "target":"x86_64-unknown-linux-gnu","version":"0.4.0-test.1","entrypoint":"bin/styx",
         "source":{"revision":"1".repeat(40),"inputs_sha256":Sha256Digest::of_bytes(b"{}")},
-        "contracts":{"control":1,"management_state":if capable {7} else {2}},
-        "files":files,"external_workers":[]})).unwrap();
+        "contracts":{"control":1,"management_state":1},
+        "files":files,"external_workers":[]}),
+    )
+    .unwrap();
     write(&payload.join("manifest.json"), &manifest, false);
     write(
         &payload.join("manifest.sig"),
@@ -82,19 +85,15 @@ fn signed_selection(top: &Path, capable: bool) -> NativeRuntimeSelection {
         .runtime_selection()
         .unwrap()
 }
-fn fresh(top: &Path, selected: &NativeRuntimeSelection, capable: bool) -> NativeRootBinding {
+fn fresh(top: &Path, selected: &NativeRuntimeSelection) -> NativeRootBinding {
     let parent = PrivateRoot::open(top).unwrap();
     let fresh = native_root::create_fresh(&parent, OsStr::new("native"))
         .unwrap_or_else(|e| panic!("fresh fixture refused: {:?}", e.error()));
     let state = NativeState {
-        schema: if capable { 7 } else { NATIVE_STATE_SCHEMA },
+        schema: NATIVE_STATE_SCHEMA,
         kind: NativeStateKind::StyxDesiredState,
         runtime_format: NativeRuntimeFormat::NativeRustV1,
-        reader_contract: if capable {
-            ReaderContract::NativePairingLifecycleStateV1
-        } else {
-            ReaderContract::NativeManagementStateV1
-        },
+        reader_contract: ReaderContract::NativeStateV1,
         scope_generation: fresh.marker().scope_generation,
         deployment_raw_sha256: Sha256Digest::of_bytes(DEPLOYMENT),
         mode: NativeDeploymentMode::CreateLocal,
@@ -108,7 +107,6 @@ fn fresh(top: &Path, selected: &NativeRuntimeSelection, capable: bool) -> Native
                 autostart: NativeAutostartDesired::Disabled,
             }),
         },
-        migration: None,
         extensions: BTreeMap::from([(
             NATIVE_RUNTIME_SELECTION_KEY.to_owned(),
             serde_json::value::to_raw_value(selected).unwrap(),
@@ -118,11 +116,11 @@ fn fresh(top: &Path, selected: &NativeRuntimeSelection, capable: bool) -> Native
         .initialize(DEPLOYMENT, &state)
         .unwrap_or_else(|e| panic!("genesis fixture refused: {:?}", e.error()))
 }
-fn fixture(capable: bool, signed_capable: bool) -> (PathBuf, NativeRootBinding) {
+fn fixture() -> (PathBuf, NativeRootBinding) {
     let top = std::env::temp_dir().join(format!("styx-pairing-reader-{}", uuid::Uuid::new_v4()));
     directory(&top);
-    let selected = signed_selection(&top, signed_capable);
-    let binding = fresh(&top, &selected, capable);
+    let selected = signed_selection(&top);
+    let binding = fresh(&top, &selected);
     (top, binding)
 }
 fn rejected_intent() -> Vec<u8> {
@@ -157,8 +155,8 @@ fn bytes(journal: &EnrollmentJournal<'_>) -> Vec<(String, Vec<u8>)> {
 }
 
 #[test]
-fn signed_fresh_reader_gate_uses_the_same_owner_without_writing() {
-    let (top, binding) = fixture(true, true);
+fn signed_native_runtime_validation_uses_the_same_owner_without_writing() {
+    let (top, binding) = fixture();
     let owner = binding.configuration_root();
     owner.require_pairing_lifecycle_reader().unwrap();
     let mut journal =
@@ -180,7 +178,7 @@ fn signed_fresh_reader_gate_uses_the_same_owner_without_writing() {
 }
 
 #[test]
-fn generic_and_old_native_journals_cannot_prepare_reject() {
+fn generic_journals_cannot_prepare_reject() {
     let top = std::env::temp_dir().join(format!("styx-generic-reject-{}", uuid::Uuid::new_v4()));
     directory(&top);
     let root = PrivateRoot::open(&top).unwrap();
@@ -218,66 +216,12 @@ fn generic_and_old_native_journals_cannot_prepare_reject() {
     drop(generic);
     drop(owner);
     fs::remove_dir_all(top).unwrap();
-
-    let (top, binding) = fixture(false, false);
-    let owner = binding.configuration_root();
-    let mut old =
-        OwnedEnrollmentJournal::from_configuration(owner.clone(), JournalBudget::default())
-            .unwrap();
-    assert_eq!(
-        owner.require_pairing_lifecycle_reader(),
-        Err(JournalError::Conflict)
-    );
-    old.with_journal(|j| {
-        let before = bytes(j);
-        assert_eq!(
-            j.prepare(&rejected_intent(), None),
-            Err(JournalError::Conflict)
-        );
-        assert_eq!(bytes(j), before);
-        Ok(())
-    })
-    .unwrap();
-    assert!(owner.ensure_admission().is_ok());
-    drop(old);
-    drop(owner);
-    drop(binding);
-    fs::remove_dir_all(top).unwrap();
 }
 
 #[test]
-fn schema_seven_alone_cannot_authorize_reject_with_an_old_signed_runtime() {
-    let (top, binding) = fixture(true, false);
-    let owner = binding.configuration_root();
-    let mut journal =
-        OwnedEnrollmentJournal::from_configuration(owner.clone(), JournalBudget::default())
-            .unwrap();
-    assert_eq!(
-        owner.require_pairing_lifecycle_reader(),
-        Err(JournalError::Conflict)
-    );
-    journal
-        .with_journal(|j| {
-            let before = bytes(j);
-            assert_eq!(
-                j.prepare(&rejected_intent(), None),
-                Err(JournalError::Conflict)
-            );
-            assert_eq!(bytes(j), before);
-            Ok(())
-        })
-        .unwrap();
-    assert!(owner.ensure_admission().is_ok());
-    drop(journal);
-    drop(owner);
-    drop(binding);
-    fs::remove_dir_all(top).unwrap();
-}
-
-#[test]
-fn actual_prepare_only_c07_tip_cannot_pass_the_floor_gate() {
+fn pending_native_configuration_cannot_authorize_pairing() {
     use styx_contracts::management::DesiredStateCommit;
-    let (top, binding) = fixture(true, true);
+    let (top, binding) = fixture();
     let owner = binding.configuration_root();
     let before = binding.validated_readstate().unwrap();
     let mut target = before.state().clone();
@@ -294,7 +238,7 @@ fn actual_prepare_only_c07_tip_cannot_pass_the_floor_gate() {
         deployment_raw_sha256: Sha256Digest::of_bytes(DEPLOYMENT),
         before_state_sha256: before.raw_sha256(),
         target_state_sha256: Sha256Digest::of_bytes(&target),
-        reader: ReaderContract::NativePairingLifecycleStateV1,
+        reader: ReaderContract::NativeStateV1,
     };
     let management =
         OwnedManagementJournal::open_existing(owner.clone(), JournalBudget::default()).unwrap();
@@ -332,7 +276,7 @@ fn actual_prepare_only_c07_tip_cannot_pass_the_floor_gate() {
 
 #[test]
 fn same_bytes_input_replacement_fails_the_original_file_pin() {
-    let (top, binding) = fixture(true, true);
+    let (top, binding) = fixture();
     let owner = binding.configuration_root();
     assert_eq!(
         owner.with_state(|state| {

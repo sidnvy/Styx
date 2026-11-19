@@ -16,9 +16,6 @@ impl HostApp {
         if self.login.pending() {
             return Err(AppError("app_login_in_progress"));
         }
-        if self.service_client_or_unknown() {
-            return self.service_quit_admission().await;
-        }
         if self.resume_local_available {
             // This is a positively revalidated never-dispatched checkpoint,
             // not permission to clear an arbitrary failed pairing/role outcome.

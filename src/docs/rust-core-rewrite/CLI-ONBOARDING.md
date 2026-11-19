@@ -47,8 +47,10 @@ confirmation of its address/CA fingerprint and comparison code. Waiting for
 ChatGPT remains a separate choice. Role, workspace, capabilities and
 network choices are retained as input intent, not as a second management state.
 The canonical native state, original enrollment prefix, signed release and OS
-service observations remain authoritative. All low-level commands remain
-available, including the original `status --state-dir ... [--native]` behavior.
+service observations remain authoritative. `status --state-dir ...` reads the
+current native configuration; `doctor --state-dir ...` inspects its runtime/profile
+diagnostics. `plan` prepares a native desired-state change. The obsolete `--native`
+selector and JavaScript configuration inspection are removed.
 
 ## Sequence and approval
 

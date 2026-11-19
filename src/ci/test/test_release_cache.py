@@ -48,8 +48,8 @@ class NativeReleaseCacheTests(unittest.TestCase):
             binary.write_bytes(b'explicit-test-fixture-not-an-executable')
         elif argv[1:] == ['build-info', '--json']:
             report = dict(schema=1, target='x86_64-unknown-linux-gnu',
-                          minimum_release_reader='native_runtime_migrated_v1',
-                          supported_state_readers=['native_management_state_v1', 'native_migrated_state_v1'])
+                          minimum_release_reader='native_runtime_v2',
+                          supported_state_readers=['native_state_v1'])
             kwargs['stdout'].write(json.dumps(report).encode())
         elif argv[:2] != ['cargo', 'clean']:
             raise AssertionError(argv)

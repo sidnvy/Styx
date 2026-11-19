@@ -33,15 +33,12 @@ struct ProductView: View {
     @ObservedObject var model: ProductModel
     weak var controller: ProductWindowController?
     let isMainWindow: Bool
-    @State private var usePluginPackage = false
-    @State private var editTunnel = false
-    init(model: ProductModel, controller: ProductWindowController?, showPluginPackage: Bool = false, isMainWindow: Bool = false) {
+    init(model: ProductModel, controller: ProductWindowController?, isMainWindow: Bool = false) {
         self.model = model; self.controller = controller
         self.isMainWindow = isMainWindow
-        _usePluginPackage = State(initialValue: showPluginPackage)
     }
     var body: some View {
-        if (isMainWindow && model.settingsVisible) || (model.nativeHost && [.overview, .computers, .settings].contains(model.page)) {
+        if (isMainWindow && model.settingsVisible) || ([.overview, .computers, .settings].contains(model.page)) {
             ProductSettingsView(model: model, controller: controller)
         } else {
             onboardingBody
@@ -58,19 +55,16 @@ struct ProductView: View {
                     } else if model.nativeCanResumeLocal {
                         resumeLocalSetup
                     } else {
-                        if model.nativeHost && model.status["enrollment"]["error"].string == "original_runtime_selection_required" {
+                        if model.status["enrollment"]["error"].string == "original_runtime_selection_required" {
                             Text(productText("此设置仍绑定原已签名运行组件。请保留原 App 和设置；此版本不能以新组件替换后继续设置。", "This setup still requires its original signed runtime. Keep the original App and settings; this version cannot replace that runtime to continue setup.")).foregroundStyle(.secondary)
                         }
                         switch model.page {
                         case .welcome: welcome
                         case .invitation: invitation
                         case .capabilities: capabilities
-                        case .preparation: preparation
                         case .permissions: permissions
                         case .chat: chat
-                        case .overview: overview
-                        case .computers: computers
-                        case .settings: settings
+                        case .overview, .computers, .settings: ProductSettingsView(model: model, controller: controller)
                         }
                     }
                     if let error = model.error ?? model.observationError {
@@ -81,7 +75,6 @@ struct ProductView: View {
             }
         }.background(Color(nsColor: .windowBackgroundColor))
             .frame(minWidth: 580, minHeight: 500)
-            .sheet(isPresented: $editTunnel) { ProductTunnelEditor(model: model) }
             .task(id: model.onboardingVisible || model.settingsVisible) {
                 if model.onboardingVisible || model.settingsVisible { await model.observePresentation() }
             }
@@ -121,7 +114,7 @@ struct ProductView: View {
             ProductBrand(size: 100).padding(.top, 40)
             Text(productText("欢迎使用 Styx", "Welcome to Styx")).font(.system(size: 32, weight: .semibold))
             Text(productText("在 ChatGPT 中使用你的电脑。", "Use your computer from ChatGPT.")).foregroundStyle(.secondary)
-            Button(productText("开始设置", "Get started")) { model.joining = false; model.page = .capabilities }.buttonStyle(.borderedProminent).controlSize(.large).disabled(model.nativeHost && !model.nativeCanCreateLocal)
+            Button(productText("开始设置", "Get started")) { model.joining = false; model.page = .capabilities }.buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.nativeCanCreateLocal)
             Button(productText("加入已有 Styx", "Join an existing Styx")) { model.joining = true; model.page = .invitation }.buttonStyle(.link)
         }.frame(maxWidth: .infinity).padding(.bottom, 50)
     }
@@ -129,8 +122,7 @@ struct ProductView: View {
         VStack(alignment: .leading, spacing: 20) {
             heading(productText("允许 ChatGPT 做什么？", "What can ChatGPT do?"), productText("选择 ChatGPT 可以在这台电脑上使用的功能。", "Choose the features ChatGPT can use on this computer."))
             ProductPanel(title: productText("这台电脑的功能", "Features on this computer")) {
-                if model.nativeHost { Toggle(isOn: $model.exec) { ProductCapabilityLabel(kind: .cli) } }
-                else { ProductCapabilityLabel(kind: .cli) }
+                Toggle(isOn: $model.exec) { ProductCapabilityLabel(kind: .cli) }
                 Divider()
                 Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }
                 Text(productText("需要你在系统设置中授予“辅助功能”和“屏幕录制”权限；下一步会引导你完成。", "Needs Accessibility and Screen Recording permission in System Settings; the next step guides you.")).font(.caption).foregroundStyle(.secondary)
@@ -139,7 +131,7 @@ struct ProductView: View {
                 Text(productText("自动准备专用浏览器；网站登录时由你确认。", "A dedicated browser is prepared for you. Sign in to websites when needed.")).font(.caption).foregroundStyle(.secondary)
             }
             TextField(productText("电脑名称", "Computer name"), text: $model.label)
-            if model.nativeHost && !model.joining {
+            if !model.joining {
                 setupTunnelFields
                 Toggle(productText("允许网络上的其他电脑加入此网关", "Let other computers on my network join this Gateway"), isOn: $model.allowRemoteHosts)
                 if model.allowRemoteHosts {
@@ -167,81 +159,10 @@ struct ProductView: View {
                 Button(productText("返回", "Back")) { model.page = model.joining ? .invitation : .welcome }
                 Spacer()
                 Button(productText("继续", "Continue")) { model.createAndPrepare() }.buttonStyle(.borderedProminent)
-                    .disabled(model.busy || (model.nativeHost && !model.joining && model.allowRemoteHosts && model.networkDiscoveryLoading) || model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (model.nativeHost && !model.joining && (!model.nativeCanCreateLocal || model.setupTunnelInput == nil)) || (!model.nativeHost && model.session["defaults"]["bundle"].string == nil))
+                    .disabled(model.busy || (!model.joining && model.allowRemoteHosts && model.networkDiscoveryLoading) || model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (!model.joining && (!model.nativeCanCreateLocal || model.setupTunnelInput == nil)) || (!model.session["defaults"]["bundle"].string == nil))
             }
         }.task(id: model.allowRemoteHosts) {
-            if model.nativeHost && !model.joining && model.allowRemoteHosts { model.discoverNetworkInterfaces() }
-        }
-    }
-    private var preparation: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            heading(productText("准备电脑", "Prepare your computer"), productText("Styx 会自动完成以下步骤。需要你操作时，会在这里说明。", "Styx completes these steps automatically and lets you know when you need to act."))
-            approvalNotice
-            ProductPanel(title: productText("设置进度", "Setup progress")) {
-                ForEach(model.preparationStages) { stage in
-                    HStack(spacing: 12) {
-                        if stage.state == .working { ProgressView().controlSize(.small).frame(width: 20) }
-                        else { Image(systemName: stage.state == .completed ? "checkmark.circle.fill" : stage.state == .blocked || stage.state == .needsReview ? "exclamationmark.circle" : "circle").frame(width: 20).foregroundStyle(stage.state == .completed ? Color.accentColor : Color.secondary) }
-                        Text(stage.title)
-                        Spacer()
-                        Text(preparationStateTitle(stage.state)).font(.callout).foregroundStyle(.secondary)
-                    }.padding(.vertical, 4)
-                }
-            }
-            if model.joinRollbackRequired {
-                Text(productText("更换邀请未完成。先恢复上次设置，再重试。", "The invitation change was interrupted. Restore the previous setup before retrying.")).foregroundStyle(.secondary)
-                Button(productText("恢复上次设置", "Restore previous setup")) { model.rollbackJoinRecovery() }.buttonStyle(.borderedProminent)
-            } else if model.signingUpgradeIncomplete {
-                Text(productText("发现旧版设置。先核对本次升级，再保留设置并恢复连接。", "Settings from an earlier version were found. Review this upgrade, then preserve your settings and resume the connection.")).foregroundStyle(.secondary)
-                if model.signingUpgrade["status"].string == "reviewable" {
-                    Text(productText("本次只更新 App 的签名登记，并保存回滚记录。电脑身份、配对、聊天凭据和系统权限保持不变；不会替换或停止已有后台服务。", "This updates only the App signing registration and saves a rollback record. Computer identity, pairing, chat credentials and system permissions are preserved. Existing background services are not replaced or stopped.")).font(.callout)
-                    Button(productText("保留设置并完成升级", "Keep settings and finish upgrade")) { model.completeSigningUpgrade() }.buttonStyle(.borderedProminent)
-                } else {
-                    Button(productText("核对本次升级", "Review this upgrade")) { model.reviewSigningUpgrade() }.buttonStyle(.borderedProminent)
-                }
-            } else if model.signingUpgradeNeedsReview {
-                Text(productText("升级未完成，现有设置已保留。此版本无法自动恢复，请将此提示交给 Styx 维护者处理。", "The upgrade did not finish and your settings are retained. This version cannot recover it automatically; share this message with the Styx maintainer.")).foregroundStyle(.secondary)
-            } else if let check = model.retryableCommandCheck {
-                Text(ProductPreparationPolicy.commandCheckMessage(check)).foregroundStyle(.secondary)
-                Button(productText("重新检查命令组件", "Check command component again")) { model.recheckCommandComponent() }.buttonStyle(.borderedProminent)
-            } else if model.preparationConnectionNeedsReview {
-                Text(model.connectionReviewMessage).foregroundStyle(.secondary)
-                Button(productText("重试本机连接", "Retry this computer's connection")) { model.resumeForeground() }
-            } else if model.canRecoverJoin {
-                Text(productText("未能加入管理电脑。请使用这台电脑能够访问的地址重新获取邀请。", "Could not join the main computer. Get a new invitation using an address this computer can reach.")).foregroundStyle(.secondary)
-                Button(productText("更换邀请", "Use a new invitation")) { model.beginJoinRecovery() }.buttonStyle(.borderedProminent)
-            } else if let blocked = model.preparationBlocker {
-                if blocked.status == "awaiting_approval" || ProductPreparationPolicy.canCheckOwnerApproval(model.deployment) {
-                    Text(productText("请在发出邀请的电脑核对下方配对码并确认连接。", "Compare this pairing code on the inviting computer and confirm the connection.")).foregroundStyle(.secondary)
-                    if let code = model.joiningComparisonCode { Text(code).font(.system(.title3, design: .monospaced)).textSelection(.enabled) }
-                    Button(productText("检查管理电脑批准", "Check owner approval")) { model.continuePreparation() }.buttonStyle(.borderedProminent)
-                } else {
-                    Text(blocked.status == "uncertain" ? productText("上次准备的结果尚未确认。请刷新并核对详细信息；安装和配对不会自动重试。", "The previous setup result is unconfirmed. Refresh and review details; installation and pairing will not be retried automatically.") : productText("准备暂时停止。请刷新状态并核对详细信息，再继续处理。", "Setup has paused. Refresh the status and review details before continuing.")).foregroundStyle(.secondary)
-                }
-            } else if !model.busy {
-                Button(model.joined ? productText("继续加入", "Continue joining") : productText("继续准备", "Continue setup")) { model.continuePreparation() }.buttonStyle(.borderedProminent)
-            }
-            DisclosureGroup(productText("详细信息", "Details")) {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(model.deployment?.steps.filter { !$0.id.contains("service") } ?? []) { step in
-                        HStack { Text(step.id).font(.system(.caption, design: .monospaced)); Spacer(); Text(stateTitle(step.status)).font(.caption).foregroundStyle(.secondary) }
-                        if let fingerprint = model.status["deployment"]["steps"].array.first(where: { $0["id"].string == step.id })?["fingerprint"].string {
-                            Text(fingerprint).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                        }
-                    }
-                }.padding(.top, 10)
-            }.font(.callout).foregroundStyle(.secondary)
-        }
-    }
-    private func preparationStateTitle(_ state: ProductPreparationStage.State) -> String {
-        switch state {
-        case .pending: return productText("等待准备", "Waiting")
-        case .working: return productText("正在准备", "Preparing")
-        case .completed: return productText("已准备", "Prepared")
-        case .blocked: return productText("需要检查", "Needs checking")
-        case .awaitingApproval: return productText("等待管理电脑批准", "Awaiting owner approval")
-        case .needsReview: return productText("需要核对", "Needs review")
-        case .notApproved: return productText("尚未获管理电脑批准", "Not approved by the owner")
+            if !model.joining && model.allowRemoteHosts { model.discoverNetworkInterfaces() }
         }
     }
     private var permissions: some View {
@@ -293,310 +214,15 @@ struct ProductView: View {
             Button(productText("返回", "Back")) { model.cancelInvitationReview() }
         }
     }
-    private var chat: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            heading(productText("连接 ChatGPT", "Connect ChatGPT"))
-            if model.nativeHost {
-                ProductNativeChatView(model: model)
-            } else if model.joined {
-                ProductPanel(title: productText("由管理电脑管理", "Managed on the main computer")) {
-                    Text(productText("这台电脑只需加入管理电脑（Gateway），无需单独配置 Tunnel 或 ChatGPT 插件。回到 ChatGPT，在同一个 Styx 连接中选择这台电脑。", "This computer only needs to join the Gateway. It does not need its own tunnel or ChatGPT plugin. Return to ChatGPT and choose this computer through the same Styx connection."))
-                    approvalNotice
-                }
-            } else if !model.localPrepared {
-                Button(productText("先完成电脑准备", "Finish computer setup")) { model.page = .preparation }
-            } else {
-                tunnelPanel
-                officialPanel
-                if usePluginPackage { pluginUploadPanel }
-                ProductTryoutView(model: model, controller: controller)
-                if model.accepted { Button(productText("完成设置", "Finish setup")) { model.page = .overview }.buttonStyle(.borderedProminent) }
-            }
-        }
-    }
-    private var tunnelPanel: some View {
-        ProductPanel(title: productText("1. 配置管理电脑的 Tunnel", "1. Configure the Gateway tunnel")) {
-            Text(productText("只在管理电脑（Gateway）设置一次。其他 Host 加入这台管理电脑后，共用此通道和 ChatGPT 连接。", "Set this up once on the Gateway. Other Hosts join it and share its tunnel and ChatGPT connection.")).font(.callout).foregroundStyle(.secondary)
-            ProductTunnelStatus(model: model)
-            Button(model.tunnelConnection == .notConfigured ? productText("填写连接信息", "Enter connection details") : productText("编辑连接信息", "Edit connection details")) { editTunnel = true }.accessibilityIdentifier("styx-onboarding-edit-tunnel")
-            if model.tunnelConnection != .connected && model.tunnelConnection != .notConfigured {
-                Button(productText("重新连接", "Reconnect")) { model.startTunnel() }.disabled(model.busy || model.tunnelAttempt == .connecting).accessibilityIdentifier("styx-reconnect")
-            }
-        }
-    }
-    private var pluginPackageContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(productText("插件包含连接配置、内置技能及下方设置的名称、描述和图标。保存 ZIP 后到 ChatGPT 安装。", "The plugin includes connection settings, built-in skills, and the name, description and icon below. Save the ZIP, then install it in ChatGPT."))
-            Button(productText("导出插件 ZIP…", "Export plugin ZIP…")) { model.exportPluginPackage() }.buttonStyle(.borderedProminent)
-                .disabled(model.tunnelConnection != .connected || model.connectionTunnelID.isEmpty || model.plugin["contextChanged"].bool || model.pluginName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pluginName.count > 64 || model.pluginDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pluginDescription.count > 30)
-            if model.connectionTunnelID.isEmpty {
-                Text(productText("先完成上方的第 1 步，再导出插件 ZIP。", "Complete step 1 above before exporting the plugin ZIP.")).foregroundStyle(.secondary)
-            }
-            if let location = model.exportedPluginURL, !model.pluginDraftEdited {
-                Label(productText("文件已保存", "File saved"), systemImage: "checkmark.circle.fill")
-                Text(location.path).font(.caption).textSelection(.enabled)
-                Button(productText("在 Finder 中显示 ZIP", "Show ZIP in Finder")) { NSWorkspace.shared.activateFileViewerSelecting([location]) }
-            }
-            GroupBox(productText("插件名称、描述和图标", "Plugin name, description and icon")) {
-                VStack(alignment: .leading, spacing: 12) {
-                TextField(productText("插件名称", "Plugin name"), text: $model.pluginName).onChange(of: model.pluginName) { _ in model.observePluginDraftEdit() }
-                TextField(productText("简短描述（最多 30 字）", "Short description (up to 30 characters)"), text: $model.pluginDescription).onChange(of: model.pluginDescription) { _ in model.observePluginDraftEdit() }
-                HStack {
-                    if let encoded = model.pluginIcon["dataBase64"].string, let bytes = Data(base64Encoded: encoded), let image = NSImage(data: bytes) {
-                        Image(nsImage: image).resizable().scaledToFit().frame(width: 40, height: 40)
-                    } else { ProductBrand(size: 40) }
-                    Button(productText("更换插件图标…", "Choose plugin icon…")) { model.selectIcon() }
-                }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-    }
-    private var officialPanel: some View {
-        ProductPanel(title: usePluginPackage ? productText("2. 保存插件 ZIP", "2. Save the plugin ZIP") : productText("2. 在 ChatGPT 添加 Styx", "2. Add Styx in ChatGPT")) {
-            if usePluginPackage {
-                pluginPackageContent
-            } else {
-                ProductChatGPTConnectionSteps(model: model, requireReadyToOpen: true)
-                if model.tunnelConnection != .connected { Text(productText("先完成第 1 步，等待连接成功后再添加。", "Complete step 1 and wait for the tunnel to connect before adding Styx.")).foregroundStyle(.secondary) }
-                Button(productText("我已连接 Styx", "I connected Styx")) { model.confirmPluginInstallation() }.disabled(model.plugin["contextChanged"].bool || model.connectionTunnelID.isEmpty || model.tunnelConnection != .connected).accessibilityIdentifier("styx-custom-mcp-confirm")
-            }
-            if model.plugin["contextChanged"].bool {
-                Text(productText("连接信息已变化，请先核对当前连接。", "Connection details changed. Review the current connection first."))
-                Button(productText("核对当前连接…", "Review current connection…")) { model.rebindPluginConnection() }
-            }
-        }
-    }
-    private var pluginUploadPanel: some View {
-        ProductPanel(title: productText("3. 上传到 ChatGPT", "3. Upload to ChatGPT")) {
-            Text(productText("已有 Styx：打开它的详情，上传新版本。首次安装：选择“上传插件”，导入 ZIP 后安装。", "Already have Styx? Open its details and upload a new version. For a first installation, choose Upload plugin, import the ZIP and install it."))
-            if model.exportedPluginURL != nil && !model.pluginDraftEdited {
-                Button(productText("打开 ChatGPT 上传 ZIP", "Open ChatGPT to upload ZIP")) { model.openOfficial("https://chatgpt.com/plugins") }.buttonStyle(.borderedProminent)
-                Button(productText("我已上传并安装 Styx", "I uploaded and installed Styx")) { model.confirmPluginInstallation() }
-                    .disabled(model.plugin["contextChanged"].bool || model.plugin["export"]["status"].string != "exported")
-            } else {
-                Text(productText("先保存上方的插件 ZIP，再到 ChatGPT 插件管理中上传并安装。", "First save the plugin ZIP above, then upload and install it in ChatGPT plugin management.")).foregroundStyle(.secondary)
-            }
-            ProductPluginCompatibilityNote()
-        }
-    }
+    private var chat: some View { ProductNativeChatView(model: model) }
 
-    private var overview: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            heading("Styx", productText("查看这台电脑的功能和连接。", "Check this computer’s features and connection."))
-            ProductPanel(title: productText("这台电脑", "This computer")) {
-                if model.nativeHost {
-                    if model.status["gateway"] != .null {
-                        if let notice = model.nativeLanJoinNotice {
-                            Text(notice).font(.callout).textSelection(.enabled)
-                        } else {
-                            Text(productText("其他电脑加入未启用", "Joining from other computers is disabled")).foregroundStyle(.secondary)
-                        }
-                        Text(productText("本机网关：", "Local gateway: ") + (model.status["gateway"]["running"] == .bool(true) && model.status["gateway"]["listening"] == .bool(true) ? productText("运行中", "running") : productText("状态未确认", "status not confirmed")))
-                        Text(productText("仅供这台 Mac 内部连接：", "For connections within this Mac only: ") + (model.status["gateway"]["origin"].string ?? productText("状态未确认", "status not confirmed")))
-                            .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                    }
-                    if model.status["admission_fenced"].bool || model.status["gateway"]["admission_fenced"].bool {
-                        Text(productText("上次设置结果尚未确认，请刷新状态查看；原配置已保留。", "The last setup result is unconfirmed. Refresh status to review it; your existing settings have been retained.")).foregroundStyle(.secondary)
-                    }
-                    if model.nativeHasServiceState {
-                        Text(model.nativeServiceStatusText)
-                        Text(productText("Exec 连接尚未在此处验证。可在通用设置中管理后台服务。", "The Exec connection has not been verified here. Manage the background service in General settings.")).font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        Text("Host: " + (model.status["foreground"]["status"].string ?? "unknown"))
-                        Text("Exec transport: " + (model.status["foreground"]["execConnection"].string ?? "unknown"))
-                        if model.status["foreground"]["computerStartupError"].string != nil {
-                            Text(productText("Computer Use 未能启动。请正常退出 Styx 后重新打开。", "Computer Use could not start. Quit Styx normally, then reopen it."))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    if model.status["enrollment"]["status"].string == "awaiting_approval" {
-                        Text(model.status["enrollment"]["comparison_code"].string ?? "").textSelection(.enabled)
-                        Text(model.status["enrollment"]["fingerprint"].string ?? "").font(.caption).textSelection(.enabled)
-                        Button(productText("检查批准", "Check confirmation")) { model.nativeClaim() }
-                    }
-                    if model.status["enrollment"]["status"].string == "rejected" {
-                        Text(productText("管理电脑已拒绝此次申请，未授予访问权限。更改这台电脑的设置后，可使用新邀请重新申请。", "The Gateway rejected this request. No access was granted. Change this computer's setup to apply again with a new invitation.")).foregroundStyle(.secondary)
-                    } else if model.status["foreground"]["error"].string == "gateway_wss_admission_refused" {
-                        Text(productText("网关拒绝了这台电脑的访问。请更改这台电脑的角色并重新配对。", "The Gateway refused this computer's access. Change this computer's role to pair again.")).foregroundStyle(.secondary)
-                    } else if model.nativeSupportsOperation("connect") {
-                        Button(productText("重新连接", "Reconnect")) { model.resumeForeground() }.disabled(model.busy || model.status["admission_fenced"].bool)
-                    }
-                    Text(model.nativeQuitDescription)
-                } else {
-                statusRow(ProductCapabilityKind.cli.title, model.journey["readiness"]["exec"]["status"].string)
-                statusRow(ProductCapabilityKind.browser.title, model.browserNotApproved ? "not_approved" : model.journey["readiness"]["browser"]["status"].string)
-                statusRow(ProductCapabilityKind.computer.title, model.computerNotApproved ? "not_approved" : model.journey["readiness"]["desktop"]["status"].string)
-                }
-                approvalNotice
-                if !model.nativeHost && !model.localPrepared { Button(productText("继续设置", "Continue setup")) { model.page = .preparation } }
-                if model.computerApproved && (!model.axGranted || !model.screenGranted) { Button(productText("检查系统权限", "Review system permissions")) { model.page = .permissions } }
-                if model.foregroundRecoveryNeeded { Button(productText("恢复电脑连接", "Resume computer connection")) { model.resumeForeground() } }
-            }
-            ProductPanel(title: productText("聊天连接", "Chat connection")) {
-                Text(model.joined ? productText("由管理电脑管理", "Managed on the main computer") : model.chatStatusTitle)
-                Button(productText("查看聊天连接", "View chat connection")) { model.page = .chat }
-            }
-        }
-    }
-    private var computers: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            heading(productText("电脑", "Computers"))
-            ProductPanel(title: productText("已批准的电脑", "Approved computers")) {
-                if model.devices.isEmpty { Text(productText("尚未读取到电脑。", "No computers have been read yet.")).foregroundStyle(.secondary) }
-                ForEach(model.devices) { device in
-                    HStack {
-                        Text(device.label)
-                        Spacer()
-                        if device.isDefault { Text(productText("默认", "Default")).foregroundStyle(.secondary) }
-                        else { Button(productText("设为默认", "Set as default")) { model.setDefault(device.id) } }
-                        if !model.joined { Button(productText("撤销访问", "Revoke access")) { model.revokeDevice(device) } }
-                    }
-                }
-                Button(productText("刷新电脑", "Refresh computers")) { model.loadDevices() }
-            }
-            if !model.joined {
-                ProductPanel(title: productText("添加电脑", "Add computer")) {
-                    ProductInvitationView(model: model)
-                    ProductPendingIdentities(model: model)
-                    Button(productText("检查待连接的电脑", "Check waiting computers")) { model.loadPending() }
-
-                }
-            }
-        }
-    }
-    private var settings: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            heading(productText("设置", "Settings"))
-            if model.deployment == nil { Button(productText("返回开始设置", "Back to setup")) { model.page = .welcome } }
-            ProductPanel(title: productText("语言", "Language")) {
-                Text(productText("跟随系统；可在系统设置中选择 Styx 的语言。", "Follows the system. Choose Styx's language in System Settings."))
-                Button(productText("打开语言与地区", "Open Language & Region")) { model.openOfficial("x-apple.systempreferences:com.apple.Localization-Settings.extension") }
-            }
-            if model.session["nativeAppLifecycleSupported"].bool {
-                ProductPanel(title: productText("启动", "Startup")) {
-                    Toggle(productText("登录时启动 Styx", "Open Styx at login"), isOn: Binding(get: { model.loginEnabled }, set: { model.setLoginEnabled($0) }))
-                        .disabled(!model.loginPreferenceKnown)
-                    if !model.loginPreferenceKnown {
-                        Text(productText("登录启动状态尚未确认。请刷新状态后重试。", "Startup status could not be confirmed. Refresh status to check again.")).font(.caption).foregroundStyle(.secondary)
-                    }
-                    Text(productText("关闭窗口后继续运行；选择“退出 Styx”才结束本次运行。", "Closing the window keeps Styx running. Choose Quit Styx to end this run.")).font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            if model.nativeHost {
-                ProductPanel(title: productText("这台电脑的能力", "This computer's capabilities")) {
-                    ProductHostCapabilitySettings(model: model)
-                }
-            } else if model.deployment != nil {
-                ProductPanel(title: productText("这台电脑的能力", "This computer's capabilities")) {
-                    ProductCapabilityLabel(kind: .cli)
-                    if model.joined {
-                        Text(productText("可选能力由管理电脑审批。请在管理电脑核对当前授权；这里不会自行扩大权限。", "Optional capabilities are approved on the main computer. Review authorization there; this computer cannot expand it itself.")).font(.callout).foregroundStyle(.secondary)
-                        approvalNotice
-                    } else {
-                        Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }.disabled(model.nativeHost)
-                        Toggle(isOn: $model.browser) { ProductCapabilityLabel(kind: .browser) }.disabled(model.nativeHost)
-                        Text(productText("应用更改时，Styx 会暂时断开这台电脑。请先完成正在进行的操作。", "Applying changes temporarily disconnects this computer. Finish any active work first.")).font(.caption).foregroundStyle(.secondary)
-                        Button(productText("应用更改", "Apply changes")) { model.updateCapabilities() }
-                    }
-                    if model.foregroundRecoveryNeeded { Button(productText("恢复电脑连接", "Resume computer connection")) { model.resumeForeground() } }
-                }
-            }
-        }
-    }
-    private func statusRow(_ title: String, _ status: String?) -> some View {
-        HStack { Text(title); Spacer(); Text(stateTitle(status ?? "not_observed")).foregroundStyle(.secondary) }
-    }
-    @ViewBuilder private var approvalNotice: some View {
-        if model.browserNotApproved {
-            Text(productText("浏览器自动化尚未获管理电脑批准，已允许的功能仍可使用。", "Browser Automation was not approved on the main computer. Approved capabilities, including CLI, can still connect.")).font(.callout).foregroundStyle(.secondary)
-        }
-        if model.computerNotApproved {
-            Text(productText("操作电脑尚未获管理电脑批准，暂时无需开启系统权限。", "Computer Use was not approved on the main computer. System permissions for it are not needed here.")).font(.callout).foregroundStyle(.secondary)
-        }
-    }
-    private func stateTitle(_ status: String) -> String {
-        switch status {
-        case "succeeded", "completed": return productText("已完成", "Completed")
-        case "connected", "ready": return productText("已准备好", "Ready")
-        case "verified": return productText("测试通过", "Test passed")
-        case "not_requested": return productText("未启用", "Not enabled")
-        case "not_required", "skipped": return productText("无需检查", "Not required")
-        case "not_approved": return productText("尚未获管理电脑批准", "Not approved by the owner")
-        case "running", "starting", "connecting": return productText("正在处理", "In progress")
-        case "awaiting_approval": return productText("等待管理电脑批准", "Awaiting approval")
-        case "rejected": return productText("申请已被拒绝", "Request rejected")
-        case "preflight_passed": return productText("基础检查通过", "Preflight passed")
-        case "failed", "uncertain", "blocked", "needs_attention": return productText("需要检查", "Needs attention")
-        case "session_unavailable": return productText("需要图形登录会话", "Graphical login required")
-        default: return productText("尚未确认", "Not yet verified")
-        }
-    }
-}
-
-// NSView-backed text is used for acceptance so the readback is taken from the
-// visible AppKit control, not from an arbitrary JavaScript or model echo.
-struct ProductAcceptanceField: NSViewRepresentable {
-    @ObservedObject var model: ProductModel
-    weak var owner: ProductWindowController?
-    func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField(string: "")
-        field.identifier = NSUserInterfaceItemIdentifier("styx-acceptance-target")
-        field.setAccessibilityIdentifier("styx-acceptance-target")
-        field.setAccessibilityLabel(productText("桌面验收输入框", "Desktop acceptance field"))
-        field.delegate = context.coordinator
-        return field
-    }
-    func updateNSView(_ field: NSTextField, context: Context) {
-        if context.coordinator.challengeID != model.challengeID {
-            field.stringValue = ""; context.coordinator.challengeID = model.challengeID
-        }
-        owner?.acceptanceFields.register(field, challengeID: model.challengeID)
-    }
-    func makeCoordinator() -> Coordinator { Coordinator() }
-    final class Coordinator: NSObject, NSTextFieldDelegate {
-        var challengeID: String?
-    }
-}
-
-// SwiftUI keeps the onboarding and Settings trees alive together. A weak
-// registry prevents an offscreen tree's update from replacing the active field.
-@MainActor final class ProductAcceptanceFields {
-    private let fields = NSMapTable<NSTextField, NSString>.weakToStrongObjects()
-    func register(_ field: NSTextField, challengeID: String?) {
-        if let id = challengeID { fields.setObject(id as NSString, forKey: field) }
-        else { fields.removeObject(forKey: field) }
-    }
-    func readback(challengeID: String, expected: String, roots: [NSWindow]) -> (value: String, window: NSWindow)? {
-        var matches: [(value: String, window: NSWindow)] = []
-        for field in fields.keyEnumerator().allObjects.compactMap({ $0 as? NSTextField }) {
-            guard fields.object(forKey: field) as String? == challengeID,
-                  let window = field.window, window.isVisible,
-                  !field.isHiddenOrHasHiddenAncestor, field.stringValue == expected,
-                  let root = roots.first(where: { window === $0 || window.sheetParent === $0 }),
-                  root.isVisible, root.windowNumber > 0 else { continue }
-            // Cua observes the parent's AXSheet subtree. Bind the local readback
-            // to that same root, never an unrelated window with the same PID.
-            matches.append((field.stringValue, root))
-        }
-        return matches.count == 1 ? matches[0] : nil
-    }
 }
 
 @MainActor final class ProductWindowController: NSWindowController, NSWindowDelegate, NSPopoverDelegate {
     let model: ProductModel
-    let acceptanceFields = ProductAcceptanceFields()
-    let ownerAppPID = Int(ProcessInfo.processInfo.processIdentifier)
-    private var observationTimer: Timer?
     private var menuPopover: NSPopover?
     private var menuSizeTimer: Timer?
-    var showMenuInvitation: (() -> Void)?
 
-    #if STYX_TESTING
-    convenience init(sessionURL: URL) {
-        do { self.init(model: try ProductModel(sessionURL: sessionURL)) }
-        catch { preconditionFailure("Invalid owned Styx bootstrap") }
-    }
-    #endif
     init(model: ProductModel) {
         self.model = model
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 640), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
@@ -606,21 +232,17 @@ struct ProductAcceptanceField: NSViewRepresentable {
         super.init(window: window)
         window.delegate = self; window.contentView = NSHostingView(rootView: ProductView(model: model, controller: self, isMainWindow: true))
         window.center(); window.setFrameAutosaveName("Styx.ProductWindow.v6")
-        observationTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            guard let owner = self else { return }
-            Task { @MainActor in await owner.observeDesktopReadback() }
-        }
     }
     required init?(coder: NSCoder) { nil }
     func present() {
-        if model.nativeHost && [.overview, .computers, .settings].contains(model.page) {
+        if [.overview, .computers, .settings].contains(model.page) {
             showSettings(.computers); return
         }
         menuPopover?.performClose(nil); model.settingsVisible = false; model.onboardingVisible = true; model.observePermissions(); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     func showPreferences() { showSettings(.general) }
     func showOnboarding() {
         menuPopover?.performClose(nil)
-        if !model.nativeHost && model.page == .overview { model.page = model.localPrepared ? (model.accepted ? .overview : .chat) : .preparation }
+        if model.nativeCanResumeLocal || model.nativeCanCreateLocal && [.overview, .computers, .settings].contains(model.page) { model.page = .welcome }
         present()
     }
     func showSettings(_ section: ProductSettingsSection) {
@@ -659,56 +281,18 @@ struct ProductAcceptanceField: NSViewRepresentable {
         }
         if !model.settingsVisible && !model.onboardingVisible { model.clearSecrets() }
     }
-    func currentDesktopReadback(challengeID: String) -> (value: String, window: NSWindow)? {
-        guard model.challengeID == challengeID,
-              let expected = model.acceptance["challenge"]["desktopValue"].string,
-              let expires = model.acceptance["challenge"]["expiresAt"].number,
-              expires > Date().timeIntervalSince1970 * 1000 else { return nil }
-        return acceptanceFields.readback(challengeID: challengeID, expected: expected, roots: [window].compactMap { $0 })
-    }
-    private func observeDesktopReadback() async {
-        guard !model.busy, let id = model.challengeID,
-              let readback = currentDesktopReadback(challengeID: id),
-              model.acceptance["desktop"]["status"].string != "verified" else { return }
-        // The Core still requires authenticated Cua before/action/after evidence
-        // bound to this App. Typed text alone can never produce acceptance.
-        do {
-            _ = try await model.client.write("acceptance/desktop-readback", ["authorize": .bool(true), "challengeId": .string(id), "value": .string(readback.value), "pid": .number(Double(ownerAppPID)), "windowId": .number(Double(readback.window.windowNumber))])
-            await model.refresh()
-        } catch { /* No untrusted error text or fabricated success. Refresh remains available. */ }
-    }
     func prepareToQuit(completion: @escaping (Bool) -> Void) {
         model.clearSecrets()
         Task {
             do {
-                // Quitting needs only the authenticated lifecycle endpoint. A
-                // page bootstrap also scans connections and must not hold quit.
-                if model.nativeHost {
-                    try await model.client.quitNative()
-                    observationTimer?.invalidate(); observationTimer = nil
-                    menuSizeTimer?.invalidate(); menuSizeTimer = nil; menuPopover?.performClose(nil)
-                    completion(true); return
-                }
-                let session = try await model.client.read("session")
-                guard session["nativeAppLifecycleSupported"].bool else { throw ProductCoreError.unavailable }
-                let lifecycle = try await model.client.write("app/quit", ["authorize": .bool(true)])["lifecycle"]
-                guard ["suspended", "absent"].contains(lifecycle["currentSessionRecovery"].string ?? ""),
-                      lifecycle["loaded"] == .bool(false), lifecycle["running"] == .bool(false),
-                      lifecycle["loginPreference"].string == "unchanged" else { throw ProductCoreError.invalidResponse }
-                observationTimer?.invalidate(); observationTimer = nil
+                try await model.client.quitNative()
                 menuSizeTimer?.invalidate(); menuSizeTimer = nil; menuPopover?.performClose(nil)
                 completion(true)
             } catch {
-                // Resolve AppKit's pending termination before presenting UI.
-                // Dismissing an error must never be required to release quit.
                 completion(false)
                 let alert = NSAlert()
                 alert.messageText = productText("暂时无法安全退出 Styx", "Styx could not finish quitting")
-                switch error as? ProductCoreError {
-                case .workInProgress: alert.informativeText = productText("有任务仍在运行。请完成后再退出。", "Tasks are still running. Finish them before quitting.")
-                case .workStateUnknown: alert.informativeText = productText("暂时无法确认任务状态。请稍后重试。", "The task state could not be confirmed. Try again shortly.")
-                default: alert.informativeText = productText("尚未确认 Styx 的自动恢复已暂停。请稍后再次选择“退出 Styx”。", "Styx could not confirm that automatic recovery was paused. Try Quit Styx again shortly.")
-                }
+                alert.informativeText = productText("尚未确认本机任务全部结束。请检查当前状态后再次选择“退出 Styx”。", "Local work has not been confirmed stopped. Check its current state, then choose Quit Styx again.")
                 if let parent = window {
                     showWindow(nil); NSApp.activate(ignoringOtherApps: true)
                     alert.beginSheetModal(for: parent) { _ in }

@@ -307,7 +307,7 @@ def build(args):
         manifest = dict(schema=2, runtime_format='native_rust_v1', component='styx', scope='configuration_preview',
                         minimum_reader='native_release_v1', target=TARGET, version=args.version, entrypoint='bin/styx',
                         source=dict(revision=args.source_revision, inputs_sha256=sha(source_raw)),
-                        contracts=dict(control=1, management_state=2), files=members, external_workers=[])
+                        contracts=dict(control=1, management_state=1), files=members, external_workers=[])
         manifest_raw = encode(manifest)
         require(len(manifest_raw) <= 1024 * 1024, 'manifest_capacity')
         write_private(payload / 'manifest.json', manifest_raw)

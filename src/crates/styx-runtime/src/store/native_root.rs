@@ -643,7 +643,7 @@ mod platform {
             runtime_format: NativeRuntimeFormat::NativeRustV1,
             root_identity,
             scope_generation: Sha256Digest::from_bytes(entropy),
-            reader_floor: ReaderContract::NativeManagementStateV1,
+            reader_floor: ReaderContract::NativeStateV1,
         };
         let result = (|| {
             let bytes = serde_json::to_vec(&marker).map_err(|_| NativeRootError::InvalidInput)?;
@@ -776,7 +776,6 @@ mod platform {
             if trusted_now_unix == 0
                 || deployment.is_empty()
                 || deployment.len() > NATIVE_STATE_BYTES
-                || state.has_migration_binding()
                 || state.mode != NativeDeploymentMode::CreateLocal
                 || state.desired.gateway.is_none()
                 || state.revision != 0

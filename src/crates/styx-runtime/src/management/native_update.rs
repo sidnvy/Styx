@@ -159,9 +159,6 @@ fn require_initialized_profile(
     let invalid = || NativeManagementError::new(ErrorKind::Invalid);
     let conflict = || NativeManagementError::new(ErrorKind::Conflict);
     let state = canonical.state();
-    if state.has_migration_binding() {
-        return Err(NativeManagementError::new(ErrorKind::Unsupported));
-    }
     let root = crate::store::PrivateRoot::open(path).map_err(|_| invalid())?;
     if root.identity()
         != transactions
@@ -223,14 +220,7 @@ fn require_initialized_profile(
             )
             .map_err(|_| invalid())?;
             let credential = held.files[credential_file].bytes();
-            if !matches!(seed.schema, 1 | 2)
-                || (seed.schema == 2
-                    && state.reader_contract
-                        != styx_contracts::management::ReaderContract::NativePairingLifecycleStateV1)
-                || (seed.schema == 1
-                    && state.reader_contract
-                        == styx_contracts::management::ReaderContract::NativePairingLifecycleStateV1
-                    && state.runtime_update().map_err(|_| invalid())?.is_none())
+            if seed.schema != 2
                 || ready.schema != 1
                 || seed_hash != expected
                 || seed.root_identity != transactions.marker().root_identity

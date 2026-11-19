@@ -865,14 +865,7 @@ mod platform {
             {
                 return Err(bad());
             }
-            if !matches!(seed.schema, 1 | 2)
-                || (seed.schema == 2
-                    && state.state().reader_contract
-                        != ReaderContract::NativePairingLifecycleStateV1)
-                || (seed.schema == 1
-                    && state.state().reader_contract
-                        == ReaderContract::NativePairingLifecycleStateV1
-                    && update.is_none())
+            if seed.schema != styx_contracts::native_host::NATIVE_HOST_JOIN_SEED_SCHEMA
                 || !crate::store::native_root::same_persisted_identity(
                     &identity(&root),
                     &seed.root_identity,
@@ -958,7 +951,7 @@ mod platform {
         if !candidate
             .manifest()
             .minimum_reader
-            .supports_state_reader(ReaderContract::NativePairingLifecycleStateV1)
+            .supports_state_reader(ReaderContract::NativeStateV1)
         {
             return Err(JoinError::new("native_join_reader_unsupported", 2));
         }
@@ -1030,10 +1023,10 @@ mod platform {
                 serde_json::value::to_raw_value(&selection).map_err(|_| bad())?,
             );
             let state = NativeState {
-                schema: NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA,
+                schema: NATIVE_STATE_SCHEMA,
                 kind: NativeStateKind::StyxDesiredState,
                 runtime_format: NativeRuntimeFormat::NativeRustV1,
-                reader_contract: ReaderContract::NativePairingLifecycleStateV1,
+                reader_contract: ReaderContract::NativeStateV1,
                 scope_generation: seed.scope_generation,
                 deployment_raw_sha256: seed.deployment_raw_sha256,
                 mode: NativeDeploymentMode::JoinExisting,
@@ -1047,7 +1040,6 @@ mod platform {
                         autostart: NativeAutostartDesired::Disabled,
                     }),
                 },
-                migration: None,
                 extensions,
             };
             Ok((seed_raw, state, join))
@@ -1843,9 +1835,9 @@ mod platform {
                     })
                     .collect();
                 let manifest = serde_json::json!({"schema":2,"runtime_format":"native_rust_v1","component":"styx",
-                    "scope":"runtime_candidate","minimum_reader":"native_runtime_migrated_v3","target":"x86_64-unknown-linux-gnu",
+                    "scope":"runtime_candidate","minimum_reader":"native_runtime_v2","target":"x86_64-unknown-linux-gnu",
                     "version":"0.4.0-test.1","entrypoint":"bin/styx","source":{"revision":"1".repeat(40),
-                    "inputs_sha256":Sha256Digest::of_bytes(sources[2].1)},"contracts":{"control":1,"management_state":2},
+                    "inputs_sha256":Sha256Digest::of_bytes(sources[2].1)},"contracts":{"control":1,"management_state":1},
                     "files":files,"external_workers":[]});
                 let raw = serde_json::to_vec(&manifest).unwrap();
                 write(&payload.join("manifest.json"), &raw, false);

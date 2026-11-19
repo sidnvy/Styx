@@ -61,9 +61,9 @@ fn selection(root: &Path) -> PathBuf {
         .fingerprint()
         .unwrap();
     let manifest = json!({"schema":2,"runtime_format":"native_rust_v1","component":"styx",
-        "scope":"runtime_candidate","minimum_reader":"native_pairing_lifecycle_v1","target":"x86_64-unknown-linux-gnu",
+        "scope":"runtime_candidate","minimum_reader":"native_runtime_v2","target":"x86_64-unknown-linux-gnu",
         "version":"0.4.0-test.1","entrypoint":"bin/styx","source":{"revision":"1".repeat(40),
-        "inputs_sha256":Sha256Digest::of_bytes(b"{}")},"contracts":{"control":1,"management_state":7},
+        "inputs_sha256":Sha256Digest::of_bytes(b"{}")},"contracts":{"control":1,"management_state":1},
         "files":files,"external_workers":[]});
     let raw = serde_json::to_vec(&manifest).unwrap();
     write(&payload.join("manifest.json"), &raw, false);
@@ -94,10 +94,10 @@ fn rejection_journal(path: &Path, selection: &Path, now: u64) -> OwnedEnrollment
         .unwrap_or_else(|failure| panic!("fresh reference: {:?}", failure.error()));
     let deployment = b"{\"synthetic_pairing_reference\":true}";
     let state = NativeState {
-        schema: 7,
+        schema: NATIVE_STATE_SCHEMA,
         kind: NativeStateKind::StyxDesiredState,
         runtime_format: NativeRuntimeFormat::NativeRustV1,
-        reader_contract: ReaderContract::NativePairingLifecycleStateV1,
+        reader_contract: ReaderContract::NativeStateV1,
         scope_generation: fresh.marker().scope_generation,
         deployment_raw_sha256: Sha256Digest::of_bytes(deployment),
         mode: NativeDeploymentMode::CreateLocal,
@@ -111,7 +111,6 @@ fn rejection_journal(path: &Path, selection: &Path, now: u64) -> OwnedEnrollment
             }),
             host: None,
         },
-        migration: None,
         extensions: BTreeMap::from([(
             NATIVE_RUNTIME_SELECTION_KEY.into(),
             serde_json::value::to_raw_value(&selected).unwrap(),

@@ -16,11 +16,7 @@ pub mod management;
     target_os = "macos"
 ))]
 pub(crate) mod native_host_snapshot;
-#[cfg(any(
-    all(target_os = "linux", target_env = "gnu"),
-    target_os = "macos",
-    target_os = "windows"
-))]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub(crate) mod native_live_tip;
 #[cfg(any(
     all(target_os = "linux", target_env = "gnu"),
@@ -177,11 +173,7 @@ impl ProcessIdentity {
 pub enum LockResource {
     ConfigurationWriter,
     Execution,
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     ServiceOperation,
 }
 
@@ -190,11 +182,7 @@ impl LockResource {
         match self {
             Self::ConfigurationWriter => ".styx-configuration-writer.lock",
             Self::Execution => ".styx-execution-lease.lock",
-            #[cfg(any(
-                all(target_os = "linux", target_env = "gnu"),
-                target_os = "macos",
-                target_os = "windows"
-            ))]
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
             Self::ServiceOperation => ".styx-service-operation.lock",
         }
     }
@@ -363,9 +351,7 @@ pub struct PreservationManifest {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) use platform::{
-    SignedAppMember, SignedAppMembers, service_require_empty_acl as macos_service_require_empty_acl,
-};
+pub(crate) use platform::{SignedAppMember, SignedAppMembers};
 
 /// Public signed installation reader. It exposes no writer, lock, creation,
 /// configuration or private-state adoption port. Publisher authority remains
@@ -695,11 +681,7 @@ impl PrivateRoot {
     }
     /// Serialize the explicit C07 + OS service effect across separate CLI
     /// processes. This grants no configuration-writer or execution authority.
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn try_service_operation_lease(&self) -> Result<ServiceOperationGuard> {
         Ok(ServiceOperationGuard(
             self.inner.try_lock(LockResource::ServiceOperation)?,
@@ -714,17 +696,9 @@ impl PrivateRoot {
     }
 }
 
-#[cfg(any(
-    all(target_os = "linux", target_env = "gnu"),
-    target_os = "macos",
-    target_os = "windows"
-))]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub(crate) struct ServiceOperationGuard(platform::Lock);
-#[cfg(any(
-    all(target_os = "linux", target_env = "gnu"),
-    target_os = "macos",
-    target_os = "windows"
-))]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 impl ServiceOperationGuard {
     pub(crate) fn validate(&self) -> Result<()> {
         self.0.validate()

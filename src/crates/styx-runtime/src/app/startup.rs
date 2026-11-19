@@ -5,7 +5,7 @@ use crate::store::native_host_snapshot::NativeHostSnapshot;
 
 impl HostApp {
     pub(super) async fn try_ready_startup(&mut self) -> Result<bool, AppError> {
-        // Existing service clients and split local Gateway composition keep
+        // Existing split local Gateway composition keeps
         // their original path. No sibling is created or paired here.
         if self.scope.gateway_sibling()?.root.get().is_some() {
             return Ok(false);
@@ -125,7 +125,6 @@ mod tests {
             observed,
             deployment_file: PathBuf::new(),
             retire_failure: None,
-            service: None,
             local_gateway: None,
             resume_local_available: false,
             configuration: None,

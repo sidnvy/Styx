@@ -7,7 +7,7 @@ func productText(_ chinese: String, _ english: String) -> String {
     (Locale.preferredLanguages.first ?? "en").hasPrefix("zh") ? chinese : english
 }
 
-enum ProductPage: String, CaseIterable { case welcome, invitation, capabilities, preparation, permissions, chat, overview, computers, settings }
+enum ProductPage: String, CaseIterable { case welcome, invitation, capabilities, permissions, chat, overview, computers, settings }
 enum ProductTunnelConnection: Equatable {
     case notConfigured, connected, connecting, stopped, unavailable, unknown
     static func observed(_ tunnel: ProductJSON) -> Self {
@@ -62,130 +62,13 @@ struct ProductPermissionResume {
     func complete() { defaults.removeObject(forKey: key) }
 }
 
-enum ProductPreparationPhase: String { case components, connection, browser }
-struct ProductPreparationStage: Identifiable {
-    enum State: Equatable { case pending, working, completed, blocked, awaitingApproval, needsReview, notApproved }
-    let id: ProductPreparationPhase
-    let state: State
-    var title: String {
-        switch id {
-        case .components: return productText("安装组件", "Install components")
-        case .connection: return productText("连接本机", "Connect this computer")
-        case .browser: return productText("准备 Browser", "Prepare Browser")
-        }
-    }
-}
-enum ProductPreparationPolicy {
-    static func stages(_ deployment: ProductDeployment?, browser: ProductJSON, foreground: ProductJSON = .null, nativeStartup: ProductJSON = .null, activity: ProductPreparationPhase?) -> [ProductPreparationStage] {
-        guard let deployment = deployment else { return [] }
-        func state(_ ids: Set<String>, phase: ProductPreparationPhase) -> ProductPreparationStage.State {
-            let steps = deployment.steps.filter { ids.contains($0.id) }
-            if steps.contains(where: { ["uncertain", "failed"].contains($0.status) }) { return .needsReview }
-            if activity == phase && steps.contains(where: { $0.retryable }) { return .working }
-            if steps.contains(where: { $0.status == "blocked" }) { return .blocked }
-            if steps.contains(where: { $0.status == "awaiting_approval" }) { return .awaitingApproval }
-            if !steps.isEmpty && steps.allSatisfy(\.complete) { return .completed }
-            return activity == phase || steps.contains(where: { $0.status == "running" }) ? .working : .pending
-        }
-        var connection = state(["host.invite", "host.pair", "host.request", "host.claim", "host.doctor"], phase: .connection)
-        if connection == .completed && foreground != .null {
-            switch foreground["status"].string {
-            case "needs_attention": connection = .needsReview
-            case "started", "stopping": connection = .working
-            case "connected", "using_service": break
-            default: connection = activity == .connection ? .working : .pending
-            }
-        }
-        if nativeStartup["status"].string == "reconciliation_required" { connection = .needsReview }
-        var result = [ProductPreparationStage(id: .components, state: state(["gateway.runtime.prepare", "gateway.prepare", "gateway.start", "gateway.verify", "host.prepare"], phase: .components)),
-                      ProductPreparationStage(id: .connection, state: connection)]
-        if deployment.browserRequested {
-            let browserState: ProductPreparationStage.State
-            switch browser["status"].string {
-            case "prepared": browserState = browser["approved"] == .bool(true) ? .completed : .needsReview
-            case "not_approved": browserState = browser["approved"] == .bool(false) ? .notApproved : .needsReview
-            case "preparation_blocked": browserState = .needsReview
-            default: browserState = activity == .browser ? .working : .pending
-            }
-            result.append(ProductPreparationStage(id: .browser, state: browserState))
-        }
-        return result
-    }
-    static func retryableCommandCheck(_ deployment: ProductDeployment?) -> ProductStep? {
-        guard let next = deployment?.steps.first(where: { !$0.complete }), next.retryable else { return nil }
-        return next
-    }
-    static func blockingStep(_ deployment: ProductDeployment?) -> ProductStep? {
-        deployment?.steps.first { !$0.id.hasPrefix("host.service.") && ["blocked", "uncertain", "failed", "awaiting_approval"].contains($0.status) }
-    }
-    static func canCheckOwnerApproval(_ deployment: ProductDeployment?) -> Bool {
-        guard deployment?.joined == true, let next = deployment?.steps.first(where: { !$0.complete }) else { return false }
-        return next.id == "host.claim" && ["blocked", "awaiting_approval"].contains(next.status)
-    }
-    static func commandCheckMessage(_ step: ProductStep) -> String {
-        if step.blockers.contains("codex_executor_unavailable") {
-            return productText("命令组件暂未能启动。请再次检查。", "The command component could not start. Check again.")
-        }
-        if step.blockers.contains("host_credential_unavailable") {
-            return productText("电脑连接凭据暂不可用。请重新检查现有配置；不要删除身份或重新配对。", "The computer's connection credential is unavailable. Recheck the existing configuration; preserve its identity and pairing.")
-        }
-        if step.blockers.contains("signed_install_unavailable") || step.blockers.contains("signed_computer_runtime_unavailable") {
-            return productText("尚未能确认已安装组件的完整性。请重新检查；仍有问题时需要检查安装记录。", "Installed components could not be verified. Check again; if it persists, review the installation record.")
-        }
-        if step.blockers.contains("invalid_host_configuration") || step.blockers.contains("macos_requires_embedded_cua_socket") {
-            return productText("电脑组件配置尚未通过检查。请重新检查现有设置；无需重新配对。", "The computer's component configuration has not passed its check. Recheck the existing settings; pairing does not need to be repeated.")
-        }
-        return productText("命令组件检查尚未通过。请重新检查；已有的安装和配对会保留。", "The command component check did not pass. Check again; existing installation and pairing will be preserved.")
-    }
-}
-
-enum ProductBrowserPreparation: Equatable { case notRequired, prepare, needsReview }
-enum ProductForegroundTransition: Equatable { case stopped, owned, needsReview }
-enum ProductWorkflowError: Error { case browserPreparationNeedsReview, capabilityNeedsOfflineReview, foregroundStopUnconfirmed, capabilityChangeInterrupted, foregroundRecoveryRequired, computerPermissionRecoveryRequired, roleChangeNeedsRestart }
-
-// Desired selection does not grant a capability. These decisions use Core's
-// current approved Host projection and refuse absent or uncertain observations.
-enum ProductCapabilityPolicy {
-    static func browserPreparation(requested: Bool, observation: ProductJSON) -> ProductBrowserPreparation {
-        guard requested else { return .notRequired }
-        switch observation["status"].string {
-        case "not_approved": return observation["approved"] == .bool(false) ? .notRequired : .needsReview
-        case "prepared": return observation["approved"] == .bool(true) ? .notRequired : .needsReview
-        case "not_prepared": return observation["approved"] == .bool(true) ? .prepare : .needsReview
-        default: return .needsReview
-        }
-    }
-    static func foregroundTransition(owner: ProductJSON, observed: ProductJSON) -> ProductForegroundTransition {
-        guard owner["observation"].string == "current_process" else { return .needsReview }
-        if owner["status"].string == "not_running", observed["status"].string == "not_running" { return .stopped }
-        if owner["host"].string == "foreground", ["started", "connected"].contains(owner["status"].string ?? ""),
-           ["started", "connected"].contains(observed["status"].string ?? "") { return .owned }
-        return .needsReview
-    }
-    static func computerApproved(_ foreground: ProductJSON) -> Bool {
-        foreground["computerRequested"] == .bool(true)
-    }
-}
-
-enum ProductRestorationPolicy {
-    static func page(deployment: ProductDeployment?, localPrepared: Bool, browser: ProductJSON, foreground: ProductJSON,
-                     accepted: Bool, accessibility: Bool, screenRecording: Bool) -> ProductPage {
-        guard let deployment = deployment else { return .welcome }
-        guard localPrepared else { return .preparation }
-        if deployment.browserRequested {
-            guard ProductCapabilityPolicy.browserPreparation(requested: true, observation: browser) == .notRequired else { return .preparation }
-        }
-        guard ["current_process", "authenticated_foreground_owner"].contains(foreground["observation"].string ?? ""),
-              ["started", "connected", "using_service"].contains(foreground["status"].string ?? ""),
-              ["foreground", "service"].contains(foreground["host"].string ?? "") else { return .preparation }
-        if ProductCapabilityPolicy.computerApproved(foreground) && (!accessibility || !screenRecording) { return .permissions }
-        return accepted || deployment.joined ? .overview : .chat
-    }
-}
+enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, roleChangeNeedsRestart }
 
 @MainActor final class ProductModel: ObservableObject {
     let client: ProductCoreClient
-    var nativeHost: Bool { client.isNativeHost }
+    func nativeSupportsOperation(_ operation: String) -> Bool {
+        status["supportedOperations"].array.contains { $0.string == operation }
+    }
     func nativeClaim() { perform { [self] in _ = try await client.native("claimJoin") } }
     func nativeChangeRole() {
         guard nativeSupportsOperation("retireRole") else { return }
@@ -224,7 +107,6 @@ enum ProductRestorationPolicy {
 
     #if STYX_TESTING
     var testSuppressObservations = false
-    var testPreview = false
     var testObservationLoopStarts = 0
     var testObservationConsumerCount: Int { observationConsumers.count }
     var testObservationLoopRunning: Bool { observationTask != nil }
@@ -236,29 +118,17 @@ enum ProductRestorationPolicy {
         }
     }
     @Published var busy = false
-    @Published var signingUpgrade: ProductJSON = .null
-    @Published var signingUpgradeState: ProductJSON = .null
     @Published var loaded = false
     @Published var loadingMessage = productText("正在连接本机 Styx…", "Connecting to Styx on this Mac…")
     @Published var error: String?
     @Published var observationError: String?
     @Published var status: ProductJSON = .null
-    // Export feedback is separate from preparation and contains no manager
-    // preference or installation receipt. Saving never resends Core mutation.
-    @Published var nativeServiceExportURL: URL?
-    @Published var nativeServiceExportError: String?
-    @Published var nativeServiceSaving = false
-    @Published var journey: ProductJSON = .null
-    @Published var acceptance: ProductJSON = .null
-    @Published var session: ProductJSON = .null
     @Published var plugin: ProductJSON = .null
-    @Published var browserObservation: ProductJSON = .null
-    @Published var foregroundRecoveryNeeded = false
-    @Published var preparationActivity: ProductPreparationPhase?
+    @Published var tunnel: ProductJSON = .null
     @Published var devices: [ProductDevice] = []
     @Published var exec = true
-    @Published var computer = true
-    @Published var browser = true
+    @Published var computer = false
+    @Published var browser = false
     @Published var label = ""
     @Published var allowRemoteHosts = false
     @Published var lanAddress = ""
@@ -266,7 +136,7 @@ enum ProductRestorationPolicy {
     @Published var networkDiscoveryLoading = false
     @Published var networkDiscoveryError: String?
     func discoverNetworkInterfaces() {
-        guard nativeHost, nativeSupportsOperation("networkInterfaces"), !networkDiscoveryLoading else { return }
+        guard nativeSupportsOperation("networkInterfaces"), !networkDiscoveryLoading else { return }
         networkDiscoveryLoading = true; networkDiscoveryError = nil
         Task { [self] in
             defer { networkDiscoveryLoading = false }
@@ -309,7 +179,7 @@ enum ProductRestorationPolicy {
         && status["supportedOperations"].array.contains { $0.string == "createLocal" }
     }
     var nativeCanResumeLocal: Bool {
-        nativeHost && !nativeLocalSetupSubmitted
+        !nativeLocalSetupSubmitted
         && status["enrollment"]["status"].string == "local_setup_pre_invite"
         && status["enrollment"]["can_resume_local"] == .bool(true)
         && status["supportedOperations"].array.contains { $0.string == "resumeLocal" }
@@ -342,33 +212,19 @@ enum ProductRestorationPolicy {
             }
         }
     }
-    @Published var recoveringJoin = false
-    @Published var joinRecovery: ProductJSON = .null
     @Published var tunnelID = ""
-    @Published var runtimeKey = ""
-    @Published var pluginMode = "create"
     @Published var pluginIdentity = "styx"
     @Published var pluginLongDescription = ""
     @Published var pluginName = "Styx"
     @Published var pluginDescription = productText("连接你的电脑", "Connect your computers")
-    @Published var accountLabel = ""
-    @Published var pluginURL = ""
     @Published var pluginIcon: ProductJSON = .null
     @Published var pluginDraftEdited = false
     @Published var exportedPluginURL: URL?
     @Published var exportCompletionID: UUID?
-    @Published var desktopValue = ""
     @Published var axGranted = false
     @Published var screenGranted = false
-    @Published var ingress: ProductJSON = .null
     @Published var createdInvitation: ProductJSON = .null
-    @Published var ingressSetup: ProductJSON = .null
-    @Published var selectedIngressAddress = ""
     @Published var invitationError: String?
-    @Published var invitationClosed = false
-    @Published var invitationWindowOpen = false
-    @Published var comparisonConfirmation = ""
-    @Published var pending: [ProductJSON] = []
     @Published var tunnelObservationStale = false
     @Published var tunnelAttempt: ProductTunnelAttempt = .idle
     private var tunnelMonitor: Task<Void, Never>?
@@ -401,8 +257,7 @@ enum ProductRestorationPolicy {
                 while !Task.isCancelled {
                     guard let self = self else { return }
                     await self.bootstrap()
-                    if self.nativeHost { await self.refresh() }
-                    else if self.tunnelAttempt != .connecting { await self.refreshMenu() }
+                    await self.refresh()
                     do { try await Task.sleep(nanoseconds: 3_000_000_000) } catch { return }
                 }
             }
@@ -415,11 +270,8 @@ enum ProductRestorationPolicy {
             do { try await Task.sleep(nanoseconds: 60_000_000_000) } catch { return }
         }
     }
-    @Published var selectedDeviceID: String?
     @Published var menuVisible = false
     @Published var invitationExpanded = false
-    @Published var menuObservationFailed = false
-    @Published var selectedPending: ProductJSON = .null
     @Published var loginStartup = "unknown"
     @Published var loginOperation = "observed"
     var loginEnabled: Bool { ["enabled", "requires_approval"].contains(loginStartup) }
@@ -445,41 +297,9 @@ enum ProductRestorationPolicy {
     private let permissionResume: ProductPermissionResume?
     var recoverComputerUse: (() async throws -> Void)?
 
-    var deployment: ProductDeployment? { ProductDeployment(status["deployment"]) }
-    var localPrepared: Bool { journey["steps"].array.contains { $0["id"].string == "local_setup" && $0["status"].string == "completed" } }
-    var joined: Bool { deployment?.joined ?? joining }
-    var accepted: Bool { acceptance["complete"].bool }
-    var browserNotApproved: Bool { browserObservation["status"].string == "not_approved" && browserObservation["approved"] == .bool(false) }
-    var computerNotApproved: Bool { joined && deployment?.computerRequested == true && status["foreground"]["computerRequested"] == .bool(false) }
-    var computerApproved: Bool { nativeHost ? status["desktop_intent"]["computer_requested"].bool : ProductCapabilityPolicy.computerApproved(status["foreground"]) }
-    var preparationStages: [ProductPreparationStage] { ProductPreparationPolicy.stages(deployment, browser: browserObservation, foreground: status["foreground"], nativeStartup: status["nativeStartup"], activity: preparationActivity) }
-    var signingUpgradeIncomplete: Bool { !signingUpgradeNeedsReview && (signingUpgradeState["status"].string == "required" || status["nativeStartup"]["reason"].string == "native_signing_registration_required") }
-    var signingUpgradeNeedsReview: Bool { signingUpgradeState["status"].string == "needs_review" || status["nativeStartup"]["reason"].string == "native_signing_upgrade_requires_review" }
-    var connectionReviewMessage: String {
-        switch status["nativeStartup"]["reason"].string {
-        case "existing_service_requires_review": return productText("这台电脑已有另一套 Styx 后台服务，暂时无法连接。请让安装该服务的人检查后，再重试本机连接。", "Another Styx background service is installed on this computer. Ask the person who installed it to check it, then retry this computer’s connection.")
-        case "connection_owned_elsewhere": return productText("这台电脑正由另一个 Styx 程序连接。请先在那个程序中断开，再重试本机连接。", "Another Styx program is connected to this computer. Disconnect it in that program, then retry this computer’s connection.")
-        case "interrupted_operation_requires_review": return productText("上次设置中断，暂时无法恢复连接。请保留现有设置，将此提示交给 Styx 维护者处理。", "Setup was interrupted and the connection cannot resume yet. Keep your settings and share this message with the Styx maintainer.")
-        default: return productText("本机连接未能恢复。可以重试连接；若仍失败，请保留现有设置并检查诊断记录。", "This computer's connection could not resume. Retry the connection; if it still fails, preserve your settings and inspect diagnostics.")
-        }
-    }
-    var canRecoverJoin: Bool { session["joinRecoverySupported"].bool && joinRecovery["canRecover"] == .bool(true) }
-    var joinRollbackRequired: Bool { session["joinRecoverySupported"].bool && joinRecovery["rollbackRequired"] == .bool(true) }
-    var retryableCommandCheck: ProductStep? { ProductPreparationPolicy.retryableCommandCheck(deployment) }
-    var preparationBlocker: ProductStep? { ProductPreparationPolicy.blockingStep(deployment) }
-    var preparationConnectionNeedsReview: Bool {
-        guard localPrepared else { return false }
-        let observed = status["foreground"]["status"].string ?? "unknown"
-        return ["needs_attention", "stopping"].contains(observed) || observed == "not_running" && status["nativeStartup"]["status"].string == "reconciliation_required"
-    }
+    var computerApproved: Bool { status["desktop_intent"]["computer_requested"].bool }
     var connectionTunnelID: String { plugin["connection"]["tunnelId"].string ?? tunnelID }
-    var tunnelConnection: ProductTunnelConnection { tunnelObservationStale ? .unknown : ProductTunnelConnection.observed(journey["tunnel"]) }
-    var challengeID: String? { acceptance["challenge"]["id"].string }
-    var targetProofReady: Bool {
-        acceptance["requestProof"]["status"].string == "verified"
-        && ["verified", "not_required"].contains(acceptance["desktop"]["status"].string ?? "")
-        && ["verified", "not_required"].contains(acceptance["browser"]["status"].string ?? "")
-    }
+    var tunnelConnection: ProductTunnelConnection { tunnelObservationStale ? .unknown : ProductTunnelConnection.observed(tunnel) }
     init(owned: ProductOwnedCore) {
         client = ProductCoreClient(owned: owned)
         permissionResume = ProductPermissionResume(profileScope: owned.uiPreferenceScope)
@@ -489,7 +309,7 @@ enum ProductRestorationPolicy {
     }
     func applyNative(_ value: ProductJSON) throws {
         guard value["mode"].string == "rust_host" else { throw ProductCoreError.invalidResponse }
-        status = value; browserObservation = .null; acceptance = .null
+        publish(\.status, value)
         if !restoredPage {
             restoredPage = true
             observePermissions()
@@ -505,12 +325,12 @@ enum ProductRestorationPolicy {
         }
     }
     #if STYX_TESTING
-    init(sessionURL: URL, permissionReader: @escaping () -> (accessibility: Bool, screenRecording: Bool) = {
-        (AXIsProcessTrusted(), CGPreflightScreenCaptureAccess())
-    }, permissionActions: ProductPermissionActions? = nil, permissionResume: ProductPermissionResume? = nil) throws {
-        client = try ProductCoreClient(sessionURL: sessionURL)
+    init(testRequest: @escaping (String, [String: ProductJSON]) async throws -> ProductJSON,
+         permissionReader: @escaping () -> (accessibility: Bool, screenRecording: Bool) = { (false, false) },
+         permissionActions: ProductPermissionActions? = nil, permissionResume: ProductPermissionResume? = nil) {
+        client = ProductCoreClient(testRequest: testRequest)
         self.permissionReader = permissionReader
-        self.permissionActions = permissionActions ?? .system
+        self.permissionActions = permissionActions ?? ProductPermissionActions(request: { _ in }, openSettings: { _ in })
         self.permissionResume = permissionResume
     }
 
@@ -524,17 +344,11 @@ enum ProductRestorationPolicy {
         busy = true
         defer { busy = false }
         do {
-            loadingMessage = productText("正在连接本机 Styx…", "Connecting to Styx on this Mac…")
-            if nativeHost {
-                try applyNative(try await client.native("startupStatus"))
-                await refreshNativeLogin()
-                label = Host.current().localizedName ?? "Mac"; loaded = true; return
-            }
-            session = try await client.read("session")
-            label = session["defaults"]["label"].string ?? Host.current().localizedName ?? "Mac"
-            try await reload()
+            try applyNative(try await client.native("startupStatus"))
+            await refreshNativeLogin()
+            label = Host.current().localizedName ?? "Mac"
             loaded = true
-        } catch { reportFailure() }
+        } catch { reportFailure(error) }
     }
     func refresh() async {
         observePermissions()
@@ -553,102 +367,22 @@ enum ProductRestorationPolicy {
             }
         }
     }
-    func reviewSigningUpgrade() {
-        signingUpgrade = .null
-        perform { [self] in signingUpgrade = try await client.write("native-signing/plan", [:])["upgrade"] }
-    }
-    func completeSigningUpgrade() {
-        guard signingUpgrade["status"].string == "reviewable", let planID = signingUpgrade["planId"].string else { return }
-        signingUpgrade = .null
-        perform { [self] in
-            _ = try await client.write("native-signing/apply", ["authorize": .bool(true), "planId": .string(planID)])
-            restoredPage = false
-        }
-    }
     private func reload() async throws {
-        if nativeHost {
-            try applyNative(try await client.native("status"))
-            if nativeSupportsOperation("computers") {
-                devices = try await client.native("computers")["devices"].array.compactMap(ProductDevice.init)
-                let tunnel = try await client.native("tunnelStatus")
-                journey = .object(["tunnel": tunnel]); tunnelObservationStale = false
-                tunnelID = tunnel["tunnelId"].string ?? ""
-                if invitationExpanded { pending = try await client.native("pendingComputers")["pending"].array }
-            }
-            await refreshNativeLogin(); return
+        try applyNative(try await client.native("status"))
+        if nativeSupportsOperation("computers") {
+            publish(\.devices, try await client.native("computers")["devices"].array.compactMap(ProductDevice.init))
+            publish(\.tunnel, try await client.native("tunnelStatus"))
+            publish(\.tunnelObservationStale, false)
+            publish(\.tunnelID, tunnel["tunnelId"].string ?? "")
         }
-        // Native permission observation must not depend on a successful Core read.
-        observePermissions()
-        let revision = mutationRevision
-        if !loaded { publish(\.loadingMessage, productText("正在核对连接状态…", "Checking current connections…")) }
-        if session["nativeSigningUpgradeSupported"].bool {
-            let upgrade = try await client.read("native-signing/status")["upgrade"]
-            guard revision == mutationRevision, !Task.isCancelled else { return }
-            publish(\.signingUpgradeState, upgrade)
-        }
-        let snapshot: ProductJSON
-        do { snapshot = try await client.read("snapshot") }
-        catch {
-            if session["joinRecoverySupported"].bool, let recovery = try? await client.read("join/recovery")["recovery"] {
-                publish(\.joinRecovery, recovery)
-                if joinRollbackRequired { page = .preparation; loaded = true; return }
-            }
-            if signingUpgradeNeedsReview { page = .preparation; loaded = true; return }
-            throw error
-        }
-        guard revision == mutationRevision, !Task.isCancelled else { return }
-        applySnapshot(snapshot)
-    }
-    func applySnapshot(_ snapshot: ProductJSON) {
-        publish(\.status, snapshot["status"])
-        publish(\.joinRecovery, snapshot["status"]["joinRecovery"])
-        publish(\.journey, snapshot["journey"]); publish(\.tunnelObservationStale, false)
-        if deployment != nil {
-            if localPrepared && deployment?.browserRequested == true {
-                // A Browser observation failure does not hide Exec or the rest
-                // of the App. Preparation takes a fresh authoritative reading.
-                publish(\.browserObservation, snapshot["browser"])
-            } else { publish(\.browserObservation, .null) }
-            let latest = snapshot["acceptance"]
-            if latest["challenge"]["id"] != acceptance["challenge"]["id"] { desktopValue = "" }
-            publish(\.acceptance, latest)
-            if !joined {
-                publish(\.plugin, snapshot["plugin"])
-                if !pluginDraftEdited {
-                    publish(\.pluginMode, plugin["selection"]["mode"].string ?? "create")
-                    publish(\.pluginName, plugin["presentation"]["displayName"].string ?? "Styx")
-                    publish(\.pluginDescription, plugin["presentation"]["shortDescription"].string ?? productText("连接你的电脑", "Connect your computers"))
-                    publish(\.pluginLongDescription, plugin["presentation"]["longDescription"].string ?? "")
-                    publish(\.accountLabel, plugin["selection"]["accountLabel"].string ?? "")
-                    publish(\.pluginURL, plugin["selection"]["pluginUrl"].string ?? "")
-                    publish(\.pluginIcon, plugin["presentation"]["icon"])
-                }
-            }
-        }
-        if session["nativeAppLifecycleSupported"].bool {
-            // Startup observation is independent of setup readiness. A legacy
-            // recovery definition or temporarily unavailable launchd must not
-            // prevent opening the rest of the App to inspect and recover it.
-            let observed = snapshot["lifecycle"]["loginAtStartup"].string ?? "unknown"
-            publish(\.loginStartup, ["enabled", "disabled", "not_installed"].contains(observed) ? observed : "unknown")
-        } else { publish(\.loginStartup, "unknown") }
-        observePermissions()
-        if !restoredPage {
-            restoredPage = true
-            if let deployment = deployment {
-                computer = deployment.computerRequested; browser = deployment.browserRequested
-                page = ProductRestorationPolicy.page(deployment: deployment, localPrepared: localPrepared,
-                                                     browser: browserObservation, foreground: status["foreground"],
-                                                     accepted: accepted, accessibility: axGranted, screenRecording: screenGranted)
-            }
-        }
+        await refreshNativeLogin()
     }
     private func refreshNativeLogin() async {
         guard status["supportedOperations"].array.contains(where: { $0.string == "appLifecycle" }) else {
             publish(\.loginStartup, "unknown"); return
         }
         do {
-            let result = try await client.read("app/lifecycle")
+            let result = try await client.lifecycle()
             let lifecycle = result["lifecycle"]
             guard lifecycle["schema"] == .number(1), lifecycle["platform"].string == "macos",
                   let observed = lifecycle["status"].string,
@@ -671,43 +405,20 @@ enum ProductRestorationPolicy {
             error = productText("登录启动更改的结果未确认，Styx 不会重复执行。请在系统设置中核对当前状态。", "The login startup change is unconfirmed and will not be repeated. Check its current state in System Settings.")
             return
         }
-        if let core = failure as? ProductCoreError {
-            if case .serviceChangeUnconfirmed = core {
-                error = productText("后台服务操作的结果未确认，Styx 不会重复执行。请查看当前状态并保留原配置；安全退出 App 不代表服务操作成功。", "The background service operation is unconfirmed and will not be repeated. Review its state and keep the original profile. Quitting the App safely does not confirm that the service operation succeeded.")
-                return
-            }
-            if case .servicePreparationRequired = core {
-                error = productText("请先在“设置 → 通用”的“高级：运行组件更新”中完成更新，再转为后台管理。现有身份和配对会保留。", "First complete the update under Advanced: runtime component updates in Settings → General, then transfer to background management. Identity and pairing will be preserved.")
-                return
-            }
-        }
         // Never interpolate raw transport errors, response bodies or secrets.
         switch failure as? ProductWorkflowError {
         case .roleChangeNeedsRestart:
             error = productText("这台电脑已停止连接，但网关尚未确认清理。请退出并重新打开 Styx，再更改角色并配对；不会重复重置设置。", "This computer has stopped, but the Gateway did not confirm cleanup. Quit and reopen Styx, then change its role to pair again. No settings reset was repeated.")
-        case .browserPreparationNeedsReview:
-            error = productText("浏览器尚未准备好。请点击“重新检查”；若这台电脑由邀请加入，请先在发出邀请的电脑上允许浏览器自动化。", "The browser is not ready. Select Check again. If this computer joined by invitation, first allow Browser Automation on the computer that invited it.")
-        case .capabilityNeedsOfflineReview:
-            error = productText("暂时无法更改功能：这台电脑正由另一个 Styx 程序或后台服务连接。请先在管理它的程序中断开，再应用更改。", "Features cannot be changed while another Styx program or background service is connected. Disconnect it in the program that manages it, then apply your changes.")
-        case .foregroundStopUnconfirmed:
-            error = productText("连接还未完全停止，功能没有更改。请稍等片刻，再点击“重新检查”。", "The connection has not finished stopping, so features have not changed. Wait a moment, then select Check again.")
-        case .capabilityChangeInterrupted:
-            error = productText("功能更改中断，暂时无法确定是否已保存。请保留现有设置，将此提示交给 Styx 维护者处理。", "The feature update was interrupted and may not have been saved. Keep your settings and share this message with the Styx maintainer.")
-        case .foregroundRecoveryRequired:
-            error = productText("功能已更改，电脑还未重新连接。请点击“继续设置”，然后重试本机连接。", "Features were updated, but this computer has not reconnected. Select Continue setup, then retry this computer’s connection.")
         case .computerPermissionRecoveryRequired:
-            error = productText("还无法操作电脑。请检查 Styx 的辅助功能和屏幕录制权限；若刚开启权限，请退出并重新打开 Styx。", "Computer interaction is unavailable. Check Styx’s Accessibility and Screen Recording permissions. If you just enabled them, quit and reopen Styx.")
+            error = productText("还无法操作电脑。请检查 Styx 的辅助功能和屏幕录制权限；若刚开启权限，请退出并重新打开 Styx。", "Computer interaction is not available. Check Styx Accessibility and Screen Recording permissions. If you just enabled them, quit and reopen Styx.")
         default:
-            error = productText("操作未完成。请点击“重新检查”查看最新状态；若仍有问题，请将此提示交给 Styx 维护者。", "The operation did not finish. Select Check again to see the latest state. If the issue persists, share this message with the Styx maintainer.")
+            error = productText("操作未完成。请检查当前状态后重试；结果未确认的操作不会自动重复。", "The operation did not finish. Check the current state before retrying; unconfirmed operations are not repeated automatically.")
         }
     }
     private func waitForObservation() async throws {
         while observationInFlight { try await Task.sleep(nanoseconds: 20_000_000) }
     }
     func perform(_ operation: @escaping () async throws -> Void) {
-        #if STYX_TESTING
-        if testPreview { error = "UI preview: no Core operation was performed."; return }
-        #endif
         guard !busy else { return }
         mutationRevision += 1
         busy = true; error = nil
@@ -719,118 +430,50 @@ enum ProductRestorationPolicy {
     }
 
     func createAndPrepare() {
-        if nativeHost {
-            guard !busy else { return }
-            let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty else { return }
-            let joinExisting = joining
-            if !joinExisting && !nativeCanCreateLocal { page = .overview; return }
-            perform { [self] in
-                // Selecting Computer Use never grants desktop permission or invents
-                // readiness; the Permissions page asks the owner for both grants.
-                var choice: [String: ProductJSON] = ["label": .string(name), "exec": .bool(exec), "computer": .bool(computer), "persistLogin": .bool(false)]
-                choice.merge(nativeBrowserChoice) { _, chosen in chosen }
-                if joinExisting {
-                    guard let origin = joinAcceptance["origin"].string,
-                          let ca = joinAcceptance["caSha256"].string else { throw ProductCoreError.rejected }
-                    choice["approvedGatewayOrigin"] = .string(origin)
-                    choice["approvedCaSha256"] = .string(ca)
-                    _ = try await client.native("join", choice)
-                    joinAcceptance = .null; inspection = .null; page = afterSetupPage
-                } else {
-                    guard nativeCanCreateLocal, let tunnel = setupTunnelInput else { throw ProductCoreError.rejected }
-                    choice["tunnel"] = tunnel; setupTunnelKey = ""
-                    choice["allowRemoteHosts"] = .bool(allowRemoteHosts)
-                    if allowRemoteHosts && !lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { choice["lanAddress"] = .string(lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)) }
-                    nativeLocalSetupSubmitted = true
-                    defer { if nativeLocalSetupSubmitted { page = afterSetupPage } }
-                    // One request; omitted port uses Core's fixed default 22022.
-                    // perform refreshes status after failure, never this mutation.
-                    do { try applyNative(try await client.native("createLocal", choice)) }
-                    catch {
-                        if let failure = error as? ProductOwnedCoreRejection,
-                           ["app_lan_address_invalid", "app_network_interface_changed", "app_network_interface_required", "app_network_interfaces_unavailable", "tunnel_client_unavailable"].contains(failure.response["error"].string ?? "") {
-                            // Core refused before publishing any setup input.
-                            nativeLocalSetupSubmitted = false
-                            if failure.response["error"].string == "tunnel_client_unavailable" {
-                                self.error = productText("请使用包含 Tunnel 客户端的 Gateway 安装包。", "Use a Gateway package that includes the Tunnel client.")
-                                return
-                            }
-                            self.error = productText("请选择可用的局域网或 VPN 网络。若网络已变化，请重新检测；设置尚未提交。", "Select an available LAN or VPN network. If the network changed, detect networks again. Setup was not submitted.")
+        guard !busy else { return }
+        let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        let joinExisting = joining
+        if !joinExisting && !nativeCanCreateLocal { page = .overview; return }
+        perform { [self] in
+            // Selecting Computer Use never grants desktop permission or invents
+            // readiness; the Permissions page asks the owner for both grants.
+            var choice: [String: ProductJSON] = ["label": .string(name), "exec": .bool(exec), "computer": .bool(computer), "persistLogin": .bool(false)]
+            choice.merge(nativeBrowserChoice) { _, chosen in chosen }
+            if joinExisting {
+                guard let origin = joinAcceptance["origin"].string,
+                      let ca = joinAcceptance["caSha256"].string else { throw ProductCoreError.rejected }
+                choice["approvedGatewayOrigin"] = .string(origin)
+                choice["approvedCaSha256"] = .string(ca)
+                _ = try await client.native("join", choice)
+                joinAcceptance = .null; inspection = .null; page = afterSetupPage
+            } else {
+                guard nativeCanCreateLocal, let tunnel = setupTunnelInput else { throw ProductCoreError.rejected }
+                choice["tunnel"] = tunnel; setupTunnelKey = ""
+                choice["allowRemoteHosts"] = .bool(allowRemoteHosts)
+                if allowRemoteHosts && !lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { choice["lanAddress"] = .string(lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                nativeLocalSetupSubmitted = true
+                defer { if nativeLocalSetupSubmitted { page = afterSetupPage } }
+                // One request; omitted port uses Core's fixed default 22022.
+                // perform refreshes status after failure, never this mutation.
+                do { try applyNative(try await client.native("createLocal", choice)) }
+                catch {
+                    if let failure = error as? ProductOwnedCoreRejection,
+                       ["app_lan_address_invalid", "app_network_interface_changed", "app_network_interface_required", "app_network_interfaces_unavailable", "tunnel_client_unavailable"].contains(failure.response["error"].string ?? "") {
+                        // Core refused before publishing any setup input.
+                        nativeLocalSetupSubmitted = false
+                        if failure.response["error"].string == "tunnel_client_unavailable" {
+                            self.error = productText("请使用包含 Tunnel 客户端的 Gateway 安装包。", "Use a Gateway package that includes the Tunnel client.")
                             return
                         }
-                        self.error = productText("上次设置结果尚未确认，请刷新状态查看；原配置已保留。", "The last setup result is unconfirmed. Refresh status to review it; your existing settings have been retained.")
+                        self.error = productText("请选择可用的局域网或 VPN 网络。若网络已变化，请重新检测；设置尚未提交。", "Select an available LAN or VPN network. If the network changed, detect networks again. Setup was not submitted.")
                         return
                     }
+                    self.error = productText("上次设置结果尚未确认，请刷新状态查看；原配置已保留。", "The last setup result is unconfirmed. Refresh status to review it; your existing settings have been retained.")
+                    return
                 }
-            }; return
-        }
-        guard status["deployment"] == .null else { page = .preparation; return }
-        perform { [self] in
-            guard status["deployment"] == .null else { throw ProductCoreError.rejected }
-            let defaults = session["defaults"]
-            var host = defaults.object.filter { ["bundle", "publisherKeyFile", "publisherSha256", "baseDir"].contains($0.key) }
-            guard host.count == 4, !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ProductCoreError.unavailable }
-            host["label"] = .string(label); host["computer"] = .bool(computer)
-            host["browser"] = .object(["enabled": .bool(browser), "headless": .bool(false)])
-            let gatewayURL = joining ? joinAcceptance["origin"].string : defaults["gatewayUrl"].string
-            guard let gatewayURL = gatewayURL else { throw ProductCoreError.unavailable }
-            var payload: [String: ProductJSON] = ["schema": .number(1), "mode": .string(joining ? "join-existing" : "create-local"), "gateway": .object(["url": .string(gatewayURL)]), "host": .object(host)]
-            if joining {
-                guard let id = joinAcceptance["joinLinkId"].string else { throw ProductCoreError.rejected }
-                payload["joinLinkId"] = .string(id)
             }
-            _ = try await client.write("create", payload)
-            page = .preparation
-            try await reload()
-            try await prepare()
-        }
-    }
-    private func prepare() async throws {
-        defer { preparationActivity = nil }
-        preparationActivity = retryableCommandCheck == nil ? .components : .connection
-        if joined {
-            // Retry only the claim/doctor checks that Core marks safely blocked.
-            // Uncertain preparation/request mutations are never replayed.
-            let safe: Set<String> = ["host.prepare", "host.request", "host.claim", "host.doctor"]
-            let retryableChecks: Set<String> = ["host.claim", "host.doctor"]
-            for _ in 0..<4 {
-                guard let next = deployment?.steps.first(where: { $0.status != "succeeded" && $0.status != "skipped" }),
-                      safe.contains(next.id),
-                      ["pending", "awaiting_approval"].contains(next.status) ||
-                        (next.status == "blocked" && retryableChecks.contains(next.id)) else { break }
-                _ = try await client.write("advance", ["authorize": .array([.string(next.id)])])
-                try await reload()
-                guard deployment?.steps.first(where: { $0.id == next.id })?.status == "succeeded" else { break }
-            }
-        } else if !localPrepared {
-            var scope = status["ownerPairingScope"].object
-            guard !scope.isEmpty else { throw ProductCoreError.unavailable }
-            scope["approve"] = .bool(true)
-            _ = try await client.write("local-setup", ["ownerApproval": .object(scope)])
-            try await reload()
-        }
-        guard localPrepared else { return }
-        if deployment?.browserRequested == true {
-            preparationActivity = .browser
-            browserObservation = try await client.read("browser")["browser"]
-            switch ProductCapabilityPolicy.browserPreparation(requested: true, observation: browserObservation) {
-            case .prepare: browserObservation = try await client.write("browser/prepare", ["authorize": .bool(true)])["browser"]
-            case .notRequired: break
-            case .needsReview: throw ProductWorkflowError.browserPreparationNeedsReview
-            }
-        }
-        preparationActivity = .connection
-        let foreground = try await client.write("foreground", ["authorize": .bool(true)])["foreground"]
-        foregroundRecoveryNeeded = false
-        page = ProductCapabilityPolicy.computerApproved(foreground) ? .permissions : joined ? .overview : .chat
-    }
-    func continuePreparation() { perform { [self] in try await prepare() } }
-    func recheckCommandComponent() {
-        guard retryableCommandCheck != nil else { return }
-        // Core admits only this explicit read-only blocked doctor retry. It
-        // retains completed installation/pairing and refuses uncertain steps.
-        perform { [self] in try await prepare() }
+        }; return
     }
     func observePermissions() {
         let observation = permissionReader()
@@ -849,7 +492,7 @@ enum ProductRestorationPolicy {
     func continueAfterPermissions() {
         perform { [self] in
             try await verifyPermissionsAndRecover()
-            page = nativeHost || joined ? .overview : .chat
+            page = .overview
         }
     }
     func permissionWasRequested(_ screen: Bool) -> Bool { permissionActions.wasRequested(screen) }
@@ -867,54 +510,19 @@ enum ProductRestorationPolicy {
         if !(screen ? screenGranted : axGranted) { permissionResume?.begin() }
         permissionActions.open(screen)
     }
-    func beginJoinRecovery() {
-        guard canRecoverJoin, !busy else { return }
-        invite = ""; inspection = .null; joinAcceptance = .null
-        recoveringJoin = true; page = .invitation
-    }
     func cancelInvitationReview() {
         invite = ""; inspection = .null; joinAcceptance = .null
-        page = recoveringJoin || status["deployment"] != .null ? .preparation : .welcome
-        recoveringJoin = false
-    }
-    func rollbackJoinRecovery() {
-        guard joinRollbackRequired, let transaction = joinRecovery["transactionId"].string else { return }
-        perform { [self] in
-            _ = try await client.write("join/rollback", ["authorize": .bool(true), "transactionId": .string(transaction)])
-            recoveringJoin = false; inspection = .null; joinAcceptance = .null; page = .preparation
-        }
+        page = nativeCanCreateLocal ? .welcome : .overview
     }
     func inspectInvitation() {
         let input = invite; invite = ""; inspection = .null; joinAcceptance = .null
-        perform { [self] in inspection = try await client.write("pairing-link/inspect", ["link": .string(input)]) }
+        perform { [self] in inspection = try await client.native("inspectJoin", ["link": .string(input)]) }
     }
     func acceptInvitation() {
-        if nativeHost {
-            guard inspection["preview"]["origin"].string != nil, inspection["preview"]["caSha256"].string != nil else { error = productText("需要核对证书", "Certificate confirmation required"); return }
-            joinAcceptance = inspection["preview"]; joining = true; page = .capabilities; return
-        }
-        perform { [self] in
-            // Existing deployments may only use the Core-admitted recovery path.
-            guard recoveringJoin ? canRecoverJoin : status["deployment"] == .null else { throw ProductCoreError.rejected }
-            let p = inspection["preview"]
-            var payload: [String: ProductJSON] = ["inspectionId": inspection["inspectionId"], "approvedGatewayOrigin": p["origin"]]
-            if p["caSha256"].string != nil { payload["approvedCaSha256"] = p["caSha256"] }
-            joinAcceptance = try await client.write("pairing-link/accept", payload)
-            if recoveringJoin {
-                guard let id = joinAcceptance["joinLinkId"].string else { throw ProductCoreError.rejected }
-                _ = try await client.write("join/recover", ["authorize": .bool(true), "joinLinkId": .string(id)])
-                inspection = .null; joinAcceptance = .null; recoveringJoin = false; page = .preparation
-                // Recovery updates trust and resets the uncertain request only.
-                // The user explicitly continues the retained setup from this page.
-            } else {
-                inspection = .null; joining = true; page = .capabilities
-            }
-        }
+        guard inspection["preview"]["origin"].string != nil, inspection["preview"]["caSha256"].string != nil else { error = productText("需要核对证书", "Certificate confirmation required"); return }
+        joinAcceptance = inspection["preview"]; joining = true; page = .capabilities; return
     }
     func saveTunnel(id: String, newKey: String?) async throws {
-        #if STYX_TESTING
-        if testPreview { throw ProductCoreError.unavailable }
-        #endif
         guard !busy else { throw ProductCoreError.unavailable }
         let normalized = id.trimmingCharacters(in: .whitespacesAndNewlines)
         guard ProductTunnelInputPolicy.tunnelError(normalized) == nil,
@@ -926,41 +534,12 @@ enum ProductRestorationPolicy {
         busy = true; error = nil
         defer { busy = false }
         try await waitForObservation()
-        if nativeHost {
-            var payload: [String: ProductJSON] = ["authorize": .bool(true), "tunnelId": .string(normalized)]
-            if let newKey = newKey { payload["apiKey"] = .string(newKey) }
-            _ = try await client.native("tunnelSave", payload)
-            tunnelID = normalized
-            try await reload(); monitorTunnel(); return
-        }
-        // The Core keeps the stored key private. Omitting apiKey deliberately
-        // retains it; the App never reads it back into a password field.
-        if journey["tunnel"]["status"].string == "running" {
-            _ = try await client.write("tunnel/stop", ["authorize": .bool(true)])
-        }
-        var payload: [String: ProductJSON] = ["authorize": .bool(true), "autoStart": .bool(true), "tunnelId": .string(normalized)]
+
+        var payload: [String: ProductJSON] = ["authorize": .bool(true), "tunnelId": .string(normalized)]
         if let newKey = newKey { payload["apiKey"] = .string(newKey) }
-        _ = try await client.write("tunnel/configure", payload)
-        _ = try await client.write("tunnel/start", ["authorize": .bool(true)])
+        _ = try await client.native("tunnelSave", payload)
         tunnelID = normalized
-        try await reload()
-        monitorTunnel()
-    }
-    func startTunnel() {
-        #if STYX_TESTING
-        if testPreview { error = "UI preview: connection operations are disabled."; return }
-        #endif
-        guard !busy, tunnelAttempt != .connecting else { return }
-        tunnelMonitor?.cancel(); tunnelObservationStale = true; tunnelAttempt = .connecting
-        mutationRevision += 1
-        busy = true; error = nil
-        Task {
-            do {
-                try await waitForObservation()
-                _ = try await client.write("tunnel/start", ["authorize": .bool(true)])
-                busy = false; monitorTunnel()
-            } catch { busy = false; tunnelAttempt = .failed; reportFailure(error) }
-        }
+        try await reload(); monitorTunnel(); return
     }
     @discardableResult func monitorTunnel(check: (() async -> Void)? = nil, pause: (() async throws -> Void)? = nil) -> Task<Void, Never> {
         tunnelMonitor?.cancel()
@@ -987,70 +566,31 @@ enum ProductRestorationPolicy {
         } catch { self.error = productText("请选择不超过 256 KB 的方形 PNG 图片（48–1024 像素）。", "Choose a square PNG, 48–1024 pixels and no larger than 256 KB.") }
     }
     func clearSecrets() {
-        runtimeKey = ""; invite = ""
+        setupTunnelKey = ""; invite = ""
         createdInvitation = .null; invitationCopied = false
         if let copied = copiedCredential, copiedCredentialChangeCount == NSPasteboard.general.changeCount,
            NSPasteboard.general.string(forType: .string) == copied { NSPasteboard.general.clearContents() }
         copiedCredential = nil; copiedCredentialChangeCount = nil
     }
     func copy(_ value: String, secret: Bool = false) {
-        #if STYX_TESTING
-        if testPreview { return }
-        #endif
         guard !value.isEmpty else { return }
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(value, forType: .string)
         if secret { copiedCredential = value; copiedCredentialChangeCount = NSPasteboard.general.changeCount }
     }
-    func beginAcceptance() { perform { [self] in _ = try await client.write("acceptance/begin", ["authorize": .bool(true)]) } }
-    func confirmChat() {
-        guard targetProofReady, let id = challengeID else { return }
-        perform { [self] in _ = try await client.write("acceptance/confirm", ["authorize": .bool(true), "challengeId": .string(id), "observedInTargetChat": .bool(true)]) }
-    }
-    func loadDevices() {
-        perform { [self] in devices = try await client.write("devices", [:])["devices"].array.compactMap(ProductDevice.init) }
-    }
-    func setDefault(_ id: String) { perform { [self] in _ = try await client.write("default-device", ["authorize": .bool(true), "deviceId": .string(id)]); devices = try await client.write("devices", [:])["devices"].array.compactMap(ProductDevice.init) } }
     func revokeDevice(_ device: ProductDevice) {
         let alert = NSAlert()
         alert.messageText = productText("撤销这台电脑的访问？", "Revoke this computer's access?")
-        alert.informativeText = device.label + "\n" + productText("该电脑将无法继续访问，需要管理电脑重新审核才能加入。", "This computer will lose access and require a new owner review before joining again.")
+        alert.informativeText = device.label + "\n" + productText("该电脑将无法继续访问，需要新的邀请才能加入。", "This computer will lose access and need a new invitation to join again.")
         alert.addButton(withTitle: productText("撤销访问", "Revoke access"))
         alert.addButton(withTitle: productText("取消", "Cancel"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         perform { [self] in
-            _ = try await client.write("device/revoke", ["authorize": .bool(true), "deviceId": .string(device.id)])
-            devices = try await client.write("devices", [:])["devices"].array.compactMap(ProductDevice.init)
+            _ = try await client.native("revokeComputer", ["authorize": .bool(true), "deviceId": .string(device.id)])
+            devices = try await client.native("computers", [:])["devices"].array.compactMap(ProductDevice.init)
         }
     }
     func setLoginEnabled(_ enabled: Bool) {
-        perform { [self] in _ = try await client.write("app/login", ["authorize": .bool(true), "enabled": .bool(enabled)]) }
-    }
-    func loadPending() {
-        // Core advertises this read only for the owning, unfenced Gateway.
-        // Reading existing requests must never create an invitation or change
-        // which invitation surfaces are open. Failed reads retain prior rows.
-        guard !nativeHost || nativeSupportsOperation("pendingComputers") else { return }
-        perform { [self] in
-            pending = try await client.write("pending/list", ["authorize": .bool(true)])["pending"].array
-        }
-    }
-    func approvePending() {
-        guard let payload = ProductInvitationPolicy.approval(selectedPending, confirmation: comparisonConfirmation) else { return }
-        // Capture only the request the user explicitly compared. Later polling
-        // cannot substitute another identity or its requested capabilities.
-        comparisonConfirmation = ""
-        perform { [self] in
-            var approval = payload
-            if nativeHost {
-                approval.removeValue(forKey: "comparisonCodeConfirmation")
-                approval["comparisonCode"] = .string(selectedPending["comparison_code"].string ?? "")
-                approval["deviceId"] = selectedPending["device_id"]
-                approval["fingerprint"] = selectedPending["fingerprint"]
-            }
-            _ = try await client.write("pending/approve", approval)
-            selectedPending = .null
-            pending = try await client.write("pending/list", ["authorize": .bool(true)])["pending"].array
-        }
+        perform { [self] in _ = try await client.changeLogin(["authorize": .bool(true), "enabled": .bool(enabled)]) }
     }
     func setHostCapability(_ name: String, enabled: Bool) {
         perform { [self] in
@@ -1058,66 +598,11 @@ enum ProductRestorationPolicy {
             guard result["applied"].bool else { throw ProductCoreError.rejected }
         }
     }
-    func updateCapabilities() {
-        perform { [self] in
-            guard !joined else { throw ProductCoreError.rejected }
-            status = try await client.read("status")
-            var payload: [String: ProductJSON] = ["authorize": .bool(true), "computer": .bool(computer)]
-            let currentBrowser = status["deviceCapabilities"]["browser"] == .null ? deployment?.browserRequested == true : status["deviceCapabilities"]["browser"].bool
-            var stoppedOwnedForeground = false
-            if browser != currentBrowser {
-                payload["browser"] = .bool(browser)
-                switch ProductCapabilityPolicy.foregroundTransition(owner: status["ownedForeground"], observed: status["foreground"]) {
-                case .stopped: break
-                case .needsReview: throw ProductWorkflowError.capabilityNeedsOfflineReview
-                case .owned:
-                    let alert = NSAlert()
-                    alert.messageText = productText("暂停本次连接并更改能力？", "Pause this connection and change capabilities?")
-                    alert.informativeText = productText("这会停止本次 Styx App 管理的 CLI、Browser 和 Computer Use 连接。请先完成正在进行的操作。更改成功后会恢复连接。", "This pauses CLI, Browser and Computer Use connections managed by this Styx App. Finish active work first. Connections resume after successful changes.")
-                    alert.addButton(withTitle: productText("暂停并更改", "Pause and change"))
-                    alert.addButton(withTitle: productText("取消", "Cancel"))
-                    guard alert.runModal() == .alertFirstButtonReturn else { return }
-                    let stopped: ProductJSON
-                    do { stopped = try await client.write("foreground/stop", ["authorize": .bool(true)])["foreground"] }
-                    catch { throw ProductWorkflowError.foregroundStopUnconfirmed }
-                    guard stopped["status"].string == "stopped", stopped["observation"].string == "current_process", stopped["foregroundRestartRequired"] == .bool(true) else { throw ProductWorkflowError.foregroundStopUnconfirmed }
-                    stoppedOwnedForeground = true; foregroundRecoveryNeeded = true
-                }
-            }
-            let result: ProductJSON
-            do { result = try await client.write("capabilities", payload)["capabilities"] }
-            catch {
-                if stoppedOwnedForeground { throw ProductWorkflowError.capabilityChangeInterrupted }
-                // Computer-only updates can also stop the owned connection
-                // before a lost response. Observe and recover; never replay.
-                foregroundRecoveryNeeded = true
-                throw ProductWorkflowError.capabilityChangeInterrupted
-            }
-            guard result["status"].string == "updated", result["phase"].string == "complete" else {
-                foregroundRecoveryNeeded = stoppedOwnedForeground || result["foregroundRestartRequired"].bool
-                throw ProductWorkflowError.capabilityChangeInterrupted
-            }
-            if stoppedOwnedForeground || result["foregroundRestartRequired"] == .bool(true) {
-                foregroundRecoveryNeeded = true
-                do {
-                    _ = try await client.write("foreground", ["authorize": .bool(true)])
-                    foregroundRecoveryNeeded = false
-                } catch { throw ProductWorkflowError.foregroundRecoveryRequired }
-            }
-        }
-    }
     func resumeForeground() {
-        if nativeHost { guard nativeSupportsOperation("connect") else { return }; perform { [self] in _ = try await client.native("connect") }; return }
-        perform { [self] in
-            _ = try await client.write("foreground", ["authorize": .bool(true)])
-            foregroundRecoveryNeeded = false
-            if page == .preparation { restoredPage = false }
-        }
+        guard nativeSupportsOperation("connect") else { return }
+        perform { [self] in _ = try await client.native("connect") }
     }
     func openOfficial(_ value: String) {
-        #if STYX_TESTING
-        if testPreview { return }
-        #endif
         guard let url = URL(string: value), let c = URLComponents(url: url, resolvingAgainstBaseURL: false), c.user == nil, c.password == nil else { return }
         let official = c.scheme == "https" && ["platform.openai.com", "chatgpt.com", "developers.openai.com"].contains(c.host ?? "") && c.port == nil
         let system = c.scheme == "x-apple.systempreferences" && ["com.apple.preference.security", "com.apple.Localization-Settings.extension"].contains(c.path)

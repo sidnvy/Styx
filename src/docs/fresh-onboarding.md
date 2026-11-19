@@ -43,7 +43,7 @@ Gateway deployment, choosing an unused loopback port:
 "$STYX" gateway bootstrap --parent-dir /absolute/private/gateway-parent \
   --name gateway --deployment-file /absolute/private/inputs/gateway.json \
   --runtime-selection-file /absolute/private/inputs/runtime-selection.json --json
-"$STYX" plan --native --state-dir /absolute/private/gateway-parent/gateway \
+"$STYX" plan --state-dir /absolute/private/gateway-parent/gateway \
   --component gateway --run running --transaction-id gateway-first-run \
   --sequence 1 --json
 "$STYX" apply --state-dir /absolute/private/gateway-parent/gateway \
@@ -109,7 +109,7 @@ credential refresh command and is not part of ordinary reconnect.
 ## Connect, observe a real effect, and reopen
 
 ```sh
-"$STYX" plan --native --state-dir /absolute/private/host-parent/host \
+"$STYX" plan --state-dir /absolute/private/host-parent/host \
   --component host --run running --transaction-id host-first-run --sequence 1 --json
 "$STYX" apply --state-dir /absolute/private/host-parent/host \
   --plan-file EXACT_HOST_PLAN_FILE_FROM_PREVIOUS_REPORT --authorize --json

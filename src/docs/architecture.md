@@ -53,11 +53,12 @@ Within `styx-runtime`:
 | `providers/codex`, `providers/browser`, `providers/cua` | Adapters for the fixed upstream executors |
 | `foreground` | Compose one native Host/Gateway for CLI, App or a native service |
 | `management`, `store` | Native configuration changes, persisted state and credential storage |
-| `platform`, `app` | OS service and native App lifecycle integration |
+| `platform`, `app` | Linux systemd and native App lifecycle integration |
 | `release` | Installed payload selection and publisher verification |
 
 Swift in `host/macos/` and C# in `host/windows/` provide native UI and OS
-integration. They call the Rust core. Node runs the Playwright Browser worker;
+integration. Both use the current Rust App protocol; macOS has no parallel HTTP
+management client or JavaScript setup runtime. Node runs the Playwright Browser worker;
 build and test scripts may also use Node, but there is no JavaScript Gateway,
 Host or management runtime.
 
@@ -114,9 +115,12 @@ services, it also selects the active runtime. For App-managed processes, the
 current signed App bundle supplies executable code; the profile's original
 selection remains enrollment history. A replacement bundle must retain the
 publisher and support the persisted state reader.
-Previously committed App runtime-update records remain readable after removal
-of their updater. New stopped-profile runtime selection uses the existing native
-transaction writer; historical App records do not require a second live writer.
+Configuration has one current format (`native_state_v1`, schema 1). Runtime
+selection and an optional update record live in that format; there are no
+migration, App updater, service repair or role-transfer reader variants. Release
+producers and native installers use `native_runtime_v2`. Old format readers and
+automatic imports are removed; no compatibility or conversion manager replaces them.
+Stopped-profile runtime selection uses the existing native transaction writer.
 
 OS observations report what is actually running. The Linux upgrade plan records
 unfinished installation intent and the pending dispatch; the native journal
@@ -136,11 +140,18 @@ assets. Local builds remain development and test inputs.
 
 ## Supported compositions
 
-Desktop installations offer Host only or Gateway + Host. Headless Linux offers
-Gateway only. The one Gateway owns the deployment's Tunnel. Hosts pair with its
+Desktop installations offer Host only or Gateway + Host, owned by the running
+App. Login startup launches that App through the normal OS mechanism. Desktop
+roles cannot be exported or transferred into macOS launchd or Windows SCM
+services. Headless Linux offers Gateway only, owned by systemd. The one Gateway owns the deployment's Tunnel. Hosts pair with its
 address and one-time invitation; opening another conversation does not create a
 new device identity.
 
-Current native profiles and pairing survive an update. Source cleanup never
-deletes runtime profiles, keys or publisher pins. Historical migration cuts are
-not instructions to reset already installed Rust deployments.
+The CLI uses the current native configuration directly: `status --state-dir`
+reads it and `plan --state-dir` describes the requested native change. There is
+no separate legacy planner or `--native` mode switch.
+
+Changes to source do not modify installed profiles, keys, pairing or publisher
+pins. A future installation of this format does not promise to read an earlier
+format; deployment and any required configuration replacement are separate from
+source integration. Current-format updates retain identity and publisher continuity.

@@ -1,8 +1,5 @@
 //! Real C07 update/recovery and synthetic, legally signed C08 fixtures. No image
 //! execution, user publisher, Host enrollment, service or power-loss acceptance.
-#[path = "native_app_reader7_reference_tests.rs"]
-mod app_reader7_reference;
-
 use super::*;
 use crate::{
     crypto::DevicePrivateKey,
@@ -38,24 +35,7 @@ fn write(path: &Path, bytes: &[u8], executable: bool) {
     file.write_all(bytes).unwrap();
     file.sync_all().unwrap();
 }
-fn candidate(base: &Path, name: &str, key: &SigningKey, selected: bool) -> NativeRuntimeSelection {
-    candidate_reader(
-        base,
-        name,
-        key,
-        if selected {
-            "native_runtime_selected_v1"
-        } else {
-            "native_runtime_migrated_v3"
-        },
-    )
-}
-fn candidate_reader(
-    base: &Path,
-    name: &str,
-    key: &SigningKey,
-    reader: &str,
-) -> NativeRuntimeSelection {
+fn candidate(base: &Path, name: &str, key: &SigningKey) -> NativeRuntimeSelection {
     let payload = base.join(name);
     directory(&payload);
     directory(&payload.join("bin"));
@@ -100,10 +80,10 @@ fn candidate_reader(
         .fingerprint()
         .unwrap();
     let manifest = serde_json::json!({"schema":2,"runtime_format":"native_rust_v1","component":"styx", "scope":"runtime_candidate",
-        "minimum_reader": reader,
+        "minimum_reader": "native_runtime_v2",
         "target":"x86_64-unknown-linux-gnu","version":format!("0.4.0-test.{name}"),"entrypoint":"bin/styx",
         "source":{"revision":"1".repeat(40),"inputs_sha256":Sha256Digest::of_bytes(members[2].1)},
-        "contracts":{"control":1,"management_state":match reader { "native_pairing_lifecycle_v1" => 7, "native_app_service_transferred_v1" => 6, "native_app_runtime_selected_v1" => 4, "native_runtime_selected_v1" => 3, _ => 2 }},"files":files,"external_workers":[]});
+        "contracts":{"control":1,"management_state":1},"files":files,"external_workers":[]});
     let raw = serde_json::to_vec(&manifest).unwrap();
     write(&payload.join("manifest.json"), &raw, false);
     write(
@@ -129,42 +109,15 @@ fn verified(base: &Path, name: &str) -> VerifiedNativeRelease {
     release::verify_selected(&selection_file(base, name)).unwrap()
 }
 fn create(base: &Path, bootstrap: &NativeRuntimeSelection, identity: &[u8]) -> NativeTransactions {
-    create_for_manager(base, bootstrap, identity, NativeManager::ForegroundCli)
-}
-fn create_for_manager(
-    base: &Path,
-    bootstrap: &NativeRuntimeSelection,
-    identity: &[u8],
-    manager: NativeManager,
-) -> NativeTransactions {
-    create_for_reader(
-        base,
-        bootstrap,
-        identity,
-        manager,
-        ReaderContract::NativeManagementStateV1,
-    )
-}
-fn create_for_reader(
-    base: &Path,
-    bootstrap: &NativeRuntimeSelection,
-    identity: &[u8],
-    manager: NativeManager,
-    reader: ReaderContract,
-) -> NativeTransactions {
     directory(base);
     let parent = PrivateRoot::open(base).unwrap();
     let fresh = native_root::create_fresh(&parent, OsStr::new("native"))
         .unwrap_or_else(|e| panic!("fresh: {:?}", e.error()));
     let state = NativeState {
-        schema: match reader {
-            ReaderContract::NativeManagementStateV1 => NATIVE_STATE_SCHEMA,
-            ReaderContract::NativePairingLifecycleStateV1 => NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA,
-            _ => panic!("fixture reader"),
-        },
+        schema: NATIVE_STATE_SCHEMA,
         kind: NativeStateKind::StyxDesiredState,
         runtime_format: NativeRuntimeFormat::NativeRustV1,
-        reader_contract: reader,
+        reader_contract: ReaderContract::NativeStateV1,
         scope_generation: fresh.marker().scope_generation,
         deployment_raw_sha256: Sha256Digest::of_bytes(DEPLOYMENT),
         mode: NativeDeploymentMode::JoinExisting,
@@ -173,12 +126,11 @@ fn create_for_reader(
         desired: NativeDesired {
             gateway: None,
             host: Some(NativeComponentDesired {
-                manager,
+                manager: NativeManager::ForegroundCli,
                 run: NativeRunDesired::Stopped,
                 autostart: NativeAutostartDesired::Disabled,
             }),
         },
-        migration: None,
         extensions: BTreeMap::from([
             (
                 NATIVE_RUNTIME_SELECTION_KEY.into(),
@@ -218,25 +170,19 @@ fn reported_selection(tx: &NativeTransactions, profile: &Path) -> NativeRuntimeS
 }
 
 #[test]
-fn pairing_reader7_real_journal_accepts_fresh_genesis_and_its_first_committed_transaction() {
-    let base = std::env::temp_dir().join(format!("styx-pairing-genesis-{}", uuid::Uuid::new_v4()));
+fn native_real_journal_rejects_unrecorded_successors_and_retains_first_commit() {
+    let base = std::env::temp_dir().join(format!("styx-native-genesis-{}", uuid::Uuid::new_v4()));
     directory(&base);
     let key = SigningKey::from_bytes(&[79u8; 32]);
-    let initial = candidate_reader(&base, "pairing-first", &key, "native_pairing_lifecycle_v1");
-    let next = candidate_reader(&base, "pairing-next", &key, "native_pairing_lifecycle_v1");
+    let initial = candidate(&base, "first", &key);
+    let next = candidate(&base, "next", &key);
     let profile = base.join("profile");
-    let mut tx = create_for_reader(
-        &profile,
-        &initial,
-        b"synthetic private fixture identity",
-        NativeManager::ForegroundCli,
-        ReaderContract::NativePairingLifecycleStateV1,
-    );
+    let mut tx = create(&profile, &initial, b"synthetic private fixture identity");
     complete_chain(&tx);
     assert_eq!(reported_selection(&tx, &profile), initial);
 
     // These are valid typed successors with no matching journal. A decoded
-    // schema7 alone must not make either one an admissible fresh genesis.
+    // state alone must not make either one an admissible fresh genesis.
     let empty = tx
         .configuration_root()
         .with_state(|configuration| {
@@ -264,13 +210,8 @@ fn pairing_reader7_real_journal_accepts_fresh_genesis_and_its_first_committed_tr
             bootstrap_runtime: initial.clone(),
             previous_runtime: initial.clone(),
             transaction,
-            service_repair: None,
         })
         .unwrap(),
-    );
-    fake_selected.extensions.insert(
-        NATIVE_PAIRING_RUNTIME_HISTORY_KEY.into(),
-        serde_json::value::to_raw_value(&NativePairingRuntimeHistory::Foreground).unwrap(),
     );
     let fake_selected =
         native_state::decode_state(&serde_json::to_vec(&fake_selected).unwrap(), tx.marker())
@@ -283,24 +224,21 @@ fn pairing_reader7_real_journal_accepts_fresh_genesis_and_its_first_committed_tr
 
     // Real coordinator, original writer and real persisted phase chain. No
     // runtime image is launched by this desired-state transaction.
-    tx.apply_target(&successor(&tx, "pairing-first-desired", 1))
+    tx.apply_target(&successor(&tx, "first-desired", 1))
         .unwrap();
     complete_chain(&tx);
-    assert_eq!(
-        tx.readstate().unwrap().state().schema,
-        NATIVE_PAIRING_LIFECYCLE_STATE_SCHEMA
-    );
+    assert_eq!(tx.readstate().unwrap().state().schema, NATIVE_STATE_SCHEMA);
     assert_eq!(reported_selection(&tx, &profile), initial);
     drop(tx);
     let mut tx = open(&profile);
     complete_chain(&tx);
     assert_eq!(reported_selection(&tx, &profile), initial);
-    tx.recover_original(&"pairing-first-desired".try_into().unwrap())
+    tx.recover_original(&"first-desired".try_into().unwrap())
         .unwrap();
     tx.update_runtime(
-        verified(&base, "pairing-first"),
-        verified(&base, "pairing-next"),
-        "pairing-first-selection".try_into().unwrap(),
+        verified(&base, "first"),
+        verified(&base, "next"),
+        "first-selection".try_into().unwrap(),
         2,
     )
     .unwrap();
@@ -312,31 +250,28 @@ fn pairing_reader7_real_journal_accepts_fresh_genesis_and_its_first_committed_tr
 }
 
 #[test]
-fn pairing_reader7_real_journal_keeps_promotions_and_refuses_incompatible_rollback_without_writes()
-{
-    let base =
-        std::env::temp_dir().join(format!("styx-pairing-promotions-{}", uuid::Uuid::new_v4()));
+fn runtime_updates_preserve_bootstrap_history_and_allow_forward_rollback() {
+    let base = std::env::temp_dir().join(format!("styx-runtime-history-{}", uuid::Uuid::new_v4()));
     directory(&base);
     let key = SigningKey::from_bytes(&[80u8; 32]);
-    let initial = candidate(&base, "old-bootstrap", &key, false);
-    let first = candidate_reader(&base, "pairing-a", &key, "native_pairing_lifecycle_v1");
-    let second = candidate_reader(&base, "pairing-b", &key, "native_pairing_lifecycle_v1");
-    let _incompatible = candidate(&base, "old-selected", &key, true);
+    let initial = candidate(&base, "bootstrap", &key);
+    let first = candidate(&base, "update-a", &key);
+    let second = candidate(&base, "update-b", &key);
     let profile = base.join("profile");
     let mut tx = create(&profile, &initial, b"synthetic private fixture identity");
     tx.update_runtime(
-        verified(&base, "old-bootstrap"),
-        verified(&base, "pairing-a"),
-        "promote-to-pairing".try_into().unwrap(),
+        verified(&base, "bootstrap"),
+        verified(&base, "update-a"),
+        "first-update".try_into().unwrap(),
         1,
     )
     .unwrap();
     complete_chain(&tx);
     assert_eq!(reported_selection(&tx, &profile), first);
     tx.update_runtime(
-        verified(&base, "pairing-a"),
-        verified(&base, "pairing-b"),
-        "pairing-successor".try_into().unwrap(),
+        verified(&base, "update-a"),
+        verified(&base, "update-b"),
+        "second-update".try_into().unwrap(),
         2,
     )
     .unwrap();
@@ -353,8 +288,8 @@ fn pairing_reader7_real_journal_keeps_promotions_and_refuses_incompatible_rollba
         initial
     );
     tx.update_runtime(
-        verified(&base, "pairing-b"),
-        verified(&base, "pairing-a"),
+        verified(&base, "update-b"),
+        verified(&base, "update-a"),
         "compatible-forward-rollback".try_into().unwrap(),
         3,
     )
@@ -362,36 +297,6 @@ fn pairing_reader7_real_journal_keeps_promotions_and_refuses_incompatible_rollba
     complete_chain(&tx);
     assert_eq!(reported_selection(&tx, &profile), first);
 
-    let before = fs::read(profile.join("native/state.json")).unwrap();
-    let namespace = profile.join("native/.styx-management-journal-v1");
-    let journal_bytes = || {
-        let mut files: Vec<_> = fs::read_dir(&namespace)
-            .unwrap()
-            .map(|item| {
-                let item = item.unwrap();
-                (item.file_name(), fs::read(item.path()).unwrap())
-            })
-            .collect();
-        files.sort_by(|a, b| a.0.cmp(&b.0));
-        files
-    };
-    let original_journal = journal_bytes();
-    assert!(
-        tx.update_runtime(
-            verified(&base, "pairing-a"),
-            verified(&base, "old-selected"),
-            "incompatible-downgrade".try_into().unwrap(),
-            4
-        )
-        .is_err()
-    );
-    assert_eq!(fs::read(profile.join("native/state.json")).unwrap(), before);
-    assert_eq!(
-        journal_bytes(),
-        original_journal,
-        "no intent/prepare/phase can be written for a downgrade"
-    );
-    complete_chain(&tx);
     drop(tx);
     fs::remove_dir_all(base).unwrap();
 }
@@ -468,10 +373,10 @@ fn runtime_update_interruption_and_forward_rollback_batch() {
     directory(&base);
     let key = SigningKey::from_bytes(&[37u8; 32]);
     let foreign = SigningKey::from_bytes(&[91u8; 32]);
-    let bootstrap = candidate(&base, "bootstrap", &key, false);
-    let next = candidate(&base, "new", &key, true);
-    let rollback = candidate(&base, "rollback", &key, true);
-    let _foreign = candidate(&base, "foreign", &foreign, true);
+    let bootstrap = candidate(&base, "bootstrap", &key);
+    let next = candidate(&base, "new", &key);
+    let rollback = candidate(&base, "rollback", &key);
+    let _foreign = candidate(&base, "foreign", &foreign);
     let identity = DevicePrivateKey::generate_rsa3072().unwrap();
     for (index, fault) in ["prepared.persisted", "canonical.directory_sync"]
         .into_iter()
@@ -497,15 +402,12 @@ fn runtime_update_interruption_and_forward_rollback_batch() {
         assert!(tx.configuration_root().ensure_admission().is_err());
         assert_eq!(
             tx.query(&id).unwrap().unwrap().intent.reader,
-            ReaderContract::NativeRuntimeSelectedStateV1
+            ReaderContract::NativeStateV1
         );
         if index == 0 {
             assert_eq!(tx.readstate().unwrap().raw_bytes(), original);
         } else {
-            assert_eq!(
-                tx.readstate().unwrap().state().schema,
-                NATIVE_RUNTIME_SELECTED_STATE_SCHEMA
-            );
+            assert_eq!(tx.readstate().unwrap().state().schema, NATIVE_STATE_SCHEMA);
         }
         let result = tx
             .recover_runtime_update(verified(&base, "bootstrap"), verified(&base, "new"), &id)
@@ -580,27 +482,6 @@ fn runtime_update_interruption_and_forward_rollback_batch() {
         );
         assert_eq!(tx.readstate().unwrap().raw_bytes(), before_rejections);
         drop(tx);
-        let mut tx = open(&case);
-        tx.recover_original(&"ordinary-successor".try_into().unwrap())
-            .unwrap();
-        // The old legal package cannot become a schema3 target: its signed
-        // reader declaration supports only the original state contract.
-        assert!(
-            !verified(&base, "bootstrap")
-                .supports_state_reader(ReaderContract::NativeRuntimeSelectedStateV1)
-                .unwrap()
-        );
-        assert_eq!(
-            tx.update_runtime(
-                verified(&base, "new"),
-                verified(&base, "bootstrap"),
-                "old-reader-target".try_into().unwrap(),
-                3
-            ),
-            Err(NativeTransactionError::InvalidInput)
-        );
-        assert_eq!(tx.readstate().unwrap().raw_bytes(), before_rejections);
-        drop(tx);
         let root = PrivateRoot::open(case.join("native")).unwrap();
         let executing = root.try_execution_lease().unwrap();
         let mut tx = open(&case);
@@ -669,8 +550,8 @@ async fn status_selection_reads_committed_update_while_setup_copy_stays_old() {
     let base = std::env::temp_dir().join(format!("styx-status-selection-{}", uuid::Uuid::new_v4()));
     directory(&base);
     let key = SigningKey::from_bytes(&[37u8; 32]);
-    let initial = candidate(&base, "setup", &key, false);
-    let selected = candidate(&base, "running", &key, true);
+    let initial = candidate(&base, "setup", &key);
+    let selected = candidate(&base, "running", &key);
     let profile = base.join("profile");
     let mut tx = create(&profile, &initial, b"synthetic private fixture identity");
     directory(&profile.join("inputs"));

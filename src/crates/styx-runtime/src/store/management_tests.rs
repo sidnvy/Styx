@@ -48,7 +48,7 @@ fn intent(id: &str, sequence: u64) -> DesiredStateCommit {
         deployment_raw_sha256: Sha256Digest::of_bytes(DEPLOYMENT),
         before_state_sha256: Sha256Digest::of_bytes(BEFORE),
         target_state_sha256: Sha256Digest::of_bytes(TARGET),
-        reader: ReaderContract::NativeManagementStateV1,
+        reader: ReaderContract::NativeStateV1,
     }
 }
 #[test]
@@ -355,7 +355,7 @@ fn management_preparation_child() {
             deployment_raw_sha256: Sha256Digest::of_bytes(deployment.bytes()),
             before_state_sha256: Sha256Digest::of_bytes(before.bytes()),
             target_state_sha256: Sha256Digest::of_bytes(target.bytes()),
-            reader: ReaderContract::NativeManagementStateV1,
+            reader: ReaderContract::NativeStateV1,
         };
         let raw = serde_json::to_vec(&intent).unwrap();
         let fence = owner

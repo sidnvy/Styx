@@ -80,8 +80,6 @@ impl OwnedEnrollmentJournal {
                     writer: &mut state.writer,
                     budget: self.budget,
                     namespace: self.namespace,
-                    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-                    historical_transaction: None,
                 };
                 journal.scan()?;
                 let result = operation(&mut journal);

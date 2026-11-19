@@ -70,7 +70,6 @@ pub struct NativeTransactions {
     journal: std::sync::Arc<OwnedManagementJournal>,
     retained_maintenance: Option<ConfigurationMaintenance>,
     retained_runtime_update: Option<runtime_update::RuntimeUpdateCustody>,
-    retained_app_service_transfer: Option<app_service::AppServiceTransferCustody>,
 }
 impl NativeTransactions {
     #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
@@ -87,7 +86,6 @@ impl NativeTransactions {
                 journal: std::sync::Arc::new(journal),
                 retained_maintenance: None,
                 retained_runtime_update: None,
-                retained_app_service_transfer: None,
             }),
             Err(error) => Err(NativeTransactionOpenFailure {
                 error: error.into(),
@@ -97,11 +95,7 @@ impl NativeTransactions {
     }
     /// The caller holds the original SharedEnrollment mutex and local control gate.
     /// Only autostart changes; Core/device lanes and all run states are preserved.
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn set_service_autostart(
         &mut self,
         owner: &OwnedConfigurationRoot,
@@ -120,11 +114,7 @@ impl NativeTransactions {
         })
     }
     /// Desired Stop is committed before notification; it is never an actual-exit receipt.
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn set_service_stopped(
         &mut self,
         owner: &OwnedConfigurationRoot,
@@ -138,11 +128,7 @@ impl NativeTransactions {
     }
     /// Only a Host can be requested Running through the live Gateway writer.
     /// This changes intent only; the caller's original OS definition starts it.
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn set_service_host_running(
         &mut self,
         owner: &OwnedConfigurationRoot,
@@ -161,11 +147,7 @@ impl NativeTransactions {
     }
     /// Read this transaction's formally hash-bound target, not today's canonical
     /// revision and not the independent journal sequence number.
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn service_transaction_target_revision(
         &self,
         transaction: &TransactionId,
@@ -176,11 +158,7 @@ impl NativeTransactions {
             .map_err(|_| NativeTransactionError::UnknownInspect)?;
         Ok(target.state().revision)
     }
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     fn assign_service_desired(
         &mut self,
         owner: &OwnedConfigurationRoot,
@@ -690,14 +668,10 @@ impl NativeTransactions {
             self.validate_update_publication(&original.before, &original.target, &original.intent)?;
         }
         let canonical = self.readstate()?;
-        if self.marker().reader_floor
-            == styx_contracts::management::ReaderContract::NativeManagementStateV1
-        {
-            if transaction.snapshot().last_durable_stage == DurableStage::Committed {
-                self.validate_complete_chain(&canonical)?;
-            } else {
-                self.validate_update_recovery_chain(id, &canonical)?;
-            }
+        if transaction.snapshot().last_durable_stage == DurableStage::Committed {
+            self.validate_complete_chain(&canonical)?;
+        } else {
+            self.validate_update_recovery_chain(id, &canonical)?;
         }
         if transaction
             .recovery_decision(
@@ -714,9 +688,7 @@ impl NativeTransactions {
         // caller lost the reply. Confirm that already-admitted complete tip;
         // do not try to acquire a recovery fence that no longer exists. This
         // never releases a fence or adopts another transaction/owner.
-        if self.marker().reader_floor
-            == styx_contracts::management::ReaderContract::NativeManagementStateV1
-            && transaction.snapshot().last_durable_stage == DurableStage::Committed
+        if transaction.snapshot().last_durable_stage == DurableStage::Committed
             && self.retained_maintenance.is_none()
             && self.configuration_root().ensure_admission().is_ok()
         {
@@ -879,10 +851,5 @@ mod tests;
 #[path = "native_transaction_platform_tests.rs"]
 mod native_tests;
 
-#[path = "native_app_service.rs"]
-mod app_service;
 #[path = "native_runtime_update.rs"]
 mod runtime_update;
-
-#[cfg(target_os = "macos")]
-pub(crate) use runtime_update::OriginalServiceRuntimeRepair;
