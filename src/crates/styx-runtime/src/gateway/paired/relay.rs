@@ -476,7 +476,9 @@ impl RelayHandle {
             .get(device)
             .cloned()
             .ok_or(RelayError::Offline)?;
-        if !entry.host_settings {
+        if !entry.host_settings
+            || (!entry.android_feature && patch.is_some_and(|patch| patch.android.is_some()))
+        {
             return Err(RelayError::Unsupported);
         }
         let call = patch.map_or(Call::GetCapabilities, |patch| Call::SetCapabilities {

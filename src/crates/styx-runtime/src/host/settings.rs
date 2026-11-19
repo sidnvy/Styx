@@ -55,12 +55,27 @@ impl CapabilityPatch {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsReport {
+    #[serde(deserialize_with = "deserialize_generations")]
     pub generations: [u64; 4],
     pub configured: Capabilities,
     pub applied: bool,
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub android_status: Option<AndroidStatus>,
+}
+// Existing desktop Hosts report three generations; Android occupies the fourth.
+fn deserialize_generations<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<[u64; 4], D::Error> {
+    let generations = Vec::<u64>::deserialize(deserializer)?;
+    match generations.as_slice() {
+        [exec, browser, computer] => Ok([*exec, *browser, *computer, 0]),
+        [exec, browser, computer, android] => Ok([*exec, *browser, *computer, *android]),
+        other => Err(serde::de::Error::invalid_length(
+            other.len(),
+            &"three or four capability generations",
+        )),
+    }
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct AndroidStatus {
@@ -439,5 +454,74 @@ mod tests {
         assert!(change.await.unwrap().unwrap().applied);
         assert!(settings.admit(|c| c.exec).await.is_err());
         settings.close().await;
+    }
+
+    fn capability_reply(generations: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "status": "capabilities",
+            "report": {
+                "generations": generations,
+                "configured": {"exec": true, "browser": true, "computer": true},
+                "applied": true,
+                "error": null
+            }
+        })
+    }
+    #[test]
+    fn capability_wire_accepts_existing_desktop_and_android_generations() {
+        use crate::host::protocol::wire::Reply;
+        let old = capability_reply(serde_json::json!([11, 22, 33]));
+        let Reply::Capabilities { report } = serde_json::from_value::<Reply>(old).unwrap() else {
+            panic!("expected capability report");
+        };
+        assert_eq!(report.generations, [11, 22, 33, 0]);
+        assert_eq!(
+            report.configured,
+            Capabilities {
+                exec: true,
+                browser: true,
+                computer: true,
+                android: false
+            }
+        );
+        assert!(report.applied && report.error.is_none() && report.android_status.is_none());
+        let encoded = serde_json::to_value(Reply::Capabilities { report }).unwrap();
+        assert_eq!(
+            encoded["report"]["generations"],
+            serde_json::json!([11, 22, 33, 0])
+        );
+
+        let mut current = capability_reply(serde_json::json!([11, 22, 33, 44]));
+        current["report"]["configured"]["android"] = true.into();
+        current["report"]["android_status"] =
+            serde_json::json!({"accessibility": true, "device_locked": false});
+        let Reply::Capabilities { report } = serde_json::from_value::<Reply>(current).unwrap()
+        else {
+            panic!("expected capability report");
+        };
+        assert_eq!(report.generations, [11, 22, 33, 44]);
+        assert!(report.configured.android && report.android_status.unwrap().accessibility);
+        let encoded = serde_json::to_value(Reply::Capabilities { report }).unwrap();
+        assert_eq!(
+            encoded["report"]["generations"],
+            serde_json::json!([11, 22, 33, 44])
+        );
+    }
+    #[test]
+    fn capability_wire_rejects_other_generation_lengths_and_missing_generations() {
+        use crate::host::protocol::wire::Reply;
+        for length in [0, 1, 2, 5, 6] {
+            let wire = capability_reply(serde_json::json!(vec![0u64; length]));
+            assert!(
+                serde_json::from_value::<Reply>(wire).is_err(),
+                "length {length}"
+            );
+        }
+        let mut missing = capability_reply(serde_json::json!([0, 0, 0]));
+        missing["report"]
+            .as_object_mut()
+            .unwrap()
+            .remove("generations");
+        assert!(serde_json::from_value::<Reply>(missing).is_err());
     }
 }

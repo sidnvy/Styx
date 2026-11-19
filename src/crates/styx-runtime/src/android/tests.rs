@@ -337,6 +337,79 @@ async fn independent_android_pairing_wss_images_reconnect_disable_and_revoke() {
         "authenticated bootstrap control lease is retained"
     );
 
+    // A legacy peer does not negotiate Android. Refuse the new patch before
+    // looking up any control lease or writing a frame its old DTO cannot parse.
+    // The original Entry retains all Core leases and the actual control link.
+    let legacy = Arc::new(crate::gateway::paired::Entry {
+        host_settings: true,
+        device: original.device.clone(),
+        transport_generation: original.transport_generation.clone(),
+        host_connection: original.host_connection.clone(),
+        host_generation: original.host_generation.clone(),
+        grant_revision: original.grant_revision,
+        profile: original.profile.clone(),
+        tx: original.tx.clone(),
+        stop: original.stop.clone(),
+        live: AtomicBool::new(true),
+        admission: Mutex::new(false),
+        drain: Mutex::new(None),
+        drain_enabled: original.drain_enabled,
+        lease: tokio::sync::Mutex::new(None),
+        bootstrap_lane: original.bootstrap_lane,
+        bootstrap_lease: tokio::sync::Mutex::new(None),
+        exec_feature: original.exec_feature,
+        browser_feature: original.browser_feature,
+        computer_feature: original.computer_feature,
+        android_feature: false,
+        browser_lease: tokio::sync::Mutex::new(None),
+        computer_lease: tokio::sync::Mutex::new(None),
+    });
+    relay
+        .inner
+        .state
+        .lock()
+        .unwrap()
+        .entries
+        .insert(device.clone(), legacy);
+    for android in [false, true] {
+        let result = relay
+            .host_capabilities(
+                &device,
+                Some(crate::host::settings::CapabilityPatch {
+                    android: Some(android),
+                    ..Default::default()
+                }),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(crate::gateway::paired::RelayError::Unsupported)
+        ));
+    }
+    relay
+        .inner
+        .state
+        .lock()
+        .unwrap()
+        .entries
+        .insert(device.clone(), original.clone());
+    assert!(original.live.load(Ordering::Acquire));
+    assert!(!original.stop.is_cancelled());
+    relay
+        .host_capabilities(&device, None)
+        .await
+        .expect("original control link remains usable after a legacy Android patch refusal");
+    relay
+        .host_capabilities(
+            &device,
+            Some(crate::host::settings::CapabilityPatch {
+                exec: Some(false),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("desktop-only patch still reaches the unchanged control link");
+
     let mut config = StreamableHttpClientTransportConfig::with_uri(format!("{origin}/mcp"))
         .auth_header(mcp_token)
         .reinit_on_expired_session(false)
