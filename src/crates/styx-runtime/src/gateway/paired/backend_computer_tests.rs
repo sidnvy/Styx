@@ -154,3 +154,83 @@ fn computer_wire_preserves_explicit_timeout_and_has_no_default_response_budget()
         }
     ));
 }
+
+#[test]
+fn open_recovery_requires_an_exact_running_inspection_and_a_read_route() {
+    let target = ResourceTarget {
+        operation_id: styx_contracts::operation::OperationId {
+            host_generation: "original-host".try_into().unwrap(),
+            owner_epoch: "original-owner".try_into().unwrap(),
+            sequence: 1,
+        },
+        payload_digest: Sha256Digest::of_bytes(b"original-open"),
+    };
+    let running = || Snapshot {
+        operation_id: target.operation_id.clone(),
+        payload_digest: target.payload_digest,
+        target: None,
+        state: OperationState::Running,
+        liveness: ExecutionLiveness::Running,
+        output_drain: OutputDrain::NotOpened,
+    };
+    let accepts = |snapshot| inspected_open_running(&Reply::Inspected { snapshot }, &target);
+    assert!(accepts(running()));
+    for state in [
+        OperationState::Reserved,
+        OperationState::Dispatched,
+        OperationState::Unknown,
+        OperationState::Cancelled,
+        OperationState::Failed,
+        OperationState::Succeeded,
+    ] {
+        assert!(!accepts(Snapshot { state, ..running() }));
+    }
+    let mut wrong = running();
+    wrong.operation_id.sequence += 1;
+    assert!(!accepts(wrong));
+    let mut wrong = running();
+    wrong.operation_id.host_generation = "different-host".try_into().unwrap();
+    assert!(!accepts(wrong));
+    let mut wrong = running();
+    wrong.operation_id.owner_epoch = "different-owner".try_into().unwrap();
+    assert!(!accepts(wrong));
+    let mut wrong = running();
+    wrong.payload_digest = Sha256Digest::of_bytes(b"different-open");
+    assert!(!accepts(wrong));
+    let mut wrong = running();
+    wrong.target = Some(target.clone());
+    assert!(
+        !accepts(wrong),
+        "an action snapshot is not an open resource"
+    );
+    for reply in [
+        Reply::Error {
+            category: ErrorCategory::TargetNotFound,
+            certainty: ExecutionCertainty::NotDispatched,
+            cursor_may_be_consumed: false,
+        },
+        Reply::Error {
+            category: ErrorCategory::ResultUnknown,
+            certainty: ExecutionCertainty::Unknown,
+            cursor_may_be_consumed: false,
+        },
+        Reply::Start {
+            snapshot: running(),
+            dispatch: "started".into(),
+        },
+    ] {
+        assert!(!inspected_open_running(&reply, &target));
+    }
+    for name in [
+        "list_apps",
+        "list_windows",
+        "get_window_state",
+        "get_desktop_state",
+        "verify_state",
+    ] {
+        assert!(is_computer_read(name));
+    }
+    for name in ["click", "set_value", "unrecognized"] {
+        assert!(!is_computer_read(name));
+    }
+}

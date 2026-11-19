@@ -90,6 +90,21 @@ impl ComputerContexts {
         });
     }
 }
+fn is_computer_read(name: &str) -> bool {
+    matches!(
+        public_contract::route(name),
+        Some(
+            public_contract::PublicComputerRoute::Metadata
+                | public_contract::PublicComputerRoute::WindowRead
+                | public_contract::PublicComputerRoute::DesktopRead
+                | public_contract::PublicComputerRoute::VerifyRead
+        )
+    )
+}
+fn inspected_open_running(reply: &Reply, target: &ResourceTarget) -> bool {
+    matches!(reply, Reply::Inspected { snapshot }
+        if snapshot.state == OperationState::Running && same_resource(snapshot, target))
+}
 fn open_started(snapshot: &Snapshot, dispatch: &str, target: &ResourceTarget) -> bool {
     dispatch == "started"
         && snapshot.state == OperationState::Running
@@ -263,21 +278,30 @@ impl PairedGatewayBackend {
         if !self.active(owner) {
             return failure("permission_denied", None, false);
         }
+        if record.phase == Phase::Opening && is_computer_read(name) {
+            // A lost open reply does not prove the original worker failed.
+            // Inspect only that resource; never reopen it or replay an action.
+            if let (Some(binding), Some(target)) = (record.binding.as_ref(), record.target.as_ref())
+                && let Ok(reply) = self
+                    .computer_exchange(
+                        binding,
+                        ComputerCommand::InspectOpen {
+                            target: target.clone(),
+                        },
+                    )
+                    .await
+                && inspected_open_running(&reply, target)
+            {
+                record.phase = Phase::Ready;
+            }
+        }
         if record.phase.blocks_dispatch() {
             return failure("outcome_unknown", None, true);
         }
         if record.phase == Phase::ActionUnknown {
             // Inspect the original action; never dispatch it again. Its outcome
             // belongs to the Host ledger, not to this new read request.
-            if !matches!(
-                public_contract::route(name),
-                Some(
-                    public_contract::PublicComputerRoute::Metadata
-                        | public_contract::PublicComputerRoute::WindowRead
-                        | public_contract::PublicComputerRoute::DesktopRead
-                        | public_contract::PublicComputerRoute::VerifyRead
-                )
-            ) {
+            if !is_computer_read(name) {
                 return failure("fresh_observation_required", None, false);
             }
             let (Some(binding), Some(target), Some(action)) = (

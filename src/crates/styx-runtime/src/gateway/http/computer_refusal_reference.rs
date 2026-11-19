@@ -127,7 +127,7 @@ pub(super) async fn exercise(
         );
         assert_eq!(
             result["error"], "computer_not_dispatched",
-            "known source refusal needs a settled original reservation"
+            "known source refusal needs a settled original reservation; reply={result}"
         );
         assert_eq!(result["uncertain"], false);
         let (records, workers) = host.desktop_refusal_records();
@@ -230,7 +230,71 @@ pub(super) async fn exercise(
         4,
         "lost response cannot reopen"
     );
-    for exact_owner in [owner, &unknown_owner, &lost_owner] {
+    // Lose the public waiter after DispatchOpen was submitted. The fixture
+    // supplies only a Running Core record, never a native Cua handle. A fresh
+    // read must inspect that exact original resource and reach Host admission.
+    let running_owner = principal.new_mcp_session_owner().unwrap();
+    *factory.released.0.lock().unwrap() = false;
+    factory.mode.store(2, Ordering::SeqCst);
+    let task_backend = backend.clone();
+    let task_owner = running_owner.clone();
+    let task_device = device.clone();
+    let pending = tokio::spawn(async move {
+        task_backend
+            .call_tool(&task_owner, params("list_windows", &task_device))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), factory.entered.notified())
+        .await
+        .unwrap();
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    let original = host.simulate_desktop_open_running(running_owner.owner_id());
+    {
+        let (lock, changed) = &factory.released;
+        *lock.lock().unwrap() = true;
+        changed.notify_all();
+    }
+    factory.mode.store(0, Ordering::SeqCst);
+    let mutation = rmcp::model::CallToolRequestParams::new("click").with_arguments(
+        json!({"environment_id":device.as_str(),"element_token":"s00000001:0"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    assert_eq!(
+        text(backend.call_tool(&running_owner, mutation).await.unwrap())["error"],
+        "outcome_unknown",
+        "a mutation must not recover or replay the unknown open"
+    );
+    let read = text(
+        backend
+            .call_tool(&running_owner, params("list_apps", device))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        read["error"], "target_not_found",
+        "a fresh read must inspect the original Running record and reach Host action admission"
+    );
+    assert_eq!(read["execution_certainty"], "not_dispatched");
+    assert_eq!(read["uncertain"], false);
+    let (records, workers) = host.desktop_refusal_records();
+    assert_eq!(
+        workers, 0,
+        "the Running fixture never launched a native worker"
+    );
+    assert_eq!(records.len(), 5, "inspection must not prepare another open");
+    assert_eq!(factory.preparations.load(Ordering::SeqCst), 5);
+    let retained = records
+        .iter()
+        .find(|record| record.id == original.operation_id)
+        .unwrap();
+    assert_eq!(retained.payload_digest, original.payload_digest);
+    assert_eq!(retained.state, OperationState::Running);
+    host.finish_simulated_desktop_open(&original).await;
+
+    for exact_owner in [owner, &unknown_owner, &lost_owner, &running_owner] {
         assert_eq!(
             backend
                 .cleanup_owner(exact_owner, Duration::from_secs(5))

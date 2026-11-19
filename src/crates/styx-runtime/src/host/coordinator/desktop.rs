@@ -560,7 +560,16 @@ impl HostCoordinator {
             return Ok(DesktopOpenSubmission::Existing(snapshot));
         }
         let admission = loop {
-            self.refresh_desktop_source().await?;
+            // This refresh precedes dispatch and cannot have started a worker.
+            // Preserve unknown outcomes from refreshes after native actions.
+            self.refresh_desktop_source()
+                .await
+                .map_err(|error| match error {
+                    CoordinatorError::Desktop(CuaError::StaleObservation) => {
+                        CoordinatorError::Admission(ErrorCategory::StaleObservation)
+                    }
+                    other => other,
+                })?;
             let admission = self.reserve_desktop_open(owner, id, digest).await?;
             if !admission.waited {
                 break admission;
@@ -1233,6 +1242,67 @@ impl HostCoordinator {
             .unwrap();
         state.desktop = Some(test_lane(binding.clone()));
         binding
+    }
+    /// Synthetic ledger evidence for the paired lost-reply regression only.
+    /// No native worker or successful desktop permission is claimed.
+    pub(crate) fn simulate_desktop_open_running(&self, owner_id: &OwnerId) -> ResourceTarget {
+        let mut state = self.inner.state.lock().unwrap();
+        let lane = state.desktop.as_ref().unwrap();
+        assert!(lane.worker.resources().unwrap().is_empty());
+        let (owner, target) = lane
+            .open_history
+            .iter()
+            .find(|(owner, _)| owner.owner_id() == owner_id)
+            .cloned()
+            .unwrap();
+        let admission = facts(&state, CapabilityId::DesktopWindowsRead).unwrap();
+        assert!(matches!(
+            state
+                .ledger
+                .dispatch(
+                    &owner,
+                    &target.operation_id,
+                    target.payload_digest,
+                    &admission,
+                    self.now()
+                )
+                .unwrap(),
+            DispatchDisposition::ExecuteOnce(_)
+        ));
+        state
+            .ledger
+            .record_executor_fact(&target.operation_id, ExecutorFact::Running, self.now())
+            .unwrap();
+        target
+    }
+    pub(crate) async fn finish_simulated_desktop_open(&self, target: &ResourceTarget) {
+        let _execution = self.inner.execution_gate.clone().write_owned().await;
+        let mut state = self.inner.state.lock().unwrap();
+        assert!(
+            state
+                .desktop
+                .as_ref()
+                .unwrap()
+                .worker
+                .resources()
+                .unwrap()
+                .is_empty()
+        );
+        // Settle only this synthetic record; there was no native resource to end.
+        for fact in [
+            ExecutorFact::Exited { successful: false },
+            ExecutorFact::OutputDrained,
+        ] {
+            state
+                .ledger
+                .record_executor_fact(&target.operation_id, fact, self.now())
+                .unwrap();
+        }
+        let permit = state.ledger.begin_resource_release(target).unwrap();
+        state
+            .ledger
+            .record_provider_release(permit.confirm_released())
+            .unwrap();
     }
     pub(crate) fn desktop_refusal_records(&self) -> (Vec<OperationSnapshot>, usize) {
         let state = self.inner.state.lock().unwrap();
