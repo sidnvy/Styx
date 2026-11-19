@@ -147,7 +147,7 @@ impl NativeHostSnapshot {
         path: &Path,
         scope: Arc<crate::app::HostScope>,
     ) -> JournalResult<Self> {
-        Self::open_source(path, Some(scope), None, RunPolicy::ControlBinding)
+        Self::open_source(path, Some(scope), RunPolicy::ControlBinding)
     }
     /// Observe an App-managed Host using its currently installed App bundle.
     /// The profile C07 selection remains historical enrollment data and is

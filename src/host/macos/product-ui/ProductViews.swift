@@ -159,7 +159,7 @@ struct ProductView: View {
                 Button(productText("返回", "Back")) { model.page = model.joining ? .invitation : .welcome }
                 Spacer()
                 Button(productText("继续", "Continue")) { model.createAndPrepare() }.buttonStyle(.borderedProminent)
-                    .disabled(model.busy || (!model.joining && model.allowRemoteHosts && model.networkDiscoveryLoading) || model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (!model.joining && (!model.nativeCanCreateLocal || model.setupTunnelInput == nil)) || (!model.session["defaults"]["bundle"].string == nil))
+                    .disabled(model.busy || (!model.joining && model.allowRemoteHosts && model.networkDiscoveryLoading) || model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (!model.joining && (!model.nativeCanCreateLocal || model.setupTunnelInput == nil)))
             }
         }.task(id: model.allowRemoteHosts) {
             if !model.joining && model.allowRemoteHosts { model.discoverNetworkInterfaces() }
