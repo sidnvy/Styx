@@ -1,4 +1,4 @@
-# Styx 0.4.1
+# Styx @VERSION@
 
 Styx connects ChatGPT to your Windows, macOS and Linux computers through one
 Gateway. Each computer decides locally whether to enable commands, Browser
@@ -9,10 +9,10 @@ several conversations can use the same computer.
 
 | System | Download | Role |
 | --- | --- | --- |
-| Windows x64 | `Styx-0.4.1-windows-x64.exe` | Host, with an optional local Gateway |
-| macOS Apple silicon | `Styx-0.4.1-macos-arm64.dmg` | Host, with an optional local Gateway |
-| Linux x86_64 desktop | `styx-0.4.1-linux-x86_64-desktop.tar.gz` | Host, with an optional local Gateway |
-| Linux x86_64 server | `styx-0.4.1-linux-x86_64-gateway-only.tar.gz` | Gateway only |
+| Windows x64 | `Styx-@VERSION@-windows-x64.exe` | Host, with an optional local Gateway |
+| macOS Apple silicon | `Styx-@VERSION@-macos-arm64.dmg` | Host, with an optional local Gateway |
+| Linux x86_64 desktop | `styx-@VERSION@-linux-x86_64-desktop.tar.gz` | Host, with an optional local Gateway |
+| Linux x86_64 server | `styx-@VERSION@-linux-x86_64-gateway-only.tar.gz` | Gateway only |
 
 ## Install and connect
 
@@ -39,10 +39,18 @@ Accessibility and Screen Recording permissions needed for Computer Use.
 
 ## Existing installations
 
-Keep your current configuration. Use the new installer or App, then the single
-**Update Styx** entry in desktop Settings. Styx handles the component update and
-reconnection. Do not copy individual Runtime files or pair again just to update.
-On Linux, run the new package's `./install.sh` to update the existing installation.
+This prerelease uses the current native state format. An existing 0.4.x profile
+requires an explicit offline handoff before its first 0.5 startup; replacing the
+package alone does not convert it. Retain a complete cold backup of the old
+profile and journals, preserve identities, pairing, keys and publisher pins, and
+resolve any unfinished operation before the handoff. Do not reset or re-pair a
+computer to conceal a format mismatch.
+
+For a current-format profile, quit the desktop App, install the complete new
+package, then reopen Styx. The App uses the Runtime included in its installed
+bundle. There is no separate desktop Runtime updater. On Linux, run the new
+package's `./install.sh` to update the existing installation. Keep the prior
+working package and configuration backup until the new installation is verified.
 
 Closing a desktop window leaves Styx in the tray/menu bar. **Quit Styx** stops
 its local tasks and connection. On Linux use `styx quit` and `styx start`;
