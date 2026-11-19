@@ -175,6 +175,7 @@ jobs:
           npm --prefix src/packages/styx-browser-provider ci --ignore-scripts --no-audit --no-fund
           npm --prefix src/providers/browser-worker ci --ignore-scripts --no-audit --no-fund
       - name: Select the installed desktop browser
+        id: desktop_browser
         run: |
           python - <<'PYTHON'
           import os, pathlib, sys
@@ -187,13 +188,15 @@ jobs:
           selected = next((str(pathlib.Path(p).resolve()) for p in candidates if pathlib.Path(p).is_file()), None)
           if not selected:
               raise SystemExit('No installed desktop browser on the native runner')
-          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as env:
-              env.write('STYX_BROWSER_EXECUTABLE=' + selected + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('executable=' + selected + '\n')
           PYTHON
       - name: Provide a Linux test display
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb xauth
       - name: Exercise the visible Browser and external-page handoff
+        env:
+          STYX_BROWSER_EXECUTABLE: ${{ steps.desktop_browser.outputs.executable }}
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             xvfb-run -a node --test src/providers/browser-worker/worker.test.mjs
