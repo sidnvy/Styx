@@ -143,7 +143,9 @@ async fn known_preflight_refusal_releases_the_resource_and_allows_a_new_request(
     assert_eq!(retained.unreleased_records, 0);
     assert!(retained.blocked.is_empty());
     assert_eq!(
-        std::fs::read_dir(source.root.join("output")).unwrap().count(),
+        std::fs::read_dir(source.root.join("output"))
+            .unwrap()
+            .count(),
         0
     );
     assert_eq!(
