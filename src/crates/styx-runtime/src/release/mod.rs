@@ -335,20 +335,6 @@ impl VerifiedNativeRelease {
         let pinned = self.inventory.pin_executable(entry)?;
         Ok(pinned)
     }
-    /// Code identity of the retained, publisher-verified CLI, for a platform
-    /// service to compare against its original running process. Data only;
-    /// this does not authorize a process, writer or service registration.
-    #[cfg(target_os = "macos")]
-    pub(crate) fn macos_executable_cdhash(&self) -> Result<Vec<u8>> {
-        let cdhash = self.executable.expected_cdhash()?;
-        Ok(cdhash)
-    }
-    /// Original native CLI pin for SCM identity comparisons only. This does not
-    /// enable pathname-based spawning on Windows.
-    #[cfg(target_os = "windows")]
-    pub(crate) fn windows_executable(&self) -> Result<&PinnedExecutable> {
-        Ok(&self.executable)
-    }
     /// Returns only the fixed, retained native image's kernel FD path. This
     /// function does not spawn, install, activate or authorize arbitrary commands.
     pub fn launch_path(&self) -> Result<PathBuf> {

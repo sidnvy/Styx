@@ -937,8 +937,7 @@ impl Drop for UnsettledStart {
 impl HostAuthority {
     #[cfg(any(
         all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
+        all(test, target_os = "macos")
     ))]
     pub(crate) fn configure_exec_admission(
         &self,

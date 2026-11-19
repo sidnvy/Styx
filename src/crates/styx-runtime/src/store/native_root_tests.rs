@@ -111,7 +111,7 @@ fn fresh_native_root_genesis_reopen_and_retained_unknown_batch() {
     let canonical = fs::read(path.join("state.json")).unwrap();
     assert_eq!(fs::read(path.join("deployment.json")).unwrap(), DEPLOYMENT);
     let read = binding.validated_readstate().unwrap();
-    assert_eq!(read.state().schema, 2);
+    assert_eq!(read.state().schema, NATIVE_STATE_SCHEMA);
     assert_eq!(read.state().revision, 0);
     assert_eq!(
         read.state().extensions["preserved_unknown"].get(),

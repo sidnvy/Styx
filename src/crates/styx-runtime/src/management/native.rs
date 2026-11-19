@@ -98,11 +98,7 @@ pub struct NativeManagementError {
     _app_scope: Option<Arc<crate::app::HostScope>>,
 }
 enum Retained {
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     Service {
         _job: tokio::task::JoinHandle<()>,
     },
@@ -123,21 +119,9 @@ impl NativeManagementError {
     }
     /// An observed retained service task requires whole-process CLI
     /// teardown. Library/App callers retain this error and never exit here.
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "windows",
-        all(target_os = "linux", target_env = "gnu")
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub fn requires_process_teardown(&self) -> bool {
-        #[cfg(any(
-            all(target_os = "linux", target_env = "gnu"),
-            target_os = "macos",
-            target_os = "windows"
-        ))]
-        if matches!(self._retained, Some(Retained::Service { .. })) {
-            return true;
-        }
-        false
+        matches!(self._retained, Some(Retained::Service { .. }))
     }
     pub fn code(&self) -> &'static str {
         match self.kind {
@@ -549,11 +533,7 @@ mod platform {
         require_state(state.state(), scope.is_some())?;
         Ok(())
     }
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(super) fn service_open(path: &Path) -> Result<NativeTransactions> {
         let mut transactions = open(path)?;
         let checked = prepare_managed_transactions(path, None, &mut transactions)

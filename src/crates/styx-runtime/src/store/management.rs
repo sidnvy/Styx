@@ -26,11 +26,7 @@ pub(super) fn readonly_inventory(
 ) -> JournalResult<ManagementInventory> {
     parser::inventory(scan)
 }
-#[cfg(any(
-    all(target_os = "linux", target_env = "gnu"),
-    target_os = "windows",
-    target_os = "macos"
-))]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub(super) fn readonly_original(
     scan: &super::secure_journal::JournalObservation,
     id: &TransactionId,

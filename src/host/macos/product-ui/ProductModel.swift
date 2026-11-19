@@ -589,7 +589,6 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         perform { [self] in
             _ = try await client.native("revokeComputer", ["authorize": .bool(true), "deviceId": .string(device.id)])
-            devices = try await client.native("computers", [:])["devices"].array.compactMap(ProductDevice.init)
         }
     }
     func setLoginEnabled(_ enabled: Bool) {

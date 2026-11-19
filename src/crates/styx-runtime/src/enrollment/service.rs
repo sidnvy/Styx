@@ -384,11 +384,7 @@ pub struct EnrollmentService {
     remote_hosts: BTreeSet<String>,
     clock: Clock,
     uncertain: bool,
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     service_tip_pending: bool,
     #[cfg(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -434,11 +430,7 @@ impl EnrollmentService {
             remote_hosts: BTreeSet::new(),
             clock: Clock::new(now),
             uncertain: false,
-            #[cfg(any(
-                all(target_os = "linux", target_env = "gnu"),
-                target_os = "macos",
-                target_os = "windows"
-            ))]
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
             service_tip_pending: false,
             #[cfg(any(
                 all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -501,31 +493,19 @@ impl EnrollmentService {
         }
         result
     }
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn service_control_owner(&self) -> crate::store::OwnedConfigurationRoot {
         // This returns the SAME owner for transaction inspection even while its
         // admission fence is retained. Mutations separately require admission.
         self.store.configuration_root()
     }
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn set_service_tip_pending(&mut self, pending: bool) {
         self.service_tip_pending = pending;
     }
     fn ordinary_admission(&self) -> Result<(), ServiceError> {
         self.healthy()?;
-        #[cfg(any(
-            all(target_os = "linux", target_env = "gnu"),
-            target_os = "macos",
-            target_os = "windows"
-        ))]
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
         if self.service_tip_pending {
             return Err(ServiceError::new(503, "service_control_pending"));
         }

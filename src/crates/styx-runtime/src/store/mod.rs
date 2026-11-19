@@ -459,7 +459,7 @@ impl PrivateRoot {
             inner: self.inner.open_or_create_private_child(name)?,
         })
     }
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     pub(crate) fn revalidate_runtime_directory(&self) -> Result<()> {
         self.inner.validate_root()
     }
