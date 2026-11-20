@@ -859,7 +859,7 @@ async fn run_owned(
         match source {
             Ok(Ok(Some(source))) => {
                 let mut browser_facts = facts(&device);
-                browser_facts.descriptor.capability_id = CapabilityId::BrowserHeadless;
+                browser_facts.descriptor.capability_id = CapabilityId::Browser;
                 browser_facts.descriptor.scope = Scope::Browser;
                 browser_facts.descriptor.provider_id =
                     "playwright".try_into().expect("static provider identity");

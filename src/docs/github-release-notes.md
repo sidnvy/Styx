@@ -7,11 +7,22 @@ several conversations can use the same computer.
 
 ## Changes
 
-Linux Host services can now finish shutdown when an old command's exit receipt
-is unavailable after the executor has closed. The Host still joins its executor,
-I/O and local jobs, preserves the unknown command result, and lets systemd finish
-its existing process group. The stop command confirms the group is empty before
-reporting success. Desktop App and foreground CLI cleanup requirements are unchanged.
+Browser now opens a visible Chrome or Edge window on the selected computer,
+using a dedicated Styx profile. You can sign in, complete verification and edit
+pages in that same window. After manual interaction, the agent selects the tab
+and takes a fresh snapshot before continuing with the same page and login.
+
+Browser sessions remain on the Host across conversation closure and ordinary
+reconnection. Quitting the Host ends its sessions. Login state is not restored
+after a Host restart. Styx does not attach to your existing everyday browser
+profile or take over its already-open tabs.
+
+Browser setup now uses one interactive mode. The old headless and persistent-login
+switches have been removed. Browser requires a logged-in graphical session on
+the selected computer; a Gateway-only server does not need a desktop.
+
+A known failure before the browser starts no longer leaves the Browser session
+stuck: a fresh explicit request can try again after the cause is fixed.
 
 ## Choose your download
 
@@ -34,7 +45,8 @@ The installer retains the program in your user data directory and starts setup.
 You can remove the downloaded archive and extracted folder after installation.
 Linux uses a terminal setup wizard and systemd user services. For a headless
 Gateway to remain running after logout, enable linger for its service account
-when setup requests it. Desktop Computer Use requires a logged-in graphical session.
+when setup requests it. Browser and desktop Computer Use require a logged-in
+graphical session.
 
 On the Gateway, run `styx invite` (or use its invitation screen). On the joining
 computer, enter the Gateway address and one-use pairing code. The computers must
@@ -47,25 +59,15 @@ Accessibility and Screen Recording permissions needed for Computer Use.
 
 ## Existing installations
 
-This release uses the current native state format. An existing 0.4.x profile
-requires an explicit offline handoff before its first 0.5 startup; replacing the
-package alone does not convert it. Retain a complete cold backup of the old
-profile and journals, preserve identities, pairing, keys and publisher pins, and
-resolve any unfinished operation before the handoff. Do not reset or re-pair a
-computer to conceal a format mismatch.
+When upgrading from official 0.5.x releases, update the Gateway and its Hosts
+together. The Browser capability protocol changed in 0.6.0; an older Gateway
+will not recognize the new Host's Browser capability.
 
-For a current-format profile, quit the desktop App, install the complete new
-package, then reopen Styx. The App uses the Runtime included in its installed
-bundle. There is no separate desktop Runtime updater. On Linux, run the new
-package's `./install.sh` to update the existing installation. Keep the prior
-working package and configuration backup until the new installation is verified.
-
-Linux services created by `0.5.0-rc.1` need a one-time service-definition
-handoff for the corrected shutdown policy. Use the RC CLI to stop, disable and
-uninstall only the service; retain its profile. Then use the new CLI to select
-the verified Runtime and install, enable and start the service before running
-`./install.sh`. The ordinary installer rejects the old preview unit definition;
-this release does not add an old-unit compatibility path.
+Quit the desktop App, install the complete new package, then reopen Styx from
+its installed location. The App uses the Runtime included in that bundle.
+On Linux, run the new package's `./install.sh` to update the existing installation.
+Keep the existing profiles, identities, pairing, keys and publisher pins, and
+retain the prior working package until the new installation is verified.
 
 Closing a desktop window leaves Styx in the tray/menu bar. **Quit Styx** stops
 its local tasks and connection. On Linux use `styx quit` and `styx start`;

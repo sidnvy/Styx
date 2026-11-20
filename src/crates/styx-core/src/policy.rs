@@ -11,10 +11,7 @@ pub(crate) fn deadline_expired(
         Some(deadline) => Ok(now >= deadline),
         None if matches!(
             context.capability,
-            CapabilityId::ExecRun
-                | CapabilityId::BrowserHeadless
-                | CapabilityId::BrowserHeaded
-                | CapabilityId::BrowserAttach
+            CapabilityId::ExecRun | CapabilityId::Browser
         ) =>
         {
             Err(ErrorCategory::InvalidRequest)
@@ -124,9 +121,6 @@ fn check_admission_inner(
         || d.capability_id != context.capability
     {
         return Err(ErrorCategory::ProtocolMismatch);
-    }
-    if context.capability == CapabilityId::BrowserAttach {
-        return Err(ErrorCategory::CapabilityUnsupported);
     }
     if !d.configured || !d.remote_grant || !facts.local_policy_allowed {
         return Err(ErrorCategory::PermissionDenied);

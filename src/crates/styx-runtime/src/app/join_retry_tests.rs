@@ -465,7 +465,7 @@ async fn unsent_cli_and_app_join_retry_but_dispatched_join_stays_fenced_requires
         app.dispatch(Operation::InspectJoin, raw(json!({"link":link.as_str()})))
             .await
             .unwrap();
-        let result = app.dispatch(Operation::Join, raw(json!({"label":"Retry App","computer":false,"browser":false,"persistLogin":false,"approvedGatewayOrigin":origin_text,"approvedCaSha256":pin}))).await;
+        let result = app.dispatch(Operation::Join, raw(json!({"label":"Retry App","computer":false,"browser":false,"approvedGatewayOrigin":origin_text,"approvedCaSha256":pin}))).await;
         if origin_text == &unreachable {
             assert_eq!(result.unwrap_err().code(), "join_http_connect_failed");
             let status = app
@@ -529,7 +529,7 @@ async fn unsent_cli_and_app_join_retry_but_dispatched_join_stays_fenced_requires
         .await
         .unwrap();
     assert_eq!(preview["preview"]["caSha256"], pin.as_str());
-    let result=app.dispatch(Operation::Join,raw(json!({"label":"Code App","computer":false,"browser":false,"persistLogin":false,"approvedGatewayOrigin":origin_text,"approvedCaSha256":pin}))).await.unwrap();
+    let result=app.dispatch(Operation::Join,raw(json!({"label":"Code App","computer":false,"browser":false,"approvedGatewayOrigin":origin_text,"approvedCaSha256":pin}))).await.unwrap();
     assert_eq!(result["status"], "ready_to_connect");
     assert!(
         pairing_link::resolve(&address_code, now_ms().unwrap())
@@ -713,7 +713,7 @@ async fn presend_refusal_archives_cli_and_app_inputs_and_allows_new_inspection()
         app.dispatch(Operation::InspectJoin, raw(json!({"link":link.as_str()})))
             .await
             .unwrap();
-        let error = app.dispatch(Operation::Join, raw(json!({"label":"Retry App","computer":false,"browser":false,"persistLogin":false,"approvedGatewayOrigin":origin,"approvedCaSha256":pin}))).await.unwrap_err();
+        let error = app.dispatch(Operation::Join, raw(json!({"label":"Retry App","computer":false,"browser":false,"approvedGatewayOrigin":origin,"approvedCaSha256":pin}))).await.unwrap_err();
         assert_eq!(error.code(), "join_http_invalid_input");
         let status = app
             .dispatch(Operation::Status, raw(json!({})))

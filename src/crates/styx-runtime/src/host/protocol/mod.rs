@@ -561,7 +561,7 @@ impl<'a> HostProtocol<'a> {
                 {
                     let _ = (owner, grant_revision, timeout_ms, command);
                     Reply::Unsupported {
-                        feature: BROWSER_HEADLESS_V1.into(),
+                        feature: BROWSER_V1.into(),
                     }
                 }
             }
@@ -758,7 +758,7 @@ impl<'a> HostProtocol<'a> {
         }
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         if self.paired && self.browser.is_some() {
-            features.push(BROWSER_HEADLESS_V1.into());
+            features.push(BROWSER_V1.into());
             features.push(HOST_BROWSER_SESSIONS_V1.into());
         }
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]

@@ -267,7 +267,7 @@ async fn unknown_cleanup_retains_profile_record_until_inflight_preparation_and_r
         local_policy_allowed: true,
         descriptor: styx_contracts::capability::CapabilityDescriptor {
             contract_version: 1,
-            capability_id: CapabilityId::BrowserHeadless,
+            capability_id: CapabilityId::Browser,
             scope: styx_contracts::capability::Scope::Browser,
             provider_id: "owned-browser".try_into().unwrap(),
             configured: true,

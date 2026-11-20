@@ -438,11 +438,7 @@ fn provider_loss_is_local_and_fresh_projection_reuses_existing_policy() {
         check_admission(&context, &facts, MonotonicMillis(27)),
         Err(ErrorCategory::PermissionDenied)
     );
-    for capability in [
-        CapabilityId::ExecRun,
-        CapabilityId::BrowserHeadless,
-        CapabilityId::BrowserAttach,
-    ] {
+    for capability in [CapabilityId::ExecRun, CapabilityId::Browser] {
         let before = (
             directory.list(30),
             directory.cursor(),
@@ -465,8 +461,8 @@ fn provider_loss_is_local_and_fresh_projection_reuses_existing_policy() {
             before
         );
     }
-    // This is Core policy independence, not an actual native/headless run.
-    for capability in [CapabilityId::ExecRun, CapabilityId::BrowserHeadless] {
+    // This is Core policy independence, not an actual native Browser run.
+    for capability in [CapabilityId::ExecRun, CapabilityId::Browser] {
         let mut context = context.clone();
         context.capability = capability;
         context.session = None;

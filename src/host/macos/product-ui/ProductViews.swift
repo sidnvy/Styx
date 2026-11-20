@@ -128,7 +128,7 @@ struct ProductView: View {
                 Text(productText("需要你在系统设置中授予“辅助功能”和“屏幕录制”权限；下一步会引导你完成。", "Needs Accessibility and Screen Recording permission in System Settings; the next step guides you.")).font(.caption).foregroundStyle(.secondary)
                 Divider()
                 Toggle(isOn: $model.browser) { ProductCapabilityLabel(kind: .browser) }
-                Text(productText("自动准备专用浏览器；网站登录时由你确认。", "A dedicated browser is prepared for you. Sign in to websites when needed.")).font(.caption).foregroundStyle(.secondary)
+                Text(productText("浏览器窗口会显示在这台 Mac 上。你可以直接登录或操作，完成后让 ChatGPT 在同一会话中继续。", "A browser window opens on this Mac. Sign in or interact there, then ask ChatGPT to continue in the same session.")).font(.caption).foregroundStyle(.secondary)
             }
             TextField(productText("电脑名称", "Computer name"), text: $model.label)
             if !model.joining {

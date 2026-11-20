@@ -130,7 +130,7 @@ pub enum BrowserSessionCommand {
         arguments: serde_json::Map<String, serde_json::Value>,
     },
 }
-pub const BROWSER_HEADLESS_V1: &str = "browser_headless_v1";
+pub const BROWSER_V1: &str = "browser_v1";
 pub const HOST_EXEC_TASKS_V1: &str = "host_exec_tasks_v1";
 
 #[derive(Serialize, Deserialize)]

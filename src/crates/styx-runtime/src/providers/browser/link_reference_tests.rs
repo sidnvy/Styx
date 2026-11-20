@@ -16,8 +16,7 @@ fn token(result: &CallToolResult) -> String {
 }
 #[tokio::test]
 async fn trusted_link_boundary_blocks_reserved_and_late_snapshot_remint() {
-    let (_ledger, owner, parent, _, _) =
-        super::tests::permit(vec![1], CapabilityId::BrowserHeadless);
+    let (_ledger, owner, parent, _, _) = super::tests::permit(vec![1], CapabilityId::Browser);
     let target = styx_contracts::operation::ResourceTarget {
         operation_id: parent.id().clone(),
         payload_digest: Sha256Digest::of_bytes(parent.payload()),

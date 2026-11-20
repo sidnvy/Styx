@@ -1,7 +1,7 @@
 //! Owned Hyper upgrades. Registry routes; Core lease and owner gates authorize.
 use super::relay::{Command, Entry, RelayError, RelayHandle, cleanup_control};
 use crate::host::protocol::wire::{
-    ANDROID_V1, BROWSER_HEADLESS_V1, COMPUTER_V2, Call, HostControl, Reply, Request as WireRequest,
+    ANDROID_V1, BROWSER_V1, COMPUTER_V2, Call, HostControl, Reply, Request as WireRequest,
     Response as WireResponse, TRANSPORT_DRAIN_V1,
 };
 use bytes::Bytes;
@@ -215,7 +215,7 @@ impl RelayHandle {
                                         && got==challenge && device_id==device
                                         && connection_generation==response.connection_generation && owner_issuance=="gateway_authenticated" => {
                                             let exec=exec_negotiated(&features,write,terminate,read_resume);
-                                            let browser=features.iter().any(|v|v==BROWSER_HEADLESS_V1) && features.iter().any(|v|v==crate::host::protocol::wire::HOST_BROWSER_SESSIONS_V1);
+                                            let browser=features.iter().any(|v|v==BROWSER_V1) && features.iter().any(|v|v==crate::host::protocol::wire::HOST_BROWSER_SESSIONS_V1);
                                             (host_generation,connection_generation,rev,exec,browser,features.iter().any(|v|v==COMPUTER_V2),features.iter().any(|v|v==ANDROID_V1),features.iter().any(|v|v==TRANSPORT_DRAIN_V1),features.iter().any(|v|v==crate::host::settings::FEATURE))
                                         },
                                 _=>return Err(RelayError::Unauthorized),

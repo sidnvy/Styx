@@ -15,12 +15,8 @@ pub enum CapabilityId {
     AndroidRunSteps,
     #[serde(rename = "exec.run")]
     ExecRun,
-    #[serde(rename = "browser.headless")]
-    BrowserHeadless,
-    #[serde(rename = "browser.headed")]
-    BrowserHeaded,
-    #[serde(rename = "browser.attach")]
-    BrowserAttach,
+    #[serde(rename = "browser")]
+    Browser,
     #[serde(rename = "desktop.windows.read")]
     DesktopWindowsRead,
     #[serde(rename = "desktop.windows.control")]
@@ -39,7 +35,7 @@ impl CapabilityId {
         !matches!(
             self,
             Self::ExecRun
-                | Self::BrowserHeadless
+                | Self::Browser
                 | Self::AndroidObserve
                 | Self::AndroidAct
                 | Self::AndroidRunSteps

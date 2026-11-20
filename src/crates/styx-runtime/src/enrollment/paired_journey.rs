@@ -496,7 +496,7 @@ async fn paired_journey(capacity: bool, computers: usize, browser_handoff: bool)
     );
     if browser_enabled {
         let mut browser_facts = facts(device.clone());
-        browser_facts.descriptor.capability_id = CapabilityId::BrowserHeadless;
+        browser_facts.descriptor.capability_id = CapabilityId::Browser;
         browser_facts.descriptor.scope = Scope::Browser;
         host.authority().configure_browser(browser_facts).unwrap();
     }

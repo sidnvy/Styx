@@ -1,5 +1,10 @@
 # Foreground Browser transition bootstrap
 
+> Historical transition record. Current Browser configuration, visible-window behavior
+> and resource lifetimes are defined in [REFACTOR-PLAN.md](REFACTOR-PLAN.md#browser-边界的实现落点)
+> and the [Browser worker contract](../../providers/browser-worker/README.md). The
+> headless-only requirements and provisional limits below describe the original slice.
+
 The paired foreground Host can optionally reuse the existing, publisher-verified
 legacy release's Node and Browser dependency closure. It does not run the legacy
 JS Host, rewrite a signed member, introduce Browser workers into the

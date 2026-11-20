@@ -379,6 +379,9 @@ namespace StyxNative {
    {"This computer uses the main computer's Styx connection. Configure ChatGPT on the computer that invited you.","这台电脑使用管理电脑的 Styx 连接，请在邀请你的电脑上配置 ChatGPT。"},
    {"Computer Use","操作电脑"},
    {"Browser","操作浏览器"},
+   {"Browser — visible window on this computer","操作浏览器 — 在这台电脑上打开可见窗口"},
+   {"Browser opens a separate window on this computer. Sign in or interact there, then ask ChatGPT to continue in the same session.","浏览器会在这台电脑上打开独立窗口。你可以直接登录或操作，完成后让 ChatGPT 在同一会话中继续。"},
+   {"Choose the features to enable on this computer. Browser and Computer Use need an available signed-in desktop.","选择在这台电脑上启用的功能。操作浏览器和电脑需要已登录的桌面。"},
    {"Exec","运行命令"}
   };
   internal static string UI(string value){string translated;return System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName=="zh"&&ChineseText.TryGetValue(value,out translated)?translated:value;}
@@ -538,10 +541,10 @@ namespace StyxNative {
   internal void Verify(){var budget=Json.Obj("volumes",new object[]{Json.Obj("requiredBytes",2147483648d,"availableBytes",1073741824d)});if(!SpaceFeedback(budget,true).Contains("upgrade has not started")||SpaceFeedback(budget,false).Contains("upgrade has not started")||!SpaceFeedback(budget,true).Contains("Required:"))throw new Exception("space_feedback_failed");if(panel.Controls.Count!=1||settings.Controls.Count!=1||icon.Width<16)throw new Exception("native_shell_failed");settings.Verify();}
  }
  sealed class Settings:Form {
-  sealed class CapabilityDraft {internal string Label=Environment.MachineName,LanAddress="";internal bool Exec=true,Computer,Browser,AllowRemoteHosts;internal int Channel;internal CheckState Persist=CheckState.Checked;}
+  sealed class CapabilityDraft {internal string Label=Environment.MachineName,LanAddress="";internal bool Exec=true,Computer,Browser,AllowRemoteHosts;internal int Channel;}
   readonly StyxContext owner;readonly FlowLayoutPanel content,navigation;readonly TableLayoutPanel startupPanel;readonly Label startupText;readonly ProgressBar startupProgress;readonly Button retryStartup;readonly Label feedback,statusReadout,observationError;readonly Dictionary<string,CapabilityDraft> capabilityDrafts=new Dictionary<string,CapabilityDraft>();
   string renderedRustOverviewKey="";
-  string page="welcome",joinOrigin,joinCa;bool localCreationSubmitted;TextBox label,link;CheckBox exec,computer,browser,persist;ComboBox channel;
+  string page="welcome",joinOrigin,joinCa;bool localCreationSubmitted;TextBox label,link;CheckBox exec,computer,browser;ComboBox channel;
   internal Settings(StyxContext context,Icon icon){owner=context;Text=StyxContext.UI("Styx Settings");Icon=icon;ClientSize=new Size(590,720);MinimumSize=new Size(550,650);Font=new Font("Segoe UI",10);BackColor=Color.FromArgb(249,249,247);AutoScaleMode=AutoScaleMode.Dpi;StartPosition=FormStartPosition.CenterScreen;var outer=new TableLayoutPanel { Dock=DockStyle.Fill,RowCount=3,ColumnCount=1,Padding=new Padding(0) };outer.RowStyles.Add(new RowStyle(SizeType.Absolute,62));outer.RowStyles.Add(new RowStyle(SizeType.AutoSize));outer.RowStyles.Add(new RowStyle(SizeType.Percent,100));Controls.Add(outer);navigation=new FlowLayoutPanel { Dock=DockStyle.Fill,WrapContents=false,Padding=new Padding(15,8,0,0) };outer.Controls.Add(navigation,0,0);StyxContext.Button(navigation,"Computers",()=>{ShowPage("overview");return Task.FromResult(0);}).MinimumSize=new Size(100,32);StyxContext.Button(navigation,"ChatGPT",()=>{ShowPage("chat");return Task.FromResult(0);}).MinimumSize=new Size(100,32);StyxContext.Button(navigation,"General",()=>{ShowPage("general");return Task.FromResult(0);}).MinimumSize=new Size(100,32);foreach(Control item in navigation.Controls){item.AutoSize=false;item.Width=165;item.Height=36;}startupPanel=new TableLayoutPanel {Dock=DockStyle.Top,AutoSize=true,ColumnCount=2,RowCount=2,Padding=new Padding(26,8,26,12),Visible=false};startupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));startupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));startupText=new Label {AutoSize=true,MaximumSize=new Size(390,0),Margin=new Padding(0,0,10,8)};startupProgress=new ProgressBar {Dock=DockStyle.Top,Height=8,Style=ProgressBarStyle.Marquee,MarqueeAnimationSpeed=25};retryStartup=new Button {Text="Retry",AutoSize=true,MinimumSize=new Size(75,32)};retryStartup.Click+=async(s,e)=>await owner.InitializeCore();startupPanel.Controls.Add(startupText,0,0);startupPanel.Controls.Add(retryStartup,1,0);startupPanel.Controls.Add(startupProgress,0,1);startupPanel.SetColumnSpan(startupProgress,2);startupText.Paint+=(s,e)=>owner.RecordFirstPaint();outer.Controls.Add(startupPanel,0,1);content=new FlowLayoutPanel {Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoScroll=true,Padding=new Padding(26)};outer.Controls.Add(content,0,2);content.SizeChanged+=(sender,args)=>{foreach(Control child in content.Controls){if(child is Label||child is TextBox||child is CheckBox){child.Width=Math.Max(280,content.ClientSize.Width-content.Padding.Horizontal-22);}}};feedback=new Label {Width=490,Height=100,ForeColor=Color.FromArgb(95,70,35)};statusReadout=new Label {Width=490,Height=140};observationError=new Label {Width=490,Height=65,ForeColor=Color.FromArgb(130,65,35)};FormClosing+=(s,e)=>{if(e.CloseReason==CloseReason.UserClosing){e.Cancel=true;Hide();}};ShowPage("welcome");}
   internal bool StartupActionsGated {get{return !navigation.Enabled&&!content.Enabled;}}
   internal bool StartupRetryAvailable {get{return startupPanel.Visible&&retryStartup.Visible&&retryStartup.Enabled;}}
@@ -559,13 +562,13 @@ namespace StyxNative {
    label=Input("Computer name");label.Text=draft.Label;label.TextChanged+=(s,e)=>draft.Label=((TextBox)s).Text;
    exec=new CheckBox {Text="Exec — run commands on this computer",Checked=draft.Exec,Width=490,Height=32};
    computer=new CheckBox {Text="Computer Use — control the signed-in desktop",Checked=draft.Computer,Width=490,Height=32};
-   browser=new CheckBox {Text="Browser Automation — dedicated Styx profile",Checked=draft.Browser,Width=490,Height=32};
+   browser=new CheckBox {Text=StyxContext.UI("Browser — visible window on this computer"),Checked=draft.Browser,Width=490,Height=32};
    content.Controls.Add(exec);content.Controls.Add(computer);content.Controls.Add(browser);
    exec.CheckedChanged+=(s,e)=>draft.Exec=((CheckBox)s).Checked;computer.CheckedChanged+=(s,e)=>draft.Computer=((CheckBox)s).Checked;browser.CheckedChanged+=(s,e)=>draft.Browser=((CheckBox)s).Checked;
    channel=new ComboBox {DropDownStyle=ComboBoxStyle.DropDownList,Width=300,AccessibleName="Browser"};channel.Items.AddRange(new object[]{"Automatic (Chrome / Edge)","Microsoft Edge","Google Chrome"});channel.SelectedIndex=draft.Channel;channel.SelectedIndexChanged+=(s,e)=>draft.Channel=((ComboBox)s).SelectedIndex;content.Controls.Add(channel);
-   persist=new CheckBox {Text="Keep website logins in the dedicated Styx profile",CheckState=draft.Persist,Width=490,Height=32};persist.CheckStateChanged+=(s,e)=>draft.Persist=((CheckBox)s).CheckState;content.Controls.Add(persist);Explain("Browser Automation uses a separate Styx profile. Your personal browser sessions stay separate.",65);
+   Explain("Browser opens a separate window on this computer. Sign in or interact there, then ask ChatGPT to continue in the same session.",65);
   }
-  Dictionary<string,object> Choice(){var values=Json.Obj("label",label.Text.Trim(),"computer",computer.Checked,"browser",browser.Checked);values["exec"]=exec.Checked;if(label.Text.Trim().Length==0)throw new InvalidOperationException();values["browserChannel"]=channel.SelectedIndex==1?"msedge":channel.SelectedIndex==2?"chrome":"auto";values["persistLogin"]=persist.Checked;return values;}
+  Dictionary<string,object> Choice(){var values=Json.Obj("label",label.Text.Trim(),"computer",computer.Checked,"browser",browser.Checked);values["exec"]=exec.Checked;if(label.Text.Trim().Length==0)throw new InvalidOperationException();values["browserChannel"]=channel.SelectedIndex==1?"msedge":channel.SelectedIndex==2?"chrome":"auto";return values;}
   async Task ReadLogin(){ApplyLogin(await owner.Call("appLifecycle"));}
   void ApplyLogin(object response){string state=Json.Str(response,"lifecycle","status"),operation=Json.Str(response,"login","status");Feedback(!owner.LoginChangeAllowed||operation=="unknown"?"The last login startup change is unconfirmed and will not be repeated. Check Windows startup settings. Quit and reopen Styx to read the system state.":operation=="pending"?"A login startup change is awaiting its result. Styx will not repeat it.":state=="not_registered"?"Login startup is off.":state=="registered_unverified"?"Login startup is registered. Windows can disable it independently; check Windows startup settings.":state=="foreign"?"The existing Startup entry belongs to another app or installation. Styx preserved it.":"Login startup could not be observed. Check Windows startup settings; no startup entry was changed.");}
   bool NativeSetupEmpty(object data){return Json.Str(data,"mode")=="rust_host"&&!Json.Yes(data,"admission_fenced")&&Json.Get(data,"gateway")==null&&Json.Get(data,"configuration")==null&&Json.Get(data,"enrollment")==null;}
@@ -707,6 +710,7 @@ namespace StyxNative {
   }
   void HostCapabilities(){
    if(!owner.Supports("hostCapabilities")){Explain("Connect this computer to change its capabilities.",45);return;}
+    Explain("Browser opens a separate window on this computer. Sign in or interact there, then ask ChatGPT to continue in the same session.",65);
     Explain("Turning off a capability stops its existing tasks. Other capabilities and the Gateway connection keep running.",80);
     foreach(string capability in new[]{"exec","browser","computer"}){
      string selectedCapability=capability;
@@ -740,7 +744,7 @@ namespace StyxNative {
     else Explain("The last change is unconfirmed. Styx will not repeat it. Check Windows startup settings, or quit and reopen Styx to read the system state.",85);
     Action("Windows startup settings",()=>{Process.Start("ms-settings:startupapps");return Task.FromResult(0);},false);NativeAction("Check status","appLifecycle",ReadLogin);
    }else if(name=="create"){
-    Capabilities();persist.Checked=false;persist.Enabled=false;
+    Capabilities();
     channel.Items[0]="Choose Microsoft Edge or Google Chrome";channel.Enabled=browser.Checked;browser.CheckedChanged+=(s,e)=>channel.Enabled=browser.Checked;
     Explain("Styx sets up a local gateway and connects this computer. Computer Use is optional and controls only your signed-in desktop when it is available.",85);
     bool resuming=CanResumeLocal();
@@ -810,9 +814,9 @@ namespace StyxNative {
     });
     Action("Return",()=>{ShowPage("welcome");return Task.FromResult(0);},false);
    }else if(name=="join"){
-    Capabilities();persist.Checked=false;persist.Enabled=false;
+    Capabilities();
     channel.Items[0]="Choose Microsoft Edge or Google Chrome";channel.Enabled=browser.Checked;browser.CheckedChanged+=(s,e)=>channel.Enabled=browser.Checked;
-    Explain("Choose the features to enable on this computer. Computer Use requires an available signed-in desktop. Browser Automation uses a separate, temporary profile.",85);
+    Explain("Choose the features to enable on this computer. Browser and Computer Use need an available signed-in desktop.",85);
     joinOrigin="";joinCa="";link=Input("Gateway address and pairing code (or paste invitation)",true);
     NativeAction("Review pairing link","inspectJoin",async()=>{joinOrigin="";joinCa="";string invitation=link.Text;link.Clear();var result=await owner.Call("inspectJoin",Json.Obj("link",invitation));if(String.IsNullOrEmpty(Json.Str(result,"inspectionId")))throw new IOException();joinOrigin=Json.Str(result,"preview","origin");joinCa=Json.Str(result,"preview","caSha256");Feedback("Gateway: "+joinOrigin+"\nCertificate SHA-256: "+(joinCa.Length>0?joinCa:"System trust is not supported in this slice")+"\nExpires: "+Convert.ToString(Json.Get(result,"preview","expiresAt"))+"\nConfirm this Gateway to join.");});
     NativeAction("Trust this Gateway and send request","join",async()=>{if(String.IsNullOrEmpty(joinOrigin))throw new InvalidOperationException();if(String.IsNullOrEmpty(joinCa))throw new NativeOperationException("app_system_trust_not_supported");if(browser.Checked&&channel.SelectedIndex==0){Feedback("Choose Microsoft Edge or Google Chrome before requesting Browser Automation.");return;}var choice=Choice();if(!browser.Checked)choice["browserChannel"]=null;choice["approvedGatewayOrigin"]=joinOrigin;choice["approvedCaSha256"]=joinCa;joinOrigin="";joinCa="";var result=await owner.Call("join",choice);string joined=Json.Str(result,"status");if(joined!="ready_to_connect"&&joined!="awaiting_approval")throw new IOException();await owner.RefreshAfterMutation();ShowPage("overview");Feedback(joined=="ready_to_connect"?"This computer is paired.":"Waiting for approval of the original invitation.");},JoinRequestProgress);

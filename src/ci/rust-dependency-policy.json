@@ -357,12 +357,12 @@
     "host::coordinator::browser::browser_tests::actual_owned_browser_host_nonce_policy_drop_and_cleanup": {
       "kind": "explicit_external_runtime",
       "input": "--browser-host --node22 --codex-bin --browser-executable and fresh owned evidence root",
-      "required_for": "actual Linux headless owned Host Browser nonce/profile/policy/unknown/no-replay and physical cleanup; not paired-network, desktop, account or signed package acceptance"
+      "required_for": "actual Linux visible owned Host Browser nonce/profile/policy/unknown/no-replay and physical cleanup; not paired-network, desktop, account or signed package acceptance"
     },
     "host::coordinator::browser::browser_tests::references::actual_snapshot_refs_navigation_tabs_owner_and_reopen_batch": {
       "kind": "explicit_external_runtime",
       "input": "--browser-references --browser-host and all explicit owned Browser inputs",
-      "required_for": "actual headless Core/Host opaque refs, native navigation/tab invalidation and reopen ABA; not final crossplatform Browser/account/desktop release"
+      "required_for": "actual visible Core/Host opaque refs, native navigation/tab invalidation and reopen ABA; not final crossplatform Browser/account/desktop release"
     },
     "app::join_retry_tests::unsent_cli_and_app_join_retry_but_dispatched_join_stays_fenced_requires_sockets": {
       "kind": "loopback_socket_fixture",

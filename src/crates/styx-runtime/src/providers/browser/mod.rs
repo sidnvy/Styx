@@ -77,14 +77,12 @@ pub struct OwnedBrowserConfig {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserOpenSpec {
-    mode: String,
     config_digest: Sha256Digest,
 }
 impl BrowserOpenSpec {
     pub fn for_config(config: &OwnedBrowserConfig) -> Result<Self> {
         config.validate()?;
         Ok(Self {
-            mode: "headless".into(),
             config_digest: config.digest()?,
         })
     }
@@ -490,7 +488,7 @@ impl BrowserOpenSlot {
         let validate = || -> Result<()> {
             config.validate()?;
             if permit.target().is_some()
-                || permit.context().capability != CapabilityId::BrowserHeadless
+                || permit.context().capability != CapabilityId::Browser
                 || permit.context().session.is_some()
                 || permit.context().observation.is_some()
             {
@@ -498,7 +496,7 @@ impl BrowserOpenSlot {
             }
             let spec: BrowserOpenSpec = serde_json::from_slice(permit.payload())
                 .map_err(|_| BrowserError::InvalidRequest)?;
-            if spec.mode != "headless" || spec.config_digest != config.digest()? {
+            if spec.config_digest != config.digest()? {
                 return Err(BrowserError::InvalidRequest);
             }
             Ok(())
@@ -622,6 +620,29 @@ impl BrowserOpenSlot {
         let mut live = resource.state.clone().lock_owned().await;
         let started = Instant::now();
         let until = started + config.rpc_timeout;
+        #[cfg(target_os = "linux")]
+        let desktop_environment = {
+            // Keep this read under the registered resource's cancellation owner.
+            // No Browser process has been dispatched if desktop startup is unavailable.
+            let environment = tokio::select! {
+                _ = resource.stop.cancelled() => Err(BrowserError::Unknown),
+                result = crate::providers::linux_scope::browser_desktop_environment(Some(until)) => result.map_err(BrowserError::from),
+            };
+            match environment {
+                Ok(environment) => environment,
+                Err(cause) => {
+                    // This registered resource has no child or I/O to stop. Record
+                    // its normal cleanup result before returning the known refusal.
+                    cleanup(&mut live, config.rpc_timeout).await;
+                    return Err(BrowserOpenFailure {
+                        operation,
+                        handle: Some(handle),
+                        evidence: BrowserActionEvidence::NotDispatched,
+                        cause,
+                    });
+                }
+            }
+        };
         let result = async {
             #[cfg(target_os = "linux")]
             {
@@ -636,7 +657,7 @@ impl BrowserOpenSlot {
             file.write_all(&bytes).and_then(|_|file.sync_all()).map_err(|_|BrowserError::SpawnFailed)?;
             live.config_file = config_file;
             let cfg = fd_path(&file);live.pins.push(file);
-            let (mut command, scope) = LinuxOwnedScope::command(ScopeCommand::browser(node,worker,cfg,config.workspace_dir.clone(),config.output_dir.clone())?)?;
+            let (mut command, scope) = LinuxOwnedScope::command(ScopeCommand::browser(node,worker,cfg,config.workspace_dir.clone(),config.output_dir.clone(),desktop_environment)?)?;
             live.scope = Some(scope);
             live.child = Some(command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn().map_err(|_|BrowserError::SpawnFailed)?);
             tokio::select! {
@@ -859,7 +880,7 @@ impl BrowserActionSlot {
             || permit.owner() != &self.resource.owner
             || target.operation_id != self.resource.operation
             || target.payload_digest != self.resource.digest
-            || permit.context().capability != CapabilityId::BrowserHeadless
+            || permit.context().capability != CapabilityId::Browser
             || permit.context().session.is_some()
             || permit.context().observation.is_some()
         {
