@@ -50,6 +50,7 @@ struct LocalBrowser {
     node_path: PathBuf,
     browser: PathBuf,
     runtime: PrivateDirectory,
+    profiles: PrivateDirectory,
     assets: PreparedBrowserAssets,
     #[cfg(target_os = "linux")]
     workspace: PathBuf,
@@ -213,6 +214,10 @@ pub(crate) fn prepare_browser_bootstrap(
     let node_path = release.join("bin/node.exe");
     canonical(&node_path).map_err(|e| at("node_path", e))?;
     let browser = browser_path;
+    let browser_root = assets::open_or_create_private_directory(profile.host_base_dir(), "browser")
+        .map_err(|e| at("private_profiles", map_error(e)))?;
+    let profiles = assets::open_or_create_private_directory(browser_root.path(), "profiles")
+        .map_err(|e| at("private_profiles", map_error(e)))?;
     let runtime = assets::fresh_private_directory(profile.host_base_dir())
         .map_err(|e| at("private_runtime", map_error(e)))?;
     let staged = assets::prepare(
@@ -227,6 +232,7 @@ pub(crate) fn prepare_browser_bootstrap(
         node,
         browser,
         runtime,
+        profiles,
         assets: staged,
         profile,
         owners: Mutex::new(Vec::new()),
@@ -248,6 +254,7 @@ impl LocalBrowser {
             .revalidate()
             .map_err(|_| ErrorCategory::IntegrityFailure)?;
         self.runtime.revalidate().map_err(map_error)?;
+        self.profiles.revalidate().map_err(map_error)?;
         self.assets.revalidate().map_err(map_error)?;
         #[cfg(target_os = "linux")]
         canonical(&self.workspace)?;
@@ -265,6 +272,10 @@ impl LocalBrowser {
     }
 }
 impl BrowserBootstrap for LocalBrowser {
+    fn saved_profiles(&self) -> Result<Vec<String>> {
+        saved_profile_ids(&self.profiles)
+    }
+
     fn release_profile(&self, owner: &OwnerLease) {
         if let Ok(mut owners) = self.owners.lock() {
             owners.retain(|entry| &entry.owner != owner);
@@ -280,15 +291,15 @@ impl BrowserBootstrap for LocalBrowser {
         if let Some(p) = owners.iter().find(|p| &p.owner == owner) {
             return Ok(p.config.clone());
         }
-        // An OwnerId reused with a different epoch/incarnation never adopts an
-        // old profile. Core remains the sole authority deciding valid owners.
+        // Old runtime owners are never restored. The Host's stable profile ID
+        // selects only browser data; Core still decides valid operator leases.
         if owners
             .iter()
             .any(|p| p.owner.owner_id() == owner.owner_id())
         {
             return Err(ErrorCategory::Unauthorized);
         }
-        let private = assets::fresh_private_directory(self.runtime.path()).map_err(map_error)?;
+        let private = profile_directory(&self.runtime, &self.profiles, owner.owner_id().as_str())?;
         let output = assets::fresh_private_directory(self.runtime.path()).map_err(map_error)?;
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         let workspace = assets::fresh_private_directory(self.runtime.path()).map_err(map_error)?;
@@ -353,6 +364,54 @@ impl BrowserBootstrap for LocalBrowser {
         self.validate_inputs(false)
     }
 }
+fn profile_id_name(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn persistent_profile_id(owner_id: &str) -> Option<&str> {
+    let (profile, incarnation) = owner_id.strip_prefix("host-browser-")?.split_once('-')?;
+    (profile_id_name(profile) && profile_id_name(incarnation)).then_some(profile)
+}
+
+pub(crate) fn profile_directory(
+    runtime: &PrivateDirectory,
+    profiles: &PrivateDirectory,
+    owner_id: &str,
+) -> Result<PrivateDirectory> {
+    match persistent_profile_id(owner_id) {
+        Some(profile) => {
+            profiles.revalidate().map_err(map_error)?;
+            assets::open_or_create_private_directory(profiles.path(), profile).map_err(map_error)
+        }
+        // Retain the private protocol/fixture behavior outside Host sessions.
+        None => assets::fresh_private_directory(runtime.path()).map_err(map_error),
+    }
+}
+
+fn saved_profile_ids(profiles: &PrivateDirectory) -> Result<Vec<String>> {
+    profiles.revalidate().map_err(map_error)?;
+    let mut ids = Vec::new();
+    for entry in std::fs::read_dir(profiles.path()).map_err(|_| ErrorCategory::PermissionDenied)? {
+        let entry = entry.map_err(|_| ErrorCategory::PermissionDenied)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str().filter(|name| profile_id_name(name)) else {
+            continue;
+        };
+        if entry
+            .file_type()
+            .map_err(|_| ErrorCategory::PermissionDenied)?
+            .is_dir()
+        {
+            ids.push(name.to_owned());
+        }
+    }
+    ids.sort();
+    Ok(ids)
+}
+
 fn map_error(error: crate::providers::browser::BrowserError) -> ErrorCategory {
     use crate::providers::browser::BrowserError;
     match error {
@@ -423,5 +482,90 @@ mod selection_tests {
             chrome
         );
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    struct PrivateFixture(PathBuf);
+    impl PrivateFixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
+                .join(format!("styx-browser-profiles-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for PrivateFixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn persistent_profiles_keep_login_bytes_across_runtime_and_incarnation_changes() {
+        let fixture = PrivateFixture::new();
+        let profiles = assets::open_or_create_private_directory(&fixture.0, "profiles").unwrap();
+        let profile_id = "a".repeat(32);
+        let first_owner = format!("host-browser-{profile_id}-{}", "1".repeat(32));
+        let (profile_path, runtime_path) = {
+            let runtime = assets::fresh_private_directory(&fixture.0).unwrap();
+            let profile = profile_directory(&runtime, &profiles, &first_owner).unwrap();
+            std::fs::write(profile.path().join("Cookies"), b"persistent login fixture").unwrap();
+            (profile.path().to_path_buf(), runtime.path().to_path_buf())
+        };
+        let profiles = assets::open_or_create_private_directory(&fixture.0, "profiles").unwrap();
+        let runtime = assets::fresh_private_directory(&fixture.0).unwrap();
+        let next_owner = format!("host-browser-{profile_id}-{}", "2".repeat(32));
+        let reopened = profile_directory(&runtime, &profiles, &next_owner).unwrap();
+        assert_ne!(runtime.path(), runtime_path);
+        assert_eq!(reopened.path(), profile_path);
+        assert_eq!(
+            std::fs::read(reopened.path().join("Cookies")).unwrap(),
+            b"persistent login fixture"
+        );
+        let other_owner = format!("host-browser-{}-{}", "b".repeat(32), "3".repeat(32));
+        let other = profile_directory(&runtime, &profiles, &other_owner).unwrap();
+        assert_ne!(other.path(), reopened.path());
+        assert!(!other.path().join("Cookies").exists());
+        let legacy = profile_directory(&runtime, &profiles, "browser-fixture-owner").unwrap();
+        assert!(legacy.path().starts_with(runtime.path()));
+        assert!(!legacy.path().starts_with(profiles.path()));
+    }
+
+    #[test]
+    fn saved_profiles_list_only_stable_profile_directory_names() {
+        let fixture = PrivateFixture::new();
+        let profiles = assets::open_or_create_private_directory(&fixture.0, "profiles").unwrap();
+        for name in ["b".repeat(32), "a".repeat(32), "not-a-profile".to_owned()] {
+            assets::open_or_create_private_directory(profiles.path(), &name).unwrap();
+        }
+        std::fs::write(profiles.path().join("c".repeat(32)), b"not a directory").unwrap();
+        symlink(
+            profiles.path().join("a".repeat(32)),
+            profiles.path().join("d".repeat(32)),
+        )
+        .unwrap();
+        assert_eq!(
+            saved_profile_ids(&profiles).unwrap(),
+            vec!["a".repeat(32), "b".repeat(32)]
+        );
+        assert_eq!(
+            persistent_profile_id(&format!(
+                "host-browser-{}-{}",
+                "a".repeat(32),
+                "1".repeat(32)
+            )),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(
+            persistent_profile_id(&format!(
+                "host-browser-{}-{}",
+                "A".repeat(32),
+                "1".repeat(32)
+            )),
+            None
+        );
+        assert_eq!(persistent_profile_id("host-browser-old-incarnation"), None);
     }
 }

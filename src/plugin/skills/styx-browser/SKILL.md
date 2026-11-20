@@ -20,20 +20,27 @@ For an existing browser session, use the Computer Use workflow when appropriate
 or explain the limitation. Never copy profiles, cookies or tokens to simulate a
 signed-in session.
 
-A Browser session belongs to its Host and stays open after the conversation ends
-or the Gateway reconnects. Each conversation starts with its own default session.
-Keep the returned browser_session_id with the selected environment_id. To resume
-another conversation's pages, first list_browser_sessions, then use
-take_over_browser_session only when the user explicitly asks to take over that
-session. Transfer keeps the original tabs and page state. Refresh the snapshot;
-the previous operator can no longer act on that session and must not silently
-take it back. A busy session cannot transfer during an admitted action. If a
-transfer reply is lost, inspect list_browser_sessions for current_operator before
-doing anything else; do not replay an uncertain action.
+Keep sign-ins in the Host's persistent Browser profile. On the first Browser
+use in a new conversation, call list_browser_sessions and reuse the intended
+profile by browser_session_id. A profile marked saved or available can be resumed
+directly. If the user wants to continue an existing browser still operated by
+another conversation, use take_over_browser_session. Do not silently displace an
+active operator. Transfer preserves live tabs and page state; refresh the
+snapshot before continuing. If a transfer reply is lost, inspect
+list_browser_sessions for current_operator instead of replaying the action.
 
-Conversation closure does not close a Browser session. Explicit browser_close,
-disabling Browser, received device revocation or Host exit stops it. Host restart
-does not restore sessions. Closing one session does not close other sessions.
+An omitted browser_session_id uses this caller's default or the sole available
+profile. If several profiles are available, select the intended one from the
+list. Independent concurrent sessions continue to use separate profiles with
+their own sign-ins. Keep browser_session_id together with environment_id.
+
+Conversation closure and ordinary reconnection keep live Browser sessions.
+Explicit browser_close, disabling Browser, received device revocation or Host
+exit ends the running context and preserves its profile. After Host restart,
+saved profiles are listed and the next explicit Browser action opens the same
+profile. Old callers, page references, actions and page memory are not restored.
+A website may expire or revoke its own login normally. Closing one Browser
+session does not close another.
 
 Observe the page before acting. Use fresh snapshot references for clicks and
 inputs; refresh after navigation and state-changing actions. Do not reuse stale

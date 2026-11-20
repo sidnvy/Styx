@@ -21,7 +21,15 @@ can sign in and interact in that same session; the agent waits and observes the
 current tab again before continuing. This replaces the former headless-only
 product restriction. Host session ownership and shutdown behavior remain as
 defined in [REFACTOR-PLAN.md](REFACTOR-PLAN.md). Existing-browser attachment, an
-embedded ChatGPT view and restoring sessions after Host restart are not added.
+embedded ChatGPT view and restoring old page memory or execution authority are not added.
+
+## Persistent Browser sign-ins (owner decision, 2026-11-21)
+
+Keep each Browser profile as Host-local data across conversation changes, context
+closure and Host restart. Reuse the existing session ID and takeover interface.
+Reopen the same profile with fresh execution ownership and observations; keep
+independent profiles available for concurrent work. This adds no cookie syncing,
+existing everyday-browser attachment or separate browser management service.
 
 ## Historical v1 baseline
 

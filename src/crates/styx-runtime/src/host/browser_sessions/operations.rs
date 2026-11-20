@@ -19,6 +19,9 @@ use styx_core::operations::OwnerLease;
 use tokio_util::task::TaskTracker;
 const SPEC_LIMIT: usize = 128 * 1024;
 pub(crate) trait BrowserBootstrap: Send + Sync {
+    /// Saved local profiles, without caller identities or execution state.
+    /// Adapters must explicitly forward discovery rather than hide saved logins.
+    fn saved_profiles(&self) -> Result<Vec<String>, ErrorCategory>;
     // Every adapter must explicitly forward or implement metadata retirement.
     fn release_profile(&self, owner: &OwnerLease);
     /// Includes control and full worker-input validation before profile creation.
@@ -47,6 +50,9 @@ pub(crate) struct BrowserPort<'a> {
     pub(crate) inputs: &'a BrowserInputs,
 }
 impl BrowserPort<'_> {
+    pub(crate) async fn saved_profiles(&self) -> Result<Vec<String>, ErrorCategory> {
+        self.browser_input(|source| source.saved_profiles()).await
+    }
     fn context(&self, revision: u64, timeout: u32) -> Result<PreparedContext, ErrorCategory> {
         if timeout == 0 || timeout > 10_000 {
             return Err(ErrorCategory::InvalidRequest);

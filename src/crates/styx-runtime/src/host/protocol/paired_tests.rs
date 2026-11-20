@@ -238,6 +238,10 @@ async fn unknown_cleanup_retains_profile_record_until_inflight_preparation_and_r
         released: AtomicUsize,
     }
     impl browser::BrowserBootstrap for Profiles {
+        fn saved_profiles(&self) -> Result<Vec<String>, styx_contracts::error::ErrorCategory> {
+            Ok(Vec::new())
+        }
+
         fn prepare_profile(
             &self,
             _: &OwnerLease,

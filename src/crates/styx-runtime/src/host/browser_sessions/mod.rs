@@ -26,6 +26,7 @@ type Cell = Arc<AsyncMutex<Session>>;
 #[derive(Default)]
 pub(crate) struct State {
     registry: Mutex<Registry>,
+    restored: tokio::sync::OnceCell<()>,
     inputs: std::sync::OnceLock<Arc<operations::BrowserInputs>>,
 }
 impl State {
@@ -38,11 +39,15 @@ impl State {
             .clone()
     }
     pub(crate) fn forget_caller(&self, owner: &OwnerRef) {
-        self.registry
-            .lock()
-            .expect("Browser sessions")
-            .defaults
-            .remove(&caller(owner));
+        let mut registry = self.registry.lock().expect("Browser sessions");
+        registry.defaults.remove(&caller(owner));
+        for cell in registry.sessions.values() {
+            if let Ok(mut session) = cell.try_lock()
+                && session.operator.as_ref() == Some(owner)
+            {
+                session.operator = None;
+            }
+        }
     }
 }
 #[derive(Default)]
@@ -51,7 +56,7 @@ struct Registry {
     defaults: BTreeMap<Caller, String>,
 }
 struct Session {
-    operator: OwnerRef,
+    operator: Option<OwnerRef>,
     lease: OwnerLease,
     target: Option<ResourceTarget>,
     phase: Phase,
@@ -59,6 +64,7 @@ struct Session {
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
+    Saved,
     New,
     Ready,
     Unknown,
@@ -140,12 +146,87 @@ impl Engine<'_> {
     fn state(&self) -> &State {
         self.port.coordinator.browser_sessions()
     }
+    fn active_caller(
+        &self,
+        owner: &OwnerRef,
+    ) -> Result<std::sync::MutexGuard<'_, crate::host::callers::OwnerRegistry>, &'static str> {
+        let registry = self
+            .port
+            .coordinator
+            .remote_access()
+            .lock()
+            .expect("owner registry");
+        if registry.stopping
+            || !registry
+                .owners
+                .get(&caller(owner))
+                .is_some_and(|record| record.lease.is_some())
+        {
+            return Err("unauthorized");
+        }
+        Ok(registry)
+    }
+    fn new_session(
+        &self,
+        id: &str,
+        operator: Option<OwnerRef>,
+        phase: Phase,
+    ) -> Result<Session, &'static str> {
+        // The profile ID survives restart; caller access and execution identity do not.
+        let incarnation = uuid::Uuid::new_v4().simple().to_string();
+        let lease = self
+            .port
+            .authority
+            .register_verified_owner(
+                format!("host-browser-{id}-{incarnation}")
+                    .try_into()
+                    .expect("local Browser owner"),
+                uuid::Uuid::new_v4()
+                    .to_string()
+                    .try_into()
+                    .expect("UUID epoch"),
+            )
+            .map_err(|_| "capacity_busy")?;
+        Ok(Session {
+            operator,
+            lease,
+            target: None,
+            phase,
+            cleanup: None,
+        })
+    }
+    async fn restore_profiles(&self) -> Result<(), &'static str> {
+        self.state()
+            .restored
+            .get_or_try_init(|| async {
+                let profiles = self
+                    .port
+                    .saved_profiles()
+                    .await
+                    .map_err(|_| "browser_profile_unavailable")?;
+                let mut registry = self.state().registry.lock().expect("Browser sessions");
+                for id in profiles {
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        registry.sessions.entry(id.clone())
+                    {
+                        let session = self.new_session(&id, None, Phase::Saved)?;
+                        entry.insert(Arc::new(AsyncMutex::new(session)));
+                    }
+                }
+                Ok(())
+            })
+            .await
+            .map(|_| ())
+    }
     fn resolve(
         &self,
         owner: &OwnerRef,
         id: Option<String>,
         create: bool,
     ) -> Result<(String, Cell), &'static str> {
+        // Serialize claiming with the existing caller fence, without retaining
+        // caller access over async work or persisting a second lifecycle record.
+        let _caller = self.active_caller(owner)?;
         let mut state = self.state().registry.lock().expect("Browser sessions");
         if let Some(id) = id.or_else(|| state.defaults.get(&caller(owner)).cloned()) {
             return state
@@ -158,35 +239,56 @@ impl Engine<'_> {
         if !create {
             return Err("browser_not_open");
         }
+        // Reuse an available signed-in profile instead of silently creating an
+        // empty one after a conversation ends or the Host restarts. An active
+        // operator is never displaced; independent conversations can still open
+        // independent profiles, and explicit takeover keeps its existing meaning.
+        let available: Vec<_> = state
+            .sessions
+            .iter()
+            .filter_map(|(id, cell)| {
+                let session = cell.try_lock().ok()?;
+                (session.operator.is_none()
+                    && session.phase != Phase::Unknown
+                    && session.cleanup.is_none())
+                .then(|| (id.clone(), cell.clone()))
+            })
+            .collect();
+        if let [(id, cell)] = available.as_slice() {
+            let mut session = cell.try_lock().map_err(|_| "busy")?;
+            if session.operator.is_some() {
+                return Err("busy");
+            }
+            if let Some(target) = &session.target {
+                self.port
+                    .coordinator
+                    .invalidate_browser_session_references(&session.lease, target)
+                    .map_err(|_| "busy")?;
+            }
+            session.operator = Some(owner.clone());
+            state.defaults.insert(caller(owner), id.clone());
+            return Ok((id.clone(), cell.clone()));
+        }
+        if available.len() > 1 {
+            return Err("browser_session_selection_required");
+        }
         let id = uuid::Uuid::new_v4().simple().to_string();
-        let lease = self
-            .port
-            .authority
-            .register_verified_owner(
-                format!("host-browser-{id}").try_into().expect("UUID owner"),
-                uuid::Uuid::new_v4()
-                    .to_string()
-                    .try_into()
-                    .expect("UUID epoch"),
-            )
-            .map_err(|_| "capacity_busy")?;
-        let cell = Arc::new(AsyncMutex::new(Session {
-            operator: owner.clone(),
-            lease,
-            target: None,
-            phase: Phase::New,
-            cleanup: None,
-        }));
+        let cell = Arc::new(AsyncMutex::new(self.new_session(
+            &id,
+            Some(owner.clone()),
+            Phase::New,
+        )?));
         state.sessions.insert(id.clone(), cell.clone());
         state.defaults.insert(caller(owner), id.clone());
         Ok((id, cell))
     }
-    fn remove(&self, id: &str) {
-        let mut state = self.state().registry.lock().expect("Browser sessions");
-        state.sessions.remove(id);
-        state.defaults.retain(|_, value| value != id);
-    }
     async fn close(&self, id: &str, session: &mut Session) -> CallToolResult {
+        if session.phase == Phase::Saved && session.target.is_none() {
+            session.operator = None;
+            return success(
+                json!({"browser_session_id":id,"closed":true,"profile_preserved":true}),
+            );
+        }
         if session.cleanup.is_none() {
             match self.port.authority.fence_owner_for_cleanup(&session.lease) {
                 Ok(handle) => session.cleanup = Some(handle),
@@ -210,8 +312,11 @@ impl Engine<'_> {
         {
             return failure("outcome_unknown", true);
         }
-        self.remove(id);
-        success(json!({"browser_session_id":id,"closed":true}))
+        *session = match self.new_session(id, None, Phase::Saved) {
+            Ok(saved) => saved,
+            Err(code) => return failure(code, false),
+        };
+        success(json!({"browser_session_id":id,"closed":true,"profile_preserved":true}))
     }
     /// Capability shutdown already proved physical exit. Reclaim that context's
     /// local owner/profile on the next request, without starting a browser.
@@ -227,6 +332,14 @@ impl Engine<'_> {
             .collect();
         for (id, cell) in entries {
             let Ok(mut s) = cell.try_lock() else { continue };
+            // A caller can finish while profile discovery or an action is
+            // pending. Its existing fenced/removed owner record is authoritative.
+            if s.operator
+                .as_ref()
+                .is_some_and(|operator| self.active_caller(operator).is_err())
+            {
+                s.operator = None;
+            }
             if s.cleanup.is_none()
                 && s.target.as_ref().is_some_and(|target| {
                     self.port
@@ -252,7 +365,13 @@ impl Engine<'_> {
         owner: OwnerRef,
         command: BrowserSessionCommand,
     ) -> CallToolResult {
+        if let Err(code) = self.restore_profiles().await {
+            return failure(code, false);
+        }
         self.collect_closed().await;
+        if self.active_caller(&owner).is_err() {
+            return failure("unauthorized", false);
+        }
         match command {
             BrowserSessionCommand::List => {
                 let entries: Vec<_> = self
@@ -269,8 +388,11 @@ impl Engine<'_> {
                     sessions.push(match cell.try_lock() {
                         Ok(session) => json!({
                             "browser_session_id": id,
-                            "current_operator": session.operator == owner,
+                            "current_operator": session.operator.as_ref() == Some(&owner),
+                            "profile_persistent": true,
+                            "available": session.operator.is_none() && session.phase != Phase::Unknown && session.cleanup.is_none(),
                             "status": match session.phase {
+                                Phase::Saved => "saved",
                                 Phase::New => "not_opened",
                                 Phase::Ready => "open",
                                 Phase::Unknown => "outcome_unknown",
@@ -289,10 +411,14 @@ impl Engine<'_> {
                 let Ok(mut s) = cell.try_lock() else {
                     return failure("busy", false);
                 };
+                let _caller = match self.active_caller(&owner) {
+                    Ok(guard) => guard,
+                    Err(code) => return failure(code, false),
+                };
                 if s.cleanup.is_some() {
                     return failure("outcome_unknown", true);
                 }
-                if s.operator != owner {
+                if s.operator.as_ref() != Some(&owner) {
                     if let Some(target) = &s.target
                         && self
                             .port
@@ -302,7 +428,7 @@ impl Engine<'_> {
                     {
                         return failure("busy", false);
                     }
-                    s.operator = owner.clone();
+                    s.operator = Some(owner.clone());
                 }
                 // An old operator's default remains bound to this ID and is
                 // refused; an implicit action must never take the context back.
@@ -313,7 +439,7 @@ impl Engine<'_> {
                     .defaults
                     .insert(caller(&owner), id.clone());
                 success(
-                    json!({"browser_session_id":id,"current_operator":true,"status":if s.phase==Phase::Unknown{"outcome_unknown"}else{"open"},"refresh_snapshot":true}),
+                    json!({"browser_session_id":id,"current_operator":true,"profile_persistent":true,"status":match s.phase {Phase::Saved=>"saved",Phase::New=>"not_opened",Phase::Ready=>"open",Phase::Unknown=>"outcome_unknown"},"refresh_snapshot":true}),
                 )
             }
             BrowserSessionCommand::Action {
@@ -334,8 +460,31 @@ impl Engine<'_> {
                     Err(e) => return failure(e, false),
                 };
                 let mut session = cell.lock().await;
-                if session.operator != owner {
-                    return failure("browser_session_transferred", false);
+                {
+                    let _caller = match self.active_caller(&owner) {
+                        Ok(guard) => guard,
+                        Err(code) => return failure(code, false),
+                    };
+                    if session.operator.is_none() {
+                        if let Some(target) = &session.target
+                            && self
+                                .port
+                                .coordinator
+                                .invalidate_browser_session_references(&session.lease, target)
+                                .is_err()
+                        {
+                            return failure("busy", false);
+                        }
+                        session.operator = Some(owner.clone());
+                        self.state()
+                            .registry
+                            .lock()
+                            .expect("Browser sessions")
+                            .defaults
+                            .insert(caller(&owner), id.clone());
+                    } else if session.operator.as_ref() != Some(&owner) {
+                        return failure("browser_session_transferred", false);
+                    }
                 }
                 let mut result = if close {
                     self.close(&id, &mut session).await
@@ -364,7 +513,7 @@ impl Engine<'_> {
         if s.phase == Phase::Unknown {
             return failure("outcome_unknown", true);
         }
-        if s.phase == Phase::New {
+        if matches!(s.phase, Phase::New | Phase::Saved) {
             s.phase = Phase::Unknown; // Dropped waiters never cause automatic replay.
             let reply = self
                 .exchange(
