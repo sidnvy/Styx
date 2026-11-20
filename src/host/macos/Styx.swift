@@ -42,29 +42,48 @@ final class RuntimeDirectory {
         guard chmod(temporary, 0o600) == 0,
               rename(temporary, descriptor) == 0 else { throw HostError.unsafeRuntime }
     }
+    func prepareForLaunch() throws {
+        var info = stat()
+        if lstat(socket, &info) == 0 {
+            // A crashed App can leave the socket after its embedded child exits.
+            // The owner lock is held; reclaim only a dead child with no listener.
+            guard info.st_mode & S_IFMT == S_IFSOCK,
+                  let raw = try? String(contentsOfFile: path + "/cua.pid", encoding: .utf8),
+                  let pid = pid_t(raw.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0,
+                  kill(pid, 0) == -1, errno == ESRCH,
+                  socketConnectionError(socket) == ECONNREFUSED else {
+                unlink(descriptor)
+                throw HostError.daemonUnavailable
+            }
+        } else if errno != ENOENT {
+            throw HostError.daemonUnavailable
+        }
+        clear()
+    }
     func clear() { unlink(descriptor); unlink(socket); unlink(path + "/cua.pid") }
     deinit { close(lock) }
 }
 
 // Socket existence is insufficient: acceptability is a transport-only boundary,
 // never proof of MCP initialization, TCC attribution, or successful GUI actions.
-func socketAccepts(_ path: String) -> Bool {
+func socketAccepts(_ path: String) -> Bool { socketConnectionError(path) == nil }
+func socketConnectionError(_ path: String) -> Int32? {
     var addr = sockaddr_un()
     let bytes = Array(path.utf8CString)
-    guard bytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else { return false }
+    guard bytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else { return ENAMETOOLONG }
     addr.sun_family = sa_family_t(AF_UNIX)
     addr.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
     withUnsafeMutableBytes(of: &addr.sun_path) { raw in
         for (i, byte) in bytes.enumerated() { raw[i] = UInt8(bitPattern: byte) }
     }
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-    guard fd >= 0 else { return false }
+    guard fd >= 0 else { return errno }
     defer { close(fd) }
     // Never block AppKit while a peer is stuck or its backlog is full.
     _ = fcntl(fd, F_SETFL, O_NONBLOCK)
     return withUnsafePointer(to: &addr) { pointer in
         pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-            Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0
+            Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0 ? nil : errno
         }
     }
 }
@@ -458,13 +477,8 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         }
         guard daemonStopTask == nil else { throw HostError.daemonUnavailable }
         guard let runtime = runtime, daemon == nil else { return }
-        // A released owner lock does not prove a prior crashed owner's child
-        // exited. Never unlink an existing endpoint to replace a live daemon.
-        if FileManager.default.fileExists(atPath: runtime.socket) {
-            unlink(runtime.descriptor)
-            throw HostError.daemonUnavailable
-        }
-        runtime.clear(); generation = UUID().uuidString; lastGrants = nil
+        try runtime.prepareForLaunch()
+        generation = UUID().uuidString; lastGrants = nil
         guard let driver = Bundle.main.url(forAuxiliaryExecutable: "cua-driver") else {
             throw HostError.daemonUnavailable
         }
