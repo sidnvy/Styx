@@ -147,6 +147,7 @@ async function main() {
         fact('browser_native_context_closed');
         if (!closing && closeRequestId === undefined) fail();
       });
+      await value.pages()[0]?.bringToFront();
       fact('browser_native_context_open');
       return value;
     });
