@@ -14,7 +14,7 @@ source. Existing historical outputs and working profiles are not deleted.
 1. Merge the intended PRs into `main` after required CI/review and affected real
    behavior checks. An unverified feature remains a draft PR; do not hide it by
    changing release gates. Confirm `main` contains the intended commits.
-2. In a PR, set the workspace version in `Cargo.toml` and all four workspace
+2. In a PR, set the workspace version in `Cargo.toml` and all workspace
    package versions in `Cargo.lock`. Use a new version for changed source. Do not
    replace the existing `v0.4.2` tag/assets with any later 0.4.2 debug build.
    Use an explicit prerelease version when the stable acceptance gates are open.

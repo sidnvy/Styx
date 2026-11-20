@@ -7,22 +7,24 @@ several conversations can use the same computer.
 
 ## Changes
 
-Browser now opens a visible Chrome or Edge window on the selected computer,
-using a dedicated Styx profile. You can sign in, complete verification and edit
-pages in that same window. After manual interaction, the agent selects the tab
-and takes a fresh snapshot before continuing with the same page and login.
+Gateway now supports independently paired Android Hosts alongside Windows,
+macOS and Linux. Android screen observation, native actions and action batches use the shared Rust Host protocol and the phone's Accessibility service.
+Each phone keeps its own identity, pairing and local permission choices.
 
-Browser sessions remain on the Host across conversation closure and ordinary
-reconnection. Quitting the Host ends its sessions. Login state is not restored
-after a Host restart. Styx does not attach to your existing everyday browser
-profile or take over its already-open tabs.
+This release includes the visible Browser introduced in 0.6.0. It opens an
+installed Chrome or Edge window on the selected desktop computer, using a
+dedicated Styx profile. You can sign in and interact in that same window; the
+agent selects the tab and takes a fresh snapshot before continuing automation.
+Browser sessions survive conversation closure and ordinary reconnects. Host Quit
+ends them, and login state is not restored after a Host restart.
 
-Browser setup now uses one interactive mode. The old headless and persistent-login
-switches have been removed. Browser requires a logged-in graphical session on
-the selected computer; a Gateway-only server does not need a desktop.
+### Android package availability
 
-A known failure before the browser starts no longer leaves the Browser session
-stuck: a fresh explicit request can try again after the cause is fixed.
+The four downloads below update Gateway and desktop Hosts. A signed Android APK
+is not published in this Release; its CI signing and distribution are not yet
+configured. The existing accepted Android Host APK can continue using the updated
+Gateway with the same pairing and permissions. No phone reinstall is needed for
+this Gateway/desktop update.
 
 ## Choose your download
 
