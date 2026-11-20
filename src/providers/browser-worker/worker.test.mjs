@@ -60,7 +60,7 @@ test('headed worker shares a live page with external changes and settles each cl
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [fileURLToPath(new URL('./worker.mjs', import.meta.url)), '--config', configFile],
-      env: { ...process.env, DEBUG: 'pw:browser' },
+      env: { ...process.env, DEBUG: 'pw:browser,pw:api' },
       stderr: 'pipe',
     });
     const client = new Client({ name: 'styx-headed-worker-test', version: '1.0.0' });
@@ -81,7 +81,7 @@ test('headed worker shares a live page with external changes and settles each cl
       t.diagnostic(`${name} completed in ${Date.now() - started} ms`);
       return result;
     } catch (cause) {
-      throw new Error(`${name} failed after ${Date.now() - started} ms\n${worker.facts()}`, { cause });
+      throw new Error(`${name} failed after ${Date.now() - started} ms\n${cause.stack ?? cause}\n${worker.facts()}`, { cause });
     }
   }
   const nonce = randomUUID(), humanValue = `human-${nonce}`, agentValue = `agent-${nonce}`;
