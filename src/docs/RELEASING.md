@@ -18,6 +18,8 @@ source. Existing historical outputs and working profiles are not deleted.
    package versions in `Cargo.lock`. Use a new version for changed source. Do not
    replace the existing `v0.4.2` tag/assets with any later 0.4.2 debug build.
    Use an explicit prerelease version when the stable acceptance gates are open.
+   Update `src/docs/github-release-notes.md` to describe the actual changes and
+   upgrade requirements for this version before tagging.
 3. Tag that merged commit with exactly `v<workspace version>` and push the tag.
    Alternatively rerun the same workflow on that tag after inspecting a known
    failed build. Manual dispatch on `main`, `develop` or a feature branch is
