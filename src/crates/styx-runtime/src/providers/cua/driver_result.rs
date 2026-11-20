@@ -68,6 +68,7 @@ pub(super) fn outcome(
                 | "element_not_visible",
             ) => Some(CuaError::StaleObservation),
             Some("permission_denied" | "permission_required") => Some(CuaError::PermissionDenied),
+            Some("keyboard_unavailable") => Some(CuaError::Unsupported),
             _ => None,
         };
         if let Some(cause) = cause.filter(|_| before_dispatch) {
@@ -97,6 +98,18 @@ pub(super) async fn invoke(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn missing_keyboard_is_unsupported_only_when_no_dispatch_is_proven() {
+        let mut reply = CallToolResult::structured(
+            serde_json::json!({"code":"keyboard_unavailable","effect":"none"}),
+        );
+        reply.is_error = Some(true);
+        let result = outcome(reply.clone());
+        assert_eq!(result.0, CuaEvidence::NotDispatched);
+        assert_eq!(result.2, Some(CuaError::Unsupported));
+        reply.structured_content.as_mut().unwrap()["effect"] = Value::String("unknown".into());
+        assert_eq!(outcome(reply).0, CuaEvidence::Unknown);
+    }
     #[tokio::test]
     async fn complete_unknown_click_does_not_prevent_independent_read_on_same_transport() {
         let driver = super::super::fake_driver::FakeDriver::start(

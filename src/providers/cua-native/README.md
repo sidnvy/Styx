@@ -50,3 +50,11 @@ Actual compilation, installed native effects and release acceptance are separate
 claims. The upstream comparison and original Linux activation counterexample
 are recorded in `src/docs/rust-core-rewrite/CUA-UPSTREAM-REUSE-AUDIT-20261113.md`;
 new-platform results must be bound to the current patch before a release claim.
+
+
+Linux foreground element typing additionally reuses the standard Hyprland
+focus IPC and Wayland virtual-keyboard writer. It does not require the optional
+isolated-input compositor plugin, try AX insertion before keyboard delivery,
+or retry after an uncertain write. Source.json and the retained patch bind the
+unchanged upstream archive and each modified source byte; native GUI acceptance
+is still required in addition to build/test receipts.

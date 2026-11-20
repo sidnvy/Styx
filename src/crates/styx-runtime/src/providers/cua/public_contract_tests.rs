@@ -226,12 +226,12 @@ fn styx_discovery_is_a_subset_of_the_unchanged_upstream_catalog() {
         .copied()
         .filter(|name| public_names.contains(name))
         .collect();
-    assert_eq!(supported.len(), 7);
+    assert_eq!(supported.len(), 8);
     for name in supported {
         assert!(route(name).is_some(), "advertised Computer route {name}");
         assert!(schemas().unwrap().contains_key(name));
     }
-    for name in ["type_text", "press_key", "scroll"] {
+    for name in ["press_key", "scroll"] {
         assert!(
             native_names.contains(&name),
             "upstream catalog stays pinned"
@@ -395,7 +395,7 @@ fn element_click_contract_preserves_optional_observed_target_and_explicit_window
     ] {
         assert!(schema.is_valid(&value));
         let action = decode("click", raw(value)).unwrap();
-        let request = action.click_request().unwrap().unwrap();
+        let request = action.element_input_request().unwrap().unwrap();
         assert_eq!(request.element_token, "s00000002:1");
     }
     let right =
@@ -403,9 +403,12 @@ fn element_click_contract_preserves_optional_observed_target_and_explicit_window
     assert!(schema.is_valid(&right));
     let action = decode("click", raw(right)).unwrap();
     if cfg!(target_os = "windows") {
-        assert!(action.click_request().unwrap().is_some());
+        assert!(action.element_input_request().unwrap().is_some());
     } else {
-        assert!(matches!(action.click_request(), Err(CuaError::Unsupported)));
+        assert!(matches!(
+            action.element_input_request(),
+            Err(CuaError::Unsupported)
+        ));
     }
     for value in [
         json!({"x":1,"y":2}),
@@ -439,5 +442,33 @@ fn read_only_metadata_and_verification_routes_remain_available_without_file_outp
         assert!(
             !advertised_schema(name).is_valid(&json!({"screenshot_out_file":"/tmp/unowned.png"}))
         );
+    }
+}
+
+#[test]
+fn foreground_typing_requires_explicit_posture_and_a_bounded_exact_element_target() {
+    let valid = json!({"pid":42,"window_id":7,"element_token":"s00000001:2","text":"Chrome 中文","delivery_mode":"foreground"});
+    let action = decode("type_text", raw(valid.clone())).unwrap();
+    assert_eq!(
+        action.capability().unwrap(),
+        styx_contracts::capability::CapabilityId::DesktopKeyboard
+    );
+    for field in ["pid", "window_id", "element_token", "text", "delivery_mode"] {
+        let mut invalid = valid.clone();
+        invalid.as_object_mut().unwrap().remove(field);
+        assert!(decode("type_text", raw(invalid)).is_err(), "{field}");
+    }
+    for (field, value) in [
+        ("delivery_mode", json!("background")),
+        ("text", json!("")),
+        ("text", json!("中".repeat(6000))),
+        ("element_token", json!("s00000000:2")),
+        ("scope", json!("desktop")),
+        ("x", json!(100)),
+        ("session", json!("foreign")),
+    ] {
+        let mut invalid = valid.clone();
+        invalid[field] = value;
+        assert!(decode("type_text", raw(invalid)).is_err(), "{field}");
     }
 }
