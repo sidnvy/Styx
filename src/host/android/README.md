@@ -157,3 +157,62 @@ and `after.is_keyguard_locked: true` before testing native-tool refusals. Screen
 off with Keyguard still false is not a locked-screen pass. On a device whose
 current settings do not produce Keyguard, record that coverage limitation and
 restore the ordinary awake state without changing the user's security setup.
+
+## Release APK producer
+
+`src/ci/release-android.py` uses the same SDK, NDK, JDK, Cargo target and Gradle
+cache as the development build. It builds the real Rust JNI library with Cargo's
+release profile and assembles a non-debuggable arm64 APK. The version name comes
+from the root `Cargo.toml`; `--build-number` supplies Android's increasing
+`versionCode` (the existing release source job already produces this number).
+The Gradle inputs are `STYX_ANDROID_VERSION_NAME` and
+`STYX_ANDROID_VERSION_CODE`. The ordinary debug build keeps its development
+suffix and still uses Android's debug identity.
+
+For an unsigned packaging check on the workstation:
+
+```bash
+ANDROID_HOME=/home/sid/remote-mic-arch/android-sdk \
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk \
+python3 -I -B src/ci/release-android.py --offline --unsigned \
+  --build-number 1174 \
+  --output /home/sid/Developer/Artifacts/Styx/android-host/release-check
+```
+
+The output name ends in `-android-arm64-unsigned.apk`. Its receipt identifies the
+source revision, dirty-source status, versionCode, actual JNI library and APK
+hashes, and `signing: UNSIGNED`. This checks packaging; it is not a published
+or installable release and does not establish device acceptance.
+
+A signed build omits `--unsigned` and requires these environment inputs on the
+existing signing machine:
+
+- `STYX_ANDROID_KEYSTORE`: path to the established Android release keystore.
+- `STYX_ANDROID_KEYSTORE_PASSWORD`: that keystore's password.
+- `STYX_ANDROID_KEY_ALIAS`: the established release key alias.
+- `STYX_ANDROID_KEY_PASSWORD`: the key password.
+
+The producer neither creates nor transfers a private key and does not update
+GitHub secrets. It verifies the signed APK, records the public certificate
+fingerprint and rejects the Android debug identity for publication. Passwords
+are environment inputs, not command arguments or receipt fields.
+
+**Current publication gap:** the existing phone build uses the local Android
+debug certificate; a formal Android release signing identity and its CI signing
+access have not been configured. The four existing desktop/Gateway assets remain
+the current official release set. This producer does not publish a parallel APK
+release or silently replace that set.
+
+When that signing access is ready, integrate this producer into the existing
+`styx-release.yml` after its source/quality jobs. Use the same source revision,
+version and build number, existing Android toolchain versions, and shared
+Cargo/Gradle caches. Upload the signed `Styx-<version>-android-arm64.apk` to an
+`assets-android` artifact, include that job in the final publish dependencies,
+and add the APK to the existing exact checksum asset list in
+`release-ci.py`. Only then include Android in the same immutable GitHub Release.
+No second workflow or distribution channel is needed.
+
+If the formal release uses a different certificate from the development build,
+Android will not accept it as an ordinary in-place update over that debug APK.
+Decide the development-to-release migration before installing the first signed
+release, preserving the existing phone pairing until that transition is explicit.
