@@ -10,7 +10,7 @@ android {
         targetSdk = 36
         testInstrumentationRunner = "com.styx.host.test.PlatformAcceptanceInstrumentation"
         versionCode = 1
-        versionName = "0.7.0-android-dev"
+        versionName = "0.7.1-android-dev"
         ndk { abiFilters += "arm64-v8a" }
     }
     buildTypes { release { isMinifyEnabled = false } }

@@ -199,11 +199,7 @@ jobs:
           STYX_BROWSER_EXECUTABLE: ${{ steps.desktop_browser.outputs.executable }}
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            # Temporary diagnosis: independent cold starts, stop at the first failure.
-            for attempt in 1 2 3; do
-              echo "Linux Browser diagnostic attempt $attempt"
-              xvfb-run -a node --test src/providers/browser-worker/worker.test.mjs || exit $?
-            done
+            xvfb-run -a node --test src/providers/browser-worker/worker.test.mjs
           else
             node --test src/providers/browser-worker/worker.test.mjs
           fi
