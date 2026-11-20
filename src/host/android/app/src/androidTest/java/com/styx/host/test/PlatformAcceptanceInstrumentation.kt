@@ -1,7 +1,9 @@
 package com.styx.host.test
 
+import android.accessibilityservice.AccessibilityService
 import android.app.Activity
 import android.app.Instrumentation
+import android.app.KeyguardManager
 import android.app.UiAutomation
 import android.content.Intent
 import android.graphics.Bitmap
@@ -9,6 +11,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.os.SystemClock
 import android.text.Editable
 import android.text.InputType
@@ -20,6 +23,7 @@ import android.widget.EditText
 import android.widget.TextView
 import com.styx.host.MainActivity
 import com.styx.host.NativeHost
+import com.styx.host.StyxAccessibilityService
 import java.io.File
 import java.util.concurrent.atomic.AtomicReference
 import android.util.Base64
@@ -49,6 +53,7 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
         if (mode == "pair_ui") { pairUsingUi(); return }
         if (mode == "forget_ui") { forgetUsingUi(); return }
         if (mode == "host_ui") { hostUsingUi(); return }
+        if (mode == "keyguard") { keyguardUsingApi(); return }
         var success = false
         val result = JSONObject().put("sdk", Build.VERSION.SDK_INT)
         try {
@@ -325,6 +330,46 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
             finish(if (result.optBoolean("ok")) Activity.RESULT_OK else Activity.RESULT_CANCELED,
                 Bundle().apply { putString("result_json", result.toString()) })
         }
+    }
+
+    /** Reads public lock state or requests one normal Accessibility lock, without changing security settings. */
+    private fun keyguardUsingApi() {
+        val action = hostAction ?: "status"
+        val result = JSONObject().put("mode", "keyguard").put("action", action)
+        var lockRequested = false
+        var lockAccepted: Boolean? = null
+        try {
+            currentCase = "keyguard_arguments"
+            require(action in listOf("status", "lock"))
+            result.put("before", keyguardState())
+            if (action == "lock") {
+                currentCase = "keyguard_lock_request"
+                val service = checkNotNull(StyxAccessibilityService.instance)
+                lockRequested = true
+                lockAccepted = service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
+                check(lockAccepted == true)
+                currentCase = "keyguard_lock_state"
+                await(5000) { targetContext.getSystemService(KeyguardManager::class.java).isKeyguardLocked }
+            }
+            result.put("ok", true)
+        } catch (error: Throwable) {
+            result.put("ok", false).put("error", JSONObject().put("code", "keyguard_acceptance_failed")
+                .put("uncertain", lockRequested && lockAccepted != false))
+                .put("error_type", error.javaClass.simpleName).put("stage", currentCase)
+        } finally {
+            result.put("lock_requested", lockRequested).put("lock_accepted", lockAccepted ?: JSONObject.NULL)
+                .put("after", keyguardState())
+            finish(if (result.optBoolean("ok")) Activity.RESULT_OK else Activity.RESULT_CANCELED,
+                Bundle().apply { putString("result_json", result.toString()) })
+        }
+    }
+
+    private fun keyguardState(): JSONObject {
+        val keyguard = targetContext.getSystemService(KeyguardManager::class.java)
+        return JSONObject().put("is_keyguard_locked", keyguard.isKeyguardLocked)
+            .put("is_device_locked", keyguard.isDeviceLocked).put("is_device_secure", keyguard.isDeviceSecure)
+            .put("is_keyguard_secure", keyguard.isKeyguardSecure)
+            .put("is_interactive", targetContext.getSystemService(PowerManager::class.java).isInteractive)
     }
 
     /** Finite lifecycle acceptance through the real buttons; status reads only the public JNI surface. */

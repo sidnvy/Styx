@@ -134,3 +134,17 @@ state and reports sanitized status and readiness. `-e action status` performs
 only those public reads. None of these actions reads or resets credentials.
 The synthetic fixture keeps its own visible window awake for MCP acceptance;
 leaving or closing the fixture restores normal screen-timeout behavior.
+
+For real Keyguard acceptance, use `-e mode keyguard -e action status` with the same
+`--no-restart` runner. It reads Android's public Keyguard, device-security and
+interactive state without opening an Activity. `-e action lock` requests the
+normal Accessibility `GLOBAL_ACTION_LOCK_SCREEN` once, then observes Keyguard
+for up to five seconds. It never changes lock settings, supplies a credential,
+or retries the action. Keep the normal device access route available for the
+owner to unlock when authentication is configured.
+
+A successful request is separate from a real lock: require `lock_accepted: true`
+and `after.is_keyguard_locked: true` before testing native-tool refusals. Screen
+off with Keyguard still false is not a locked-screen pass. On a device whose
+current settings do not produce Keyguard, record that coverage limitation and
+restore the ordinary awake state without changing the user's security setup.
