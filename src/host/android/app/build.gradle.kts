@@ -1,5 +1,11 @@
 plugins { id("com.android.application") }
 
+val workspaceVersion = rootProject.file("../../../Cargo.toml").readLines()
+    .map { it.trim() }.dropWhile { it != "[workspace.package]" }.drop(1)
+    .takeWhile { !it.startsWith("[") }.first { it.startsWith("version =") }
+    .substringAfter('"').substringBefore('"')
+val releaseKeystore = providers.environmentVariable("STYX_ANDROID_KEYSTORE")
+
 android {
     namespace = "com.styx.host"
     compileSdk = 36
@@ -9,11 +15,26 @@ android {
         minSdk = 30
         targetSdk = 36
         testInstrumentationRunner = "com.styx.host.test.PlatformAcceptanceInstrumentation"
-        versionCode = 1
-        versionName = "0.7.1-android-dev"
+        versionCode = providers.environmentVariable("STYX_ANDROID_VERSION_CODE").orElse("1").get().toInt()
+        versionName = providers.environmentVariable("STYX_ANDROID_VERSION_NAME").orElse("$workspaceVersion-android-dev").get()
         ndk { abiFilters += "arm64-v8a" }
     }
-    buildTypes { release { isMinifyEnabled = false } }
+    signingConfigs {
+        if (releaseKeystore.isPresent) {
+            create("release") {
+                storeFile = file(releaseKeystore.get())
+                storePassword = providers.environmentVariable("STYX_ANDROID_KEYSTORE_PASSWORD").get()
+                keyAlias = providers.environmentVariable("STYX_ANDROID_KEY_ALIAS").get()
+                keyPassword = providers.environmentVariable("STYX_ANDROID_KEY_PASSWORD").get()
+            }
+        }
+    }
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            if (releaseKeystore.isPresent) signingConfig = signingConfigs.getByName("release")
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

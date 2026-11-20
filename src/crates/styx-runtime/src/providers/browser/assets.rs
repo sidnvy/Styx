@@ -222,8 +222,8 @@ pub(crate) fn prepare(
     Ok(prepared)
 }
 
-/// Fresh runtime-only directory. No adoption, recursive chmod, or deletion of
-/// existing profiles. Its descriptor and original identity remain pinned.
+/// Pinned private directory. Opening a saved profile never changes permissions
+/// or deletes its contents; its descriptor and original identity remain pinned.
 pub(crate) struct PrivateDirectory {
     path: PathBuf,
     root: PrivateRoot,
@@ -254,6 +254,40 @@ pub(crate) fn fresh_private_directory(parent: &Path) -> Result<PrivateDirectory>
     parent_descriptor
         .sync_all()
         .map_err(|_| BrowserError::Unknown)?;
+    let owned = PrivateDirectory {
+        path,
+        root,
+        descriptor,
+        parent_path: parent.to_path_buf(),
+        parent: parent_root,
+        parent_descriptor,
+    };
+    owned.revalidate()?;
+    Ok(owned)
+}
+
+/// Reopen a named Host-owned profile, or create it with the normal private mode.
+/// The caller supplies one local directory name, never a remote pathname.
+pub(crate) fn open_or_create_private_directory(
+    parent: &Path,
+    name: &str,
+) -> Result<PrivateDirectory> {
+    let mut components = Path::new(name).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(BrowserError::InvalidRequest);
+    }
+    let (parent_root, parent_descriptor) = directory(parent)?;
+    match mkdirat(&parent_descriptor, name, Mode::S_IRWXU) {
+        Ok(()) => parent_descriptor
+            .sync_all()
+            .map_err(|_| BrowserError::Unknown)?,
+        Err(nix::errno::Errno::EEXIST) => {}
+        Err(_) => return Err(BrowserError::SpawnFailed),
+    }
+    let path = parent.join(name);
+    let (root, descriptor) = directory(&path)?;
     let owned = PrivateDirectory {
         path,
         root,

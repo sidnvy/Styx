@@ -1294,6 +1294,12 @@ struct CapacityBrowser {
     root: PathBuf,
 }
 impl crate::host::protocol::browser::BrowserBootstrap for CapacityBrowser {
+    fn saved_profiles(&self) -> Result<Vec<String>, styx_contracts::error::ErrorCategory> {
+        // This fixture verifies same-Host close/reopen and protocol reconnection;
+        // discovery after a new Host bootstrap has separate coverage.
+        Ok(Vec::new())
+    }
+
     // Fixture directories preserve evidence; there is no retained owner registry.
     fn release_profile(&self, _: &styx_core::operations::OwnerLease) {}
 
@@ -1306,7 +1312,22 @@ impl crate::host::protocol::browser::BrowserBootstrap for CapacityBrowser {
             "browser-{}",
             Sha256Digest::of_bytes(owner.owner_id().as_str().as_bytes()).to_hex()
         ));
-        let profile = directory.join("profile");
+        let runtime = crate::providers::browser::assets::open_or_create_private_directory(
+            &self.root,
+            "browser-runtime",
+        )
+        .map_err(|_| styx_contracts::error::ErrorCategory::IntegrityFailure)?;
+        let profiles = crate::providers::browser::assets::open_or_create_private_directory(
+            &self.root,
+            "browser-profiles",
+        )
+        .map_err(|_| styx_contracts::error::ErrorCategory::IntegrityFailure)?;
+        // Reuse the production stable profile mapping, including its fresh-owner
+        // incarnation handling. Only runtime/output fixture paths are owner-local.
+        let profile =
+            crate::foreground::profile_directory(&runtime, &profiles, owner.owner_id().as_str())?
+                .path()
+                .to_owned();
         let output = directory.join("output");
         let workspace = directory.join("workspace");
         for path in [&directory, &profile, &output, &workspace] {
@@ -2065,20 +2086,28 @@ async fn browser_session_journey(
         refs[0].to_owned()
     }
     let effects = Arc::new(Mutex::new(Vec::<String>::new()));
+    let login_states = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let stop = tokio_util::sync::CancellationToken::new();
     let server_stop = stop.clone();
     let observed = effects.clone();
+    let observed_login = login_states.clone();
     let server = tokio::spawn(async move {
         let mut connections = tokio::task::JoinSet::new();
         loop {
             let stream =
                 tokio::select! {_=server_stop.cancelled()=>break,r=listener.accept()=>r.unwrap().0};
             let observed = observed.clone();
+            let observed_login = observed_login.clone();
             connections.spawn(async move {
-                let service=service_fn(move |request:Request<Incoming>|{let observed=observed.clone();async move {
-                    let body=if request.uri().path()=="/effect" {
+                let service=service_fn(move |request:Request<Incoming>|{let observed=observed.clone();let observed_login=observed_login.clone();async move {
+                    let body=if request.uri().path()=="/login-state" {
+                        let cookie=request.headers().get("cookie").and_then(|v|v.to_str().ok()).unwrap_or("").to_owned();
+                        let body=Limited::new(request.into_body(),4096).collect().await.unwrap().to_bytes();
+                        observed_login.lock().await.push((String::from_utf8(body.to_vec()).unwrap(),cookie));
+                        "observed".to_owned()
+                    }else if request.uri().path()=="/effect" {
                         let body=Limited::new(request.into_body(),4096).collect().await.unwrap().to_bytes();let value=String::from_utf8(body.to_vec()).unwrap();observed.lock().await.push(value.clone());value
                     }else{r#"<!doctype html><title>Browser transfer fixture</title><label>Retained value<input id="retained" aria-label="Retained value"></label><button onclick="fetch('/effect',{method:'POST',body:document.querySelector('#retained').value}).then(r=>r.text()).then(value=>document.querySelector('#saved').textContent='Saved: '+value)">Commit retained value</button><output id="saved"></output>"#.to_owned()};
                     Ok::<_,std::convert::Infallible>(Response::builder().header("connection","close").header("content-type","text/html").body(Full::new(Bytes::from(body))).unwrap())
@@ -2116,6 +2145,30 @@ async fn browser_session_journey(
         .unwrap(),
     );
     let id = opened["browser_session_id"].as_str().unwrap().to_owned();
+    let login_cookie = format!("styx_persistent_auth={nonce}");
+    data(
+        a.call_tool(call(
+            "browser_evaluate",
+            json!({"environment_id":device,"function":format!(
+                "() => {{ document.cookie = {}; localStorage.setItem('styx-login', {}); return true; }}",
+                serde_json::to_string(&format!("{login_cookie}; Max-Age=3600; Path=/; SameSite=Lax")).unwrap(),
+                serde_json::to_string(&nonce).unwrap(),
+            )}),
+        ))
+        .await
+        .unwrap(),
+    );
+    let observe_login = json!({"environment_id":device,"function":"async () => { await fetch('/login-state', {method:'POST', body:localStorage.getItem('styx-login') ?? ''}); return true; }"});
+    data(
+        a.call_tool(call("browser_evaluate", observe_login.clone()))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        *login_states.lock().await,
+        vec![(nonce.clone(), login_cookie.clone())],
+        "independent HTTP must observe both stored credentials before closing"
+    );
     let initial = a
         .call_tool(call("browser_snapshot", json!({"environment_id":device})))
         .await
@@ -2318,19 +2371,26 @@ async fn browser_session_journey(
         .await
         .unwrap(),
     );
-    assert!(
-        data(
-            c.call_tool(call(
-                "list_browser_sessions",
-                json!({"environment_id":device})
-            ))
-            .await
-            .unwrap()
-        )["sessions"]
-            .as_array()
-            .unwrap()
-            .is_empty()
+    let saved = data(
+        c.call_tool(call(
+            "list_browser_sessions",
+            json!({"environment_id":device}),
+        ))
+        .await
+        .unwrap(),
     );
+    let saved = saved["sessions"].as_array().unwrap();
+    assert_eq!(saved.len(), 2);
+    for expected in [&id, &other_id] {
+        let session = saved
+            .iter()
+            .find(|session| session["browser_session_id"] == *expected)
+            .expect("closed profile remains discoverable");
+        assert_eq!(session["status"], "saved");
+        assert_eq!(session["available"], true);
+        assert_eq!(session["current_operator"], false);
+        assert_eq!(session["profile_persistent"], true);
+    }
     let fresh = data(
         c.call_tool(call(
             "browser_navigate",
@@ -2339,27 +2399,78 @@ async fn browser_session_journey(
         .await
         .unwrap(),
     );
-    assert_ne!(fresh["browser_session_id"], id);
+    assert_eq!(
+        fresh["browser_session_id"], id,
+        "reopening retains the selected profile identity"
+    );
+    data(
+        c.call_tool(call("browser_evaluate", observe_login.clone()))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        *login_states.lock().await,
+        vec![
+            (nonce.clone(), login_cookie.clone()),
+            (nonce.clone(), login_cookie.clone()),
+        ],
+        "Host capability shutdown must flush the persistent cookie and localStorage"
+    );
     data(
         c.call_tool(call("browser_close", json!({"environment_id":device})))
             .await
             .unwrap(),
     );
-    assert!(
-        data(
-            c.call_tool(call(
-                "list_browser_sessions",
-                json!({"environment_id":device})
-            ))
+    let saved = data(
+        c.call_tool(call(
+            "list_browser_sessions",
+            json!({"environment_id":device}),
+        ))
+        .await
+        .unwrap(),
+    );
+    let saved = saved["sessions"].as_array().unwrap();
+    assert_eq!(saved.len(), 2);
+    for expected in [&id, &other_id] {
+        let session = saved
+            .iter()
+            .find(|session| session["browser_session_id"] == *expected)
+            .expect("closed profile remains discoverable");
+        assert_eq!(session["status"], "saved");
+        assert_eq!(session["available"], true);
+        assert_eq!(session["current_operator"], false);
+        assert_eq!(session["profile_persistent"], true);
+    }
+    let reopened = data(
+        c.call_tool(call(
+            "browser_navigate",
+            json!({"environment_id":device,"url":url}),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert_eq!(reopened["browser_session_id"], id);
+    data(
+        c.call_tool(call("browser_evaluate", observe_login))
             .await
-            .unwrap()
-        )["sessions"]
-            .as_array()
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+    );
+    assert_eq!(
+        *login_states.lock().await,
+        vec![
+            (nonce.clone(), login_cookie.clone()),
+            (nonce.clone(), login_cookie.clone()),
+            (nonce.clone(), login_cookie),
+        ],
+        "Host browser_close must preserve the persistent cookie and localStorage"
+    );
+    data(
+        c.call_tool(call("browser_close", json!({"environment_id":device})))
+            .await
+            .unwrap(),
     );
     c.cancel().await.unwrap();
     stop.cancel();
     server.await.unwrap();
-    std::fs::write(root.join("browser-handoff.json"),serde_json::to_vec_pretty(&json!({"status":"PASS","retained_session":id,"independent_session":other_id,"independent_http_effects":*effects.lock().await,"public_form_tools":["browser_snapshot","browser_type","browser_click","browser_wait_for"],"typed_value_independently_observed":true,"submitted_value_independently_observed":true,"chat_close_retained":true,"protocol_rebuilt":true,"previous_operator_denied":true,"old_snapshot_denied":true,"concurrent_transfer_busy":true,"capability_disabled_stopped_sessions":true,"explicit_close_removed_session":true})).unwrap()).unwrap();
+    std::fs::write(root.join("browser-handoff.json"),serde_json::to_vec_pretty(&json!({"status":"PASS","retained_session":id,"independent_session":other_id,"independent_http_effects":*effects.lock().await,"public_form_tools":["browser_snapshot","browser_type","browser_click","browser_wait_for"],"typed_value_independently_observed":true,"submitted_value_independently_observed":true,"chat_close_retained":true,"protocol_rebuilt":true,"previous_operator_denied":true,"old_snapshot_denied":true,"concurrent_transfer_busy":true,"capability_disabled_stopped_sessions":true,"explicit_close_preserved_profile":true,"capability_reenable_preserved_profile":true,"host_cleanup_login_storage_preserved":true,"independent_login_http_observations":*login_states.lock().await})).unwrap()).unwrap();
 }

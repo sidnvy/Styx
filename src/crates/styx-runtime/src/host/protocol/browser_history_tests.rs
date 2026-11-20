@@ -7,6 +7,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct FailingBootstrap(AtomicUsize);
 impl BrowserBootstrap for FailingBootstrap {
+    fn saved_profiles(&self) -> Result<Vec<String>, styx_contracts::error::ErrorCategory> {
+        Ok(Vec::new())
+    }
+
     fn release_profile(&self, _: &OwnerLease) {} // This rejecting fixture owns no profiles.
 
     fn prepare_profile(&self, _: &OwnerLease) -> Result<OwnedBrowserConfig, ErrorCategory> {

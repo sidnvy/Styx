@@ -136,6 +136,10 @@ struct ForegroundBrowser {
 }
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 impl crate::host::protocol::browser::BrowserBootstrap for ForegroundBrowser {
+    fn saved_profiles(&self) -> Result<Vec<String>, styx_contracts::error::ErrorCategory> {
+        self.source.saved_profiles()
+    }
+
     fn release_profile(&self, owner: &styx_core::operations::OwnerLease) {
         self.source.release_profile(owner);
     }

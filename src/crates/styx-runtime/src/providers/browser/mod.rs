@@ -1214,6 +1214,31 @@ async fn cleanup(live: &mut Live, budget: Duration) -> BrowserCleanup {
     {
         tree.snapshot();
     }
+    // Flush a live persistent context before native scope/Job termination.
+    // The factual state read never starts Chromium; closing an unopened worker
+    // must not lazily launch a browser. Reserve the remaining half of the same
+    // cleanup budget for the original physical confirmation below.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if let Some(client) = &live.client {
+        let now = Instant::now();
+        let graceful_until = now + until.saturating_duration_since(now) / 2;
+        let _ = timeout_at(graceful_until, async {
+            if let Ok(CallToolResponse::Complete(state)) = client
+                .call_tool_once(CallToolRequestParams::new("styx_browser_state"))
+                .await
+                && state.is_error != Some(true)
+                && state
+                    .structured_content
+                    .as_ref()
+                    .is_some_and(|value| value["schema"] == 1 && value["ready"] == true)
+            {
+                let _ = client
+                    .call_tool_once(CallToolRequestParams::new("browser_close"))
+                    .await;
+            }
+        })
+        .await;
+    }
     if live.client_close.is_none()
         && let Some(mut client) = live.client.take()
     {

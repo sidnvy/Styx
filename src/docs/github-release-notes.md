@@ -7,22 +7,39 @@ several conversations can use the same computer.
 
 ## Changes
 
-Gateway now supports independently paired Android Hosts alongside Windows,
-macOS and Linux. Android screen observation, native actions and action batches use the shared Rust Host protocol and the phone's Accessibility service.
-Each phone keeps its own identity, pairing and local permission choices.
+Browser login profiles now persist on the selected Host. A later conversation
+can list and reuse the same profile; closing its Browser window or restarting
+the Host retains the profile's native persistent cookies, localStorage and IndexedDB.
+Existing website expiry and sign-out rules still apply.
 
-This release includes the visible Browser introduced in 0.6.0. It opens an
-installed Chrome or Edge window on the selected desktop computer, using a
-dedicated Styx profile. You can sign in and interact in that same window; the
-agent selects the tab and takes a fresh snapshot before continuing automation.
-Browser sessions survive conversation closure and ordinary reconnects. Host Quit
-ends them, and login state is not restored after a Host restart.
+A running Browser session can be explicitly taken over by another conversation
+without launching a second browser or losing its tabs. When there is one
+available saved profile, opening Browser reuses it automatically. When there
+are several, select its browser_session_id. Independent profiles retain
+independent sign-ins, and an active operator is not silently displaced.
+After a Host restart, saved profiles are listed without launching browsers;
+new execution identities and references are created when a profile is opened.
+
+Sign in once in the visible Styx Browser window. This release does not import
+a daily Chrome/Edge profile or recover the temporary Browser profiles used by
+earlier Styx releases. A fresh snapshot is still required after taking over
+a live session. Browser tasks and page references are not restored after exit.
+
+On macOS, Styx now recovers its native Computer Use driver after a prior crash
+leaves a dead local socket. It checks both the prior process and socket before
+cleaning a stale endpoint, and preserves any live driver or unknown state.
+
+Gateway diagnostics now record the numeric status of failed MCP HTTP responses
+in the existing diagnostic stream. They omit request contents and credentials.
+This helps investigate future HTTP errors; it does not identify the cause of
+historical errors.
 
 ### Android package availability
 
 The four downloads below update Gateway and desktop Hosts. A signed Android APK
-is not published in this Release; its CI signing and distribution are not yet
-configured. The existing accepted Android Host APK can continue using the updated
+is not published in this Release. The release APK build and verification path
+is now available, but an approved Android signing identity and CI distribution
+are not yet configured. The existing accepted Android Host APK can continue using the updated
 Gateway with the same pairing and permissions. No phone reinstall is needed for
 this Gateway/desktop update.
 

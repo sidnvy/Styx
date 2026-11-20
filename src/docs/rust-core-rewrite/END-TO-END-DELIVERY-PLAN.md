@@ -1,13 +1,34 @@
 # Styx 重构当前交付清单
 
-## 当前源码与实机证据的边界（2026-11-19）
+## 当前源码与实机证据的边界（2026-11-21）
 
-PR #68 已完成当前 native model 的源码收敛，没有随之发布或部署。当前源码的
-真实 Browser Host、引用和完整配对调用链已补测；普通 Rust 质量门和真实 GUI
-读写分别记录，具体入口与范围见 [quality gates](../quality-gates.md)。
-设备上已安装 Runtime 的实机结果必须绑定其实际版本，不能当作最新 main 的安装验收。
-下方 `0.4.1` 的 GO 和安装记录均为历史证据，不表示此后的源码已经全部部署或验收。
-产品规则以 [REFACTOR-PLAN](REFACTOR-PLAN.md) 为准。
+当前已核对的正式部署为 [v0.7.1](https://github.com/sidnvy/Styx/releases/tag/v0.7.1)，
+源码 a5587e98609fd82cc7c5cf79c7c7f2a1548c21d7。moedeu-apps Gateway、niuda、
+NAB5 和 PilotMac 的实际 Runtime/包身份均已核对；这替代此前“PR #68 尚未部署”的状态。
+PilotMac 的 Computer Use 曾因旧 Cua socket/PID 残留而不可用；确认原进程已退出后，
+经正常 App 重开恢复，窗口树与截图已通过。该现场恢复不等于下述源码修复已经部署。
+
+本轮 0.8.0 源码范围：
+
+- Browser 的完整原生 profile 保留在 Host 固定私有目录；关闭 context 或重启 Host
+  后可按同一 profile ID 复用。后续对话先列出已有 profile，需要时沿用现有接手工具。
+  恢复时不恢复旧 caller、operation、target 或页面引用；多 profile 需要明确选择，
+  活跃操作者不会被隐式替换。旧版本的临时 profile 不作自动迁移。
+- 真实 headed Chromium 已验证 HttpOnly 持久 cookie、localStorage、IndexedDB 在
+  worker 退出并重开后保留；并行 profile 的登录数据和另一运行中 worker 不受影响。
+  Host 回归覆盖保存、恢复、接手、并发领取和对话结束时的操作者释放。
+- macOS 复用原 owner lock，在原 PID 已消失且 socket 明确拒绝连接时清理残留端点。
+  PilotMac 原生测试覆盖残留恢复、活跃监听者、尚未监听的活跃子进程及独占 owner。
+- Gateway 只在原诊断流记录 MCP HTTP 4xx/5xx 的数字状态；不记录请求内容。
+  新诊断不追溯旧 429，也不替代 Tunnel 上游证据。
+- Android release APK producer 已完成真实 unsigned release 构建验证；
+  当前手机仍使用原有开发签名。正式 Android 签名身份与 CI 分发尚未配置，
+  unsigned 测试 APK 不用于安装或发布，也不阻塞本轮四种既有桌面/Gateway 包。
+
+源码检查、正式 Release 和实际安装验收分别记录。只有对应 GitHub Release 的完整
+资产才可部署；安装后仍需核对实际二进制身份与受影响功能。后文 0.4.x 等记录为历史
+证据，不表示本轮新源码已经发布或安装。产品规则以
+[REFACTOR-PLAN](REFACTOR-PLAN.md) 为准。
 
 ## 独立 Android Host 开发验收（2026-11-20）
 
@@ -51,7 +72,7 @@ C1/C2 结构清理已完成；Linux Desktop、Linux Gateway-only 和 Windows 最
 四项最终下载资产、公钥、安装说明和校验文件已齐，Mac 新修复安装及双 owner 实测通过。
 **Stable：GO，已发布。** [Styx 0.4.1](https://github.com/sidnvy/Styx/releases/tag/v0.4.1) 于 2026-11-15 正式公开。
 
-## 当前桌面更新与账号验收（2026-11-15）
+## 2026-11-15 桌面更新与账号验收（历史）
 
 - Windows NAB5：最终 Inno `0.4.1.2019` / `d34887c` 已正常安装，原 GUI 单一
   “Update Styx”完成持久化组件切换。旧 App/Core 14264/5812 正常退出均 exit0，
