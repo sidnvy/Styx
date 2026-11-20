@@ -6,6 +6,7 @@ import android.app.KeyguardManager
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -69,6 +70,10 @@ class StyxAccessibilityService : AccessibilityService() {
         val maxNodes = params.optInt("max_nodes", 500)
         val maxDimension = params.optInt("max_dimension", 1280)
         if (maxNodes < 1 || maxDimension < 1) return fail("invalid_arguments", "max_nodes and max_dimension must be positive.")
+        // Content-change events can arrive after an action returns. Fetch this observation
+        // from current views instead of reusing the previous tree's cached nodes.
+        val refreshNodes = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
+        if (!refreshNodes) clearCache()
         val root = rootInActiveWindow ?: return fail("no_active_window", "Android has no accessible active window.")
         val size = getSystemService(WindowManager::class.java).currentWindowMetrics.bounds
         val id = UUID.randomUUID().toString()
@@ -83,6 +88,7 @@ class StyxAccessibilityService : AccessibilityService() {
             val (node, path) = queue.removeFirst()
             try {
                 if (targets.size >= maxNodes) { truncated = true; continue }
+                if (refreshNodes && !node.refresh()) continue
                 val bounds = Rect().also { node.getBoundsInScreen(it) }
                 val nodeId = "n${targets.size}"
                 val text = if (node.isPassword) null else node.text?.toString()

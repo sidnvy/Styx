@@ -104,9 +104,12 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
                 val click = nodeAction("click", node(observed, "android:id/button1"))
                 val batch = call("android_run_steps", callerA, JSONObject()
                     .put("observation_id", observed.getString("observation_id"))
-                    .put("steps", JSONArray().put(click).put(JSONObject(click.toString()))))
+                    .put("steps", JSONArray().put(click).put(JSONObject(click.toString())))
+                    .put("observe_after", true))
                 requireOk(batch); check(batch.getInt("completed_steps") == 2)
-                assertCounter(5)
+                val after = batch.getJSONObject("observation")
+                requireOk(after)
+                check(node(after, "android:id/text1").optString("text") == "Clicks: 5")
             }
             checkCase("batch_keeps_partial_results") {
                 val observed = observe(callerA)
