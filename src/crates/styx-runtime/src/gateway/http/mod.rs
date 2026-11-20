@@ -271,6 +271,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
     ) -> Result<Response<HeldBody>, Infallible> {
         let authorized = self.policy.authorize(request.headers()).is_ok();
         let mut response = self.handle_inner(request).await;
+        crate::foreground::tunnel::record_gateway_http_status(response.status());
         if authorized {
             self.status_headers(&mut response);
         }

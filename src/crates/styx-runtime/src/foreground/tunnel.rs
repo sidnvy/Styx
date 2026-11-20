@@ -626,20 +626,41 @@ fn write_event(
     event: &'static str,
     exit_code: Option<i32>,
 ) {
-    // A diagnostic sink can be full, closed, or broken without terminating the
-    // active tunnel process or the shared Gateway/Host lifecycle.
-    if serde_json::to_writer(
+    write_diagnostic(
         &mut out,
         &TunnelEvent {
             schema: 1,
             event,
             exit_code,
         },
-    )
-    .is_ok()
-        && out.write_all(b"\n").is_ok()
-    {
+    );
+}
+fn write_diagnostic(mut out: impl Write, event: &impl Serialize) {
+    // Diagnostics cannot terminate the active Tunnel or Gateway lifecycle.
+    if serde_json::to_writer(&mut out, event).is_ok() && out.write_all(b"\n").is_ok() {
         let _ = out.flush();
+    }
+}
+
+#[derive(Serialize)]
+struct HttpFailureEvent {
+    schema: u32,
+    stage: &'static str,
+    http_status: u16,
+}
+fn gateway_http_failure(status: http::StatusCode) -> Option<HttpFailureEvent> {
+    (status.is_client_error() || status.is_server_error()).then_some(HttpFailureEvent {
+        schema: 1,
+        stage: "gateway_mcp_response",
+        http_status: status.as_u16(),
+    })
+}
+/// The existing diagnostic stream receives only a fixed stage and numeric HTTP
+/// status. No URI, request/response data, headers or upstream output is retained.
+/// A missing record is not evidence of where an upstream failure occurred.
+pub(crate) fn record_gateway_http_status(status: http::StatusCode) {
+    if let Some(event) = gateway_http_failure(status) {
+        write_diagnostic(std::io::stderr().lock(), &event);
     }
 }
 
@@ -994,7 +1015,27 @@ mod tests {
         }
         let stop = CancellationToken::new();
         write_event(Broken, &stop, "tunnel_ready", None);
+        write_diagnostic(
+            Broken,
+            &gateway_http_failure(http::StatusCode::TOO_MANY_REQUESTS).unwrap(),
+        );
         assert!(!stop.is_cancelled());
+    }
+
+    #[test]
+    fn gateway_http_failures_record_numeric_status_without_success_noise() {
+        for status in [200, 202, 301] {
+            assert!(gateway_http_failure(http::StatusCode::from_u16(status).unwrap()).is_none());
+        }
+        for status in [400, 429, 503] {
+            let event = gateway_http_failure(http::StatusCode::from_u16(status).unwrap()).unwrap();
+            let mut bytes = Vec::new();
+            write_diagnostic(&mut bytes, &event);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                serde_json::json!({"schema":1,"stage":"gateway_mcp_response","http_status":status})
+            );
+        }
     }
 
     #[test]

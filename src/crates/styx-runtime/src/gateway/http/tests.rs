@@ -621,3 +621,107 @@ async fn process_quit_joins_local_sdk_workers_without_forging_remote_owner_clean
 mod capacity;
 #[path = "conversation_tests.rs"]
 mod conversation;
+
+#[tokio::test]
+async fn http_failure_diagnostics_child() {
+    if std::env::var_os("STYX_HTTP_FAILURE_DIAGNOSTIC_TEST").is_none() {
+        return;
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let token = "PRIVATE_AUTHORIZATION_FIXTURE_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let policy = Arc::new(
+        GatewayBearerPolicy::new(token.as_bytes(), vec![address.to_string()], vec![]).unwrap(),
+    );
+    let backend = Arc::new(CounterBackend {
+        tools: vec![],
+        fenced: Mutex::new(BTreeSet::new()),
+        calls: Mutex::new(vec![]),
+        pending: AtomicUsize::new(0),
+        attempts: AtomicUsize::new(0),
+        fail_fence_once: std::sync::atomic::AtomicBool::new(false),
+        arrived: tokio::sync::Notify::new(),
+        pending_owners: Mutex::new(BTreeMap::new()),
+        path: std::env::temp_dir().join(format!(
+            "styx-unused-http-diagnostic-{}",
+            uuid::Uuid::new_v4()
+        )),
+    });
+    let app = GatewayHttp::new(policy, backend.clone());
+    let server = app.clone().serve_owned(listener).await.unwrap();
+    let client = reqwest::Client::new();
+    let private_url = format!("http://{address}/mcp?PRIVATE_QUERY_FIXTURE=value");
+    let response = client
+        .post(&private_url)
+        .header("cookie", "PRIVATE_COOKIE_FIXTURE=value")
+        .body("PRIVATE_BODY_FIXTURE")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let response = client
+        .post(&private_url)
+        .bearer_auth(token)
+        .header("cookie", "PRIVATE_COOKIE_FIXTURE=value")
+        .body("PRIVATE_BODY_FIXTURE")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = client
+        .post(format!("http://{address}/mcp"))
+        .bearer_auth(token)
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .body("PRIVATE_BODY_FIXTURE")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(backend.attempts.load(Ordering::Acquire), 0);
+    drop(client);
+    let stopped = server.shutdown(Duration::from_secs(3)).await;
+    assert!(stopped.connections_joined && stopped.lifecycle_jobs_joined);
+}
+
+#[test]
+fn actual_http_failures_emit_only_status_and_keep_rpc_stdout_clean() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "gateway::http::tests::http_failure_diagnostics_child",
+            "--nocapture",
+        ])
+        .env("STYX_HTTP_FAILURE_DIAGNOSTIC_TEST", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stdout.contains("gateway_mcp_response"));
+    for secret in [
+        "PRIVATE_AUTHORIZATION_FIXTURE",
+        "PRIVATE_QUERY_FIXTURE",
+        "PRIVATE_COOKIE_FIXTURE",
+        "PRIVATE_BODY_FIXTURE",
+    ] {
+        assert!(
+            !stderr.contains(secret),
+            "request data reached the diagnostic stream"
+        );
+    }
+    let events: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    assert_eq!(
+        events,
+        [401, 404, 400].map(|status| {
+            serde_json::json!({"schema":1,"stage":"gateway_mcp_response","http_status":status})
+        })
+    );
+}
