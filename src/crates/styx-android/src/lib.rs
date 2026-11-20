@@ -336,6 +336,29 @@ pub extern "system" fn Java_com_styx_host_NativeHost_start<'local>(
     })
 }
 
+// Call only while holding the existing lifecycle control lock.
+fn stop_active(host: &HostState) -> Result<(), BridgeError> {
+    let mut slot = host
+        .active
+        .lock()
+        .map_err(|_| BridgeError::new("host_state_unavailable"))?;
+    let Some(active) = slot.as_mut() else {
+        return Ok(());
+    };
+    active.stop.cancel();
+    match host
+        .runtime
+        .block_on(async { tokio::time::timeout(Duration::from_secs(5), &mut active.task).await })
+    {
+        Ok(result) => {
+            slot.take();
+            let _ = result.map_err(|_| BridgeError::unknown("host_task_failed"))?;
+            Ok(())
+        }
+        Err(_) => Err(BridgeError::unknown("host_stop_pending")),
+    }
+}
+
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_styx_host_NativeHost_stop(
@@ -350,24 +373,40 @@ pub extern "system" fn Java_com_styx_host_NativeHost_stop(
             .control
             .lock()
             .map_err(|_| BridgeError::new("host_state_unavailable"))?;
-        let mut slot = host
-            .active
+        stop_active(host)?;
+        public_status()
+    })
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_styx_host_NativeHost_forget<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    platform: JObject<'local>,
+) -> jstring {
+    export(env, |env| {
+        let platform = JavaPlatform::new(env, platform)?;
+        let host = host();
+        let _control = host
+            .control
             .lock()
             .map_err(|_| BridgeError::new("host_state_unavailable"))?;
-        let Some(active) = slot.as_mut() else {
-            return public_status();
-        };
-        active.stop.cancel();
-        match host.runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), &mut active.task).await
-        }) {
-            Ok(result) => {
-                slot.take();
-                let _ = result.map_err(|_| BridgeError::unknown("host_task_failed"))?;
-                public_status()
-            }
-            Err(_) => Err(BridgeError::unknown("host_stop_pending")),
-        }
+        // Local forgetting never races an active pairing or authenticated Host.
+        // If stop is still pending, retain the existing protected credentials.
+        stop_active(host)?;
+        platform
+            .call(|env| {
+                env.call_method(platform.object.as_obj(), "forgetCredentials", "()V", &[])?;
+                Ok(())
+            })
+            .map_err(|_| BridgeError::unknown("android_credentials_remove_failed"))?;
+        let response = json!({"ok":true,"state":"stopped","code":"pairing_forgotten"});
+        *host
+            .status
+            .lock()
+            .map_err(|_| BridgeError::new("host_state_unavailable"))? = response.clone();
+        Ok(response)
     })
 }
 

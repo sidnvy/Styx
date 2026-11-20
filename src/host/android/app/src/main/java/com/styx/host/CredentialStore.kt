@@ -39,6 +39,11 @@ class CredentialStore(context: Context) {
         return cipher.doFinal(Base64.decode(envelope.getString("data"), Base64.NO_WRAP)).toString(Charsets.UTF_8)
     }
 
+    @Synchronized fun forget() {
+        file.delete()
+        check(!exists())
+    }
+
     @Synchronized fun store(json: String) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, key())

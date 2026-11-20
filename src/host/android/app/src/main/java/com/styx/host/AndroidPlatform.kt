@@ -11,6 +11,7 @@ class AndroidPlatform(context: Context) {
     private val credentials = CredentialStore(context)
     fun loadCredentials(): String? = credentials.load()
     fun storeCredentials(json: String) { credentials.store(json) }
+    fun forgetCredentials() { credentials.forget() }
 
     fun execute(method: String, paramsJson: String): String {
         if (method == "status") return readiness(context).toString()

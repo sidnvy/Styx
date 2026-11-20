@@ -6,5 +6,6 @@ object NativeHost {
     @JvmStatic external fun pair(gatewayUrl: String, invitationCode: String, deviceLabel: String, platform: AndroidPlatform): String
     @JvmStatic external fun start(configJson: String, platform: AndroidPlatform): String
     @JvmStatic external fun stop(): String
+    @JvmStatic external fun forget(platform: AndroidPlatform): String
     @JvmStatic external fun status(): String
 }

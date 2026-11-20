@@ -2,6 +2,7 @@ package com.styx.host
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -31,6 +32,7 @@ class MainActivity : Activity() {
     private lateinit var code: EditText
     private lateinit var label: EditText
     private lateinit var pairButton: Button
+    private lateinit var forgetButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -55,6 +57,7 @@ class MainActivity : Activity() {
             }
             code.text.clear()
             pairButton.isEnabled = false
+            forgetButton.isEnabled = false
             statusView.text = "Pairing…"
             settings.edit().putString("gateway_url", gatewayUrl).putString("device_label", deviceLabel).apply()
             worker.execute {
@@ -63,10 +66,11 @@ class MainActivity : Activity() {
                     runOnUiThread {
                         statusView.text = result.toString(2)
                         pairButton.isEnabled = true
+                        forgetButton.isEnabled = true
                         if (result.optBoolean("ok", false)) startHost()
                     }
                 } catch (error: Exception) {
-                    runOnUiThread { pairButton.isEnabled = true; statusView.text = "Pairing failed. Check the Gateway address and invitation state." }
+                    runOnUiThread { pairButton.isEnabled = true; forgetButton.isEnabled = true; statusView.text = "Pairing failed. Check the Gateway address and invitation state." }
                 }
             }
         }
@@ -75,6 +79,8 @@ class MainActivity : Activity() {
         content.addView(button("Start Host") { startHost() })
         content.addView(button("Stop Host") { stopService(Intent(this, HostService::class.java)); refreshStatus() })
         content.addView(button("Refresh status") { refreshStatus() })
+        forgetButton = button("Forget pairing") { confirmForgetPairing() }
+        content.addView(forgetButton)
         statusView = TextView(this).apply { textSize = 14f; setTextIsSelectable(true); setPadding(0, pad, 0, pad) }
         content.addView(statusView)
         val scroll = ScrollView(this).apply { addView(content); fitsSystemWindows = true }
@@ -89,6 +95,30 @@ class MainActivity : Activity() {
     override fun onResume() { super.onResume(); resumed = true; if (::statusView.isInitialized) refreshStatus() }
     override fun onPause() { resumed = false; main.removeCallbacks(pollStatus); super.onPause() }
     override fun onDestroy() { worker.shutdown(); super.onDestroy() }
+
+    private fun confirmForgetPairing() {
+        AlertDialog.Builder(this)
+            .setTitle("Forget pairing?")
+            .setMessage("Stop this Host and remove its local pairing. A new invitation is required to pair again. Revoke the old device separately on your Gateway.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Forget") { _, _ ->
+                stopService(Intent(this, HostService::class.java))
+                pairButton.isEnabled = false
+                forgetButton.isEnabled = false
+                statusView.text = "Forgetting pairing…"
+                worker.execute {
+                    val result = try { JSONObject(NativeHost.forget(AndroidPlatform(applicationContext))) }
+                    catch (_: Exception) { JSONObject().put("ok", false).put("error", JSONObject().put("code", "forget_pairing_failed")) }
+                    runOnUiThread {
+                        code.text.clear()
+                        statusView.text = result.toString(2)
+                        pairButton.isEnabled = true
+                        forgetButton.isEnabled = true
+                    }
+                }
+            }
+            .show()
+    }
 
     private fun startHost() {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
