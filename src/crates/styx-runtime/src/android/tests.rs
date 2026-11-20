@@ -313,8 +313,17 @@ async fn independent_android_pairing_wss_images_reconnect_disable_and_revoke() {
     });
     let platform_run = platform.clone();
     let run_stop = host_stop.clone();
+    let files_dir = mobile_dir.clone();
+    let run_reporter = reporter.clone();
     let host = tokio::spawn(async move {
-        run(credentials, &mobile_dir, platform_run, run_stop, reporter).await
+        run(
+            credentials,
+            &files_dir,
+            platform_run,
+            run_stop,
+            run_reporter,
+        )
+        .await
     });
     wait_android(&relay, &device).await;
     let original = relay
@@ -521,6 +530,64 @@ async fn independent_android_pairing_wss_images_reconnect_disable_and_revoke() {
             .unwrap(),
     );
     data(mcp.call_tool(call("android_act", json!({"environment_id":device,"observation_id":fresh["observation_id"],"action":{"type":"click","node_id":"node-1"}}))).await.unwrap());
+    assert_eq!(platform.actions.load(Ordering::SeqCst), 2);
+
+    // A normal Host stop settles the original binding before a new Core starts.
+    // Keep this exact authenticated MCP client and persisted device identity.
+    let old_generation = fresh["operation_id"]["host_generation"].clone();
+    let old_observation = fresh["observation_id"].clone();
+    host_stop.cancel();
+    tokio::time::timeout(Duration::from_secs(30), host)
+        .await
+        .expect("original Android Host stops through its transport drain")
+        .unwrap()
+        .unwrap();
+    let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(status) = status_rx.recv().await {
+            if status.state == "stopped" {
+                return status;
+            }
+        }
+        panic!("Android Host did not report its stopped state");
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        stopped.transport_drain,
+        Some(TransportDrainOutcome::Complete)
+    );
+
+    let credentials = client::load_ready(&store).unwrap();
+    assert_eq!(credentials.device_id, device);
+    let platform_run = platform.clone();
+    let files_dir = mobile_dir.clone();
+    let run_reporter = reporter.clone();
+    let host_stop = CancellationToken::new();
+    let run_stop = host_stop.clone();
+    let host = tokio::spawn(async move {
+        run(
+            credentials,
+            &files_dir,
+            platform_run,
+            run_stop,
+            run_reporter,
+        )
+        .await
+    });
+    wait_android(&relay, &device).await;
+    let resumed = mcp
+        .call_tool(call("android_observe", json!({"environment_id":device})))
+        .await
+        .unwrap();
+    assert_ne!(
+        resumed.is_error,
+        Some(true),
+        "the same MCP caller must bind to the gracefully restarted Host"
+    );
+    let fresh = data(resumed);
+    assert_eq!(fresh["environment_id"], device.as_str());
+    assert_ne!(fresh["operation_id"]["host_generation"], old_generation);
+    assert_ne!(fresh["observation_id"], old_observation);
     assert_eq!(platform.actions.load(Ordering::SeqCst), 2);
 
     platform.accessibility.store(false, Ordering::SeqCst);

@@ -434,7 +434,7 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
     private fun publicHostStatus() = publicStatus(JSONObject(NativeHost.status()))
     private fun publicStatus(state: JSONObject): JSONObject {
         return JSONObject().apply {
-            for (key in listOf("ok", "state", "code", "error_category", "environment_id"))
+            for (key in listOf("ok", "state", "code", "error_category", "environment_id", "transport_drain"))
                 if (state.has(key)) put(key, state.get(key))
         }
     }

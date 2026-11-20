@@ -33,6 +33,15 @@ notification permission to make the running Host notification visible.
 **Stop Host** and the notification's **Stop** action stop the same native Host.
 Closing the Activity leaves the foreground Host service running.
 
+For a development APK update, first press **Stop Host** and wait for `state: stopped`
+with `transport_drain: complete`, then replace the APK, reopen the App and press
+**Start Host**. The existing pairing and Android permissions remain in place.
+`stopped` describes the local Host; `unknown` or `unsupported` transport drain is
+not proof that Gateway completed the old caller cleanup. Installing over a running
+App terminates its process without this exchange. Existing callers then remain
+bound to that old Host generation; a fresh authenticated MCP session can observe
+the new Host, while old observations and unknown actions must never be replayed.
+
 After Gateway revocation, use **Forget pairing** in the App, confirm locally,
 then pair with a new invitation. Forgetting stops the Host and removes only this
 App's protected enrollment; Android permissions and Host settings remain in place.

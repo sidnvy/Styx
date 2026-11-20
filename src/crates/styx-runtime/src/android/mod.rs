@@ -6,7 +6,9 @@ use crate::{
         android::AndroidPlatform,
         coordinator::{HostAuthority, HostCoordinator},
         link::{HostWssLink, LinkAuthentication, LinkEndpoint, LinkError, SecretBearer},
-        protocol::{HostProtocol, PairedTrustedProfile, ProtocolError},
+        protocol::{
+            HostProtocol, PairedTrustedProfile, ProtocolError, wire::TransportDrainOutcome,
+        },
         settings::{Capabilities, CapabilityRuntime, HostSettings},
     },
     tls::{GatewayClientTls, TlsError, TrustAnchorPin, paired_gateway_namespace},
@@ -28,13 +30,22 @@ pub struct RunStatus {
     pub state: String,
     pub code: Option<String>,
     pub environment_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport_drain: Option<TransportDrainOutcome>,
 }
 type Reporter = Arc<dyn Fn(RunStatus) + Send + Sync>;
-fn report(callback: &Reporter, device: &DeviceId, state: &str, code: Option<&str>) {
+fn report(
+    callback: &Reporter,
+    device: &DeviceId,
+    state: &str,
+    code: Option<&str>,
+    transport_drain: Option<TransportDrainOutcome>,
+) {
     callback(RunStatus {
         state: state.into(),
         code: code.map(str::to_owned),
         environment_id: device.as_str().to_owned(),
+        transport_drain,
     });
 }
 
@@ -239,6 +250,7 @@ pub async fn run(
     .with_settings(settings.clone());
     let mut reconnect = false;
     let mut terminal = None;
+    let mut transport_drain = None;
     loop {
         if stop.is_cancelled() {
             break;
@@ -251,6 +263,7 @@ pub async fn run(
             } else {
                 "connecting"
             },
+            None,
             None,
         );
         let attempt = tokio::select! {
@@ -272,12 +285,20 @@ pub async fn run(
                             observed = &mut readiness, if awaiting_ready => {
                                 awaiting_ready = false;
                                 if observed.is_ok() && !stop.is_cancelled() {
-                                    report(&callback, &device, "connected", None);
+                                    report(&callback, &device, "connected", None, None);
                                 }
                             },
                         }
                     }
                 };
+                if stop.is_cancelled() {
+                    // Retain the original protocol receipt separately from local shutdown.
+                    // Losing that receipt cannot establish completed Gateway cleanup.
+                    transport_drain = Some(match &result {
+                        Ok(Some(outcome)) => *outcome,
+                        _ => TransportDrainOutcome::Unknown,
+                    });
+                }
                 let close = link.shutdown(Duration::from_secs(3)).await;
                 if matches!(result, Err(ProtocolError::PairingRevoked)) {
                     terminal = Some((
@@ -313,6 +334,7 @@ pub async fn run(
                     } else {
                         "gateway_connection_lost"
                     }),
+                    None,
                 );
             }
             Err(error) if !error.retryable => {
@@ -327,7 +349,7 @@ pub async fn run(
                 ));
                 break;
             }
-            Err(error) => report(&callback, &device, "disconnected", Some(error.code)),
+            Err(error) => report(&callback, &device, "disconnected", Some(error.code), None),
         }
         reconnect = true;
         tokio::select! {
@@ -340,6 +362,7 @@ pub async fn run(
         &device,
         "stopping",
         terminal.as_ref().map(|(_, _, code)| *code),
+        transport_drain,
     );
     let cleared = clear(platform).await;
     settings.close().await;
@@ -351,11 +374,17 @@ pub async fn run(
         {
             break;
         }
-        report(&callback, &device, "stopping", Some("host_cleanup_pending"));
+        report(
+            &callback,
+            &device,
+            "stopping",
+            Some("host_cleanup_pending"),
+            transport_drain,
+        );
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     if let Some((category, state, code)) = terminal {
-        report(&callback, &device, state, Some(code));
+        report(&callback, &device, state, Some(code), transport_drain);
         return Err(category);
     }
     if let Err(error) = cleared {
@@ -364,10 +393,11 @@ pub async fn run(
             &device,
             "failed",
             Some("android_cleanup_unknown"),
+            transport_drain,
         );
         return Err(error);
     }
-    report(&callback, &device, "stopped", None);
+    report(&callback, &device, "stopped", None, transport_drain);
     Ok(())
 }
 
