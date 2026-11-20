@@ -39,7 +39,10 @@ def post(body, notify=False):
     if resp.headers.get("Content-Type", "").startswith("text/event-stream"):
         for line in raw.splitlines():
             if line.startswith("data:"):
-                msg = json.loads(line[5:])
+                data = line[5:]
+                if not data.strip():  # Empty SSE events carry no JSON-RPC message.
+                    continue
+                msg = json.loads(data)
                 if msg.get("id") == body["id"]:
                     return msg
         raise RuntimeError("no response event")
