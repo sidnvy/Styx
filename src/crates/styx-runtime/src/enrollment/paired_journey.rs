@@ -507,6 +507,7 @@ async fn paired_journey(capacity: bool, computers: usize, browser_handoff: bool)
                 exec: true,
                 browser: true,
                 computer: false,
+                android: false,
             },
         )
         .unwrap();
@@ -1442,6 +1443,7 @@ async fn many_connected_computers(
                 exec: n + 1 != computers,
                 browser: false,
                 computer: false,
+                android: false,
             },
         )
         .unwrap();
@@ -1653,6 +1655,7 @@ async fn many_connected_computers(
             exec: false,
             browser: true,
             computer: true,
+            android: false,
         },
     )
     .unwrap();

@@ -1,7 +1,7 @@
 //! Owned Hyper upgrades. Registry routes; Core lease and owner gates authorize.
 use super::relay::{Command, Entry, RelayError, RelayHandle, cleanup_control};
 use crate::host::protocol::wire::{
-    BROWSER_V1, COMPUTER_V2, Call, HostControl, Reply, Request as WireRequest,
+    ANDROID_V1, BROWSER_V1, COMPUTER_V2, Call, HostControl, Reply, Request as WireRequest,
     Response as WireResponse, TRANSPORT_DRAIN_V1,
 };
 use bytes::Bytes;
@@ -163,7 +163,7 @@ impl RelayHandle {
                         Err(error) => last_error = Some(error),
                     }
                 }
-                Err(last_error.expect("three lane admission attempts"))
+                Err(last_error.expect("capability lane admission attempts"))
             })
             .await;
         let (initial_lane, lease) = match admitted {
@@ -208,7 +208,7 @@ impl RelayHandle {
                                 r=tokio::time::timeout(Duration::from_secs(5),read_response(&mut source))=>r.map_err(|_|RelayError::Unknown)??,
                             };
                             if response.request_id!=request.request_id{return Err(RelayError::Invalid)}
-                            let(host_generation,host_connection,grant_revision,exec_feature,browser_feature,computer_feature,drain_feature,host_settings)=match response.reply {
+                            let(host_generation,host_connection,grant_revision,exec_feature,browser_feature,computer_feature,android_feature,drain_feature,host_settings)=match response.reply {
                                 Reply::Negotiated{version:3,challenge:got,device_id,host_generation,connection_generation,grant_revision:Some(rev),owner_issuance,
                                     features,write,terminate,read_resume,..}
                                     if ["owner_open","owner_revoke","owner_cleanup"].iter().all(|f|features.iter().any(|v|v==f))
@@ -216,7 +216,7 @@ impl RelayHandle {
                                         && connection_generation==response.connection_generation && owner_issuance=="gateway_authenticated" => {
                                             let exec=exec_negotiated(&features,write,terminate,read_resume);
                                             let browser=features.iter().any(|v|v==BROWSER_V1) && features.iter().any(|v|v==crate::host::protocol::wire::HOST_BROWSER_SESSIONS_V1);
-                                            (host_generation,connection_generation,rev,exec,browser,features.iter().any(|v|v==COMPUTER_V2),features.iter().any(|v|v==TRANSPORT_DRAIN_V1),features.iter().any(|v|v==crate::host::settings::FEATURE))
+                                            (host_generation,connection_generation,rev,exec,browser,features.iter().any(|v|v==COMPUTER_V2),features.iter().any(|v|v==ANDROID_V1),features.iter().any(|v|v==TRANSPORT_DRAIN_V1),features.iter().any(|v|v==crate::host::settings::FEATURE))
                                         },
                                 _=>return Err(RelayError::Unauthorized),
                             };
@@ -248,7 +248,7 @@ impl RelayHandle {
                             let(tx,mut rx)=mpsc::channel::<Command>(3);
                             let e=Arc::new(Entry{host_settings,device:device.clone(),transport_generation:generation.clone(),host_connection,host_generation,grant_revision,profile,
                                 tx,stop:task_stop.clone(),live:AtomicBool::new(true),admission:Mutex::new(false),drain:Mutex::new(None),drain_enabled,lease:tokio::sync::Mutex::new(lease.take()),
-                                bootstrap_lane:initial_lane,bootstrap_lease:tokio::sync::Mutex::new(bootstrap_lease.take()),exec_feature,browser_feature,computer_feature,
+                                bootstrap_lane:initial_lane,bootstrap_lease:tokio::sync::Mutex::new(bootstrap_lease.take()),exec_feature,browser_feature,computer_feature,android_feature,
                                 browser_lease:tokio::sync::Mutex::new(browser_lease.take()),computer_lease:tokio::sync::Mutex::new(computer_lease.take())});
                             entry=Some(e.clone());let _fence=LiveFence(e.clone());
                             {
@@ -283,7 +283,7 @@ impl RelayHandle {
                                     },
                                     command=rx.recv()=>{
                                         let Some(command)=command else{break};
-                                        let control=matches!(command.call,Call::GetCapabilities|Call::SetCapabilities{..}|Call::OwnerOpen{..}|Call::OwnerRevoke{..}|Call::OwnerCleanup{..}|Call::EnableTransportDrain|Call::TransportDrainResult{..});
+                                        let control=e.host_settings || matches!(command.call,Call::GetCapabilities|Call::SetCapabilities{..}|Call::OwnerOpen{..}|Call::OwnerRevoke{..}|Call::OwnerCleanup{..}|Call::EnableTransportDrain|Call::TransportDrainResult{..});
                                         let drain_fenced=!cleanup_control(&command.call);
                                         let lane=match relay.authorization_lane(&e,&command.call).await {
                                             Ok(lane)=>lane,

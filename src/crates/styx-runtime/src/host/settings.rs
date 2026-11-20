@@ -1,5 +1,6 @@
 //! Host-owned mutable capability settings. Enrollment identity remains immutable.
 //! The same controller serves local UI and the authenticated Gateway connection.
+#[cfg(not(target_os = "android"))]
 use crate::store::{PrivateRoot, StoreError};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,8 @@ pub struct Capabilities {
     pub exec: bool,
     pub browser: bool,
     pub computer: bool,
+    #[serde(default)]
+    pub android: bool,
 }
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +33,8 @@ pub struct CapabilityPatch {
     pub browser: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub android: Option<bool>,
 }
 impl CapabilityPatch {
     fn apply(self, previous: Capabilities) -> Capabilities {
@@ -37,19 +42,45 @@ impl CapabilityPatch {
             exec: self.exec.unwrap_or(previous.exec),
             browser: self.browser.unwrap_or(previous.browser),
             computer: self.computer.unwrap_or(previous.computer),
+            android: self.android.unwrap_or(previous.android),
         }
     }
     pub fn is_empty(&self) -> bool {
-        self.exec.is_none() && self.browser.is_none() && self.computer.is_none()
+        self.exec.is_none()
+            && self.browser.is_none()
+            && self.computer.is_none()
+            && self.android.is_none()
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsReport {
-    pub generations: [u64; 3],
+    #[serde(deserialize_with = "deserialize_generations")]
+    pub generations: [u64; 4],
     pub configured: Capabilities,
     pub applied: bool,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub android_status: Option<AndroidStatus>,
+}
+// Existing desktop Hosts report three generations; Android occupies the fourth.
+fn deserialize_generations<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<[u64; 4], D::Error> {
+    let generations = Vec::<u64>::deserialize(deserializer)?;
+    match generations.as_slice() {
+        [exec, browser, computer] => Ok([*exec, *browser, *computer, 0]),
+        [exec, browser, computer, android] => Ok([*exec, *browser, *computer, *android]),
+        other => Err(serde::de::Error::invalid_length(
+            other.len(),
+            &"three or four capability generations",
+        )),
+    }
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct AndroidStatus {
+    pub accessibility: bool,
+    pub device_locked: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +98,7 @@ pub trait CapabilityRuntime: Send + Sync {
 }
 pub struct HostSettings {
     path: PathBuf,
+    #[cfg(not(target_os = "android"))]
     root: PrivateRoot,
     current: watch::Sender<Capabilities>,
     report: Mutex<SettingsReport>,
@@ -78,7 +110,9 @@ impl HostSettings {
     /// Absence imports the old *effective* local selection once. Callers include
     /// historical remote denials so an upgrade cannot silently enable a capability.
     pub fn open(path: &Path, initial: Capabilities) -> Result<Arc<Self>, ErrorCategory> {
+        #[cfg(not(target_os = "android"))]
         let root = PrivateRoot::open(path).map_err(|_| ErrorCategory::IntegrityFailure)?;
+        #[cfg(not(target_os = "android"))]
         let configured = match root.read_raw(FILE, 4096) {
             Ok(raw) => {
                 let value: Persisted = serde_json::from_slice(raw.bytes())
@@ -91,16 +125,32 @@ impl HostSettings {
             Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => initial,
             Err(_) => return Err(ErrorCategory::IntegrityFailure),
         };
+        // Android supplies its app-private filesDir; the OS owns its UID boundary.
+        #[cfg(target_os = "android")]
+        let configured = match std::fs::read(path.join(FILE)) {
+            Ok(bytes) => {
+                let value: Persisted =
+                    serde_json::from_slice(&bytes).map_err(|_| ErrorCategory::IntegrityFailure)?;
+                if value.schema != 1 {
+                    return Err(ErrorCategory::IntegrityFailure);
+                }
+                value.capabilities
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => initial,
+            Err(_) => return Err(ErrorCategory::IntegrityFailure),
+        };
         let (current, _) = watch::channel(configured);
         Ok(Arc::new(Self {
             path: path.to_owned(),
+            #[cfg(not(target_os = "android"))]
             root,
             current,
             report: Mutex::new(SettingsReport {
-                generations: [0; 3],
+                generations: [0; 4],
                 configured,
                 applied: true,
                 error: None,
+                android_status: None,
             }),
             gate: Arc::new(RwLock::new(())),
             runtime: Mutex::new(None),
@@ -172,6 +222,7 @@ impl HostSettings {
             before.exec != after.exec,
             before.browser != after.browser,
             before.computer != after.computer,
+            before.android != after.android,
         ]
         .into_iter()
         .enumerate()
@@ -187,7 +238,8 @@ impl HostSettings {
         if !previous.applied
             && ((after.exec && !before.exec)
                 || (after.browser && !before.browser)
-                || (after.computer && !before.computer))
+                || (after.computer && !before.computer)
+                || (after.android && !before.android))
         {
             return Err(ErrorCategory::Busy);
         }
@@ -200,6 +252,7 @@ impl HostSettings {
             configured: after,
             applied: false,
             error: None,
+            android_status: None,
         };
         self.current.send_replace(after);
         let result = runtime.apply(before, after).await;
@@ -207,6 +260,7 @@ impl HostSettings {
             generations,
             configured: after,
             applied: result.is_ok() && persistence_warning.is_none(),
+            android_status: None,
             error: result
                 .err()
                 .or(persistence_warning)
@@ -218,6 +272,7 @@ impl HostSettings {
     // An error before rename leaves configuration unchanged. A durability/readback
     // warning after rename must still apply the committed setting to this Host.
     fn persist(&self, capabilities: Capabilities) -> Result<Option<ErrorCategory>, ErrorCategory> {
+        #[cfg(not(target_os = "android"))]
         if PrivateRoot::open(&self.path)
             .map_err(|_| ErrorCategory::IntegrityFailure)?
             .identity()
@@ -244,6 +299,12 @@ impl HostSettings {
         {
             return Ok(Some(ErrorCategory::ResultUnknown));
         }
+        #[cfg(target_os = "android")]
+        return match std::fs::read(self.path.join(FILE)) {
+            Ok(raw) if raw == bytes => Ok(None),
+            _ => Ok(Some(ErrorCategory::ResultUnknown)),
+        };
+        #[cfg(not(target_os = "android"))]
         match self.root.read_raw(FILE, 4096) {
             Ok(raw) if raw.bytes() == bytes => Ok(None),
             _ => Ok(Some(ErrorCategory::ResultUnknown)),
@@ -293,6 +354,7 @@ mod tests {
         exec: false,
         browser: false,
         computer: false,
+        android: false,
     };
     #[tokio::test]
     async fn settings_preserve_import_and_reopen_independently_of_pairing_defaults() {
@@ -310,7 +372,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(enabled.generations, [0, 1, 0]);
+        assert_eq!(enabled.generations, [0, 1, 0, 0]);
         assert!(enabled.configured.browser && enabled.applied);
         assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
         let reopened = HostSettings::open(
@@ -319,6 +381,7 @@ mod tests {
                 exec: true,
                 browser: false,
                 computer: true,
+                android: false,
             },
         )
         .unwrap();
@@ -391,5 +454,74 @@ mod tests {
         assert!(change.await.unwrap().unwrap().applied);
         assert!(settings.admit(|c| c.exec).await.is_err());
         settings.close().await;
+    }
+
+    fn capability_reply(generations: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "status": "capabilities",
+            "report": {
+                "generations": generations,
+                "configured": {"exec": true, "browser": true, "computer": true},
+                "applied": true,
+                "error": null
+            }
+        })
+    }
+    #[test]
+    fn capability_wire_accepts_existing_desktop_and_android_generations() {
+        use crate::host::protocol::wire::Reply;
+        let old = capability_reply(serde_json::json!([11, 22, 33]));
+        let Reply::Capabilities { report } = serde_json::from_value::<Reply>(old).unwrap() else {
+            panic!("expected capability report");
+        };
+        assert_eq!(report.generations, [11, 22, 33, 0]);
+        assert_eq!(
+            report.configured,
+            Capabilities {
+                exec: true,
+                browser: true,
+                computer: true,
+                android: false
+            }
+        );
+        assert!(report.applied && report.error.is_none() && report.android_status.is_none());
+        let encoded = serde_json::to_value(Reply::Capabilities { report }).unwrap();
+        assert_eq!(
+            encoded["report"]["generations"],
+            serde_json::json!([11, 22, 33, 0])
+        );
+
+        let mut current = capability_reply(serde_json::json!([11, 22, 33, 44]));
+        current["report"]["configured"]["android"] = true.into();
+        current["report"]["android_status"] =
+            serde_json::json!({"accessibility": true, "device_locked": false});
+        let Reply::Capabilities { report } = serde_json::from_value::<Reply>(current).unwrap()
+        else {
+            panic!("expected capability report");
+        };
+        assert_eq!(report.generations, [11, 22, 33, 44]);
+        assert!(report.configured.android && report.android_status.unwrap().accessibility);
+        let encoded = serde_json::to_value(Reply::Capabilities { report }).unwrap();
+        assert_eq!(
+            encoded["report"]["generations"],
+            serde_json::json!([11, 22, 33, 44])
+        );
+    }
+    #[test]
+    fn capability_wire_rejects_other_generation_lengths_and_missing_generations() {
+        use crate::host::protocol::wire::Reply;
+        for length in [0, 1, 2, 5, 6] {
+            let wire = capability_reply(serde_json::json!(vec![0u64; length]));
+            assert!(
+                serde_json::from_value::<Reply>(wire).is_err(),
+                "length {length}"
+            );
+        }
+        let mut missing = capability_reply(serde_json::json!([0, 0, 0]));
+        missing["report"]
+            .as_object_mut()
+            .unwrap()
+            .remove("generations");
+        assert!(serde_json::from_value::<Reply>(missing).is_err());
     }
 }

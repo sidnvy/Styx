@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum CapabilityId {
+    #[serde(rename = "android.observe")]
+    AndroidObserve,
+    #[serde(rename = "android.act")]
+    AndroidAct,
+    #[serde(rename = "android.run_steps")]
+    AndroidRunSteps,
     #[serde(rename = "exec.run")]
     ExecRun,
     #[serde(rename = "browser")]
@@ -26,7 +32,14 @@ pub enum CapabilityId {
 }
 impl CapabilityId {
     pub fn requires_session(self) -> bool {
-        !matches!(self, Self::ExecRun | Self::Browser)
+        !matches!(
+            self,
+            Self::ExecRun
+                | Self::Browser
+                | Self::AndroidObserve
+                | Self::AndroidAct
+                | Self::AndroidRunSteps
+        )
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

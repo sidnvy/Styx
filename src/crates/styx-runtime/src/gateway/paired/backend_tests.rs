@@ -5,16 +5,13 @@ fn args(v: Value) -> Option<Map<String, Value>> {
 }
 #[test]
 fn frozen_tools_and_exec_arguments_preserve_legacy_edges() {
-    assert_eq!(PUBLIC.len(), 40);
+    assert_eq!(PUBLIC.len(), 43);
     for name in ["type_text", "press_key", "scroll"] {
         assert!(!PUBLIC.iter().any(|tool| tool.name == name));
     }
     assert_eq!(PUBLIC[0].name, "exec_command");
     assert_eq!(PUBLIC[1].name, "write_stdin");
-    assert_eq!(
-        PUBLIC.last().unwrap().name,
-        "get_execution_environment_status"
-    );
+    assert_eq!(PUBLIC.last().unwrap().name, "android_run_steps");
     assert!(ExecArgs::parse(args(json!({"cmd":"printf x","login":false,"tty":false,"yield_time_ms":0.0,"max_output_tokens":1.0}))).is_ok());
     for v in [
         json!({"cmd":"x","login":null}),
@@ -117,6 +114,7 @@ fn environment_metadata_is_bounded_literal_text_and_platform_is_a_closed_display
         online: false,
         browser_online: true,
         computer_online: false,
+        android_online: false,
         capability_generation: "original".into(),
         host_generation: None,
         grant_revision: None,

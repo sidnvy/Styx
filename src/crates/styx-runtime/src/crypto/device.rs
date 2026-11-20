@@ -59,6 +59,7 @@ impl GeneratedDeviceIdentity {
     /// serialize/log this PEM or treat possession as enrollment authority.
     #[cfg(any(
         test,
+        target_os = "android",
         all(target_os = "windows", target_arch = "x86_64"),
         all(
             target_os = "macos",

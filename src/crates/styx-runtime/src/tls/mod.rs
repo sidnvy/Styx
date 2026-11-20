@@ -438,11 +438,13 @@ impl GatewayClientTls {
 
 /// One-way server TLS only. Pairing, bearer/owner checks and client certificate
 /// authentication are separate decisions, never implied by accept().
+#[cfg(not(target_os = "android"))]
 pub struct GatewayServerTls {
     acceptor: TlsAcceptor,
     leaf_pin: GatewayLeafPin,
     renewal: Option<Arc<renewal::EndpointRenewal>>,
 }
+#[cfg(not(target_os = "android"))]
 impl std::fmt::Debug for GatewayServerTls {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GatewayServerTls")
@@ -450,6 +452,7 @@ impl std::fmt::Debug for GatewayServerTls {
             .finish()
     }
 }
+#[cfg(not(target_os = "android"))]
 impl GatewayServerTls {
     pub fn from_pem(
         certificates_pem: &[u8],
@@ -512,8 +515,11 @@ impl GatewayServerTls {
 #[cfg(test)]
 mod tests;
 
+#[cfg(not(target_os = "android"))]
 mod issuer;
+#[cfg(not(target_os = "android"))]
 mod renewal;
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "android")))]
 pub(crate) use issuer::issue_server_leaf;
+#[cfg(not(target_os = "android"))]
 pub(crate) use issuer::{generate_gateway_ca, issue_server_leaf_with_lan_addresses};

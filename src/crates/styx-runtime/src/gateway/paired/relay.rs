@@ -59,6 +59,7 @@ pub struct DeviceStatus {
     pub online: bool,
     pub browser_online: bool,
     pub computer_online: bool,
+    pub android_online: bool,
     pub capability_generation: String,
     pub host_generation: Option<HostGeneration>,
     pub grant_revision: Option<u64>,
@@ -90,6 +91,7 @@ pub(crate) struct Entry {
     pub exec_feature: bool,
     pub browser_feature: bool,
     pub computer_feature: bool,
+    pub android_feature: bool,
     pub browser_lease: tokio::sync::Mutex<Option<ConnectionLease>>,
     pub computer_lease: tokio::sync::Mutex<Option<ConnectionLease>>,
 }
@@ -116,6 +118,12 @@ impl Entry {
         }
     }
 }
+#[derive(Clone, Copy)]
+enum ToolRoute {
+    Lane(Lane),
+    Android,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TargetKind {
     ExecResource,
@@ -324,6 +332,15 @@ impl RelayHandle {
             .map_err(|_| RelayError::Unknown)?
             .map_err(|_| RelayError::Unauthorized)
     }
+    async fn authorize_route(&self, e: &Entry, route: ToolRoute) -> Result<(), RelayError> {
+        match route {
+            ToolRoute::Lane(lane) => self.authorize_for(e, lane).await,
+            ToolRoute::Android if e.android_feature && e.host_settings => {
+                self.control_lane(e).await.map(|_| ())
+            }
+            ToolRoute::Android => Err(RelayError::Unsupported),
+        }
+    }
     /// Control messages have no execution capability. They may use either
     /// currently authorized connection lane; business calls never fall through
     /// from a denied Browser grant to an Exec grant.
@@ -335,7 +352,10 @@ impl RelayHandle {
         if !drain::cleanup_control(call) && *e.admission.lock().map_err(|_| RelayError::Unknown)? {
             return Err(RelayError::Unauthorized);
         }
-        if matches!(
+        if call.is_android() {
+            self.authorize_route(e, ToolRoute::Android).await?;
+            self.control_lane(e).await
+        } else if matches!(
             call,
             Call::GetCapabilities
                 | Call::SetCapabilities { .. }
@@ -420,6 +440,12 @@ impl RelayHandle {
                 }
                 _ => false,
             };
+            let android_online = match e {
+                Some(e) if e.host_settings => {
+                    self.authorize_route(e, ToolRoute::Android).await.is_ok()
+                }
+                _ => false,
+            };
             devices.push(DeviceStatus {
                 host_settings: e.is_some_and(|e| e.host_settings),
                 device_id: p.device_id,
@@ -428,6 +454,7 @@ impl RelayHandle {
                 online,
                 browser_online,
                 computer_online,
+                android_online,
                 capability_generation: p.capability_generation,
                 host_generation: e.map(|e| e.host_generation.clone()),
                 grant_revision: e.map(|e| e.grant_revision),
@@ -449,7 +476,9 @@ impl RelayHandle {
             .get(device)
             .cloned()
             .ok_or(RelayError::Offline)?;
-        if !entry.host_settings {
+        if !entry.host_settings
+            || (!entry.android_feature && patch.is_some_and(|patch| patch.android.is_some()))
+        {
             return Err(RelayError::Unsupported);
         }
         let call = patch.map_or(Call::GetCapabilities, |patch| Call::SetCapabilities {
@@ -579,14 +608,14 @@ impl RelayHandle {
     async fn route_binding(
         &self,
         binding: &Arc<Binding>,
-        lane: Lane,
+        lane: ToolRoute,
     ) -> Result<Arc<Entry>, RelayError> {
         self.active_binding(binding)?;
         let current = self.current_binding_entry(binding, false)?;
         if *current.admission.lock().map_err(|_| RelayError::Unknown)? {
             return Err(RelayError::Unauthorized);
         }
-        self.authorize_for(&current, lane).await?;
+        self.authorize_route(&current, lane).await?;
         let already_confirmed = {
             let route = binding.route.lock().map_err(|_| RelayError::Unknown)?;
             Arc::ptr_eq(&route, &current)
@@ -599,7 +628,7 @@ impl RelayHandle {
         let _admission = binding.rebind.try_lock().map_err(|_| RelayError::Busy)?;
         self.active_binding(binding)?;
         let current = self.current_binding_entry(binding, false)?;
-        self.authorize_for(&current, lane).await?;
+        self.authorize_route(&current, lane).await?;
         let already_confirmed = {
             let route = binding.route.lock().map_err(|_| RelayError::Unknown)?;
             Arc::ptr_eq(&route, &current)
@@ -623,7 +652,7 @@ impl RelayHandle {
                 return Err(RelayError::Unauthorized);
             }
             self.active_binding(binding)?;
-            self.authorize_for(&current, lane).await?;
+            self.authorize_route(&current, lane).await?;
             if !Arc::ptr_eq(&self.current_binding_entry(binding, false)?, &current) {
                 return Err(RelayError::Offline);
             }
@@ -646,27 +675,37 @@ impl RelayHandle {
         owner: &VerifiedGatewayOwner,
         device: &DeviceId,
     ) -> Result<BoundOwner, RelayError> {
-        self.bind_for(owner, device, Lane::Exec).await
+        self.bind_for(owner, device, ToolRoute::Lane(Lane::Exec))
+            .await
     }
     pub async fn bind_browser(
         &self,
         owner: &VerifiedGatewayOwner,
         device: &DeviceId,
     ) -> Result<BoundOwner, RelayError> {
-        self.bind_for(owner, device, Lane::Browser).await
+        self.bind_for(owner, device, ToolRoute::Lane(Lane::Browser))
+            .await
     }
     pub async fn bind_computer(
         &self,
         owner: &VerifiedGatewayOwner,
         device: &DeviceId,
     ) -> Result<BoundOwner, RelayError> {
-        self.bind_for(owner, device, Lane::Computer).await
+        self.bind_for(owner, device, ToolRoute::Lane(Lane::Computer))
+            .await
+    }
+    pub async fn bind_android(
+        &self,
+        owner: &VerifiedGatewayOwner,
+        device: &DeviceId,
+    ) -> Result<BoundOwner, RelayError> {
+        self.bind_for(owner, device, ToolRoute::Android).await
     }
     async fn bind_for(
         &self,
         owner: &VerifiedGatewayOwner,
         device: &DeviceId,
-        lane: Lane,
+        lane: ToolRoute,
     ) -> Result<BoundOwner, RelayError> {
         let _opening = self.inner.opening.lock().await;
         if self.is_fenced(owner)? {
@@ -681,7 +720,7 @@ impl RelayHandle {
             .get(device)
             .cloned()
             .ok_or(RelayError::Offline)?;
-        self.authorize_for(&entry, lane).await?;
+        self.authorize_route(&entry, lane).await?;
         let existing = {
             let bindings = self
                 .inner
@@ -827,18 +866,25 @@ impl RelayHandle {
                 return Err(RelayError::Unauthorized);
             }
         }
-        let lane = if call.is_computer() {
-            Lane::Computer
+        let lane = if call.is_android() {
+            ToolRoute::Android
+        } else if call.is_computer() {
+            ToolRoute::Lane(Lane::Computer)
         } else if call.is_browser() {
-            Lane::Browser
+            ToolRoute::Lane(Lane::Browser)
         } else {
-            Lane::Exec
+            ToolRoute::Lane(Lane::Exec)
         };
         // A denied lane cannot consume the shared routing-record allowance.
         // exchange/actual-send/delivery still repeat the current authorization.
         let entry = self.route_binding(&b.inner, lane).await?;
         let (owner, target, revision, new_record, record_kind) = match &call {
-            Call::BrowserSession {
+            Call::Android {
+                owner,
+                grant_revision,
+                ..
+            }
+            | Call::BrowserSession {
                 owner,
                 grant_revision,
                 ..
@@ -1074,7 +1120,7 @@ impl RelayHandle {
         {
             return Err(RelayError::Unauthorized);
         }
-        self.authorize_for(&entry, lane).await?;
+        self.authorize_route(&entry, lane).await?;
         if let Reply::Prepared { snapshot }
         | Reply::ComputerPrepared { snapshot, .. }
         | Reply::Start { snapshot, .. }

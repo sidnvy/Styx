@@ -1637,6 +1637,7 @@ fn shared_host_transport_inventory_uses_routing_without_changing_capabilities() 
         online: true,
         browser_online: true,
         computer_online: false,
+        android_online: false,
         capability_generation: "generation".into(),
         host_generation: None,
         grant_revision: None,

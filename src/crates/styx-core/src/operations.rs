@@ -54,6 +54,7 @@ pub enum ResourceDomain {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationPurpose {
     Execute,
+    AndroidRequest,
     DesktopAccessibilityReadAcquisition,
     DesktopWindowCaptureReadAcquisition,
     DesktopAccessibilityWriteAttempt,
@@ -281,6 +282,60 @@ impl OperationLedger {
             payload,
             now,
         )
+    }
+    /// Android calls own one finite native request, not a process or desktop agent.
+    /// They retain the same owner, immutable payload and once-only dispatch gate.
+    pub fn prepare_android_request(
+        &mut self,
+        owner: &OwnerLease,
+        context: PreparedContext,
+        payload: Vec<u8>,
+        now: MonotonicMillis,
+    ) -> Result<OperationSnapshot, ErrorCategory> {
+        if !matches!(
+            context.capability,
+            CapabilityId::AndroidObserve | CapabilityId::AndroidAct | CapabilityId::AndroidRunSteps
+        ) {
+            return Err(ErrorCategory::CapabilityUnsupported);
+        }
+        let snapshot = self.prepare(owner, context, payload, now)?;
+        let record = self
+            .records
+            .get_mut(&snapshot.id)
+            .expect("prepared request");
+        record.purpose = OperationPurpose::AndroidRequest;
+        record.snapshot.liveness = ExecutionLiveness::NotApplicable;
+        Ok(record.snapshot.clone())
+    }
+    /// The original platform callback has returned. Unknown effects stay Unknown;
+    /// releasing this callback's resources does not authorize replay.
+    pub fn record_android_result(
+        &mut self,
+        id: &OperationId,
+        result: RequestResult,
+        now: MonotonicMillis,
+    ) -> Result<OperationSnapshot, ErrorCategory> {
+        let record = self
+            .records
+            .get_mut(id)
+            .ok_or(ErrorCategory::StaleOperation)?;
+        if record.purpose != OperationPurpose::AndroidRequest
+            || !matches!(
+                record.snapshot.state,
+                OperationState::Dispatched | OperationState::Unknown
+            )
+        {
+            return Err(ErrorCategory::StateConflict);
+        }
+        record.snapshot.state = match (record.snapshot.state, result) {
+            (OperationState::Unknown, _) | (_, RequestResult::Unknown) => OperationState::Unknown,
+            (_, RequestResult::Succeeded) => OperationState::Succeeded,
+            (_, RequestResult::Failed) => OperationState::Failed,
+        };
+        record.snapshot.output_drain = OutputDrain::Drained;
+        record.terminal_at = Some(now);
+        record.physical = PhysicalRetention::Released;
+        Ok(record.snapshot.clone())
     }
     /// Reserve an owner-bound native Desktop agent in one explicit session.
     /// This only marks resource affinity: dispatch still requires real current
@@ -532,7 +587,9 @@ impl OperationLedger {
             return Err(ErrorCategory::StateConflict);
         }
         match record.purpose {
-            OperationPurpose::Execute => check_admission(&record.context, facts, now)?,
+            OperationPurpose::Execute | OperationPurpose::AndroidRequest => {
+                check_admission(&record.context, facts, now)?
+            }
             OperationPurpose::DesktopAccessibilityReadAcquisition => {
                 check_desktop_read_acquisition(&record.context, facts, now)?
             }
@@ -549,7 +606,7 @@ impl OperationLedger {
             .expect("record checked above with exclusive ledger access");
         record.snapshot.state = OperationState::Dispatched;
         record.physical = PhysicalRetention::Retained;
-        if record.snapshot.target.is_none() {
+        if record.snapshot.target.is_none() && record.purpose != OperationPurpose::AndroidRequest {
             record.snapshot.liveness = ExecutionLiveness::Unknown;
             record.snapshot.output_drain = OutputDrain::Unknown;
         }
@@ -680,7 +737,9 @@ impl OperationLedger {
             OperationPurpose::DesktopWindowCaptureReadAcquisition => {
                 check_desktop_window_capture_acquisition(&record.context, facts, now)?
             }
-            OperationPurpose::Execute | OperationPurpose::DesktopAccessibilityWriteAttempt => {
+            OperationPurpose::Execute
+            | OperationPurpose::AndroidRequest
+            | OperationPurpose::DesktopAccessibilityWriteAttempt => {
                 return Err(ErrorCategory::StateConflict);
             }
         }
@@ -1069,3 +1128,14 @@ pub enum ActionResult {
     NotDispatched,
     Unknown,
 }
+
+/// Result of a finite native request; failure never asserts rollback.
+#[derive(Debug, Clone, Copy)]
+pub enum RequestResult {
+    Succeeded,
+    Failed,
+    Unknown,
+}
+
+#[cfg(test)]
+mod android_tests;

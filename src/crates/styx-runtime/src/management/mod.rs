@@ -11,7 +11,7 @@ pub mod native_join;
     ),
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
 ))]
-pub(crate) mod native_join_http;
+pub(crate) use crate::enrollment::client_http as native_join_http;
 #[cfg(any(
     all(target_os = "windows", target_arch = "x86_64"),
     all(
@@ -20,7 +20,7 @@ pub(crate) mod native_join_http;
     ),
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
 ))]
-mod native_join_protocol;
+use crate::enrollment::client_protocol as native_join_protocol;
 pub mod plugin_package;
 pub mod plugin_presentation;
 pub mod role_retire;

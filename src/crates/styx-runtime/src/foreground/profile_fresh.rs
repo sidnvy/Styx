@@ -201,6 +201,7 @@ fn load_snapshot(
         computer: seed.computer_requested
             && ready.computer_approved
             && deployment.host.computer == Some(Value::Bool(true)),
+        android: false,
     };
     let settings = crate::host::settings::HostSettings::open(state_dir, initial)
         .map_err(|_| ProfileError::Invalid)?;

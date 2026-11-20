@@ -11,6 +11,10 @@ fn independent_feature_families_never_synthesize_exec_support() {
     let mut browser = control.clone();
     browser.push(BROWSER_V1.into());
     assert!(!exec_negotiated(&browser, false, false, false));
+    let mut android = control.clone();
+    android.push(ANDROID_V1.into());
+    android.push(crate::host::settings::FEATURE.into());
+    assert!(!exec_negotiated(&android, false, false, false));
     let mut computer = control;
     computer.push(COMPUTER_V2.into());
     assert!(!exec_negotiated(&computer, true, true, false));

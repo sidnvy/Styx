@@ -1009,7 +1009,7 @@ mod platform {
                 computer_requested: d.host.computer,
                 browser_requested,
             };
-            let join = protocol::make_join(&seed, invitation, generated.private_key())
+            let join = protocol::make_join(&(&seed).into(), invitation, generated.private_key())
                 .map_err(protocol_error)?;
             let seed_raw = Zeroizing::new(serde_json::to_vec(&seed).map_err(|_| bad())?);
             let mut extensions = BTreeMap::new();
@@ -1137,7 +1137,7 @@ mod platform {
         }
         let (next, pending) = io(work, move |w| {
             let pending = protocol::validate_pending(
-                &w.seed,
+                &(&w.seed).into(),
                 &response.body,
                 &response.leaf_pin,
                 clock_ms()?,
@@ -1229,11 +1229,20 @@ mod platform {
         let leaf =
             GatewayLeafPin::parse_hex(&record.peer_leaf_sha256.to_hex()).map_err(|_| unknown())?;
         if historical {
-            protocol::validate_recorded_pending(&work.seed, record.body.get().as_bytes(), &leaf)
-                .map_err(protocol_error)
+            protocol::validate_recorded_pending(
+                &(&work.seed).into(),
+                record.body.get().as_bytes(),
+                &leaf,
+            )
+            .map_err(protocol_error)
         } else {
-            protocol::validate_pending(&work.seed, record.body.get().as_bytes(), &leaf, clock_ms()?)
-                .map_err(protocol_error)
+            protocol::validate_pending(
+                &(&work.seed).into(),
+                record.body.get().as_bytes(),
+                &leaf,
+                clock_ms()?,
+            )
+            .map_err(protocol_error)
         }
     }
 
@@ -1557,7 +1566,7 @@ mod platform {
                     validate_rejection(w, &pending, &raw)?;
                     return Ok((pending, None));
                 }
-                let credential = protocol::decrypt_claim(&w.seed, &w.key, &response.body)
+                let credential = protocol::decrypt_claim(&(&w.seed).into(), &w.key, &response.body)
                     .map_err(protocol_error)?;
                 w.append(File::Credential, &credential)?;
                 Ok((pending, Some(credential)))
@@ -1614,7 +1623,9 @@ mod platform {
                     },
                 ));
             }
-            if let Err(error) = protocol::validate_confirmation(&work.seed, &response.body) {
+            if let Err(error) =
+                protocol::validate_confirmation(&(&work.seed).into(), &response.body)
+            {
                 return Err(protocol_error(error).keep(Retained::Work {
                     _work: Box::new(work),
                 }));
@@ -1651,7 +1662,7 @@ mod platform {
                 _work: Box::new(work),
             }));
         }
-        let observed = match protocol::validate_self(&work.seed, &response.body) {
+        let observed = match protocol::validate_self(&(&work.seed).into(), &response.body) {
             Ok(value) => value,
             Err(error) => {
                 return Err(protocol_error(error).keep(Retained::Work {

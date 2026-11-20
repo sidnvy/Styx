@@ -86,16 +86,20 @@ actual compiler/SDK and source generation. Packaging does not recompile Rust.
 
 ## Run
 
-Pushing release wiring/producer changes to `develop` automatically builds without
-publishing a product Release. Once the workflow exists on the repository default
-branch, `workflow_dispatch` with `publish=false` offers the same dry run on a selected
-ref. Download the `complete-release` Actions artifact. No product tag is created.
-
 For release, update the workspace version and workspace lock entries, commit the
-intended source, then push its exact `v<version>` tag. The version must match Cargo.
-A version containing `-` produces a prerelease; a plain semantic version produces a
-normal release. Manual `publish=true` also requires the exact existing tag. The
-workflow does not invent a tag, alter source versions or overwrite an existing release.
+intended source, and integrate it into `main`. Create and push a new `v<version>` tag
+at the exact release commit already contained in `origin/main`. The version must match
+Cargo, and the source checkout must be clean. A version containing `-` produces a
+prerelease; a plain semantic version produces a normal release.
+
+Pushing the version tag starts the release workflow. For a manual run, select that
+same version tag in `workflow_dispatch`. Use a new version for each release and keep
+published tags immutable. The workflow does not invent a tag, alter source versions
+or overwrite an existing release.
+
+Download the required packages, `SHA256SUMS`, and `styx-publisher.pub` from the same
+published GitHub Release.
+
 The native App build number is 1142 (the last installed preview) plus the Actions run
 number, so new artifacts advance rather than resetting to build 1. Values over 9999 need an
 explicit policy update rather than silently truncating the sequence.

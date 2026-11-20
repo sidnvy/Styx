@@ -480,7 +480,8 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
         }).await.unwrap();
         authority.stop_disabled_capabilities(crate::host::settings::Capabilities {
             exec: true, browser: false, computer: true,
-        }).await.unwrap();
+            android: false,
+}).await.unwrap();
         let closed = host.inner.state.lock().unwrap().ledger.inspect(&owner, &independent.id, independent.payload_digest).unwrap();
         assert_eq!(closed.liveness, ExecutionLiveness::Exited);
         std::fs::write(root.join("exec-go"), b"go").unwrap();
@@ -496,7 +497,8 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
         }).await;
         authority.stop_disabled_capabilities(crate::host::settings::Capabilities {
             exec: false, browser: true, computer: true,
-        }).await.unwrap();
+            android: false,
+}).await.unwrap();
         let result = acted(&host, &owner, &surviving_browser, BrowserAction::Evaluate {
             function: "() => { if (document.title !== 'browser-survives-exec-disable') throw new Error('context replaced'); return document.title; }".into(),
         }).await;

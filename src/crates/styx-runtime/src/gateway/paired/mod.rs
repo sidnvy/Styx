@@ -2,6 +2,8 @@
 mod relay;
 pub(crate) mod transport;
 pub use crate::enrollment::service::GatewayExecProfile;
+#[cfg(test)]
+pub(crate) use relay::Entry;
 pub use relay::{BoundOwner, DeviceStatus, RelayError, RelayHandle};
 
 pub mod backend;
