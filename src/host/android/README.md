@@ -33,6 +33,11 @@ notification permission to make the running Host notification visible.
 **Stop Host** and the notification's **Stop** action stop the same native Host.
 Closing the Activity leaves the foreground Host service running.
 
+After Gateway revocation, use **Forget pairing** in the App, confirm locally,
+then pair with a new invitation. Forgetting stops the Host and removes only this
+App's protected enrollment; Android permissions and Host settings remain in place.
+The old Gateway device record must be revoked separately if it is still active.
+
 An encrypted opaque enrollment blob is stored under the app's no-backup directory.
 Its AES-GCM key remains in AndroidKeyStore. No credentials are returned by NativeHost
 status or written to logs. The pairing Activity blocks screenshots and recent-apps
@@ -40,7 +45,7 @@ previews, and password node text is omitted from Android observations.
 
 ## Platform contract
 
-`com.styx.host.NativeHost` exposes static JNI `pair`, `start`, `stop` and `status`.
+`com.styx.host.NativeHost` exposes static JNI `pair`, `start`, `stop`, `forget` and `status`.
 `AndroidPlatform` provides `loadCredentials`, `storeCredentials` and
 `execute(method, paramsJson)`. Rust supplies the internal `__caller_id` from its
 existing caller authority; Android does not accept a separate caller session or
@@ -48,9 +53,11 @@ perform authentication.
 
 The three public tool methods are `android_observe`, `android_act` and
 `android_run_steps`. Each Core caller has one current observation, replaced by
-that caller's next observation. Only lightweight node paths and observed identity
-are retained; an action refreshes the current Android node and rejects changed
-targets. Another caller's observation does not invalidate these references.
+that caller's next observation. The current observation retains node paths,
+semantic fields and immutable Android node-identity copies. An action resolves
+and refreshes the current node, checks its source identity and semantic fields,
+and permits a bounds-only relayout. Replaced nodes and changed target content
+are rejected. Another caller's observation does not invalidate these references.
 Explicit `release_caller` and Host `clear` callbacks discard references.
 
 Observations return the active app's accessible tree and optional scaled JPEG
@@ -99,3 +106,31 @@ services with `FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES` and checks live readin
 before opening the fixture. A failed readiness check is not a platform-action pass.
 A successful platform run still does not establish Gateway pairing or independent
 operation after ADB disconnect.
+
+
+For a one-time development pairing through the real App UI, the same test runner
+accepts `-e mode pair_ui`. Supply a JSON object with `gateway_url`, `short_code`
+and optional `device_label` through stdin to a mode-0600 file at
+`/data/user/0/com.styx.host/no_backup/styx-pairing-input.json` using the debug App's
+normal `run-as` access. Keep the JSON out of command arguments, logs and test
+extras. The runner reads and immediately deletes the file, fills MainActivity's
+three fields and clicks **Pair phone** once. It returns only public Host status
+and error codes; `pair_result` confirms enrollment separately from connection
+status. It never retries pairing. Invoke this mode with `am instrument
+--no-restart -w -r -e mode pair_ui` and the runner component above. It does not
+change production code or replace the App's pairing and credential-storage path.
+
+The explicit `-e mode forget_ui` acceptance action opens the real App's **Forget
+pairing** confirmation and presses **Forget** once. Run it only when local reset
+is intended, using the same `--no-restart` runner invocation. It verifies that the
+credential file is absent, public status has no environment identity, and the
+Accessibility connection is preserved; it never reads credentials or deletes
+files itself.
+
+For normal Host lifecycle acceptance, use `-e mode host_ui -e action start` or
+`-e mode host_ui -e action stop` with the same `--no-restart` invocation. Each
+clicks the corresponding real App button once, waits for its public terminal
+state and reports sanitized status and readiness. `-e action status` performs
+only those public reads. None of these actions reads or resets credentials.
+The synthetic fixture keeps its own visible window awake for MCP acceptance;
+leaving or closing the fixture restores normal screen-timeout behavior.

@@ -32,8 +32,10 @@ class StyxAccessibilityService : AccessibilityService() {
     private val main = Handler(Looper.getMainLooper())
     private val observations = ConcurrentHashMap<String, Observation>()
 
+    // Constructor-owned identity copies stay immutable. Dropping an observation releases
+    // its references; recycling a copy could race an action that still references it.
     private data class Target(val path: List<Int>, val viewId: String?, val className: String?,
-                              val text: String?, val description: String?, val bounds: Rect)
+                              val text: String?, val description: String?, val identity: AccessibilityNodeInfo)
     private data class Observation(val id: String, val windowId: Int, val packageName: String?,
                                    val width: Int, val height: Int, val targets: Map<String, Target>)
 
@@ -85,7 +87,7 @@ class StyxAccessibilityService : AccessibilityService() {
                 val nodeId = "n${targets.size}"
                 val text = if (node.isPassword) null else node.text?.toString()
                 val description = if (node.isPassword) null else node.contentDescription?.toString()
-                targets[nodeId] = Target(path, node.viewIdResourceName, node.className?.toString(), text, description, bounds)
+                targets[nodeId] = Target(path, node.viewIdResourceName, node.className?.toString(), text, description, AccessibilityNodeInfo(node))
                 nodes.put(JSONObject()
                     .put("node_id", nodeId)
                     .put("view_id", node.viewIdResourceName ?: JSONObject.NULL)
@@ -147,13 +149,11 @@ class StyxAccessibilityService : AccessibilityService() {
                 val child = node.getChild(index) ?: return fail("stale_node", "The observed node is no longer present.")
                 node.recycle(); node = child
             }
-            val bounds = Rect()
             if (!node.refresh()) return fail("stale_node", "The observed node is no longer present.")
-            node.getBoundsInScreen(bounds)
             val text = if (node.isPassword) null else node.text?.toString()
             val description = if (node.isPassword) null else node.contentDescription?.toString()
-            if (node.viewIdResourceName != target.viewId || node.className?.toString() != target.className ||
-                text != target.text || description != target.description || bounds != target.bounds) {
+            if (node != target.identity || node.viewIdResourceName != target.viewId ||
+                node.className?.toString() != target.className || text != target.text || description != target.description) {
                 return fail("stale_node", "The observed node changed; observe it before acting.")
             }
             if (!node.isVisibleToUser || !node.isEnabled) return fail("node_not_ready", "The observed node is not visible and enabled.")

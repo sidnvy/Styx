@@ -10,6 +10,18 @@ import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.text.Editable
+import android.text.InputType
+import android.text.TextWatcher
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.EditText
+import android.widget.TextView
+import com.styx.host.MainActivity
+import com.styx.host.NativeHost
+import java.io.File
+import java.util.concurrent.atomic.AtomicReference
 import android.util.Base64
 import com.styx.host.AndroidPlatform
 import org.json.JSONArray
@@ -23,11 +35,20 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
     private val measurements = JSONObject()
     private var currentCase = "initialization"
     private var lastErrorCode: String? = null
+    private var mode: String? = null
+    private var hostAction: String? = null
     private val callerA = "android-fixture-a"
     private val callerB = "android-fixture-b"
 
-    override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); start() }
+    override fun onCreate(arguments: Bundle?) {
+        mode = arguments?.getString("mode")
+        hostAction = arguments?.getString("action")
+        super.onCreate(arguments); start()
+    }
     override fun onStart() {
+        if (mode == "pair_ui") { pairUsingUi(); return }
+        if (mode == "forget_ui") { forgetUsingUi(); return }
+        if (mode == "host_ui") { hostUsingUi(); return }
         var success = false
         val result = JSONObject().put("sdk", Build.VERSION.SDK_INT)
         try {
@@ -57,11 +78,18 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
                 check(errorCode(rejected) == "stale_observation")
                 assertCounter(1)
             }
-            checkCase("unicode_set_text") {
+            checkCase("unicode_set_text_and_relayout_click") {
                 val observed = observe(callerA)
+                val button = node(observed, "android:id/button1")
                 val text = "Styx 中文 👋 café"
                 requireOk(act(callerA, observed, nodeAction("set_text", node(observed, "android:id/edit")).put("text", text)))
-                await(2000) { node(observe(callerA), "android:id/edit").optString("text") == text }
+                automation.waitForIdle(500, 5000)
+                // Caller B verifies the real relayout without replacing caller A's observation.
+                val changed = observe(callerB)
+                check(node(changed, "android:id/edit").optString("text") == text)
+                check(node(changed, "android:id/button1").getJSONArray("bounds").toString() != button.getJSONArray("bounds").toString())
+                requireOk(act(callerA, observed, nodeAction("click", button)))
+                assertCounter(2)
             }
             checkCase("coordinate_gesture") {
                 val observed = observe(callerA)
@@ -69,7 +97,7 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
                 requireOk(act(callerA, observed, JSONObject().put("type", "tap")
                     .put("x", (bounds.getInt(0) + bounds.getInt(2)) / 2.0)
                     .put("y", (bounds.getInt(1) + bounds.getInt(3)) / 2.0)))
-                assertCounter(2)
+                assertCounter(3)
             }
             checkCase("batch_two_real_clicks") {
                 val observed = observe(callerA)
@@ -78,7 +106,7 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
                     .put("observation_id", observed.getString("observation_id"))
                     .put("steps", JSONArray().put(click).put(JSONObject(click.toString()))))
                 requireOk(batch); check(batch.getInt("completed_steps") == 2)
-                assertCounter(4)
+                assertCounter(5)
             }
             checkCase("batch_keeps_partial_results") {
                 val observed = observe(callerA)
@@ -90,7 +118,7 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
                 check(!batch.getBoolean("ok") && batch.getInt("completed_steps") == 1)
                 check(batch.getInt("failed_step") == 1 && batch.getJSONArray("results").length() == 2)
                 check(errorCode(batch) == "invalid_arguments")
-                assertCounter(5)
+                assertCounter(6)
             }
             checkCase("tree_latency") {
                 val samples = JSONArray()
@@ -127,6 +155,18 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
                     measurements.put("secure_capture", "black_redacted_bitmap")
                 }
             }
+            checkCase("replacement_node_at_same_path_rejected") {
+                val observed = observe(callerA)
+                val oldButton = node(observed, "android:id/button1")
+                context.startActivity(Intent(context, FixtureActivity::class.java).putExtra("replace_increment", true)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+                automation.waitForIdle(500, 5000)
+                val replacement = node(observe(callerB), "android:id/button1")
+                for (key in listOf("node_id", "view_id", "class_name", "text", "description", "bounds"))
+                    check(oldButton.get(key).toString() == replacement.get(key).toString())
+                check(errorCode(act(callerA, observed, nodeAction("click", oldButton))) == "stale_node")
+                assertCounter(6)
+            }
             checkCase("caller_release_and_host_clear") {
                 val a = observe(callerA)
                 call("release_caller", callerA, JSONObject())
@@ -134,7 +174,7 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
                 val b = observe(callerB)
                 call("clear", callerB, JSONObject())
                 check(errorCode(act(callerB, b, nodeAction("click", node(b, "android:id/button1")))) == "stale_observation")
-                assertCounter(5)
+                assertCounter(6)
             }
             success = true
         } catch (error: Throwable) {
@@ -153,6 +193,201 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
             result.put("ok", success).put("passed_cases", passed).put("measurements", measurements)
             finish(if (success) Activity.RESULT_OK else Activity.RESULT_CANCELED,
                 Bundle().apply { putString("result_json", result.toString()) })
+        }
+    }
+
+    /** One local setup action through the real Activity. Input never appears in test arguments/results. */
+    private fun pairUsingUi() {
+        val result = JSONObject().put("mode", "pair_ui")
+        val observedError = AtomicReference<JSONObject?>()
+        val confirmedPair = AtomicReference<JSONObject?>()
+        var pairButton: Button? = null
+        var statusView: TextView? = null
+        var clicked = false
+        val watcher = object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) { }
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { }
+            override fun afterTextChanged(s: Editable?) {
+                val value = try { JSONObject(s.toString()) } catch (_: Exception) {
+                    if (s.toString().startsWith("Pairing failed.")) observedError.set(
+                        JSONObject().put("code", "pairing_failed").put("uncertain", true))
+                    return
+                }
+                if (value.optBoolean("ok") && value.optString("state") == "paired")
+                    confirmedPair.set(publicStatus(value))
+                val error = value.optJSONObject("error") ?: return
+                observedError.set(JSONObject().put("code", error.optString("code", "pairing_failed"))
+                    .put("uncertain", error.optBoolean("uncertain", false)))
+            }
+        }
+        try {
+            currentCase = "pair_ui_input"
+            val file = File(targetContext.noBackupFilesDir, "styx-pairing-input.json")
+            val input = try { JSONObject(file.readText()) } finally { check(file.delete()) }
+            val gatewayUrl = input.getString("gateway_url")
+            val shortCode = input.getString("short_code")
+            val deviceLabel = input.optString("device_label", Build.MODEL)
+            val activity = openMainActivity()
+            currentCase = "pair_ui_fields"
+            runOnMainSync {
+                val all = descendants(activity.findViewById(android.R.id.content))
+                fun field(hint: String, type: Int) = all.filterIsInstance<EditText>()
+                    .single { it.hint?.toString() == hint && it.inputType == type }
+                val gateway = field("Gateway URL", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI)
+                val code = field("Invitation short code", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
+                val label = field("Device name", InputType.TYPE_CLASS_TEXT)
+                val pair = all.filterIsInstance<Button>().single { it.text.toString() == "Pair phone" }
+                pairButton = pair
+                currentCase = "pair_ui_ready"
+                check(pair.isEnabled && pair.isShown && activity.hasWindowFocus())
+                statusView = all.filterIsInstance<TextView>().single { it !is EditText && it.isTextSelectable }
+                statusView!!.addTextChangedListener(watcher)
+                gateway.setText(gatewayUrl); code.setText(shortCode); label.setText(deviceLabel)
+                currentCase = "pair_ui_click"
+                clicked = true
+                check(pair.performClick())
+            }
+            currentCase = "pair_ui_result"
+            val deadline = SystemClock.elapsedRealtime() + 45000
+            var state: JSONObject
+            do {
+                state = publicHostStatus()
+                var completed = false
+                runOnMainSync { completed = pairButton!!.isEnabled }
+                if (completed && (observedError.get() != null || confirmedPair.get() != null)) break
+                Thread.sleep(50)
+            } while (SystemClock.elapsedRealtime() < deadline)
+            result.put("status", state)
+            confirmedPair.get()?.let { result.put("pair_result", it) }
+            val failure = observedError.get() ?: if (confirmedPair.get() == null)
+                JSONObject().put("code", "pair_ui_timeout").put("uncertain", clicked) else null
+            if (failure != null) result.put("error", failure)
+            result.put("ok", failure == null && confirmedPair.get() != null)
+        } catch (error: Throwable) {
+            result.put("ok", false).put("error", JSONObject().put("code", "pair_ui_failed")
+                .put("uncertain", clicked)).put("error_type", error.javaClass.simpleName)
+                .put("stage", currentCase)
+                .put("failed_at", error.stackTrace.firstOrNull { it.className.startsWith("com.styx.host.test.") }?.toString() ?: JSONObject.NULL)
+        } finally {
+            runOnMainSync { statusView?.removeTextChangedListener(watcher) }
+            result.put("pair_button_clicked", clicked)
+            finish(if (result.optBoolean("ok")) Activity.RESULT_OK else Activity.RESULT_CANCELED,
+                Bundle().apply { putString("result_json", result.toString()) })
+        }
+    }
+
+    /** Explicit local reset via the App button and standard confirmation, never direct storage mutation. */
+    private fun forgetUsingUi() {
+        val result = JSONObject().put("mode", "forget_ui")
+        var confirmed = false
+        try {
+            val accessibility = AndroidPlatform.readiness(targetContext).getBoolean("accessibility")
+            val activity = openMainActivity()
+            automation = getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+            runOnMainSync {
+                val button = descendants(activity.findViewById(android.R.id.content))
+                    .filterIsInstance<Button>().single { it.text.toString() == "Forget pairing" }
+                check(button.isEnabled && button.isShown && activity.hasWindowFocus())
+                check(button.performClick())
+            }
+            await(5000) {
+                val root = automation.rootInActiveWindow ?: return@await false
+                try {
+                    if (root.packageName?.toString() != targetContext.packageName) return@await false
+                    val nodes = root.findAccessibilityNodeInfosByText("Forget")
+                    try {
+                        if (nodes.none { it.text?.toString() == "Forget pairing?" }) return@await false
+                        val button = nodes.singleOrNull {
+                            it.className?.toString() == "android.widget.Button" &&
+                                it.text?.toString()?.equals("Forget", ignoreCase = true) == true && it.isEnabled
+                        } ?: return@await false
+                        confirmed = true
+                        check(button.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK))
+                        true
+                    } finally { nodes.forEach { it.recycle() } }
+                } finally { root.recycle() }
+            }
+            await(10000) { publicHostStatus().optString("code") == "pairing_forgotten" }
+            val state = publicHostStatus()
+            val absent = !File(targetContext.noBackupFilesDir, "styx-credentials").exists()
+            val unchanged = AndroidPlatform.readiness(targetContext).getBoolean("accessibility") == accessibility
+            result.put("status", state).put("credentials_absent", absent).put("accessibility_preserved", unchanged)
+            check(absent && unchanged && !state.has("environment_id") && state.optString("state") == "stopped")
+            result.put("ok", true)
+        } catch (error: Throwable) {
+            result.put("ok", false).put("error", JSONObject().put("code", "forget_ui_failed")
+                .put("uncertain", confirmed)).put("error_type", error.javaClass.simpleName)
+        } finally {
+            result.put("confirmation_clicked", confirmed)
+            finish(if (result.optBoolean("ok")) Activity.RESULT_OK else Activity.RESULT_CANCELED,
+                Bundle().apply { putString("result_json", result.toString()) })
+        }
+    }
+
+    /** Finite lifecycle acceptance through the real buttons; status reads only the public JNI surface. */
+    private fun hostUsingUi() {
+        val result = JSONObject().put("mode", "host_ui")
+        val action = hostAction ?: "status"
+        var clicked = false
+        try {
+            currentCase = "host_ui_arguments"
+            require(action in listOf("start", "stop", "status"))
+            result.put("action", action).put("before", publicHostStatus())
+            if (action != "status") {
+                val activity = openMainActivity()
+                currentCase = if (action == "start") "host_ui_start" else "host_ui_stop"
+                runOnMainSync {
+                    val title = if (action == "start") "Start Host" else "Stop Host"
+                    val button = descendants(activity.findViewById(android.R.id.content))
+                        .filterIsInstance<Button>().single { it.text.toString() == title }
+                    check(button.isEnabled && button.isShown && activity.hasWindowFocus())
+                    clicked = true
+                    check(button.performClick())
+                }
+                currentCase = "host_ui_result"
+                val expected = if (action == "start") "connected" else "stopped"
+                await(if (action == "start") 45000 else 15000) {
+                    publicHostStatus().optString("state") == expected
+                }
+                check(publicHostStatus().optString("state") == expected)
+            }
+            result.put("ok", true)
+        } catch (error: Throwable) {
+            result.put("ok", false).put("error", JSONObject().put("code", "host_ui_failed")
+                .put("uncertain", clicked)).put("error_type", error.javaClass.simpleName)
+                .put("stage", currentCase)
+                .put("failed_at", error.stackTrace.firstOrNull { it.className.startsWith("com.styx.host.test.") }?.toString() ?: JSONObject.NULL)
+        } finally {
+            result.put("status", publicHostStatus()).put("permissions", AndroidPlatform.readiness(targetContext))
+                .put("button_clicked", clicked)
+            finish(if (result.optBoolean("ok")) Activity.RESULT_OK else Activity.RESULT_CANCELED,
+                Bundle().apply { putString("result_json", result.toString()) })
+        }
+    }
+
+    private fun openMainActivity(): Activity {
+        currentCase = "main_activity_launch"
+        val activity = startActivitySync(Intent(targetContext, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
+        currentCase = "main_activity_focus"
+        await(5000) {
+            var ready = false
+            runOnMainSync { ready = activity.hasWindowFocus() }
+            ready
+        }
+        return activity
+    }
+
+    private fun descendants(view: View): List<View> = buildList {
+        add(view)
+        if (view is ViewGroup) for (index in 0 until view.childCount) addAll(descendants(view.getChildAt(index)))
+    }
+
+    private fun publicHostStatus() = publicStatus(JSONObject(NativeHost.status()))
+    private fun publicStatus(state: JSONObject): JSONObject {
+        return JSONObject().apply {
+            for (key in listOf("ok", "state", "code", "error_category", "environment_id"))
+                if (state.has(key)) put(key, state.get(key))
         }
     }
 

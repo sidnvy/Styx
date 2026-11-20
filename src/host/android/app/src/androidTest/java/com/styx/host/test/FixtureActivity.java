@@ -18,6 +18,7 @@ public class FixtureActivity extends Activity {
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         if (getIntent().getBooleanExtra("finish_fixture", false)) { finish(); return; }
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
         int pad = (int) (32 * getResources().getDisplayMetrics().density);
         LinearLayout layout = new LinearLayout(this);
@@ -30,9 +31,7 @@ public class FixtureActivity extends Activity {
         counter.setId(android.R.id.text1); counter.setText("Clicks: 0"); counter.setTextSize(22f);
         EditText edit = new EditText(this);
         edit.setId(android.R.id.edit); edit.setText("seed"); edit.setSingleLine(true);
-        Button increment = new Button(this);
-        increment.setId(android.R.id.button1); increment.setText("Increment fixture counter");
-        increment.setOnClickListener(view -> counter.setText("Clicks: " + ++clicks));
+        Button increment = incrementButton(counter);
         TextView secureState = new TextView(this);
         secureState.setId(android.R.id.text2); secureState.setText("Secure: off");
         Button secure = new Button(this);
@@ -48,8 +47,23 @@ public class FixtureActivity extends Activity {
         layout.requestFocus();
     }
 
+    private Button incrementButton(TextView counter) {
+        Button button = new Button(this);
+        button.setId(android.R.id.button1); button.setText("Increment fixture counter");
+        button.setOnClickListener(view -> counter.setText("Clicks: " + ++clicks));
+        return button;
+    }
+
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
-        if (intent.getBooleanExtra("finish_fixture", false)) finish();
+        if (intent.getBooleanExtra("finish_fixture", false)) { finish(); return; }
+        if (intent.getBooleanExtra("replace_increment", false)) {
+            Button previous = findViewById(android.R.id.button1);
+            LinearLayout parent = (LinearLayout) previous.getParent();
+            int index = parent.indexOfChild(previous);
+            android.view.ViewGroup.LayoutParams params = previous.getLayoutParams();
+            parent.removeView(previous);
+            parent.addView(incrementButton(findViewById(android.R.id.text1)), index, params);
+        }
     }
 }
