@@ -24,7 +24,7 @@ struct Trace {
 #[derive(Clone, Copy)]
 enum Reply {
     Ack,
-    Refused,
+    Refused(&'static str, CuaError, &'static str),
     PostEffectError,
     Late,
 }
@@ -56,7 +56,7 @@ impl ServerHandler for RpcFixture {
                 return Err(ErrorData::invalid_request("unexpected_fixture_tool", None));
             }
             trace.write_observed_gate = Some(trace.gates);
-            if !matches!(self.reply, Reply::Refused) {
+            if !matches!(self.reply, Reply::Refused(..)) {
                 trace.effects += 1;
             }
         }
@@ -67,9 +67,9 @@ impl ServerHandler for RpcFixture {
             Reply::Ack | Reply::Late => CallToolResult::structured(
                 json!({"route":"accessibility","effect":"unverifiable","delivery":{"mode":"unknown"},"summary":"official action result fixture"}),
             ),
-            Reply::Refused => {
+            Reply::Refused(code, _, _) => {
                 let mut value = CallToolResult::structured(
-                    json!({"schema":1,"outcome":"refused","effect":"unverified","code":"stale_observation","hint":"official read-again hint","next_call":{"tool":"get_window_state","arguments":{"pid":42,"window_id":7}}}),
+                    json!({"schema":1,"outcome":"refused","effect":"unverified","code":code,"hint":"official read-again hint","next_call":{"tool":"get_window_state","arguments":{"pid":42,"window_id":7}}}),
                 );
                 value.is_error = Some(true);
                 value
@@ -87,7 +87,62 @@ async fn standard_set_value_runs_gate_before_one_strict_call_and_never_replays()
     for (deny_gate, reply) in [
         (true, Reply::Ack),
         (false, Reply::Ack),
-        (false, Reply::Refused),
+        (
+            false,
+            Reply::Refused(
+                "editable_unavailable",
+                CuaError::Unsupported,
+                "CAPABILITY_UNSUPPORTED",
+            ),
+        ),
+        (
+            false,
+            Reply::Refused(
+                "strict_text_unavailable",
+                CuaError::Unsupported,
+                "CAPABILITY_UNSUPPORTED",
+            ),
+        ),
+        (
+            false,
+            Reply::Refused(
+                "stale_observation",
+                CuaError::StaleObservation,
+                "STALE_OBSERVATION",
+            ),
+        ),
+        (
+            false,
+            Reply::Refused(
+                "window_unavailable",
+                CuaError::StaleObservation,
+                "STALE_OBSERVATION",
+            ),
+        ),
+        (
+            false,
+            Reply::Refused(
+                "process_unavailable",
+                CuaError::StaleObservation,
+                "STALE_OBSERVATION",
+            ),
+        ),
+        (
+            false,
+            Reply::Refused(
+                "invalid_request",
+                CuaError::InvalidRequest,
+                "INVALID_REQUEST",
+            ),
+        ),
+        (
+            false,
+            Reply::Refused(
+                "permission_denied",
+                CuaError::PermissionDenied,
+                "PERMISSION_DENIED",
+            ),
+        ),
         (false, Reply::PostEffectError),
         (false, Reply::Late),
     ] {
@@ -195,10 +250,21 @@ async fn standard_set_value_runs_gate_before_one_strict_call_and_never_replays()
                 assert!(!uncertain);
                 assert_eq!(trace.effects, 1);
             }
-            Reply::Refused => {
+            Reply::Refused(code, cause, category) => {
                 assert_eq!(result.0, CuaEvidence::NotDispatched);
-                assert!(result.1.is_none());
+                assert_eq!(result.2, Some(cause));
+                let refusal = result.1.as_ref().expect("typed native refusal");
+                assert_eq!(refusal.is_error, Some(true));
+                assert_eq!(
+                    refusal.structured_content.as_ref().unwrap(),
+                    &json!({
+                        "category":category,"error":code,"native_reason":code,
+                        "execution_certainty":"not_dispatched","input_authorized":false,
+                        "uncertain":false
+                    })
+                );
                 assert!(!uncertain);
+                assert!(!stop.is_cancelled());
                 assert_eq!(trace.effects, 0);
             }
             Reply::PostEffectError => {

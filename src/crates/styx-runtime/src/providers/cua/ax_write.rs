@@ -107,17 +107,32 @@ pub(super) fn diagnostic(stage: &'static str, code: &str) {
     );
 }
 
-fn pre_send_code(code: &str) -> bool {
-    matches!(
-        code,
-        "invalid_request"
-            | "stale_observation"
-            | "editable_unavailable"
-            | "window_unavailable"
-            | "process_unavailable"
-            | "strict_text_unavailable"
-            | "permission_denied"
-    )
+fn refusal_cause(code: &str) -> Option<CuaError> {
+    Some(match code {
+        "invalid_request" => CuaError::InvalidRequest,
+        "stale_observation" | "window_unavailable" | "process_unavailable" => {
+            CuaError::StaleObservation
+        }
+        "editable_unavailable" | "strict_text_unavailable" => CuaError::Unsupported,
+        "permission_denied" => CuaError::PermissionDenied,
+        _ => return None,
+    })
+}
+fn refused_result(code: &str, cause: CuaError) -> CallToolResult {
+    let category = match cause {
+        CuaError::InvalidRequest => "INVALID_REQUEST",
+        CuaError::StaleObservation => "STALE_OBSERVATION",
+        CuaError::Unsupported => "CAPABILITY_UNSUPPORTED",
+        CuaError::PermissionDenied => "PERMISSION_DENIED",
+        _ => unreachable!("validated strict text refusal"),
+    };
+    let mut result = CallToolResult::structured(serde_json::json!({
+        "category": category, "error": code, "native_reason": code,
+        "execution_certainty":"not_dispatched", "input_authorized":false,
+        "uncertain":false
+    }));
+    result.is_error = Some(true);
+    result
 }
 
 // Official Cua 0.47 publishes successful set_value calls as ActionResult.
@@ -209,7 +224,7 @@ fn write_evidence(value: &CallToolResult) -> CuaEvidence {
                 && data
                     .get("code")
                     .and_then(Value::as_str)
-                    .is_some_and(pre_send_code) =>
+                    .is_some_and(|code| refusal_cause(code).is_some()) =>
         {
             CuaEvidence::NotDispatched
         }
@@ -276,11 +291,23 @@ pub(super) async fn invoke(
                 }))),
                 None,
             ),
-            CuaEvidence::NotDispatched => (
-                CuaEvidence::NotDispatched,
-                None,
-                Some(CuaError::PermissionDenied),
-            ),
+            CuaEvidence::NotDispatched => {
+                // Preserve the validated native refusal: a missing EditableText
+                // interface or stale target is not an OS permission denial.
+                let code = value
+                    .structured_content
+                    .as_ref()
+                    .and_then(|value| value.get("code"))
+                    .and_then(Value::as_str)
+                    .expect("validated strict text refusal code");
+                let cause = refusal_cause(code).expect("validated refusal classification");
+                diagnostic("native_refusal", code);
+                (
+                    CuaEvidence::NotDispatched,
+                    Some(refused_result(code, cause)),
+                    Some(cause),
+                )
+            }
             CuaEvidence::Unknown => (CuaEvidence::Unknown, Some(value), Some(CuaError::Unknown)),
         },
         _ => (CuaEvidence::Unknown, None, Some(CuaError::Unknown)),
