@@ -2,7 +2,7 @@
 //! Only the one original outbound request's response reaches rmcp. Native
 //! requests never reach SDK handler spawning; logging/progress are deliberately
 //! unused, silently discarded with finite credits, and never traced/persisted.
-use super::{FRAME_BYTES, REQUEST_BYTES, bounded_bytes, capability};
+use super::{FRAME_BYTES, REQUEST_BYTES, bounded_bytes};
 use rmcp::{
     RoleClient,
     model::{ClientNotification, ClientRequest, JsonRpcMessage, RequestId, ServerNotification},
@@ -17,30 +17,6 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::sync::CancellationToken;
-
-fn permission_query(name: &str, args: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    {
-        super::permissions::query_allowed(name, args)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = (name, args);
-        false
-    }
-}
-
-fn lifecycle_query(name: &str, args: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
-    cfg!(target_os = "macos")
-        && matches!(name, "start_session" | "end_session")
-        && args.is_some_and(|args| {
-            args.len() == 1
-                && args
-                    .get("session")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|session| session.starts_with("styx-") && session.len() <= 80)
-        })
-}
 
 const NOTIFICATIONS_PER_REQUEST: u16 = 64;
 const TOTAL_DROPPED_NOTIFICATIONS: u32 = 4096;
@@ -57,13 +33,11 @@ enum Phase {
 #[derive(Clone, Copy)]
 enum Kind {
     Initialize,
-    Catalog,
-    Tool,
+    Request,
 }
 struct State {
     phase: Phase,
     pending: Option<(RequestId, Kind)>,
-    catalog_seen: bool,
     notifications: u16,
     total_notifications: u32,
     fenced: bool,
@@ -79,7 +53,6 @@ impl Admission {
             state: Mutex::new(State {
                 phase: Phase::Fresh,
                 pending: None,
-                catalog_seen: false,
                 notifications: 0,
                 total_notifications: 0,
                 fenced: false,
@@ -115,24 +88,13 @@ impl Admission {
                             Kind::Initialize
                         }
                         ClientRequest::ListToolsRequest(_)
-                            if state.phase == Phase::Ready && !state.catalog_seen =>
+                        | ClientRequest::CallToolRequest(_)
+                        | ClientRequest::ListResourcesRequest(_)
+                        | ClientRequest::ReadResourceRequest(_)
+                        | ClientRequest::PingRequest(_)
+                            if state.phase == Phase::Ready =>
                         {
-                            Kind::Catalog
-                        }
-                        ClientRequest::CallToolRequest(value)
-                            if state.phase == Phase::Ready
-                                && state.catalog_seen
-                                && (capability(value.params.name.as_ref()).is_ok()
-                                    || permission_query(
-                                        value.params.name.as_ref(),
-                                        value.params.arguments.as_ref(),
-                                    )
-                                    || lifecycle_query(
-                                        value.params.name.as_ref(),
-                                        value.params.arguments.as_ref(),
-                                    )) =>
-                        {
-                            Kind::Tool
+                            Kind::Request
                         }
                         _ => return Err(TransportRefused),
                     };
@@ -188,6 +150,8 @@ impl Admission {
                         &value.notification,
                         ServerNotification::LoggingMessageNotification(_)
                             | ServerNotification::ProgressNotification(_)
+                            | ServerNotification::ToolListChangedNotification(_)
+                            | ServerNotification::ResourceListChangedNotification(_)
                     ) {
                         return Err(TransportRefused);
                     }
@@ -212,8 +176,7 @@ impl Admission {
             state.pending = None;
             match kind {
                 Kind::Initialize => state.phase = Phase::InitializedNotification,
-                Kind::Catalog => state.catalog_seen = true,
-                Kind::Tool => {}
+                Kind::Request => {}
             }
             Ok(true)
         })();

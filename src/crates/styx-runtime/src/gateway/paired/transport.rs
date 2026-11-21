@@ -31,7 +31,7 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 // Frame, write-buffer, command-queue and in-flight limits remain per link.
-const FRAME: usize = 2 * 1024 * 1024;
+const FRAME: usize = styx_contracts::DESKTOP_BROWSER_FRAME_BYTES + 64 * 1024;
 // A blackholed idle socket must not retain a computer slot indefinitely.
 // Only a received Pong resets this clock; business traffic cannot hide a loss.
 struct Heartbeat {

@@ -6,33 +6,30 @@ fn args(value: Value) -> Option<Map<String, Value>> {
 #[test]
 fn computer_routes_validate_native_arguments_and_preserve_typed_results() {
     let request = ComputerRequest::parse(
-        "list_windows",
-        args(json!({"environment_id":"owned-device"})),
+        "desktop_call",
+        args(json!({"environment_id":"owned-device","tool":"list_windows","arguments":{}})),
     )
     .unwrap();
     assert_eq!(request.environment_id.as_deref(), Some("owned-device"));
     let action: Value =
         serde_json::from_slice(&request.action.to_operation_payload().unwrap()).unwrap();
+    assert_eq!(action["kind"], "call_tool");
     assert_eq!(action["name"], "list_windows");
     assert_eq!(action["arguments"], json!({}));
     assert!(action.get("environment_id").is_none());
     for invalid in [
-        json!({"environment_id":null}),
-        json!({"environment_id":""}),
-        json!({"environment_id":"x".repeat(129)}),
-        json!({"owner":"forged"}),
-        json!({"_meta":{"session":"forged"}}),
-        json!({"unknown_argument":true}),
+        json!({"environment_id":null,"tool":"list_windows"}),
+        json!({"environment_id":"","tool":"list_windows"}),
+        json!({"environment_id":"x".repeat(129),"tool":"list_windows"}),
+        json!({"tool":"list_windows","owner":"forged"}),
+        json!({"tool":"list_windows","_meta":{"session":"forged"}}),
+        json!({"tool":"list_windows","unknown_argument":true}),
+        json!({"tool":""}),
+        json!({}),
     ] {
-        assert!(ComputerRequest::parse("list_windows", args(invalid)).is_err());
+        assert!(ComputerRequest::parse("desktop_call", args(invalid)).is_err());
     }
-    assert!(
-        ComputerRequest::parse(
-            "get_desktop_state",
-            args(json!({"screenshot_out_file":"/tmp/foreign.png"}))
-        )
-        .is_err()
-    );
+    assert!(ComputerRequest::parse("list_windows", None).is_err());
     assert!(ComputerRequest::parse("browser_snapshot", None).is_err());
     assert!(ComputerRequest::parse("future_computer_tool", None).is_err());
     // Cua result images retain the frozen MCP shape; the old Browser text-sized
@@ -221,16 +218,22 @@ fn open_recovery_requires_an_exact_running_inspection_and_a_read_route() {
     ] {
         assert!(!inspected_open_running(&reply, &target));
     }
+    assert!(is_computer_read(&CuaAction::list_tools(None).unwrap()));
     for name in [
         "list_apps",
         "list_windows",
         "get_window_state",
         "get_desktop_state",
         "verify_state",
+        "get_guide",
     ] {
-        assert!(is_computer_read(name));
+        assert!(is_computer_read(
+            &CuaAction::call_tool(name.into(), Map::new()).unwrap()
+        ));
     }
-    for name in ["click", "set_value", "unrecognized"] {
-        assert!(!is_computer_read(name));
+    for name in ["click", "set_value", "press_key", "unrecognized"] {
+        assert!(!is_computer_read(
+            &CuaAction::call_tool(name.into(), Map::new()).unwrap()
+        ));
     }
 }
