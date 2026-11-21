@@ -22,15 +22,18 @@ pub(super) struct DesktopProfile {
     config: OwnedCuaConfig,
     payload: Vec<u8>,
 }
+pub(super) struct DesktopResource {
+    pub(super) handle: CuaHandle,
+    pub(super) ax_observation: Option<super::desktop_observation::OwnedAxObservation>,
+}
 pub(super) struct DesktopLane {
     pub(super) worker: CuaWorker,
     pub(super) source: DesktopSource,
     pub(super) binding: SessionBinding,
     pub(super) grants: BTreeMap<CapabilityId, DesktopGrant>,
     pub(super) next_read_alias: u32,
-    pub(super) ax_observation: Option<super::desktop_observation::OwnedAxObservation>,
     profiles: BTreeMap<OwnerId, DesktopProfile>,
-    pub(super) handles: BTreeMap<OperationId, CuaHandle>,
+    pub(super) handles: BTreeMap<OperationId, DesktopResource>,
     #[cfg(all(test, target_os = "linux"))]
     open_history: Vec<(OwnerLease, ResourceTarget)>,
 }
@@ -170,15 +173,16 @@ pub(super) fn facts(state: &State, cap: CapabilityId) -> Result<AdmissionFacts, 
         current_observation: provider.observation,
     })
 }
-fn handle(
+pub(super) fn handle(
     lane: &DesktopLane,
     owner: &OwnerLease,
     target: &ResourceTarget,
 ) -> Result<CuaHandle, CoordinatorError> {
-    let bound = lane
+    let bound = &lane
         .handles
         .get(&target.operation_id)
-        .ok_or(ErrorCategory::TargetNotFound)?;
+        .ok_or(ErrorCategory::TargetNotFound)?
+        .handle;
     if bound.owner() != owner || bound.target() != target || bound.session() != &lane.binding {
         return Err(ErrorCategory::Unauthorized.into());
     }
@@ -294,7 +298,6 @@ impl HostAuthority {
             binding: binding.clone(),
             grants,
             next_read_alias: 0,
-            ax_observation: None,
             profiles: BTreeMap::new(),
             handles: BTreeMap::new(),
             #[cfg(all(test, target_os = "linux"))]
@@ -657,7 +660,13 @@ impl HostCoordinator {
                         };
                     let mut state = inner.state.lock().expect("Host state mutex");
                     if let (Some(h), Some(lane)) = (opened, state.desktop.as_mut()) {
-                        lane.handles.insert(operation.clone(), h);
+                        lane.handles.insert(
+                            operation.clone(),
+                            DesktopResource {
+                                handle: h,
+                                ax_observation: None,
+                            },
+                        );
                     }
                     let result = match evidence {
                         CuaEvidence::Acknowledged => state.ledger.record_executor_fact(
@@ -896,8 +905,10 @@ impl HostCoordinator {
             }
             let read_acquisition = acquisition.is_some();
             let read_capabilities = action.required_capabilities()?;
+            let snapshot_request = action.snapshot_request()?;
+            let invalidates_observation = action.mutates() || snapshot_request.is_some();
             let mut acquired_target = acquisition
-                .or(action.snapshot_request()?)
+                .or(snapshot_request)
                 .map(crate::providers::cua::DesktopReadTarget::acquire)
                 .transpose()?;
             let acquired_epoch = desktop(&state)?.source.epoch();
@@ -914,16 +925,13 @@ impl HostCoordinator {
             };
             // Consume only after the one Core dispatch; a dropped waiter or
             // failed/unknown native reply can never restore this target map.
-            let write_observation = if write.is_some() || click.is_some() {
-                state
-                    .desktop
-                    .as_mut()
-                    .and_then(|lane| lane.ax_observation.take())
-                    .map(Arc::new)
-            } else {
-                super::desktop_observation::invalidate(state.desktop.as_mut(), None);
-                None
-            };
+            let write_observation = super::desktop_observation::after_dispatch(
+                state.desktop.as_mut(),
+                bound.target(),
+                invalidates_observation,
+                write.is_some() || click.is_some(),
+            )
+            .map(Arc::new);
             let delivery_context = permit.context().clone();
             let write_until = delivery_context.deadline.map(|deadline| {
                 tokio::time::Instant::now()
@@ -1182,7 +1190,6 @@ pub(super) fn test_lane(binding: SessionBinding) -> DesktopLane {
         })
         .collect(),
         next_read_alias: 2,
-        ax_observation: None,
         profiles: BTreeMap::new(),
         handles: BTreeMap::new(),
         open_history: Vec::new(),

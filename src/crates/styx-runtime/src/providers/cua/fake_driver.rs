@@ -5,7 +5,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 pub(crate) struct FakeDriver {
     pub(crate) peer: rmcp::Peer<RoleClient>,
     pub(crate) calls: Arc<Mutex<Vec<Value>>>,
-    client: RunningService<RoleClient, CuaClient>,
+    pub(crate) reply: Arc<Mutex<CallToolResult>>,
+    client: Option<RunningService<RoleClient, CuaClient>>,
+    #[cfg(target_os = "linux")]
+    bound: Option<(CuaHandle, tempfile::TempDir)>,
     job: JoinHandle<()>,
 }
 impl FakeDriver {
@@ -19,6 +22,8 @@ impl FakeDriver {
     ) -> Self {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let seen = calls.clone();
+        let reply = Arc::new(Mutex::new(click_reply));
+        let response_reply = reply.clone();
         let (local, remote) = tokio::io::duplex(65536);
         let (read, mut write) = tokio::io::split(remote);
         let job = tokio::spawn(async move {
@@ -39,7 +44,7 @@ impl FakeDriver {
                         serde_json::to_value(if request["params"]["name"] == "check_permissions" {
                             CallToolResult::structured(facts.clone())
                         } else {
-                            click_reply.clone()
+                            response_reply.lock().unwrap().clone()
                         })
                         .unwrap()
                     }
@@ -64,9 +69,92 @@ impl FakeDriver {
         Self {
             peer,
             calls,
-            client,
+            reply,
+            client: Some(client),
+            #[cfg(target_os = "linux")]
+            bound: None,
             job,
         }
+    }
+    /// Bind the existing duplex client to a real provider resource for Host
+    /// ownership tests. The pinned image is never executed; no GUI is touched.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn bind_resource(
+        &mut self,
+        worker: &CuaWorker,
+        owner: OwnerLease,
+        target: ResourceTarget,
+        session: SessionBinding,
+    ) -> CuaHandle {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(self.bound.is_none());
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let image = root.path().join("never-executed-cua");
+        std::fs::copy("/bin/true", &image).unwrap();
+        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let driver = Arc::new(
+            crate::store::PrivateRoot::open(root.path())
+                .unwrap()
+                .payload_inventory(Default::default())
+                .unwrap()
+                .pin_executable("never-executed-cua")
+                .unwrap(),
+        );
+        let uid = nix::unistd::Uid::current().as_raw();
+        let runtime_dir = PathBuf::from(format!("/run/user/{uid}"));
+        let config = Arc::new(OwnedCuaConfig {
+            driver,
+            launch: TrustedCuaLaunch {
+                session: session.clone(),
+                uid,
+                session_bus: runtime_dir.join("bus"),
+                runtime_dir,
+                wayland_display: "wayland-0".into(),
+                hyprland_instance: "fixture-never-launched".into(),
+                compositor_peer: (std::process::id(), 1),
+            },
+            workspace: root.path().to_path_buf(),
+            home: root.path().to_path_buf(),
+        });
+        let resource = Arc::new(Resource {
+            owner,
+            target,
+            session,
+            stop: CancellationToken::new(),
+            live: Arc::new(tokio::sync::Mutex::new(Live {
+                scope: None,
+                scope_confirmed: false,
+                child: None,
+                identity: None,
+                client: self.client.take(),
+                close_job: None,
+                stderr: None,
+                config,
+                retired: false,
+                cleanup: None,
+                uncertain: false,
+                io_failed: false,
+                ax_once_available: false,
+                permissions_available: false,
+                permissions: None,
+                exit_success: None,
+                actions: BTreeMap::new(),
+            })),
+            cleanup_job: Mutex::new(None),
+        });
+        worker
+            .inner
+            .resources
+            .lock()
+            .unwrap()
+            .insert(resource.target.operation_id.clone(), resource.clone());
+        let handle = CuaHandle {
+            resource,
+            worker: worker.inner.clone(),
+        };
+        self.bound = Some((handle.clone(), root));
+        handle
     }
     pub(crate) async fn call(
         &self,
@@ -83,7 +171,14 @@ impl FakeDriver {
     }
     pub(crate) async fn close(mut self) {
         drop(self.peer);
-        self.client.close().await.unwrap();
+        #[cfg(target_os = "linux")]
+        if let Some((handle, _)) = self.bound.as_ref() {
+            handle.resource.stop.cancel();
+            self.client = handle.resource.live.lock().await.client.take();
+        }
+        if let Some(mut client) = self.client.take() {
+            client.close().await.unwrap();
+        }
         self.job.await.unwrap();
     }
 }

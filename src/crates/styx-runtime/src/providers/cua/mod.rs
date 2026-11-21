@@ -276,7 +276,7 @@ impl CuaAction {
                 .map(DesktopReadRequest::WindowCapture),
         )
     }
-    fn mutates(&self) -> bool {
+    pub(crate) fn mutates(&self) -> bool {
         admission::classify(&self.name, &self.arguments).map_or(true, |r| r.side_effecting)
     }
 }

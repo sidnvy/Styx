@@ -1,4 +1,4 @@
-//! One bounded, Host-owned AX read binding, never a second operation ledger.
+//! One bounded AX read binding per owned Desktop resource, within its existing record.
 use super::{
     desktop::{DesktopLane, desktop},
     *,
@@ -9,8 +9,8 @@ use crate::providers::cua::{
 };
 use styx_contracts::{capability::*, identity::ObservationId, session::SessionBinding};
 
-/// Only one map is retained per lane (the Core provider also has one current
-/// observation). ParsedAxSnapshot bounds native token metadata to 256KiB.
+/// Each native worker retains its own latest map. ParsedAxSnapshot bounds native
+/// token metadata to 256KiB. Another owner's read cannot replace this binding.
 /// Original proc custody remains alive through a consumed native write.
 pub(super) struct OwnedAxObservation {
     owner: OwnerLease,
@@ -115,8 +115,7 @@ impl OwnedAxObservation {
         if &self.owner != owner || &self.resource != resource {
             return Err(ErrorCategory::Unauthorized.into());
         }
-        if self.observed_at.elapsed() >= Duration::from_secs(30)
-            || lane.source.fenced()
+        if lane.source.fenced()
             || lane.source.epoch() != self.source_epoch
             || lane.binding != self.binding
             || state.facts.grant_revision != self.grant_revision
@@ -148,6 +147,9 @@ impl OwnedAxObservation {
         request: &crate::providers::cua::ElementInputRequest,
     ) -> Result<crate::providers::cua::ElementInputRequest, CoordinatorError> {
         let request = self.element_input_binding(state, owner, resource, request)?;
+        if self.observed_at.elapsed() >= Duration::from_secs(30) {
+            return Err(ErrorCategory::StaleObservation.into());
+        }
         self.target.validate()?;
         Ok(request)
     }
@@ -295,6 +297,7 @@ pub(super) fn install(
     if lane.source.fenced() || lane.source.epoch() != source_epoch {
         return Err(ErrorCategory::SessionDisconnected.into());
     }
+    super::desktop::handle(lane, owner, resource)?;
     let binding = lane.binding.clone();
     let before = super::desktop_read::acquisition_facts(state, CapabilityId::DesktopAccessibility)?;
     // Required/Denied/Revoked are not erased by a successful read. The public
@@ -350,6 +353,9 @@ pub(super) fn install(
         .desktop
         .as_mut()
         .ok_or(CuaError::Unsupported)?
+        .handles
+        .get_mut(&resource.operation_id)
+        .ok_or(ErrorCategory::TargetNotFound)?
         .ax_observation = Some(entry);
     Ok(())
 }
@@ -360,8 +366,9 @@ pub(super) fn prepare(
     request: &AxWriteRequest,
 ) -> Result<(CuaAction, ObservationId), CoordinatorError> {
     let entry = desktop(state)?
-        .ax_observation
-        .as_ref()
+        .handles
+        .get(&resource.operation_id)
+        .and_then(|entry| entry.ax_observation.as_ref())
         .ok_or(ErrorCategory::StaleObservation)?;
     entry.check(state, owner, resource, request)?;
     let native = entry
@@ -384,8 +391,9 @@ pub(super) fn validate_dispatch(
     now: MonotonicMillis,
 ) -> Result<AdmissionFacts, CoordinatorError> {
     let entry = desktop(state)?
-        .ax_observation
-        .as_ref()
+        .handles
+        .get(&resource.operation_id)
+        .and_then(|entry| entry.ax_observation.as_ref())
         .ok_or(ErrorCategory::StaleObservation)?;
     entry.write_facts(state, owner, resource, context, request, now)
 }
@@ -396,8 +404,9 @@ pub(super) fn prepare_element_input(
     request: &crate::providers::cua::ElementInputRequest,
 ) -> Result<(CuaAction, ObservationId), CoordinatorError> {
     let entry = desktop(state)?
-        .ax_observation
-        .as_ref()
+        .handles
+        .get(&resource.operation_id)
+        .and_then(|entry| entry.ax_observation.as_ref())
         .ok_or(ErrorCategory::StaleObservation)?;
     let request = entry.element_input_target(state, owner, resource, request)?;
     let native = entry
@@ -418,21 +427,47 @@ pub(super) fn validate_element_input_dispatch(
     now: MonotonicMillis,
 ) -> Result<AdmissionFacts, CoordinatorError> {
     let entry = desktop(state)?
-        .ax_observation
-        .as_ref()
+        .handles
+        .get(&resource.operation_id)
+        .and_then(|entry| entry.ax_observation.as_ref())
         .ok_or(ErrorCategory::StaleObservation)?;
     entry.element_input_facts(state, owner, resource, context, request, now)
+}
+/// Apply the observation transition after the one Core dispatch. Inputs retain
+/// their consumed binding for the late gate and original result settlement.
+/// Descriptive reads leave the existing binding and its original age intact.
+pub(super) fn after_dispatch(
+    lane: Option<&mut DesktopLane>,
+    resource: &ResourceTarget,
+    invalidates_observation: bool,
+    input: bool,
+) -> Option<OwnedAxObservation> {
+    if !invalidates_observation {
+        return None;
+    }
+    take(lane, resource).filter(|_| input)
+}
+/// Consume only the resource whose action passed Core dispatch. New element
+/// trees and inputs invalidate its map without touching another native worker.
+pub(super) fn take(
+    lane: Option<&mut DesktopLane>,
+    resource: &ResourceTarget,
+) -> Option<OwnedAxObservation> {
+    lane?
+        .handles
+        .get_mut(&resource.operation_id)?
+        .ax_observation
+        .take()
 }
 /// Root cleanup calls this before native cancellation; a later read completion
 /// must additionally pass fresh authority/resource checks before installing.
 pub(super) fn invalidate(lane: Option<&mut DesktopLane>, owner: Option<&OwnerLease>) {
-    if let Some(lane) = lane
-        && lane
-            .ax_observation
-            .as_ref()
-            .is_some_and(|value| owner.is_none_or(|owner| &value.owner == owner))
-    {
-        lane.ax_observation = None;
+    if let Some(lane) = lane {
+        for entry in lane.handles.values_mut() {
+            if owner.is_none_or(|owner| entry.handle.owner() == owner) {
+                entry.ax_observation = None;
+            }
+        }
     }
 }
 
