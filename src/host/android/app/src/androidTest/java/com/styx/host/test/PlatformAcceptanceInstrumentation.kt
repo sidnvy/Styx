@@ -70,6 +70,11 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
                 automation.waitForIdle(500, 5000)
             }
 
+            if (mode == "transition") {
+                verifyActivityTransition()
+                success = true
+                return
+            }
             checkCase("tree_and_independent_callers") {
                 val first = observe(callerA)
                 observe(callerB)
@@ -184,6 +189,7 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
                 check(errorCode(act(callerB, b, nodeAction("click", node(b, "android:id/button1")))) == "stale_observation")
                 assertCounter(6)
             }
+            verifyActivityTransition()
             success = true
         } catch (error: Throwable) {
             result.put("failed_case", currentCase).put("error_type", error.javaClass.simpleName)
@@ -201,6 +207,30 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
             result.put("ok", success).put("passed_cases", passed).put("measurements", measurements)
             finish(if (success) Activity.RESULT_OK else Activity.RESULT_CANCELED,
                 Bundle().apply { putString("result_json", result.toString()) })
+        }
+    }
+
+    private fun verifyActivityTransition() {
+        checkCase("batch_activity_transition_observe_after") {
+            val before = observe(callerA)
+            val transition = nodeAction("click", node(before, "android:id/button3"))
+            try {
+                val batch = call("android_run_steps", callerA, JSONObject()
+                    .put("observation_id", before.getString("observation_id"))
+                    .put("steps", JSONArray().put(transition))
+                    .put("observe_after", true))
+                requireOk(batch)
+                check(batch.getInt("completed_steps") == 1)
+                val after = batch.getJSONObject("observation")
+                requireOk(after)
+                check(node(after, "android:id/text1").optString("text") == "STYX NEXT TEST SCREEN") {
+                    "The batch observed the old window before Activity transition completed"
+                }
+            } finally {
+                context.startActivity(Intent(context, FixtureActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+                await(5000) { fixtureIsForeground() }
+            }
         }
     }
 

@@ -32,6 +32,9 @@ import kotlin.math.roundToInt
 class StyxAccessibilityService : AccessibilityService() {
     private val main = Handler(Looper.getMainLooper())
     private val observations = ConcurrentHashMap<String, Observation>()
+    private val screenEvents = java.lang.Object()
+    private var screenEventSequence = 0L
+    private var lastScreenEventAt = 0L
 
     // Constructor-owned identity copies stay immutable. Dropping an observation releases
     // its references; recycling a copy could race an action that still references it.
@@ -41,7 +44,40 @@ class StyxAccessibilityService : AccessibilityService() {
                                    val width: Int, val height: Int, val targets: Map<String, Target>)
 
     override fun onServiceConnected() { instance = this }
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) { }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        val kind = event?.eventType ?: return
+        if (kind != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            kind != AccessibilityEvent.TYPE_WINDOWS_CHANGED &&
+            kind != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) return
+        synchronized(screenEvents) {
+            screenEventSequence++
+            lastScreenEventAt = SystemClock.elapsedRealtime()
+            screenEvents.notifyAll()
+        }
+    }
+
+    // Actions acknowledge dispatch, not that the next Activity or view is ready.
+    // Wait for real Accessibility changes and a short quiet interval, never replay input.
+    private fun awaitScreenUpdate(afterSequence: Long) {
+        val deadline = SystemClock.elapsedRealtime() + 900L
+        synchronized(screenEvents) {
+            while (true) {
+                val now = SystemClock.elapsedRealtime()
+                val remaining = deadline - now
+                if (remaining <= 0) return
+                val seenChange = screenEventSequence > afterSequence
+                val quietRemaining = lastScreenEventAt + 90L - now
+                if (seenChange && quietRemaining <= 0) return
+                val waitMs = if (seenChange) minOf(remaining, quietRemaining) else remaining
+                try {
+                    screenEvents.wait(waitMs.coerceAtLeast(1L))
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return
+                }
+            }
+        }
+    }
     override fun onInterrupt() { clearObservation() }
     override fun onDestroy() { instance = null; clearObservation(); super.onDestroy() }
     fun clearObservation() { observations.clear() }
@@ -260,12 +296,19 @@ class StyxAccessibilityService : AccessibilityService() {
     private fun runSteps(caller: String, params: JSONObject): JSONObject {
         val id = params.getString("observation_id")
         val steps = params.getJSONArray("steps")
+        val observeAfter = params.optBoolean("observe_after", false)
         val results = JSONArray()
         var completed = 0
         var failure: JSONObject? = null
+        var lastActionEventSequence: Long? = null
         for (index in 0 until steps.length()) {
             val result = try {
-                act(caller, id, steps.getJSONObject(index))
+                val step = steps.getJSONObject(index)
+                if (observeAfter && index == steps.length() - 1 &&
+                    step.optString("type") in setOf("click", "long_click", "back", "home", "recents")) {
+                    lastActionEventSequence = synchronized(screenEvents) { screenEventSequence }
+                }
+                act(caller, id, step)
             } catch (error: JSONException) {
                 fail("invalid_arguments", "Invalid Android step.")
             } catch (error: InterruptedException) {
@@ -280,7 +323,10 @@ class StyxAccessibilityService : AccessibilityService() {
         }
         val response = JSONObject().put("ok", failure == null).put("completed_steps", completed).put("results", results)
         if (failure != null) response.put("error", failure).put("failed_step", completed)
-        if (params.optBoolean("observe_after", false)) response.put("observation", observe(caller, JSONObject()))
+        if (observeAfter) {
+            if (failure == null) lastActionEventSequence?.let(::awaitScreenUpdate)
+            response.put("observation", observe(caller, JSONObject()))
+        }
         return response
     }
 
