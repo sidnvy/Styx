@@ -2,32 +2,58 @@
 
 ## 当前源码与实机证据的边界（2026-11-21）
 
-当前已核对的正式部署为 [v0.8.0](https://github.com/sidnvy/Styx/releases/tag/v0.8.0)，
-源码 `6b6ba1426b517fde7179c34f132f1d28a6fc6f5b`。moedeu-apps Gateway、niuda、
-NAB5-WIN 和 PilotMac 均已核对实际版本、Runtime 身份及升级后的连接。
-记录：`/home/sid/Developer/Artifacts/Styx/release-0.8.0/delivery-verified.json`。
-这替代原先仍写作“已部署 0.7.1、0.8.0 仅有源码”的状态。
+本次重新核对的 niuda Host 与 moedeu-apps Gateway 都在运行
+[v0.8.1-rc.2](https://github.com/sidnvy/Styx/releases/tag/v0.8.1-rc.2)，
+源码 `b0c675faa81e806e6363cc00e187cdaf9aaa20cf`。
+选定 Runtime、实际进程与原生 worker 记录位于
+`/home/sid/Developer/Artifacts/Styx/release-0.8.1-rc.2/delivery-verified.json`。
+其他设备的 0.8.0 验收是此前记录，不代表本轮重新检查了那些设备。
 
-### 0.8.1-rc.1 原生输入候选
+### Desktop CUA 的已证实结果与当前缺口
 
-- Chrome 的可编辑控件没有实现 AT-SPI EditableText；原生严格 setter 在派发前返回
-  `editable_unavailable`，旧 Provider 将这类拒绝全部改成 PermissionDenied。
-  修复保留 Unsupported、StaleObservation、InvalidRequest 和真实 PermissionDenied 的区分。
-- 显式 `type_text` 复用现有元素观测、owner、capability、一次性派发及结果交付检查。
-  仅接受完整 PID/window/token 和 `delivery_mode:"foreground"`；它在光标处插入文本，
-  会改变窗口/控件焦点且不恢复原焦点。它不代表后台无干扰输入。
-- 原生执行复用 Cua 进程内 Wayland Unicode 键盘 writer；每个按键都检查精确窗口和
-  可编辑控件焦点。Hyprland 激活使用当前 Lua dispatcher，验证环境为 0.57.1。
-  未新增 Browser Profile 接管、Cookie 迁移、键盘子进程或权限旁路。
-- 完整源码质量 gate 已 PASS，输入及 Git 稳定性检查 PASS；Provider、Host observation、
-  Gateway routing、公共工具路由和原生焦点/键盘回归均通过。旧路径未生成执行记录的问题
-  已改为复用既有 Hyprland 结果函数，只在原生 writer 完成后记录派发，仍要求观察实际效果。
-- 最终冻结 worker 已在日常 Chrome 非敏感页面分别完成一次 ASCII 和一次中文/换行输入。
-  两次均返回正常执行记录，页面独立记录及无障碍读回一致。原始失败尝试和验收脚本的
-  token/空白比较中断保留原记录；没有重放任何结果不确定的写入。汇总证据：
-  `/home/sid/Developer/Artifacts/Styx/chrome-read-debug/native-input-final-component-acceptance.json`。
-- 当前候选尚未发布或部署。源码 gate、原生组件实际输入已通过；官方 Release、
-  安装后的公共 MCP 输入效果和 ChatGPT 工具目录刷新仍需分别验收，不能互相代替。
+- PR81 的错误分类修正只解决误报 PermissionDenied；新增 `type_text` 的成功
+  不代表原 `set_value` 恢复。PR82/rc2 才恢复 Linux 正常 setter 与现有原生
+  Hyprland 替换输入，并在实际日常 Chrome 的公开 MCP 路径上验证 ASCII、
+  中文/换行与清空。该验收只有一个 owner。
+- rc2 上已用两个正常认证的独立公开 MCP session 复现
+  A 读树 → B 读树 → A 写入返回 `UNAUTHORIZED / not_dispatched`，测试框未改变。
+  Host 把带有 owner/resource 归属的 AX observation 放在全局单槽；
+  B 的正常读取覆盖 A，随后 owner 检查拒绝 A。这不是 Chrome OS 权限不足。
+- 同一 rc2 session 已复现“读树 → 列窗口 → 写入”和“读树 → 纯截图 → 写入”
+  均返回 `STALE_OBSERVATION / not_dispatched`，测试框未改变。
+  这些只读原生调用保留 AX snapshot，Host 却额外丢弃了绑定。
+- 原始复现证据保存在
+  `/home/sid/Developer/Artifacts/Styx/desktop-observation-owners-20261121/`，
+  分别为 `public-two-owner-rc2.json` 与 `public-read-continuity-rc2.json`。
+  未取得另一对话所贴失败的完整请求 trace；不能把上述可复现条件直接认作
+  那一次历史请求的唯一原因。
+- 另一个现有 fixture 回归确认：合法派发并收到 native ACK/Core Succeeded 后，
+  `click/type_text` 的结果授权仍按原观察的 30 秒年龄拒绝 receipt，最终公开映射为
+  `outcome_unknown`；`set_value` 不受该年龄检查影响。修复只移除结果交付阶段的
+  年龄复查，派发前仍要求 fresh observation。此证据来自 Core/native-slot fixture，
+  不表示已在真实 Chrome 中注入长延迟；见 `chrome-read-debug/desktop-receipt-age-red.json`。
+- 当前 `fix/desktop-observation-owners` / 0.8.1-rc.3 为工作分支候选，
+  未合并、发布或部署。生产修复限定在 Host 既有资源记录和观察失效时机；
+  权限、owner、target、原引用年龄、source fence 与一次派发约束保持。
+  三项 Host 生命周期定向回归均已由红灯转绿，独立审阅通过；修复后的公开实机验收尚未完成。
+
+### 本次原生输入完成条件
+
+验收必须通过公开 MCP → Gateway → Host/Core → 原生 Cua → 实际 Chrome，
+并独立观察最终输入；源码/fixture 测试、打包、安装和实际效果分别记录。
+
+- 单 owner 的 click、set_value 与 type_text；替换、清空、Unicode 与读回。
+- 完整 AX 树后经过 metadata、纯截图等只读调用，原引用仍可在原有效期内使用。
+- 两个独立 owner 在同一 Host 重叠读取，然后各自交错写入并读回；
+  关闭一个 owner 后，另一个已取得的观察与后续读写继续有效。
+- 新完整 AX 树替换旧引用；错误 owner、过期/错误引用仍拒绝；
+  同一 operation 不二次派发，不自动重放 outcome unknown 的输入。
+
+并发读取和交错写入不能证明两个物理前台输入可安全同时执行。
+Linux/Hyprland 前台输入会聚焦窗口/控件，不恢复原焦点，不承诺后台无干扰；
+原生结果为 unverifiable/unknown 时必须再观察，不能据派发成功推断效果。
+全源码 quality receipt 的 `native_platform_acceptance=NOT_RUN` 和
+`final_release_gate=false` 也不能替代上述实机流程。
 
 ### 已部署的 0.8.0 基线
 

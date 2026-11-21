@@ -157,6 +157,7 @@ pub(super) async fn cleanup_selected(
                 for handle in lane
                     .handles
                     .values()
+                    .map(|entry| &entry.handle)
                     .filter(|handle| owner.is_none_or(|owner| handle.owner() == owner))
                 {
                     let id = handle.target().operation_id.clone();

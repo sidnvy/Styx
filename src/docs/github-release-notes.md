@@ -7,24 +7,29 @@ several conversations can use the same computer.
 
 ## Changes
 
-This release candidate restores the existing `set_value` operation in ordinary
-Chrome on Linux/Hyprland. It replaces the contents of an observed input, including
-clearing the field with an empty value, using the same public arguments.
+This release candidate fixes native Desktop actions returning
+`UNAUTHORIZED / not_dispatched` after another conversation reads the same Host.
+Each owned Desktop resource now retains its own latest accessibility observation
+inside its existing resource record. Reading, writing or closing one resource no
+longer replaces or consumes another resource's observed targets.
+Read-only metadata and screenshot calls also preserve the latest complete
+accessibility observation instead of discarding otherwise valid element tokens.
 
-Linux now uses Cua's normal setter instead of the Styx-only strict extension.
-When the control has no accessibility setter, native Hyprland input selects all
-and replaces the contents. This may bring the target window forward and focus
-the field; previous focus is not restored. The existing `type_text` operation
-continues to insert at the caret.
+The existing owner, target, permission and once-only dispatch checks remain in
+place. The Host does not retry a dispatched action or restore its consumed
+observation after an unknown result. Input freshness is checked before dispatch;
+an acknowledged click or type_text result is no longer discarded solely because
+the original observation expired while that operation was running.
+This change does not grant new permissions or alter native input delivery.
 
-The adapter preserves Cua's native result and keeps the existing Computer Use
-setting, observed target and operation ownership. Actual native setter errors
-are propagated instead of being mistaken for a missing route and retried.
-Independent observation confirms the application's resulting value.
+Linux/Hyprland `set_value` retains the replacement input support from
+0.8.1-rc.2, including empty values and Unicode. Native foreground delivery may
+bring the target window forward and focus its field; previous focus is not
+restored. The macOS and Windows setter implementations are unchanged.
 
-Update the Linux Host to obtain the native fix and Gateway to obtain the updated
-tool descriptions. The existing `set_value` arguments and tool name are unchanged.
-The macOS and Windows setter implementations are unchanged.
+Update the affected Host to obtain the observation ownership fix. Public tool
+names, arguments and the Gateway protocol are unchanged. Existing profiles,
+identities, pairing and capability grants are preserved.
 
 ### Android package availability
 
