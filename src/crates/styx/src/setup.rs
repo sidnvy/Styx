@@ -26,6 +26,12 @@ impl Role {
         matches!(self, Self::Hub | Self::Gateway)
     }
 }
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PublicMcp {
+    config: styx_runtime::management::public_mcp::PublicMcpConfig,
+    client_secret_file: Option<PathBuf>,
+}
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Payload {
@@ -105,6 +111,8 @@ pub(super) struct Answers {
     pub networks: Vec<std::net::Ipv4Addr>,
     pub join_link_file: Option<PathBuf>,
     pub tunnel: Option<Tunnel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    public_mcp: Option<PublicMcp>,
     pub plugin: Option<Plugin>,
     #[serde(default, skip_serializing)]
     pub approve: BTreeSet<String>,
@@ -338,7 +346,10 @@ impl Answers {
             return Err("setup_gateway_only_cannot_enable_host".into());
         }
         if self.role == Role::Join
-            && (!self.networks.is_empty() || self.tunnel.is_some() || self.plugin.is_some())
+            && (!self.networks.is_empty()
+                || self.tunnel.is_some()
+                || self.public_mcp.is_some()
+                || self.plugin.is_some())
         {
             return Err("setup_join_cannot_configure_hub".into());
         }
@@ -350,6 +361,22 @@ impl Answers {
                     .is_some_and(|p| !p.is_absolute()))
         {
             return Err("setup_tunnel_choices_invalid".into());
+        }
+        if let Some(public) = &self.public_mcp {
+            use styx_runtime::management::public_mcp::PublicMcpAuthentication;
+            let oauth = matches!(
+                public.config.authentication,
+                PublicMcpAuthentication::OAuthIntrospection { .. }
+            );
+            if self.tunnel.is_some()
+                || oauth != public.client_secret_file.is_some()
+                || public
+                    .client_secret_file
+                    .as_ref()
+                    .is_some_and(|path| !path.is_absolute())
+            {
+                return Err("setup_public_mcp_choices_invalid".into());
+            }
         }
         if self.browser
             && self
@@ -367,7 +394,7 @@ impl Answers {
             return Err("setup_absolute_join_link_file_required".into());
         }
         if let Some(plugin) = &self.plugin
-            && (self.tunnel.is_none()
+            && ((self.tunnel.is_none() && self.public_mcp.is_none())
                 || !plugin.output.is_absolute()
                 || plugin.output.file_name().and_then(|p| p.to_str()) != Some("styx-native")
                 || inputs::plugin_display_name(&plugin.display_name).is_none()
@@ -384,6 +411,7 @@ impl Answers {
             "workspace",
             "gateway",
             "tunnel",
+            "public-mcp",
             "gateway-service",
             "invite",
             "trust",
@@ -409,6 +437,64 @@ impl Answers {
         Ok(value)
     }
 }
+fn model_connection() -> Result<(Option<Tunnel>, Option<PublicMcp>)> {
+    use styx_runtime::management::public_mcp::{PublicMcpAuthentication, PublicMcpConfig};
+    let choice = prompt::select(
+        "Model client connection",
+        &["OpenAI Private Tunnel", "Public HTTPS", "Configure later"],
+        0,
+    )?;
+    if choice == 0 {
+        println!(
+            "Create a tunnel and runtime key in OpenAI Platform. Styx hides the key as you type."
+        );
+        return Ok((
+            Some(Tunnel {
+                id: prompt::line("Tunnel ID", None)?,
+                api_key_file: None,
+            }),
+            None,
+        ));
+    }
+    if choice == 2 {
+        return Ok((None, None));
+    }
+    println!(
+        "Publish the Gateway's /mcp route over HTTPS with a reverse proxy. Use the public URL given to clients."
+    );
+    let url = prompt::line("Public MCP URL", None)?;
+    let (authentication, client_secret_file) =
+        if prompt::select("Authentication", &["OAuth", "Static Bearer"], 0)? == 0 {
+            let issuer = prompt::line("OAuth issuer URL", None)?;
+            let introspection_url = prompt::line("Introspection HTTPS URL", None)?;
+            let client_id = prompt::line("Introspection client ID", None)?;
+            let subjects = prompt::line("Allowed OAuth subject IDs, separated by commas", None)?;
+            let allowed_subjects = subjects
+                .split(',')
+                .map(str::trim)
+                .map(str::to_owned)
+                .collect();
+            (
+                PublicMcpAuthentication::OAuthIntrospection {
+                    issuer,
+                    introspection_url,
+                    client_id,
+                    allowed_subjects,
+                },
+                Some(prompt::line("Private introspection client secret file", None)?.into()),
+            )
+        } else {
+            (PublicMcpAuthentication::Bearer, None)
+        };
+    Ok((
+        None,
+        Some(PublicMcp {
+            config: PublicMcpConfig::new(url, authentication),
+            client_secret_file,
+        }),
+    ))
+}
+
 fn interactive(
     root: &Path,
     installed: Option<(Payload, super::install::Mode)>,
@@ -479,6 +565,7 @@ fn interactive(
     };
     let mut networks = Vec::new();
     let mut tunnel = None;
+    let mut public_mcp = None;
     let mut join_link_file = None;
     let mut pasted_link = None;
     let mut port = default_port();
@@ -514,16 +601,8 @@ fn interactive(
         for index in prompt::networks(&choices)? {
             networks.push(addresses[index].address);
         }
-        prompt::section("ChatGPT connection");
-        println!(
-            "ChatGPT connects with a Secure MCP Tunnel. Create a tunnel in your account using https://developers.openai.com/api/docs/guides/secure-mcp-tunnels . Styx hides your API key as you type and saves it privately."
-        );
-        if prompt::confirm("Configure a tunnel now? Choose no to skip for now")? {
-            tunnel = Some(Tunnel {
-                id: prompt::line("Tunnel ID", None)?,
-                api_key_file: None,
-            });
-        }
+        prompt::section("Model client connection");
+        (tunnel, public_mcp) = model_connection()?;
     } else {
         println!(
             "Enter the Gateway address and pairing code, separated by a space, or paste the invitation."
@@ -588,6 +667,7 @@ fn interactive(
         networks,
         join_link_file,
         tunnel,
+        public_mcp,
         plugin: None,
         approve: BTreeSet::new(),
     };
@@ -968,6 +1048,12 @@ fn plan_steps(answers: &Answers, foreground: bool, root: &Path) -> Vec<String> {
             "Set up the hub (Styx Gateway) on HTTPS port {} {networks}.",
             answers.port
         ));
+        if let Some(public) = &answers.public_mcp {
+            steps.push(format!(
+                "Configure Public HTTPS at {}. Save OAuth credentials privately if used.",
+                public.config.url
+            ));
+        }
         if answers.tunnel.is_some() {
             steps.push("Connect ChatGPT through a Secure MCP Tunnel and save its API key privately. Briefly stop and restart an existing hub service if configuration requires it.".into());
         }
@@ -1004,11 +1090,51 @@ fn plan_steps(answers: &Answers, foreground: bool, root: &Path) -> Vec<String> {
     }
     if answers.tunnel.is_some() {
         steps.push(format!("Save the Styx upload icon in {} and show the Custom MCP > Tunnel connection steps. Nothing is uploaded or installed automatically.", root.join("chatgpt/styx-icon.png").display()));
-    } else if answers.role == Role::Hub {
+    } else if answers.role == Role::Hub && answers.public_mcp.is_none() {
         steps.push("Leave ChatGPT off for now and show how to connect it later.".into());
     }
     steps
 }
+async fn stop_gateway_to_configure(
+    session: &Session,
+    gateway: &Path,
+    foreground: bool,
+    transport: &str,
+) -> Result<()> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if !foreground {
+        let status = native::service::manage(
+            gateway,
+            native::service::ServiceAction::Status,
+            native::NativeComponent::Gateway,
+            None,
+            None,
+        )
+        .await
+        .map_err(Failure::native)?;
+        if status.os["active"] == "active" {
+            let step = format!("{transport}-gateway-stop-r{}", status.revision);
+            session.begin(&step)?;
+            let tx = format!("setup-{step}")
+                .try_into()
+                .map_err(|_| Failure::new("setup_transaction_id_invalid"))?;
+            native::service::manage(
+                gateway,
+                native::service::ServiceAction::Stop,
+                native::NativeComponent::Gateway,
+                Some(tx),
+                Some(status.revision),
+            )
+            .await
+            .map_err(Failure::native)?;
+            session.done(&step)?;
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    let _ = (session, gateway, foreground, transport);
+    Ok(())
+}
+
 async fn pair(session: &Session, gateway: Option<&Path>) -> Result<Option<String>> {
     let host = session.root.join("host");
     let mut joined = None;
@@ -1360,6 +1486,33 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
                 .map_err(Failure::native)?;
             session.skip("Hub configuration");
         }
+        if let Some(public) = &a.public_mcp {
+            use styx_runtime::management::public_mcp;
+            if session.completed("public-mcp") {
+                let configured = public_mcp::status(&gateway)?;
+                if configured.as_ref().and_then(|c| c["url"].as_str()) != Some(&public.config.url) {
+                    return Err("setup_existing_public_mcp_differs".into());
+                }
+                session.skip("Public HTTPS configuration");
+            } else {
+                session.require_known("public-mcp")?;
+                let secret = public
+                    .client_secret_file
+                    .as_deref()
+                    .map(public_mcp::read_input_secret)
+                    .transpose()?;
+                public_mcp::validate_input(&public.config, secret.as_deref().map(String::as_str))?;
+                session.consent("public-mcp", "Save the Public HTTPS endpoint and its authentication. A running Gateway may restart.")?;
+                stop_gateway_to_configure(session, &gateway, foreground, "public-mcp").await?;
+                session.begin("public-mcp")?;
+                public_mcp::configure(
+                    &gateway,
+                    public.config.clone(),
+                    secret.as_deref().map(String::as_str),
+                )?;
+                session.done("public-mcp")?;
+            }
+        }
         if let Some(tunnel) = &a.tunnel {
             let status = serde_json::to_value(
                 styx_runtime::foreground::tunnel::status(&gateway)
@@ -1374,35 +1527,7 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
                 session.skip("Tunnel configuration");
             } else {
                 session.consent("tunnel", "Save the tunnel API key privately. If the hub service is running, stop it briefly to configure ChatGPT, then restart it.")?;
-                #[cfg(all(target_os = "linux", target_env = "gnu"))]
-                if !foreground {
-                    let status = native::service::manage(
-                        &gateway,
-                        native::service::ServiceAction::Status,
-                        native::NativeComponent::Gateway,
-                        None,
-                        None,
-                    )
-                    .await
-                    .map_err(Failure::native)?;
-                    if status.os["active"] == "active" {
-                        let step = format!("tunnel-gateway-stop-r{}", status.revision);
-                        session.begin(&step)?;
-                        let tx = format!("setup-{step}")
-                            .try_into()
-                            .map_err(|_| Failure::new("setup_transaction_id_invalid"))?;
-                        native::service::manage(
-                            &gateway,
-                            native::service::ServiceAction::Stop,
-                            native::NativeComponent::Gateway,
-                            Some(tx),
-                            Some(status.revision),
-                        )
-                        .await
-                        .map_err(Failure::native)?;
-                        session.done(&step)?;
-                    }
-                }
+                stop_gateway_to_configure(session, &gateway, foreground, "tunnel").await?;
                 if let Some(key) = &tunnel.api_key_file {
                     session.begin("tunnel")?;
                     styx_runtime::foreground::tunnel::configure(
@@ -1422,8 +1547,8 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
                 }
                 session.done("tunnel")?;
             }
-        } else {
-            println!("ChatGPT tunnel: skipped for now. Run styx setup again to configure it.");
+        } else if a.public_mcp.is_none() {
+            println!("Model client connection: skipped. Run styx setup again to configure it.");
         }
         if foreground {
             session.consent("gateway-run", "Run this hub in this terminal until Ctrl-C.")?;
@@ -1451,7 +1576,9 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
         wait_gateway(&gateway).await?;
     }
     if a.role == Role::Gateway {
-        if a.tunnel.is_some() {
+        if a.public_mcp.is_some() {
+            connect_public_mcp(session, &gateway).await?;
+        } else if a.tunnel.is_some() {
             connect_chatgpt(session, &gateway).await?;
         }
         println!(
@@ -1499,7 +1626,9 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
             }
         );
         wait_computer(&gateway, device.as_deref(), a.browser).await?;
-        if a.tunnel.is_some() {
+        if a.public_mcp.is_some() {
+            connect_public_mcp(session, &gateway).await?;
+        } else if a.tunnel.is_some() {
             connect_chatgpt(session, &gateway).await?;
         }
     } else {
@@ -1615,34 +1744,55 @@ async fn export_legacy_plugin(session: &mut Session, gateway: &Path) -> Result<(
             )?;
         }
         session.begin("plugin")?;
-        plugin_package::write_profile(
-            &plugin.output,
-            &profile,
-            &session
-                .answers
-                .tunnel
-                .as_ref()
-                .ok_or_else(|| Failure::new("setup_tunnel_missing"))?
-                .id,
-            &discovery,
-        )?;
+        plugin_package::write_profile(&plugin.output, &profile, &discovery)?;
         session.done("plugin")?;
     } else {
         let discovery = admin::observe(gateway).await.map_err(Failure::admin)?;
-        plugin_package::verify_profile(
-            &plugin.output,
-            &profile,
-            &session
-                .answers
-                .tunnel
-                .as_ref()
-                .ok_or_else(|| Failure::new("setup_tunnel_missing"))?
-                .id,
-            &discovery,
-        )?;
-        session.skip("Plugin export");
+        if plugin_package::verify_profile(&plugin.output, &profile, &discovery).is_ok() {
+            session.skip("Plugin export");
+        } else {
+            println!(
+                "The existing plugin export differs from this version. It was retained. Use styx plugin export with a fresh output path for an updated package."
+            );
+        }
     }
 
+    Ok(())
+}
+
+async fn connect_public_mcp(session: &mut Session, gateway: &Path) -> Result<()> {
+    use styx_runtime::management::public_mcp;
+    let connection =
+        public_mcp::status(gateway)?.ok_or_else(|| Failure::new("setup_public_mcp_missing"))?;
+    let url = connection["url"]
+        .as_str()
+        .ok_or_else(|| Failure::new("setup_public_mcp_missing"))?;
+    let authentication = connection["authentication"].as_str().unwrap_or("bearer");
+    export_legacy_plugin(session, gateway).await?;
+    let icon = prepare_chatgpt_icon(&session.root)?;
+    let probe = public_mcp::probe(url).await;
+    println!(
+        "Public MCP URL: {url}\nAuthentication: {authentication}\nStyx icon: {}",
+        icon.display()
+    );
+    println!(
+        "HTTPS response: {}",
+        match probe {
+            Ok(probe)
+                if probe.http_status == 401
+                    && probe.bearer_challenge
+                    && (authentication != "oauth" || probe.resource_metadata_challenge) =>
+                "Authentication challenge received.".into(),
+            Ok(probe) => format!(
+                "HTTP {}. Check the proxy and authentication configuration.",
+                probe.http_status
+            ),
+            Err(_) => "Unreachable. Check the listener, reverse proxy and TLS certificate.".into(),
+        }
+    );
+    println!(
+        "Connect with a client that supports this authentication mode. Discover tools, select a paired computer and make a read-only tool call to verify access. Custom MCP connects the tools. The optional plugin package also contains skills."
+    );
     Ok(())
 }
 
@@ -1682,7 +1832,7 @@ async fn connect_chatgpt(session: &mut Session, gateway: &Path) -> Result<()> {
         .plugin
         .as_ref()
         .map(|p| p.display_name.clone())
-        .unwrap_or_else(|| format!("Styx ({})", session.answers.label));
+        .unwrap_or_else(|| "Styx".into());
     // Capture before presenting the instructions so a quick Connect is observed.
     let baseline = styx_runtime::foreground::tunnel::request_observation(gateway)
         .map_err(|e| Failure::new(e.code()))?["requests"]
@@ -1818,7 +1968,11 @@ async fn run_inner(
     } else {
         interactive(&root, installed)?
     };
-    if intent.exists() && answers.role.owns_gateway() && answers.tunnel.is_none() {
+    if intent.exists()
+        && answers.role.owns_gateway()
+        && answers.tunnel.is_none()
+        && answers.public_mcp.is_none()
+    {
         if let Ok(status) = styx_runtime::foreground::tunnel::status(&root.join("gateway")).await {
             let status = serde_json::to_value(status)
                 .map_err(|_| Failure::new("setup_tunnel_status_failed"))?;
@@ -1834,15 +1988,9 @@ async fn run_inner(
         }
         if answers.tunnel.is_none()
             && !automated
-            && prompt::confirm("Configure the previously skipped ChatGPT tunnel now?")?
+            && prompt::confirm("Configure the model client connection now?")?
         {
-            println!(
-                "Secure MCP Tunnel guide: https://developers.openai.com/api/docs/guides/secure-mcp-tunnels"
-            );
-            answers.tunnel = Some(Tunnel {
-                id: prompt::line("Tunnel ID", None)?,
-                api_key_file: None,
-            });
+            (answers.tunnel, answers.public_mcp) = model_connection()?;
         }
     }
     require_tunnel_client(&answers, &root).await?;

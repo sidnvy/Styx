@@ -58,6 +58,26 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
     .map(|_| ())
     .map_err(io::Error::other)
 }
+/// Publish a private file through the existing exclusive writer and an atomic replacement.
+pub(crate) fn replace_private_file(
+    directory: &Path,
+    root: &PrivateRoot,
+    name: &str,
+    bytes: &[u8],
+) -> io::Result<()> {
+    let temporary = format!("tmp-{}", uuid::Uuid::new_v4().simple());
+    root.create_pairing_invitation(std::ffi::OsStr::new(&temporary), bytes)
+        .map_err(io::Error::other)?;
+    let result = std::fs::rename(directory.join(&temporary), directory.join(name));
+    if result.is_err() {
+        let _ = std::fs::remove_file(directory.join(&temporary));
+    }
+    result?;
+    #[cfg(unix)]
+    std::fs::File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
 pub fn read_private(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
     let root = PrivateRoot::open(
         path.parent()

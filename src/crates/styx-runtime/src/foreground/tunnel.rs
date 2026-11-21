@@ -259,20 +259,8 @@ fn connection(root: &PrivateRoot) -> Result<Option<Connection>> {
     Ok(Some(c))
 }
 fn atomic_write(path: &Path, root: &PrivateRoot, name: &str, bytes: &[u8]) -> Result<()> {
-    let temporary = format!("tmp-{}", uuid::Uuid::new_v4().simple());
-    root.create_pairing_invitation(std::ffi::OsStr::new(&temporary), bytes)
-        .map_err(|_| error("tunnel_protected_write"))?;
-    let result = fs::rename(path.join(&temporary), path.join(name))
-        .map_err(|_| error("tunnel_protected_write"));
-    if result.is_err() {
-        let _ = fs::remove_file(path.join(&temporary));
-    }
-    result?;
-    #[cfg(unix)]
-    File::open(path)
-        .and_then(|f| f.sync_all())
-        .map_err(|_| error("tunnel_protected_write"))?;
-    Ok(())
+    crate::management::setup::replace_private_file(path, root, name, bytes)
+        .map_err(|_| error("tunnel_protected_write"))
 }
 fn open_file(path: &Path, write: bool) -> std::io::Result<File> {
     let mut options = OpenOptions::new();

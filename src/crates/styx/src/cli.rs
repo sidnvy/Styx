@@ -497,6 +497,11 @@ enum GatewayCommand {
         #[command(subcommand)]
         command: GatewayTunnelCommand,
     },
+    /// Configure or inspect the public HTTPS MCP endpoint.
+    PublicMcp {
+        #[command(subcommand)]
+        command: GatewayPublicMcpCommand,
+    },
     /// Create one invitation and publish its secret only to a new private file.
     Invite {
         #[arg(long)]
@@ -580,6 +585,26 @@ enum GatewayCommand {
     Run {
         #[arg(long)]
         state_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum GatewayPublicMcpCommand {
+    /// Save the endpoint configuration while the Gateway is stopped.
+    Configure {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        config_file: PathBuf,
+        #[arg(long)]
+        client_secret_file: Option<PathBuf>,
+        #[arg(long, required = true)]
+        authorize: bool,
+    },
+    /// Report the configured URL and authentication mode.
+    Status {
+        #[arg(long)]
+        state_dir: PathBuf,
     },
 }
 
@@ -1742,6 +1767,45 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 json,
             ),
         },
+        Command::Gateway {
+            command: GatewayCommand::PublicMcp { command },
+        } => {
+            use styx_runtime::management::{public_mcp, setup::read_private};
+            let report = tokio::task::spawn_blocking(move || match command {
+                GatewayPublicMcpCommand::Status { state_dir } => public_mcp::status(&state_dir),
+                GatewayPublicMcpCommand::Configure {
+                    state_dir,
+                    config_file,
+                    client_secret_file,
+                    authorize,
+                } => {
+                    if !authorize {
+                        return Err("gateway_public_mcp_authorization_required");
+                    }
+                    let raw = read_private(&config_file, styx_contracts::CONTROL_FRAME_BYTES)
+                        .map_err(|_| "gateway_public_mcp_configuration_invalid")?;
+                    let config = serde_json::from_slice(&raw)
+                        .map_err(|_| "gateway_public_mcp_configuration_invalid")?;
+                    let secret = client_secret_file
+                        .as_deref()
+                        .map(public_mcp::read_input_secret)
+                        .transpose()?;
+                    public_mcp::configure(&state_dir, config, secret.as_deref().map(String::as_str))
+                        .map(Some)
+                }
+            })
+            .await
+            .unwrap_or(Err("gateway_public_mcp_worker_failed"));
+            match report {
+                Ok(connection) => match write_json(
+                    &serde_json::json!({"configured":connection.is_some(),"connection":connection}),
+                ) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(_) => error("output_unavailable"),
+                },
+                Err(code) => error(code),
+            }
+        }
         Command::Gateway {
             command: GatewayCommand::Tunnel { command },
         } => {

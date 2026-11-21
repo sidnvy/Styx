@@ -26,7 +26,7 @@ struct ProductHostCapabilitySettings: View {
 struct ProductPluginCompatibilityNote: View {
     var body: some View {
         DisclosureGroup(productText("上传方式与兼容性", "Upload availability and compatibility")) {
-            Text(productText("已复现 ZIP 插件安装后图标被 ChatGPT 占位图替换。请使用 Custom MCP → Tunnel，并单独上传 Styx 图标。ZIP 导出仅保留给高级用途，不作为推荐安装方式。", "ZIP-installed plugins can replace the Styx logo with a ChatGPT placeholder. Use Custom MCP → Tunnel and upload the Styx icon separately. ZIP export remains available for advanced use and is not the recommended installation path."))
+            Text(productText("已复现 ZIP 插件安装后图标被 ChatGPT 占位图替换。请使用 Custom MCP，并单独上传 Styx 图标。ZIP 导出仅保留给高级用途，不作为推荐安装方式。", "ZIP-installed plugins can replace the Styx logo with a ChatGPT placeholder. Use Custom MCP and upload the Styx icon separately. ZIP export remains available for advanced use and is not the recommended installation path."))
         }.font(.caption).foregroundStyle(.secondary)
     }
 }
@@ -185,6 +185,74 @@ struct ProductSettingsView: View {
     private var chat: some View { ProductNativeChatView(model: model) }
 }
 
+struct ProductPublicMcpDraft {
+    var url = ""
+    var oauth = true
+    var issuer = ""
+    var introspectionURL = ""
+    var clientID = ""
+    var subjects = ""
+    var origins = ""
+    var secret = ""
+
+    init() {}
+    init(configuration: ProductJSON) {
+        url = configuration["url"].string ?? ""
+        let auth = configuration["authentication"]
+        oauth = auth["type"].string != "bearer"
+        issuer = auth["issuer"].string ?? ""
+        introspectionURL = auth["introspection_url"].string ?? ""
+        clientID = auth["client_id"].string ?? ""
+        subjects = auth["allowed_subjects"].array.compactMap { $0.string }.joined(separator: ", ")
+        origins = configuration["allowed_origins"].array.compactMap { $0.string }.joined(separator: ", ")
+    }
+
+    var input: ProductJSON? {
+        let endpoint = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parsed = URLComponents(string: endpoint), parsed.scheme == "https",
+              parsed.host != nil, parsed.path == "/mcp" else { return nil }
+        let allowedOrigins = origins.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        var authentication: [String: ProductJSON] = ["type": .string("bearer")]
+        if oauth {
+            let allowed = subjects.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard !allowed.isEmpty, allowed.allSatisfy({ !$0.isEmpty }),
+                  !issuer.isEmpty, !introspectionURL.isEmpty, !clientID.isEmpty, !secret.isEmpty else { return nil }
+            authentication = ["type": .string("oauth_introspection"), "issuer": .string(issuer),
+                              "introspection_url": .string(introspectionURL), "client_id": .string(clientID),
+                              "allowed_subjects": .array(allowed.map { .string($0) })]
+        }
+        var setup: [String: ProductJSON] = [
+            "config": .object(["url": .string(endpoint), "allowed_origins": .array(allowedOrigins.map { .string($0) }), "authentication": .object(authentication)])
+        ]
+        if oauth { setup["clientSecret"] = .string(secret) }
+        return .object(setup)
+    }
+}
+
+struct ProductPublicMcpFields: View {
+    @Binding var draft: ProductPublicMcpDraft
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField(productText("公开 MCP URL", "Public MCP URL"), text: $draft.url)
+            Picker(productText("认证", "Authentication"), selection: $draft.oauth) {
+                Text("OAuth").tag(true)
+                Text("Static Bearer").tag(false)
+            }
+            if draft.oauth {
+                TextField(productText("授权服务器 Issuer URL", "Authorization server issuer URL"), text: $draft.issuer)
+                TextField(productText("Introspection HTTPS URL", "Introspection HTTPS URL"), text: $draft.introspectionURL)
+                TextField(productText("Introspection 客户端 ID", "Introspection client ID"), text: $draft.clientID)
+                TextField(productText("允许的主体 ID（逗号分隔）", "Allowed subject IDs, comma separated"), text: $draft.subjects)
+                SecureField(productText("Introspection 客户端密钥", "Introspection client secret"), text: $draft.secret)
+            }
+            TextField(productText("允许的 Origin（选填，逗号分隔）", "Allowed origins (optional, comma separated)"), text: $draft.origins)
+            Text(productText("在反向代理上发布 /mcp，并使用匹配该 URL 的 HTTPS 证书。", "Publish /mcp through your reverse proxy using a TLS certificate for this URL."))
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
 // The same field guide is used by first-run and Settings. All external setup
 // stays with the user; these buttons only open ChatGPT, copy an ID or save art.
 struct ProductChatGPTConnectionSteps: View {
@@ -202,19 +270,29 @@ struct ProductChatGPTConnectionSteps: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(productText("2. 按下表填写", "2. Enter these values")).font(.headline)
                 LabeledContent("Name", value: "Styx")
-                LabeledContent("Connection", value: "Tunnel")
-                HStack {
-                    Text("Tunnel ID").foregroundStyle(.secondary)
-                    Spacer()
-                    if model.connectionTunnelID.isEmpty {
-                        Text(productText("先在管理电脑配置 Tunnel", "Configure the tunnel on the Gateway first")).font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        Text(model.connectionTunnelID).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                        Button(productText("复制 Tunnel ID", "Copy Tunnel ID")) { model.copy(model.connectionTunnelID) }
+                if let endpoint = model.publicMcpConnection["url"].string {
+                    LabeledContent("Connection", value: "Public HTTPS")
+                    Text(endpoint).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    Button(productText("复制 MCP URL", "Copy MCP URL")) { model.copy(endpoint) }
+                    LabeledContent("Authentication", value: model.publicMcpConnection["authentication"].string == "oauth" ? "OAuth" : "Static Bearer")
+                    if model.publicMcpConnection["authentication"].string == "bearer" {
+                        Text(productText("使用支持自定义 Bearer 凭据的 MCP 客户端。", "Use an MCP client that supports custom Bearer credentials.")).font(.caption)
                     }
+                } else {
+                    LabeledContent("Connection", value: "Tunnel")
+                    HStack {
+                        Text("Tunnel ID").foregroundStyle(.secondary)
+                        Spacer()
+                        if model.connectionTunnelID.isEmpty {
+                            Text(productText("先在管理电脑配置 Tunnel", "Configure the tunnel on the Gateway first")).font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Text(model.connectionTunnelID).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                            Button(productText("复制 Tunnel ID", "Copy Tunnel ID")) { model.copy(model.connectionTunnelID) }
+                        }
+                    }
+                    LabeledContent("Authentication", value: "No authentication")
+                    Text(productText("运行密钥（Runtime API key）只保存在管理电脑的 Styx 中，不要填入 ChatGPT。", "Keep the runtime API key in Styx on the Gateway; do not enter it in ChatGPT.")).font(.caption).foregroundStyle(.secondary)
                 }
-                LabeledContent("Authentication", value: "No authentication")
-                Text(productText("运行密钥（Runtime API key）只保存在管理电脑的 Styx 中，不要填入 ChatGPT。", "Keep the runtime API key in Styx on the Gateway; do not enter it in ChatGPT.")).font(.caption).foregroundStyle(.secondary)
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text(productText("3. 保存并上传图标", "3. Save and upload the icon")).font(.headline)
@@ -234,14 +312,38 @@ struct ProductChatGPTConnectionSteps: View {
 struct ProductNativeChatView: View {
     @ObservedObject var model: ProductModel
     @State private var editTunnel = false
+    @State private var editPublicMcp = false
     @State private var editPackage = false
+    @State private var publicReachability: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(productText("ChatGPT 中的 Styx", "Styx in ChatGPT")).font(.headline)
             if model.nativeSupportsOperation("tunnelSave") {
-                Text(productText("只在管理电脑（Gateway）上配置 Tunnel。先等待连接就绪，再按下面四步添加到 ChatGPT。", "Configure the tunnel only on the Gateway. Wait for it to connect, then follow the four steps below."))
-                ProductTunnelStatus(model: model)
-                Button(productText("配置 Tunnel…", "Configure Tunnel…")) { editTunnel = true }.disabled(model.busy)
+                if let endpoint = model.publicMcpConnection["url"].string {
+                    Text(productText("已配置公开 MCP URL：\(endpoint)", "Configured public MCP URL: \(endpoint)")).textSelection(.enabled)
+                    if model.nativeSupportsOperation("publicMcpProbe") {
+                        Button(productText("检查 HTTPS", "Check HTTPS")) {
+                            model.perform {
+                                let result = try await model.client.native("publicMcpProbe")["network"]
+                                if let status = result["httpStatus"].number {
+                                    publicReachability = "HTTP " + String(Int(status))
+                                } else {
+                                    publicReachability = productText("无法通过 HTTPS 访问", "HTTPS endpoint is unreachable")
+                                }
+                            }
+                        }.disabled(model.busy)
+                        if let publicReachability = publicReachability { Text(publicReachability).font(.caption) }
+                    }
+
+                } else {
+                    ProductTunnelStatus(model: model)
+                }
+                HStack {
+                    Button(productText("配置 Tunnel…", "Configure Tunnel…")) { editTunnel = true }
+                    if model.nativeSupportsOperation("publicMcpSave") {
+                        Button(productText("配置 Public HTTPS…", "Configure Public HTTPS…")) { editPublicMcp = true }
+                    }
+                }.disabled(model.busy)
                 Text(productText("保存时会短暂断开本 App 管理的连接，随后自动恢复。请先完成正在运行的任务。", "Saving briefly pauses connections managed by this App, then reconnects. Finish active tasks first.")).font(.caption)
                 ProductChatGPTConnectionSteps(model: model, identifierPrefix: "styx-native-custom-mcp")
             } else if model.status["configuration"] != .null {
@@ -272,7 +374,40 @@ struct ProductNativeChatView: View {
             }
         }
         .sheet(isPresented: $editTunnel) { ProductTunnelEditor(model: model) }
+        .sheet(isPresented: $editPublicMcp) { ProductPublicMcpEditor(model: model) }
         .sheet(isPresented: $editPackage) { ProductPackageEditor(model: model) }
+    }
+}
+
+struct ProductPublicMcpEditor: View {
+    @ObservedObject var model: ProductModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var draft = ProductPublicMcpDraft()
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(productText("Public HTTPS 接入", "Public HTTPS connection")).font(.headline)
+            ProductPublicMcpFields(draft: $draft)
+            Text(productText("保存会重启本机 Gateway。请先完成正在运行的操作。", "Saving restarts this Mac’s Gateway. Finish active operations first.")).font(.caption)
+            if let error = error { Text(error).foregroundStyle(.red) }
+            HStack {
+                Button(productText("取消", "Cancel")) { dismiss() }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button(productText("保存", "Save")) {
+                    guard let setup = draft.input else { return }
+                    draft.secret = ""
+                    Task {
+                        do { try await model.savePublicMcp(setup); dismiss() }
+                        catch { self.error = productText("无法确认已保存。请检查连接状态。", "The save could not be confirmed. Check the connection status.") }
+                    }
+                }.buttonStyle(.borderedProminent).disabled(model.busy || draft.input == nil)
+            }
+        }.padding(24).frame(width: 520)
+            .onAppear {
+                draft = ProductPublicMcpDraft(configuration: model.publicMcp["configuration"])
+            }
+            .interactiveDismissDisabled(model.busy)
     }
 }
 
@@ -396,7 +531,7 @@ struct ProductPackageEditor: View {
                     Button(productText("打开 ChatGPT", "Open ChatGPT")) { model.openOfficial("https://chatgpt.com/plugins") }
                 }
             }
-            if model.connectionTunnelID.isEmpty {
+            if !model.hasModelConnection {
                 Text(productText("先返回 ChatGPT 设置并保存连接信息，再导出插件包。", "Return to ChatGPT settings and save the connection details before exporting.")).font(.caption).foregroundStyle(.secondary)
             }
             ProductPluginCompatibilityNote()
@@ -419,7 +554,7 @@ struct ProductPackageEditor: View {
                     model.pluginName = name; model.pluginDescription = description; model.pluginLongDescription = longDescription; model.observePluginDraftEdit()
                     model.exportPluginPackage()
                 }.buttonStyle(.borderedProminent)
-                    .disabled(model.busy || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.unicodeScalars.count > 64 || description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || description.unicodeScalars.count > 30 || longDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || longDescription.unicodeScalars.count > 2000 || model.connectionTunnelID.isEmpty)
+                    .disabled(model.busy || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.unicodeScalars.count > 64 || description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || description.unicodeScalars.count > 30 || longDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || longDescription.unicodeScalars.count > 2000 || !model.hasModelConnection)
             }
         }.textFieldStyle(.roundedBorder).padding(24) }.frame(width: 520, height: 720)
             .onAppear { name = model.pluginName; description = model.pluginDescription; longDescription = model.pluginLongDescription.isEmpty ? model.plugin["presentation"]["longDescription"].string ?? "" : model.pluginLongDescription; priorIcon = model.pluginIcon; model.preparePluginDraft() }

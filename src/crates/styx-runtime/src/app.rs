@@ -231,6 +231,9 @@ enum Operation {
     RevokeComputer,
     TunnelStatus,
     TunnelSave,
+    PublicMcpStatus,
+    PublicMcpProbe,
+    PublicMcpSave,
     PluginRead,
     PluginSave,
     PluginExport,
@@ -287,6 +290,7 @@ struct JoinInput {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct LocalInput {
     tunnel: Option<SetupTunnel>,
+    public_mcp: Option<SetupPublicMcp>,
     label: String,
     #[serde(default = "exec_default")]
     exec: bool,
@@ -307,18 +311,59 @@ struct SetupTunnel {
     #[serde(deserialize_with = "secret_string")]
     api_key: zeroize::Zeroizing<String>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SetupPublicMcp {
+    config: crate::management::public_mcp::PublicMcpConfig,
+    #[serde(default, deserialize_with = "optional_secret")]
+    client_secret: Option<zeroize::Zeroizing<String>>,
+}
+impl SetupPublicMcp {
+    fn validate(&self, local: &str) -> Result<(), AppError> {
+        let config = crate::management::public_mcp::validate(
+            &self.config,
+            self.client_secret.as_deref().map(String::as_str),
+        )
+        .map_err(AppError)?;
+        if config.authority() == local {
+            return Err(AppError("gateway_public_mcp_separate_authority_required"));
+        }
+        Ok(())
+    }
+
+    fn configure(self, state: &Path) -> Result<Value, AppError> {
+        crate::management::public_mcp::configure(
+            state,
+            self.config,
+            self.client_secret.as_deref().map(String::as_str),
+        )
+        .map_err(AppError)
+    }
+}
+
+fn optional_secret<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> Result<Option<zeroize::Zeroizing<String>>, D::Error> {
+    Option::<String>::deserialize(decoder).map(|secret| secret.map(zeroize::Zeroizing::new))
+}
+
 fn exec_default() -> bool {
     true
 }
 impl LocalInput {
     fn desktop(input: &serde_json::value::RawValue) -> Result<Self, AppError> {
         let value: Self = decode_input(input)?;
-        let tunnel = value
-            .tunnel
-            .as_ref()
-            .ok_or(AppError("app_setup_tunnel_required"))?;
-        foreground::tunnel::validate_configuration(&tunnel.tunnel_id, Some(&tunnel.api_key))
-            .map_err(|error| AppError(error.code()))?;
+        match (&value.tunnel, &value.public_mcp) {
+            (Some(tunnel), None) => {
+                foreground::tunnel::validate_configuration(
+                    &tunnel.tunnel_id,
+                    Some(&tunnel.api_key),
+                )
+                .map_err(|error| AppError(error.code()))?;
+            }
+            (None, Some(public)) => public.validate(&format!("127.0.0.1:{}", value.port))?,
+            _ => return Err(AppError("app_setup_model_connection_required")),
+        }
         Ok(value)
     }
 }
@@ -1310,6 +1355,9 @@ impl HostApp {
                 "revokeComputer",
                 "tunnelStatus",
                 "tunnelSave",
+                "publicMcpStatus",
+                "publicMcpProbe",
+                "publicMcpSave",
             ]);
         }
         if self.running.is_some() && self.scope.host_settings().is_some() {
@@ -1362,6 +1410,7 @@ impl HostApp {
                 | Operation::InviteComputer
                 | Operation::RevokeComputer
                 | Operation::TunnelSave
+                | Operation::PublicMcpSave
                 | Operation::PluginSave
                 | Operation::PluginExport
                 | Operation::RetireRole
@@ -1414,7 +1463,10 @@ impl HostApp {
             | Operation::InviteComputer
             | Operation::RevokeComputer
             | Operation::TunnelStatus
-            | Operation::TunnelSave => {
+            | Operation::TunnelSave
+            | Operation::PublicMcpStatus
+            | Operation::PublicMcpProbe
+            | Operation::PublicMcpSave => {
                 return self.gateway_ui_request(operation, input).await;
             }
             Operation::PluginRead | Operation::PluginSave | Operation::PluginExport => {
@@ -1534,6 +1586,9 @@ impl HostApp {
             | Operation::RevokeComputer
             | Operation::TunnelStatus
             | Operation::TunnelSave
+            | Operation::PublicMcpStatus
+            | Operation::PublicMcpProbe
+            | Operation::PublicMcpSave
             | Operation::PluginRead
             | Operation::PluginSave
             | Operation::PluginExport

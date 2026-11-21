@@ -97,6 +97,10 @@ pub(super) async fn observe(root: &Path) -> Result<Value, Failure> {
             Ok(observed) => observed,
             Err(error) => json!({"state":"unavailable","error":error.code()}),
         };
+        report["public_mcp"] = match styx_runtime::management::public_mcp::status(&gateway) {
+            Ok(connection) => json!({"configured":connection.is_some(),"connection":connection}),
+            Err(error) => json!({"status":"unavailable","error":error}),
+        };
         report["tunnel"] = match styx_runtime::foreground::tunnel::status(&gateway).await {
             Ok(status) => serde_json::to_value(status)
                 .map_err(|_| Failure::new("status_serialization_failed"))?,
@@ -226,21 +230,32 @@ fn render(v: &Value, root: &Path, now_ms: u64) -> String {
     if let Some(open) = v["gateway"]["mcp_sessions"]["open"].as_u64() {
         lines.push(format!("MCP sessions: {open} open"));
     }
+    let public = v["public_mcp"]["connection"]["url"].as_str();
+    if let Some(endpoint) = public {
+        lines.push(format!(
+            "Public MCP: {endpoint} / {} (configured)",
+            v["public_mcp"]["connection"]["authentication"]
+                .as_str()
+                .unwrap_or("unknown")
+        ));
+    }
     let tunnel = v["tunnel"]["status"].as_str();
-    lines.push(
-        if tunnel == Some("not_configured") || (v["role"] == "hub" && tunnel.is_none()) {
-            format!(
-                "Tunnel: not set up — run styx setup --root {} to connect ChatGPT",
-                root.display()
-            )
-        } else {
-            format!(
-                "Tunnel: {} / {}",
-                tunnel.unwrap_or("on hub"),
-                v["tunnel"]["transport"].as_str().unwrap_or("not observed")
-            )
-        },
-    );
+    if public.is_none() || tunnel.is_some_and(|status| status != "not_configured") {
+        lines.push(
+            if tunnel == Some("not_configured") || (v["role"] == "hub" && tunnel.is_none()) {
+                format!(
+                    "Tunnel: not set up — run styx setup --root {} to connect ChatGPT",
+                    root.display()
+                )
+            } else {
+                format!(
+                    "Tunnel: {} / {}",
+                    tunnel.unwrap_or("on hub"),
+                    v["tunnel"]["transport"].as_str().unwrap_or("not observed")
+                )
+            },
+        );
+    }
     for (name, label) in [("gateway", "Hub"), ("host", "This computer")] {
         let s = &v["services"][name];
         lines.push(format!(

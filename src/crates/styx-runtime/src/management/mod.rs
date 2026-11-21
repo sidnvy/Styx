@@ -23,6 +23,7 @@ pub(crate) use crate::enrollment::client_http as native_join_http;
 use crate::enrollment::client_protocol as native_join_protocol;
 pub mod plugin_package;
 pub mod plugin_presentation;
+pub mod public_mcp;
 pub mod role_retire;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub(crate) mod service_control;

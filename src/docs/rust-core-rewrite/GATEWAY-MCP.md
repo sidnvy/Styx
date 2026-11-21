@@ -39,3 +39,18 @@ Streamable HTTP 由锁定的 rmcp SDK 提供。当前使用有初始化与会话
 OAuth 客户端通过 `401` 响应的 `WWW-Authenticate` 或 `GET /.well-known/oauth-protected-resource/mcp` 发现授权服务器。部署方配置授权服务器登录、客户端注册和 access token 发放。Gateway 对每个 MCP HTTP 请求调用 introspection，并要求 `active`、有效的 `exp`、匹配的 `iss`、`Bearer` token 类型、有效的 `sub`，以及包含完整外部 MCP URL 的 `aud`。若返回 `nbf`，必须已经生效。JWT 和不透明 access token 都通过同一 introspection 契约验证。配置允许的主体仍然拥有本部署完整 MCP 管理权限。
 
 同一 issuer 和 subject 在 token 刷新后保持相同 principal。每个新 MCP 会话仍有自己的 Gateway owner。该约定基于 [MCP 2025-11-25 Authorization](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)、[RFC 9728](https://www.rfc-editor.org/rfc/rfc9728.html) 和 [RFC 7662](https://www.rfc-editor.org/rfc/rfc7662.html)。
+
+## 设置与验收
+
+首次配置 Gateway 时，在 App 或 styx setup 中选择 Public HTTPS 或 OpenAI Private Tunnel。若已配置 Gateway，使用 App 的连接设置，或在 Gateway 停止时运行 styx gateway public-mcp configure，传入保护好的配置文件和对应的私有密钥文件。命令帮助列出参数。重新启动后用 styx gateway public-mcp status 查看已保存的 URL 与认证方式。由命令和 App 保存时，配置绑定到一个私有密钥文件版本，完整配置提交后替换旧版本。
+
+从客户端网络发起无凭据请求。HTTP 401 和资源发现响应验证 HTTPS 及挑战的可达性。在目标 MCP 客户端配置所选认证，发现工具后列出配对设备，再对目标 Host 发起一次获准的低影响调用。记录实际网络、认证、工具发现和 Host 效果。用于 OAuth 验收的 Keycloak 26.8.1 配置为预注册的 PKCE 客户端，以及向 introspection 返回完整 MCP 资源 URL 的 audience。公开部署可选能满足同一契约的授权服务。
+
+已有 Tunnel 可以与显式 Public HTTPS 配置共用一个 Gateway。已配置 Public HTTPS 时，导出选择 Public HTTPS。插件 ZIP 只声明连接和认证类型并附带 skills。Custom MCP 连接在客户端单独建立。旧桥接只有在替代入口通过实际账户和 Host 验收后才进入迁移停用步骤。
+
+## 替换旧入口
+
+1. 从已经合并到 main 的新版本生成正式 GitHub Release。记录 Gateway 和受测 Host 选中的 Runtime manifest 与实际进程版本。
+2. 在隔离环境配置候选 HTTPS URL，逐项核对 OAuth 发现、授权、工具发现、Host 调用与断开后的生命周期，再验证 Private Tunnel 原路径。复用原设备身份与 Browser profile。
+3. 共享 Gateway 切换前，检查在用连接和运行任务，保留旧路由、可恢复配置和上一套签名资产。让新路径使用独立外部 authority，先验证新路径，再迁移客户端。
+4. 独立客户端确认新入口的实际工具调用、显示名和图标。若结果不确定，检查该入口的原始请求和 Host 效果。确认替代入口服务正常后，才停用临时 bridge、撤下旧 DNS/Access 接入并删除源码中的遗留 forwarding 特例；每项对准实际部署对象。

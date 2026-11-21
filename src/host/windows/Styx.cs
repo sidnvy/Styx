@@ -618,9 +618,114 @@ namespace StyxNative {
    ShowPage(destination=="join"&&NeedsNativeSetup(owner.CurrentStatus)?"join":"welcome");
   }
   void NativeAction(string title,string operation,Func<Task> action,string pending="Working…"){if(owner.Supports(operation))Action(title,action,true,pending);else Unavailable(title);}
+  sealed class PublicMcpFields {
+   internal readonly FlowLayoutPanel Panel;
+   readonly TextBox url,issuer,introspection,clientId,subjects,origins,secret;
+   readonly ComboBox authentication;
+
+   internal PublicMcpFields(FlowLayoutPanel parent,object configuration){
+    Panel=new FlowLayoutPanel {AutoSize=true,FlowDirection=FlowDirection.TopDown,WrapContents=false,Width=500};
+    parent.Controls.Add(Panel);
+    url=Field(Panel,"Public MCP URL",Json.Str(configuration,"url"));
+    StyxContext.Text(Panel,"Authentication",22);
+    authentication=new ComboBox {DropDownStyle=ComboBoxStyle.DropDownList,Width=490,AccessibleName="Authentication"};
+    authentication.Items.AddRange(new object[]{"OAuth","Static Bearer"});
+    Panel.Controls.Add(authentication);
+    origins=Field(Panel,"Allowed origins (optional, comma separated)",JoinValues(Json.Get(configuration,"allowed_origins")));
+    var oauthFields=new FlowLayoutPanel {AutoSize=true,FlowDirection=FlowDirection.TopDown,WrapContents=false,Width=500};
+    Panel.Controls.Add(oauthFields);
+    object auth=Json.Get(configuration,"authentication");
+    issuer=Field(oauthFields,"Authorization server issuer URL",Json.Str(auth,"issuer"));
+    introspection=Field(oauthFields,"Introspection HTTPS URL",Json.Str(auth,"introspection_url"));
+    clientId=Field(oauthFields,"Introspection client ID",Json.Str(auth,"client_id"));
+    subjects=Field(oauthFields,"Allowed subject IDs (comma separated)",JoinValues(Json.Get(auth,"allowed_subjects")));
+    secret=Field(oauthFields,"Introspection client secret","",true);
+    authentication.SelectedIndexChanged+=(sender,args)=>oauthFields.Visible=authentication.SelectedIndex==0;
+    authentication.SelectedIndex=Json.Str(auth,"type")=="bearer"?1:0;
+    StyxContext.Text(Panel,"Publish /mcp through your reverse proxy with a TLS certificate for the public URL.",54);
+   }
+
+   static TextBox Field(FlowLayoutPanel parent,string title,string value,bool masked=false){
+    StyxContext.Text(parent,title,22);
+    var field=new TextBox {Text=value,Width=490,AccessibleName=title,UseSystemPasswordChar=masked};
+    parent.Controls.Add(field);
+    return field;
+   }
+
+   static string JoinValues(object value){
+    var values=value as object[];
+    return values==null?"":String.Join(", ",Array.ConvertAll(values,item=>Convert.ToString(item)));
+   }
+
+   static string[] Values(string value){
+    return Array.FindAll(Array.ConvertAll(value.Split(','),item=>item.Trim()),item=>item.Length>0);
+   }
+
+   internal void ClearSecret(){secret.Clear();}
+
+   internal Dictionary<string,object> Read(){
+    string endpoint=url.Text.Trim();
+    Uri parsed;
+    if(!Uri.TryCreate(endpoint,UriKind.Absolute,out parsed)||parsed.Scheme!="https"||parsed.AbsolutePath!="/mcp")return null;
+    bool oauth=authentication.SelectedIndex==0;
+    var auth=Json.Obj("type",oauth?"oauth_introspection":"bearer");
+    if(oauth){
+     var allowed=Values(subjects.Text);
+     if(allowed.Length==0||String.IsNullOrWhiteSpace(issuer.Text)||String.IsNullOrWhiteSpace(introspection.Text)||String.IsNullOrWhiteSpace(clientId.Text)||String.IsNullOrEmpty(secret.Text))return null;
+     auth["issuer"]=issuer.Text.Trim();
+     auth["introspection_url"]=introspection.Text.Trim();
+     auth["client_id"]=clientId.Text.Trim();
+     auth["allowed_subjects"]=allowed;
+    }
+    var setup=Json.Obj("config",Json.Obj("url",endpoint,"allowed_origins",Values(origins.Text),"authentication",auth));
+    if(oauth)setup["clientSecret"]=secret.Text;
+    return setup;
+   }
+  }
+
+  async Task EditPublicMcp(){
+   var current=await owner.Call("publicMcpStatus");
+   using(var dialog=StyxContext.Window("Public HTTPS MCP connection",new Size(570,680))){
+    var stack=StyxContext.Stack(dialog);
+    StyxContext.Text(stack,"Saving restarts this Gateway. Finish active operations first.",48);
+    var fields=new PublicMcpFields(stack,Json.Get(current,"configuration"));
+    Dictionary<string,object> setup=null;
+    StyxContext.Button(stack,"Save",()=>{
+     setup=fields.Read();
+     if(setup==null)MessageBox.Show(dialog,"Enter the public HTTPS URL and required authentication fields.","Public MCP connection");
+     else dialog.DialogResult=DialogResult.OK;
+     return Task.FromResult(0);
+    });
+    var cancel=StyxContext.Button(stack,"Cancel",()=>Task.FromResult(0));cancel.DialogResult=DialogResult.Cancel;dialog.CancelButton=cancel;
+    if(dialog.ShowDialog(this)!=DialogResult.OK){fields.ClearSecret();return;}
+    fields.ClearSecret();
+    try{await owner.Call("publicMcpSave",Json.Obj("authorize",true,"setup",setup));}
+    finally{setup.Remove("clientSecret");}
+    await owner.RefreshAfterMutation();
+    ShowPage("chat");
+    Feedback("Public HTTPS settings saved. Verify reachability and discovery from your MCP client.");
+   }
+  }
+
+  async Task ShowMcpConnection(){
+   var current=await owner.Call("publicMcpStatus");
+   string endpoint=Json.Str(current,"connection","url");
+   if(String.IsNullOrEmpty(endpoint)){
+    var tunnel=await owner.Call("tunnelStatus");
+    Feedback(Json.Str(tunnel,"tunnelId")+"\n"+Json.Str(tunnel,"status")+" / "+Json.Str(tunnel,"transport"));
+    return;
+   }
+   string network="";
+   if(owner.Supports("publicMcpProbe")){
+    var probe=await owner.Call("publicMcpProbe");
+    network=Json.Yes(probe,"network","reachable")?"\nHTTP "+Convert.ToString(Json.Get(probe,"network","httpStatus")):"\nHTTPS endpoint is unreachable.";
+   }
+   Feedback("Connection: Public HTTPS\n"+endpoint+"\nAuthentication: "+Json.Str(current,"connection","authentication")+network);
+  }
+
   void CustomMcpGuide(){
-   StyxContext.Heading(content,"1. Connect the Gateway to Tunnel");
-   Explain("Configure Tunnel on the computer running your Gateway, then check that Tunnel is ready. Joined computers share this Gateway's single Styx plugin; they do not need another Tunnel or plugin.",100);
+   StyxContext.Heading(content,"1. Configure the Gateway connection");
+   Explain("Choose OpenAI Private Tunnel or Public HTTPS on the Gateway. All joined computers use this Gateway's MCP connection.",80);
    StyxContext.Heading(content,"2. Open ChatGPT Plugins");
    Explain("In your intended ChatGPT account and workspace, choose Add > Add custom MCP server. If this Gateway already has a working Styx connection, keep using it.",85);
    Action("Open ChatGPT Plugins",()=>{Process.Start("https://chatgpt.com/plugins");return Task.FromResult(0);},false);
@@ -635,7 +740,7 @@ namespace StyxNative {
     return Task.FromResult(0);
    },false);
    StyxContext.Heading(content,"4. Fill in the connection fields");
-   Explain("Connection: Tunnel\nTunnel ID: the same Tunnel ID saved on your Gateway\nAuthentication: No authentication\nKeep the runtime API key in Styx only; do not paste it into ChatGPT.",120);
+   Explain("For Tunnel, enter the ID saved on the Gateway and select No authentication. Keep the runtime key in Styx. For Public HTTPS, use the saved MCP URL and authentication mode. Static Bearer requires a client that accepts a custom token.",125);
    StyxContext.Heading(content,"5. Connect and try Styx");
    Explain("Review the notice, choose Create as a plugin, then Connect. Choose Try in chat and send: List my Styx computers. Check that your Gateway and joined computers appear.",100);
    Explain("If Add custom MCP server is missing, check Developer mode and workspace permissions.",65);
@@ -748,8 +853,23 @@ namespace StyxNative {
     channel.Items[0]="Choose Microsoft Edge or Google Chrome";channel.Enabled=browser.Checked;browser.CheckedChanged+=(s,e)=>channel.Enabled=browser.Checked;
     Explain("Styx sets up a local gateway and connects this computer. Computer Use is optional and controls only your signed-in desktop when it is available.",85);
     bool resuming=CanResumeLocal();
-    var setupTunnel=Input("Tunnel ID");
-    var setupKey=Input("Tunnel runtime API key",true);
+    StyxContext.Text(content,"MCP connection",22);
+    var connectionType=new ComboBox {DropDownStyle=ComboBoxStyle.DropDownList,Width=490,AccessibleName="MCP connection"};
+    connectionType.Items.AddRange(new object[]{"OpenAI Private Tunnel","Public HTTPS"});
+    content.Controls.Add(connectionType);
+    var tunnelFields=new FlowLayoutPanel {AutoSize=true,FlowDirection=FlowDirection.TopDown,WrapContents=false,Width=500};
+    content.Controls.Add(tunnelFields);
+    StyxContext.Text(tunnelFields,"Tunnel ID",22);
+    var setupTunnel=new TextBox {Width=490,AccessibleName="Tunnel ID"};tunnelFields.Controls.Add(setupTunnel);
+    StyxContext.Text(tunnelFields,"Tunnel runtime API key",22);
+    var setupKey=new TextBox {Width=490,UseSystemPasswordChar=true,AccessibleName="Tunnel runtime API key"};tunnelFields.Controls.Add(setupKey);
+    var publicMcpFields=new PublicMcpFields(content,null);
+    connectionType.SelectedIndexChanged+=(sender,args)=>{
+     bool selected=connectionType.SelectedIndex==1;
+     tunnelFields.Visible=!selected;publicMcpFields.Panel.Visible=selected;
+     if(selected)setupKey.Clear();else publicMcpFields.ClearSecret();
+    };
+    connectionType.SelectedIndex=0;
     bool detecting=false; CheckBox allowLan=null; TextBox lanAddress=null;
     if(!resuming){
      var localDraft=capabilityDrafts[page];
@@ -787,10 +907,15 @@ namespace StyxNative {
      if(detecting){Feedback("Wait for network detection to finish before continuing.");return;}
      if(!resuming&&!NeedsNativeSetup(owner.CurrentStatus))throw new IOException("app_setup_requires_review");
      if(browser.Checked&&channel.SelectedIndex==0){Feedback("Choose Microsoft Edge or Google Chrome before requesting Browser Automation.");return;}
-     string tunnelId=setupTunnel.Text.Trim();
-     if(!System.Text.RegularExpressions.Regex.IsMatch(tunnelId,@"\Atunnel_[A-Za-z0-9_-]{8,128}\z")||
-        !System.Text.RegularExpressions.Regex.IsMatch(setupKey.Text,@"\Ask-[A-Za-z0-9_-]{16,512}\z")){
-      Feedback("Enter the Tunnel ID and runtime API key from OpenAI Platform to create your Gateway.");return;
+     bool usePublic=connectionType.SelectedIndex==1;
+     var publicSetup=usePublic?publicMcpFields.Read():null;
+     if(usePublic&&publicSetup==null){Feedback("Enter the public HTTPS URL and required authentication fields.");return;}
+     if(!usePublic){
+      string tunnelId=setupTunnel.Text.Trim();
+      if(!System.Text.RegularExpressions.Regex.IsMatch(tunnelId,@"\Atunnel_[A-Za-z0-9_-]{8,128}\z")||
+         !System.Text.RegularExpressions.Regex.IsMatch(setupKey.Text,@"\Ask-[A-Za-z0-9_-]{16,512}\z")){
+       Feedback("Enter the Tunnel ID and runtime API key from OpenAI Platform to create your Gateway.");return;
+      }
      }
      var choice=Choice();if(!browser.Checked)choice["browserChannel"]=null;
      if(resuming){
@@ -802,12 +927,14 @@ namespace StyxNative {
      }
      // Duplicate-submit guard only; Core owns all durable setup state. One
      // request, with Core's default port 22022. Failure only reads status.
-     choice["tunnel"]=Json.Obj("tunnelId",tunnelId,"apiKey",setupKey.Text);setupKey.Clear();
+     if(usePublic)choice["publicMcp"]=publicSetup;
+     else choice["tunnel"]=Json.Obj("tunnelId",setupTunnel.Text.Trim(),"apiKey",setupKey.Text);
+     setupKey.Clear();publicMcpFields.ClearSecret();
      localCreationSubmitted=true;
      // The installed Framework compiler is C# 5: keep awaits outside
      // catch/finally while preserving the original mutation failure and stack.
      Exception setupFailure=null;
-     try{await owner.Call(operation,choice);}catch(Exception failure){setupFailure=failure;}finally{choice.Remove("tunnel");}
+     try{await owner.Call(operation,choice);}catch(Exception failure){setupFailure=failure;}finally{choice.Remove("tunnel");choice.Remove("publicMcp");if(publicSetup!=null)publicSetup.Remove("clientSecret");}
      object observed=null;try{await owner.RefreshAfterMutation();observed=owner.CurrentStatus;}catch{}
      ApplySetupFailure(setupFailure,observed);ShowPage(setupFailure!=null&&!localCreationSubmitted?"create":"overview");
      if(setupFailure!=null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(setupFailure).Throw();
@@ -838,6 +965,10 @@ namespace StyxNative {
     }else Explain("This computer is connected through your main computer. Manage the ChatGPT connection there.",65);
    }else if(name=="chat"){
     if(owner.Supports("tunnelSave")){NativeAction("Configure Tunnel…","tunnelSave",EditNativeTunnel);NativeAction("Check Tunnel status","tunnelStatus",async()=>{var value=await owner.Call("tunnelStatus");Feedback(Json.Str(value,"tunnelId")+"\n"+Json.Str(value,"status")+" / "+Json.Str(value,"transport"));});}
+    if(owner.Supports("publicMcpSave")){
+     NativeAction("Configure Public HTTPS…","publicMcpSave",EditPublicMcp);
+     NativeAction("Check MCP connection","publicMcpStatus",ShowMcpConnection);
+    }
     if(owner.Supports("tunnelSave")){CustomMcpGuide();RefreshAction();}
     else if(NeedsNativeSetup(owner.CurrentStatus)){
      StyxContext.Heading(content,"Finish setting up Styx");

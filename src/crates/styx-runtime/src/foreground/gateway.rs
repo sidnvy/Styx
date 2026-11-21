@@ -495,6 +495,10 @@ mod platform {
             }
             foreground
         })?;
+        let lease = runtime
+            .root
+            .try_execution_lease()
+            .map_err(|_| error("gateway_execution_busy"))?;
         let configuration = runtime.configuration_root();
         let authority = runtime
             .origin
@@ -532,10 +536,6 @@ mod platform {
                 .allow_remote_host(address.to_string())
                 .map_err(|e| error(e.code()))?;
         }
-        let lease = runtime
-            .root
-            .try_execution_lease()
-            .map_err(|_| error("gateway_execution_busy"))?;
         let gateway_id = crate::tls::paired_gateway_namespace(&runtime.ca_pin);
         let tls = runtime.tls.clone();
         let admitted = Arc::new(Admitted {

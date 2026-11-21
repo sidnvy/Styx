@@ -65,11 +65,7 @@ impl HostApp {
                 return Err(AppError("plugin_confirmation_required"));
             }
             let saved = saved.ok_or(AppError("plugin_save_required"))?;
-            let tunnel = discovery["tunnel_id"]
-                .as_str()
-                .ok_or(AppError("plugin_tunnel_not_configured"))?;
-            let archive =
-                plugin_package::archive(&saved.profile, tunnel, &discovery).map_err(AppError)?;
+            let archive = plugin_package::archive(&saved.profile, &discovery).map_err(AppError)?;
             return Ok(
                 json!({"archiveBase64":STANDARD.encode(archive),"pluginId":saved.profile.id,"installed":false}),
             );
@@ -79,8 +75,9 @@ impl HostApp {
             .as_ref()
             .map(|s| s.profile.clone())
             .unwrap_or_else(|| presentation::Profile::initial("Styx"));
+        let connection = plugin_package::client_connection(&discovery).unwrap_or(Value::Null);
         Ok(
-            json!({"plugin":{"required":true,"profileSaved":saved.is_some(),"contextChanged":false,"presentation":profile.presentation,"defaultIcon":presentation::Icon::from_bytes(presentation::DEFAULT_ICON).map_err(AppError)?,"connection":{"tunnelId":discovery["tunnel_id"]},"selection":{"mode":"update","accountLabel":"","pluginUrl":"","revision":revision,"pluginId":profile.id}}}),
+            json!({"plugin":{"required":true,"profileSaved":saved.is_some(),"contextChanged":false,"presentation":profile.presentation,"defaultIcon":presentation::Icon::from_bytes(presentation::DEFAULT_ICON).map_err(AppError)?,"connection":connection,"selection":{"mode":"update","accountLabel":"","pluginUrl":"","revision":revision,"pluginId":profile.id}}}),
         )
     }
 }

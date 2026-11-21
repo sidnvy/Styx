@@ -489,8 +489,11 @@ async fn observe_scoped(
             .map_err(|_| refused("setup_tunnel_status_failed"))?;
         let tunnel =
             serde_json::to_value(tunnel).map_err(|_| refused("setup_tunnel_status_failed"))?;
+        let public_mcp = crate::gateway::auth::public_mcp::PublicMcp::load(state_dir)
+            .map_err(|_| refused("gateway_public_mcp_configuration_invalid"))?
+            .map(|public| public.client_connection());
         Ok(
-            serde_json::json!({"origin":material.origin.origin().ascii_serialization(), "origins":material.origins, "tools":names, "environments":environments,"verification_scope":"authenticated-local-mcp-discovery","server_name":"styx-vnext","verified_at_unix_ms":clock_ms()?,"tunnel_id":tunnel["tunnelId"]}),
+            serde_json::json!({"origin":material.origin.origin().ascii_serialization(), "origins":material.origins, "tools":names, "environments":environments,"verification_scope":"authenticated-local-mcp-discovery","server_name":"styx-vnext","verified_at_unix_ms":clock_ms()?,"tunnel_id":tunnel["tunnelId"],"public_mcp":public_mcp}),
         )
     };
     let result = tokio::time::timeout(std::time::Duration::from_secs(8), observed)

@@ -3,7 +3,7 @@
 use super::GatewayAuthError;
 use crate::store::PrivateRoot;
 use http::HeaderValue;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
     path::Path,
@@ -13,22 +13,35 @@ use styx_contracts::identity::Sha256Digest;
 use url::{Position, Url};
 use zeroize::Zeroizing;
 
-const CONFIG_FILE: &str = "public-mcp.json";
-const SECRET_FILE: &str = "mcp-oauth-client-secret";
+pub(crate) const CONFIG_FILE: &str = "public-mcp.json";
+pub(crate) const SECRET_FILE: &str = "mcp-oauth-client-secret";
 pub(crate) const RESOURCE_METADATA_PATH: &str = "/.well-known/oauth-protected-resource/mcp";
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PublicMcpConfig {
-    pub(crate) url: String,
+pub struct PublicMcpConfig {
+    pub url: String,
     #[serde(default)]
-    pub(crate) allowed_origins: BTreeSet<String>,
-    pub(crate) authentication: PublicMcpAuthentication,
+    pub allowed_origins: BTreeSet<String>,
+    pub authentication: PublicMcpAuthentication,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) secret_file: Option<String>,
 }
 
-#[derive(Deserialize)]
+impl PublicMcpConfig {
+    pub fn new(url: String, authentication: PublicMcpAuthentication) -> Self {
+        Self {
+            url,
+            allowed_origins: BTreeSet::new(),
+            authentication,
+            secret_file: None,
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum PublicMcpAuthentication {
+pub enum PublicMcpAuthentication {
     Bearer,
     #[serde(rename = "oauth_introspection")]
     OAuthIntrospection {
@@ -40,6 +53,7 @@ pub(crate) enum PublicMcpAuthentication {
 }
 
 pub(crate) struct PublicMcp {
+    resource: Url,
     authority: String,
     allowed_origins: BTreeSet<String>,
     oauth: Option<OAuthIntrospection>,
@@ -49,19 +63,11 @@ impl PublicMcp {
     pub(crate) fn load(state: &Path) -> Result<Option<Self>, GatewayAuthError> {
         let invalid = GatewayAuthError::InvalidConfiguration;
         let root = PrivateRoot::open(state).map_err(|_| invalid)?;
-        if root.ensure_absent(CONFIG_FILE).is_ok() {
+        let Some(config) = read_config(&root)? else {
             return Ok(None);
-        }
-        let config = root
-            .read_raw(CONFIG_FILE, styx_contracts::CONTROL_FRAME_BYTES)
-            .map_err(|_| invalid)?;
-        let config = serde_json::from_slice(config.bytes()).map_err(|_| invalid)?;
-        Self::new(config, || {
-            let raw = root.read_raw(SECRET_FILE, 4096).map_err(|_| invalid)?;
-            let value = std::str::from_utf8(raw.bytes()).map_err(|_| invalid)?;
-            Ok(Zeroizing::new(value.to_owned()))
-        })
-        .map(Some)
+        };
+        let file = config.secret_file.clone();
+        Self::new(config, || read_secret(&root, file.as_deref())).map(Some)
     }
 
     pub(crate) fn new(
@@ -126,12 +132,20 @@ impl PublicMcp {
         };
         Ok(Self {
             authority: resource[Position::BeforeHost..Position::AfterPort].to_owned(),
+            resource,
             allowed_origins: config.allowed_origins,
             oauth,
         })
     }
 
-    pub(super) fn authority(&self) -> &str {
+    pub(crate) fn client_connection(&self) -> serde_json::Value {
+        serde_json::json!({
+            "url": self.resource.as_str(),
+            "authentication": if self.oauth.is_some() { "oauth" } else { "bearer" }
+        })
+    }
+
+    pub(crate) fn authority(&self) -> &str {
         &self.authority
     }
 
@@ -142,6 +156,37 @@ impl PublicMcp {
     pub(in crate::gateway) fn oauth(&self) -> Option<&OAuthIntrospection> {
         self.oauth.as_ref()
     }
+}
+
+pub(crate) fn read_config(root: &PrivateRoot) -> Result<Option<PublicMcpConfig>, GatewayAuthError> {
+    if root.ensure_absent(CONFIG_FILE).is_ok() {
+        return Ok(None);
+    }
+    let invalid = GatewayAuthError::InvalidConfiguration;
+    let raw = root
+        .read_raw(CONFIG_FILE, styx_contracts::CONTROL_FRAME_BYTES)
+        .map_err(|_| invalid)?;
+    serde_json::from_slice(raw.bytes())
+        .map(Some)
+        .map_err(|_| invalid)
+}
+
+pub(crate) fn read_secret(
+    root: &PrivateRoot,
+    generation: Option<&str>,
+) -> Result<Zeroizing<String>, GatewayAuthError> {
+    let invalid = GatewayAuthError::InvalidConfiguration;
+    let file = generation.unwrap_or(SECRET_FILE);
+    if file != SECRET_FILE
+        && !file.strip_prefix("mcp-oauth-key-").is_some_and(|suffix| {
+            suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+    {
+        return Err(invalid);
+    }
+    let raw = root.read_raw(file, 4096).map_err(|_| invalid)?;
+    let value = std::str::from_utf8(raw.bytes()).map_err(|_| invalid)?;
+    Ok(Zeroizing::new(value.to_owned()))
 }
 
 pub(in crate::gateway) struct OAuthIntrospection {

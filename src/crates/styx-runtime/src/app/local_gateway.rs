@@ -518,7 +518,8 @@ impl HostApp {
                 .map_err(|_| AppError("app_input_writer_busy"))?,
         );
         self.unknown = true;
-        self.finish_local_pairing(choice, input.tunnel).await
+        self.finish_local_pairing(choice, input.tunnel, input.public_mcp)
+            .await
     }
     pub(super) async fn create_local(&mut self, mut input: LocalInput) -> Result<(), AppError> {
         self.startup_diagnostic = startup_diagnostic::StartupDiagnostic::from_env();
@@ -613,12 +614,14 @@ impl HostApp {
         }
         gateway.runtime_candidate = Some(startup_candidate);
         self.local_gateway = Some(gateway);
-        self.finish_local_pairing(choice, input.tunnel).await
+        self.finish_local_pairing(choice, input.tunnel, input.public_mcp)
+            .await
     }
     async fn finish_local_pairing(
         &mut self,
         choice: JoinInput,
         tunnel: Option<SetupTunnel>,
+        public_mcp: Option<SetupPublicMcp>,
     ) -> Result<(), AppError> {
         let diagnostic = self.startup_diagnostic.clone();
         if let Some(diagnostic) = &diagnostic {
@@ -651,6 +654,16 @@ impl HostApp {
             })
             .await
             .map_err(|_| AppError("tunnel_configuration_worker_failed"))??;
+        }
+        if let Some(public) = public_mcp {
+            let scope = gateway.scope.clone();
+            tokio::task::spawn_blocking(move || {
+                scope.validate()?;
+                public.configure(&scope.state_dir)?;
+                scope.validate()
+            })
+            .await
+            .map_err(|_| AppError("gateway_public_mcp_worker_failed"))??;
         }
         gateway.start().await?;
         if let Some(diagnostic) = &diagnostic {

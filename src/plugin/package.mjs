@@ -14,10 +14,11 @@ function exact(x,keys,code) {
   if(!object(x)||Object.keys(x).some(k=>!keys.includes(k)))fail(code);
 }
 export function connection(value) {
-  exact(value,['url','tunnelId'],'invalid_connection');
+  exact(value,['url','tunnelId','authentication'],'invalid_connection');
   if(Object.hasOwn(value,'url')===Object.hasOwn(value,'tunnelId'))fail('choose_exactly_one_connection');
   if(Object.hasOwn(value,'tunnelId')) {
     if(typeof value.tunnelId!=='string'||!/^tunnel_[a-z0-9]{32}$/.test(value.tunnelId))fail('invalid_tunnel_id');
+    if(Object.hasOwn(value,'authentication'))fail('invalid_connection_authentication');
     return {tunnelId:value.tunnelId};
   }
   let url; try {url=new URL(value.url);}catch{fail('invalid_https_endpoint');}
@@ -26,7 +27,8 @@ export function connection(value) {
     url.hostname.endsWith('.invalid')||url.hostname.endsWith('.example')||
     ['example.com','example.org','example.net'].includes(url.hostname)||
     /^127\./.test(url.hostname)||['[::1]','0.0.0.0'].includes(url.hostname))fail('invalid_https_endpoint');
-  return {url:url.href};
+  if(value.authentication!==undefined&&!['bearer','oauth'].includes(value.authentication))fail('invalid_connection_authentication');
+  return {url:url.href,...(value.authentication==='oauth'?{authentication:'oauth'}:{})};
 }
 function verifiedConnection(selected,receipt,{now=Date.now()}={}) {
   exact(receipt,['version','connection','independentStyx','freshConnection','verifiedAt','serverName','tools','method'],'invalid_verification_receipt');
@@ -108,7 +110,7 @@ function pngIcon(value){
  return {mimeType:'image/png',dataBase64:bytes.toString('base64')};
 }
 const template=JSON.parse(fs.readFileSync(path.join(root,'plugin.json'),'utf8'));
-export const PACKAGED_SKILLS = Object.freeze(['styx-native-onboarding', 'styx-cli', 'styx-browser', 'styx-computer-use']);
+export const PACKAGED_SKILLS = Object.freeze(['styx-native-onboarding', 'styx-cli', 'styx-browser', 'styx-computer-use', 'styx-android']);
 const skills=PACKAGED_SKILLS.map(name=>({path:`skills/${name}/SKILL.md`,data:fs.readFileSync(path.join(root,`skills/${name}/SKILL.md`))}));
 export function normalizePresentation(value={}){
  exact(value,['displayName','shortDescription','longDescription','icon'],'invalid_plugin_presentation');
@@ -131,10 +133,10 @@ export function buildPackageFiles(config,receipt,{now=Date.now()}={}){
  const manifest=structuredClone(template),ui=manifest.extensions['com.openai'].interface;
  for(const key of ['displayName','shortDescription','longDescription'])ui[key]=presentation[key];
  if(presentation.icon){ui.logo='./assets/icon.png';ui.composerIcon='./assets/icon.png';}
- const server={type:'streamable-http',...('url'in selected?selected:{}),extensions:{'com.openai':{
+ const server={type:'streamable-http',...('url'in selected?{url:selected.url}:{}),extensions:{'com.openai':{
   // The App-owned tunnel adds the Gateway credential for discovery and calls.
   // A direct HTTPS connection still needs its own remote bearer contract.
-  ...('tunnelId'in selected?selected:{}),auth:'tunnelId'in selected?{type:'none'}:{type:'api_key',headerScheme:'bearer'}
+  ...('tunnelId'in selected?selected:{}),auth:'tunnelId'in selected?{type:'none'}:selected.authentication==='oauth'?{type:'oauth'}:{type:'api_key',headerScheme:'bearer'}
  }}};
  const mcp={$schema:'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',mcpServers:{styx:server}};
  const json=data=>Buffer.from(JSON.stringify(data,null,2)+'\n');

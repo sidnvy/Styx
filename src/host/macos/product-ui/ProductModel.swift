@@ -190,6 +190,20 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
         return .object(["tunnelId": .string(setupTunnelID.trimmingCharacters(in: .whitespacesAndNewlines)),
                         "apiKey": .string(setupTunnelKey)])
     }
+    @Published var usePublicMcp = false
+    @Published var publicMcpDraft = ProductPublicMcpDraft()
+    @Published var publicMcp: ProductJSON = .null
+
+    var setupConnectionInput: [String: ProductJSON]? {
+        if usePublicMcp { return publicMcpDraft.input.map { ["publicMcp": $0] } }
+        return setupTunnelInput.map { ["tunnel": $0] }
+    }
+
+    private func clearSetupConnectionSecrets() {
+        setupTunnelKey = ""
+        publicMcpDraft.secret = ""
+    }
+
     @Published var setupTunnelID = ""
     @Published var setupTunnelKey = ""
     func resumeLocalSetup() {
@@ -198,12 +212,13 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
         guard !name.isEmpty, let origin = status["gateway"]["origin"].string,
               let port = URLComponents(string: origin)?.port else { return }
         perform { [self] in
-            guard nativeCanResumeLocal, let tunnel = setupTunnelInput else { throw ProductCoreError.rejected }
+            guard nativeCanResumeLocal, let connection = setupConnectionInput else { throw ProductCoreError.rejected }
             nativeLocalSetupSubmitted = true
             // Explicit confirmation only; a failed or lost response is never replayed.
             var choice: [String: ProductJSON] = ["label": .string(name), "exec": .bool(exec), "computer": .bool(computer), "port": .number(Double(port))]
             choice.merge(nativeBrowserChoice) { _, chosen in chosen }
-            choice["tunnel"] = tunnel; setupTunnelKey = ""
+            choice.merge(connection) { _, chosen in chosen }
+            clearSetupConnectionSecrets()
             do {
                 try applyNative(try await client.native("resumeLocal", choice))
                 page = afterSetupPage
@@ -298,6 +313,8 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
     var recoverComputerUse: (() async throws -> Void)?
 
     var computerApproved: Bool { status["desktop_intent"]["computer_requested"].bool }
+    var publicMcpConnection: ProductJSON { publicMcp["connection"] }
+    var hasModelConnection: Bool { publicMcpConnection["url"].string != nil || !connectionTunnelID.isEmpty }
     var connectionTunnelID: String { plugin["connection"]["tunnelId"].string ?? tunnelID }
     var tunnelConnection: ProductTunnelConnection { tunnelObservationStale ? .unknown : ProductTunnelConnection.observed(tunnel) }
     init(owned: ProductOwnedCore) {
@@ -375,6 +392,9 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
             publish(\.tunnelObservationStale, false)
             publish(\.tunnelID, tunnel["tunnelId"].string ?? "")
         }
+        if nativeSupportsOperation("publicMcpStatus") {
+            publish(\.publicMcp, try await client.native("publicMcpStatus"))
+        }
         await refreshNativeLogin()
     }
     private func refreshNativeLogin() async {
@@ -451,8 +471,9 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
                 // Selecting Computer Use alone does not admit permission recovery.
                 page = report["status"].string == "ready_to_connect" ? afterSetupPage : .overview
             } else {
-                guard nativeCanCreateLocal, let tunnel = setupTunnelInput else { throw ProductCoreError.rejected }
-                choice["tunnel"] = tunnel; setupTunnelKey = ""
+                guard nativeCanCreateLocal, let connection = setupConnectionInput else { throw ProductCoreError.rejected }
+                choice.merge(connection) { _, chosen in chosen }
+                clearSetupConnectionSecrets()
                 choice["allowRemoteHosts"] = .bool(allowRemoteHosts)
                 if allowRemoteHosts && !lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { choice["lanAddress"] = .string(lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)) }
                 nativeLocalSetupSubmitted = true
@@ -544,6 +565,16 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
         tunnelID = normalized
         try await reload(); monitorTunnel(); return
     }
+    func savePublicMcp(_ input: ProductJSON) async throws {
+        guard !busy else { throw ProductCoreError.unavailable }
+        mutationRevision += 1
+        busy = true; error = nil
+        defer { busy = false }
+        try await waitForObservation()
+        _ = try await client.native("publicMcpSave", ["authorize": .bool(true), "setup": input])
+        try await reload()
+    }
+
     @discardableResult func monitorTunnel(check: (() async -> Void)? = nil, pause: (() async throws -> Void)? = nil) -> Task<Void, Never> {
         tunnelMonitor?.cancel()
         tunnelMonitor = Task { [weak self] in
@@ -569,7 +600,7 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
         } catch { self.error = productText("请选择不超过 256 KB 的方形 PNG 图片（48–1024 像素）。", "Choose a square PNG, 48–1024 pixels and no larger than 256 KB.") }
     }
     func clearSecrets() {
-        setupTunnelKey = ""; invite = ""
+        clearSetupConnectionSecrets(); invite = ""
         createdInvitation = .null; invitationCopied = false
         if let copied = copiedCredential, copiedCredentialChangeCount == NSPasteboard.general.changeCount,
            NSPasteboard.general.string(forType: .string) == copied { NSPasteboard.general.clearContents() }

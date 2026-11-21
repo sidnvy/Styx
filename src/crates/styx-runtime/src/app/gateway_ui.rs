@@ -22,6 +22,12 @@ struct TunnelSave {
     tunnel_id: String,
     api_key: Option<String>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicMcpSave {
+    authorize: bool,
+    setup: SetupPublicMcp,
+}
 impl HostApp {
     fn gateway_admin_error(&mut self, error: admin::AdminError) -> AppError {
         // Retain a lost mutation outcome; the GUI cannot repeat it on this owner.
@@ -174,6 +180,64 @@ impl HostApp {
                     self.connect_host().await?;
                 }
                 serde_json::to_value(configured).map_err(|_| AppError("app_response_invalid"))
+            }
+            Operation::PublicMcpStatus | Operation::PublicMcpProbe => {
+                let mut report = tokio::task::spawn_blocking(move || {
+                    scope.validate()?;
+                    let connection = crate::management::public_mcp::status(&scope.state_dir)
+                        .map_err(AppError)?;
+                    scope.validate()?;
+                    let configuration = crate::management::public_mcp::configuration_for_owner(&scope.state_dir)
+                        .map_err(AppError)?;
+                    Ok(json!({"configured":connection.is_some(),"connection":connection,"configuration":configuration}))
+                })
+                .await
+                .map_err(|_| AppError("gateway_public_mcp_worker_failed"))??;
+                if matches!(operation, Operation::PublicMcpProbe) {
+                    let url = report["connection"]["url"]
+                        .as_str()
+                        .ok_or(AppError("plugin_connection_not_configured"))?;
+                    report["network"] = match crate::management::public_mcp::probe(url).await {
+                        Ok(probe) => json!({"reachable":true,"httpStatus":probe.http_status,
+                            "bearerChallenge":probe.bearer_challenge,
+                            "resourceMetadataChallenge":probe.resource_metadata_challenge}),
+                        Err(_) => json!({"reachable":false}),
+                    };
+                }
+                Ok(report)
+            }
+            Operation::PublicMcpSave => {
+                let choice: PublicMcpSave = decode_input(&input)?;
+                if !choice.authorize {
+                    return Err(AppError("app_confirmation_required"));
+                }
+                let gateway = self
+                    .local_gateway
+                    .as_mut()
+                    .ok_or(AppError("managed_on_hub"))?;
+                let local = gateway
+                    .origin
+                    .strip_prefix("https://")
+                    .ok_or(AppError("gateway_public_mcp_protected_state_required"))?;
+                choice.setup.validate(local)?;
+                gateway.settle().await?;
+                scope.validate()?;
+                self.unknown = true;
+                let connection = tokio::task::spawn_blocking(move || {
+                    scope.validate()?;
+                    let connection = choice.setup.configure(&scope.state_dir)?;
+                    scope.validate()?;
+                    Ok(connection)
+                })
+                .await
+                .map_err(|_| AppError("gateway_public_mcp_worker_failed"))??;
+                self.unknown = false;
+                self.local_gateway
+                    .as_mut()
+                    .ok_or(AppError("managed_on_hub"))?
+                    .start()
+                    .await?;
+                Ok(json!({"configured":true,"connection":connection}))
             }
             _ => unreachable!(),
         }

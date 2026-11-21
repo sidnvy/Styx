@@ -41,36 +41,35 @@ confirmation or native action has an unknown outcome, preserve its original root
 inputs and transaction identity. Observe/reconcile it; do not request again,
 delete locks, edit journals, remove the profile, or silently re-pair.
 
-## Connect ChatGPT
+## Connect a model client
 
-The hub owner configures a Secure MCP Tunnel in their account using
-https://developers.openai.com/api/docs/guides/secure-mcp-tunnels and enters its
-runtime API key locally in setup's hidden prompt (or an owner-private file for
-authorized automation). Never request the key in chat or put it in command
-arguments, environment variables, plugin files, logs or screenshots.
+Choose Public HTTPS or OpenAI Private Tunnel during Gateway setup. A computer
+joining an existing Gateway uses the connection already configured there.
 
-Setup saves a small Styx PNG and prints the hub's Tunnel ID. In the intended
-ChatGPT account/workspace, open Plugins > Add > Add custom MCP server. Name it
-Styx (use a distinct hub name when needed), upload the saved PNG with Choose icon,
-choose Connection: Tunnel and the exact Tunnel ID, and Authentication: No
-authentication. The local tunnel client supplies the Gateway's model-only bearer;
-this does not remove Gateway authentication. Keep the runtime key only in Styx.
-Review the notice, choose Create as a plugin, then Connect. Refresh the installed
-detail page and check that the Styx logo remains. Reuse an existing working Custom
-MCP connection for this hub; never delete a production plugin to troubleshoot it.
+For Public HTTPS, enter the external /mcp URL and the authentication mode. Use an
+HTTPS reverse proxy with a valid certificate and preserve the external Host,
+Authorization, MCP protocol/session headers and event stream. For OAuth, publish
+the protected resource metadata path, configure the authorization server and the
+approved subject IDs, and save the introspection client secret privately. For
+Static Bearer, use a client that accepts a custom bearer. Use Styx's model-only
+credential and keep owner/admin credentials out of the client.
 
-Custom MCP connects the tools without installing the ZIP's bundled skills.
-Use the connection's actual tool schemas and instructions. ZIP installation has
-been observed to replace the Styx icon with a placeholder and is not the default
-onboarding route. Existing explicit ZIP exports are retained for advanced use.
-The tunnel does not replace the computer's pinned HTTPS/WSS route to its hub.
+For OpenAI Private Tunnel, create or reuse the owner's Tunnel and enter its
+runtime API key locally in Styx. In the intended ChatGPT account, choose Plugins
+> Add > Add custom MCP server. Choose Connection: Tunnel, enter the Gateway's
+Tunnel ID, and select Authentication: No authentication. The local tunnel client
+supplies the Gateway's model-only bearer. Keep the runtime key in Styx.
 
-If the Add option is unavailable, check Developer mode and the intended
-account/workspace's permissions. Local TLS discovery, transport readiness and
-installation are separate checkpoints. None proves a successful chat tool call.
-Choose Try in chat and send **List my Styx computers**. Report the actual response
-or exact blocker; never manufacture account acceptance or treat local discovery
-or a tunnel request counter as a successful ChatGPT tool test.
+Use Styx as the name and upload the PNG saved by setup or Settings. Reuse the
+existing connection for this Gateway when updating. A Custom MCP connection uses
+the server's tool descriptions and instructions. An optional ZIP export also
+includes skills and keeps the saved plugin identity. Neither setup nor export
+installs or updates a client account.
+
+Check HTTPS reachability or Tunnel readiness first, then authentication, then
+tool discovery. In the actual client, choose **List my Styx computers** and use
+the selected device for the authorized acceptance action. Record the actual
+response and the exact blocking stage if the path cannot be completed.
 
 ## Verify the selected computer
 

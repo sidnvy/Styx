@@ -46,6 +46,16 @@ test('HTTPS package is allowlisted and declares bearer without embedding receipt
  assert.doesNotMatch(skill,/setup-native\.mjs/);
  assert.throws(()=>buildPackage(f.config,f.output,{now}),/output_must_be_fresh/);
 });
+test('HTTPS OAuth package declares OAuth and requires matching discovery',()=>{
+ const selected={url,authentication:'oauth'};
+ const {files}=buildPackageFiles({connection:selected},receipt(selected),{now});
+ const mcp=JSON.parse(files.find(file=>file.path==='mcp.json').data);
+ assert.deepEqual(mcp.mcpServers.styx,{
+  type:'streamable-http',url,extensions:{'com.openai':{auth:{type:'oauth'}}}
+ });
+ assert.throws(()=>buildPackageFiles({connection:selected},receipt({url}),{now}),/verification_connection_mismatch/);
+ assert.ok(files.some(file=>file.path==='skills/styx-android/SKILL.md'));
+});
 test('fresh verified tunnel excludes URL and lives in OpenAI connection options',t=>{
  const c={tunnelId:'tunnel_'+'a'.repeat(32)},f=fixture(t,c);buildPackage(f.config,f.output,{now});
  const s=JSON.parse(fs.readFileSync(path.join(f.output,'mcp.json'))).mcpServers.styx;

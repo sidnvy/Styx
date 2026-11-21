@@ -210,10 +210,7 @@ pub(super) async fn run(
             {
                 return Err(Failure::new("plugin_export_not_confirmed"));
             }
-            let tunnel = discovery["tunnel_id"]
-                .as_str()
-                .ok_or_else(|| Failure::new("plugin_tunnel_not_configured"))?;
-            plugin_package::write_profile(&output, &saved.profile, tunnel, &discovery)?;
+            plugin_package::write_profile(&output, &saved.profile, &discovery)?;
             println!(
                 "ZIP: {}\nUpdate the existing plugin with this identity in ChatGPT. Export does not prove installation or tool acceptance.",
                 output.with_extension("zip").display()

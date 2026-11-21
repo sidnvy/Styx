@@ -4,7 +4,7 @@ use crate::management::setup::{private_directory, write_new};
 use serde_json::{Value, json};
 use std::path::Path;
 
-const SKILLS: [(&str, &[u8]); 4] = [
+const SKILLS: [(&str, &[u8]); 5] = [
     (
         "skills/styx-native-onboarding/SKILL.md",
         include_bytes!("../../../styx/src/setup_onboarding_skill.md"),
@@ -20,6 +20,10 @@ const SKILLS: [(&str, &[u8]); 4] = [
     (
         "skills/styx-computer-use/SKILL.md",
         include_bytes!("../../../../plugin/skills/styx-computer-use/SKILL.md"),
+    ),
+    (
+        "skills/styx-android/SKILL.md",
+        include_bytes!("../../../../plugin/skills/styx-android/SKILL.md"),
     ),
 ];
 pub fn plugin_name(display: &str) -> String {
@@ -46,16 +50,47 @@ pub fn tunnel_id(value: &str) -> bool {
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
     })
 }
+pub fn client_connection(discovery: &Value) -> Result<Value, &'static str> {
+    let public = &discovery["public_mcp"];
+    if !public.is_null() {
+        let endpoint = public["url"].as_str().ok_or("invalid_plugin_public_mcp")?;
+        let url = url::Url::parse(endpoint).map_err(|_| "invalid_plugin_public_mcp")?;
+        let hostname = url.host_str().ok_or("invalid_plugin_public_mcp")?;
+        if url.scheme() != "https"
+            || url.as_str() != endpoint
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || hostname == "localhost"
+            || hostname.ends_with(".localhost")
+            || hostname.ends_with(".invalid")
+            || hostname.ends_with(".example")
+            || matches!(
+                hostname,
+                "example.com" | "example.org" | "example.net" | "0.0.0.0" | "[::1]"
+            )
+            || hostname.starts_with("127.")
+            || !matches!(public["authentication"].as_str(), Some("bearer" | "oauth"))
+        {
+            return Err("invalid_plugin_public_mcp");
+        }
+        return Ok(json!({"url": endpoint, "authentication": public["authentication"]}));
+    }
+    let tunnel = discovery["tunnel_id"]
+        .as_str()
+        .filter(|id| tunnel_id(id))
+        .ok_or("plugin_connection_not_configured")?;
+    Ok(json!({"tunnelId": tunnel}))
+}
+
 fn files(
     profile: &super::plugin_presentation::Profile,
-    tunnel: &str,
     discovery: &Value,
 ) -> Result<Vec<(String, Vec<u8>)>, &'static str> {
     let profile = profile.clone().normalized()?;
     let name = &profile.presentation.display_name;
-    if !tunnel_id(tunnel) {
-        return Err("invalid_plugin_presentation_or_tunnel");
-    }
+    let connection = client_connection(discovery)?;
     let tools = discovery["tools"]
         .as_array()
         .ok_or("native_discovery_required")?;
@@ -70,7 +105,6 @@ fn files(
         .as_u64()
         .ok_or("recent_native_discovery_required")?;
     if discovery["server_name"] != "styx-vnext"
-        || discovery["tunnel_id"] != tunnel
         || verified > now.saturating_add(60000)
         || now.saturating_sub(verified) > 86400000
         || tools.iter().any(|t| {
@@ -111,7 +145,23 @@ fn files(
     ui["longDescription"] = json!(profile.presentation.long_description);
     ui["logo"] = json!("./assets/icon.png");
     ui["composerIcon"] = json!("./assets/icon.png");
-    let mcp = json!({"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", "mcpServers":{"styx":{"type":"streamable-http", "extensions":{"com.openai":{"tunnelId":tunnel,"auth":{"type":"none"}}}}}});
+    let mut server = json!({"type": "streamable-http"});
+    let openai = if let Some(url) = connection["url"].as_str() {
+        server["url"] = json!(url);
+        let auth = if connection["authentication"] == "oauth" {
+            json!({"type":"oauth"})
+        } else {
+            json!({"type":"api_key", "headerScheme":"bearer"})
+        };
+        json!({"auth":auth})
+    } else {
+        json!({"tunnelId":connection["tunnelId"], "auth":{"type":"none"}})
+    };
+    server["extensions"]["com.openai"] = openai;
+    let mcp = json!({
+        "$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+        "mcpServers":{"styx":server}
+    });
     let mut out = vec![
         ("plugin.json".into(), json_bytes(&plugin)?),
         ("mcp.json".into(), json_bytes(&mcp)?),
@@ -198,7 +248,6 @@ fn zip(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>, &'static str> {
 pub fn write_profile(
     output: &Path,
     profile: &super::plugin_presentation::Profile,
-    tunnel: &str,
     discovery: &Value,
 ) -> Result<(), &'static str> {
     if !output.is_absolute()
@@ -206,7 +255,7 @@ pub fn write_profile(
     {
         return Err("plugin_absolute_styx_native_path_required");
     }
-    let files = files(profile, tunnel, discovery)?;
+    let files = files(profile, discovery)?;
     let archive = zip(&files)?;
     let zip_path = output.with_extension("zip");
     if output.exists() || zip_path.exists() {
@@ -229,10 +278,9 @@ pub fn write_profile(
 pub fn verify_profile(
     output: &Path,
     profile: &super::plugin_presentation::Profile,
-    tunnel: &str,
     discovery: &Value,
 ) -> Result<(), &'static str> {
-    let expected = files(profile, tunnel, discovery)?;
+    let expected = files(profile, discovery)?;
     fn walk(root: &Path, path: &Path, found: &mut Vec<String>) -> Result<(), &'static str> {
         for entry in std::fs::read_dir(path).map_err(|_| "plugin_existing_export_invalid")? {
             let entry = entry.map_err(|_| "plugin_existing_export_invalid")?;
@@ -291,10 +339,12 @@ pub fn write(
     tunnel: &str,
     discovery: &Value,
 ) -> Result<(), &'static str> {
+    if discovery["tunnel_id"] != tunnel || !discovery["public_mcp"].is_null() {
+        return Err("recent_native_discovery_required");
+    }
     write_profile(
         output,
         &super::plugin_presentation::Profile::initial(name),
-        tunnel,
         discovery,
     )
 }
@@ -304,10 +354,12 @@ pub fn verify_existing(
     tunnel: &str,
     discovery: &Value,
 ) -> Result<(), &'static str> {
+    if discovery["tunnel_id"] != tunnel || !discovery["public_mcp"].is_null() {
+        return Err("recent_native_discovery_required");
+    }
     verify_profile(
         output,
         &super::plugin_presentation::Profile::initial(name),
-        tunnel,
         discovery,
     )
 }
@@ -315,10 +367,9 @@ pub fn verify_existing(
 /// In-memory export for an original native save panel; no caller path enters Core.
 pub fn archive(
     profile: &super::plugin_presentation::Profile,
-    tunnel: &str,
     discovery: &Value,
 ) -> Result<Vec<u8>, &'static str> {
-    zip(&files(profile, tunnel, discovery)?)
+    zip(&files(profile, discovery)?)
 }
 
 #[cfg(test)]
@@ -339,7 +390,6 @@ mod tests {
         let proof = proof();
         let files = files(
             &super::super::plugin_presentation::Profile::initial("Styx (test)"),
-            &format!("tunnel_{}", "a".repeat(32)),
             &proof,
         )
         .unwrap();
@@ -352,6 +402,7 @@ mod tests {
                 "skills/styx-cli/SKILL.md",
                 "skills/styx-browser/SKILL.md",
                 "skills/styx-computer-use/SKILL.md",
+                "skills/styx-android/SKILL.md",
                 "assets/icon.png"
             ]
         );
@@ -378,22 +429,46 @@ mod tests {
         let archive = zip(&files).unwrap();
         assert_eq!(&archive[..4], b"PK\x03\x04");
         assert_eq!(crc32(b"123456789"), 0xcbf43926);
+        let mut invalid = proof.clone();
+        invalid["tunnel_id"] = json!("invalid");
         assert!(
             super::files(
                 &super::super::plugin_presentation::Profile::initial("Styx"),
-                "invalid",
-                &proof
+                &invalid
             )
             .is_err()
         );
         assert!(
             super::files(
                 &super::super::plugin_presentation::Profile::initial("Styx"),
-                &format!("tunnel_{}", "a".repeat(32)),
                 &json!({})
             )
             .is_err()
         );
+    }
+    #[test]
+    fn public_package_uses_configured_authentication_without_tunnel_or_secret() {
+        let profile = super::super::plugin_presentation::Profile::initial("Styx");
+        for (mode, auth) in [
+            ("oauth", json!({"type":"oauth"})),
+            ("bearer", json!({"type":"api_key","headerScheme":"bearer"})),
+        ] {
+            let mut discovery = proof();
+            discovery["public_mcp"] = json!({
+                "url":"https://styx.unit.test/mcp",
+                "authentication":mode
+            });
+            let files = files(&profile, &discovery).unwrap();
+            let mcp: Value = serde_json::from_slice(&files[1].1).unwrap();
+            assert_eq!(
+                mcp["mcpServers"]["styx"],
+                json!({
+                    "url":"https://styx.unit.test/mcp",
+                    "type":"streamable-http",
+                    "extensions":{"com.openai":{"auth":auth}}
+                })
+            );
+        }
     }
     #[test]
     fn renamed_profile_exports_saved_identity_descriptions_and_exact_icon() {
@@ -411,8 +486,7 @@ mod tests {
             writer.write_image_data(&vec![120; 48 * 48 * 4]).unwrap();
         }
         profile.presentation.icon = Some(Icon::from_bytes(&custom).unwrap());
-        let tunnel = format!("tunnel_{}", "a".repeat(32));
-        let output = files(&profile, &tunnel, &proof()).unwrap();
+        let output = files(&profile, &proof()).unwrap();
         let manifest: Value = serde_json::from_slice(&output[0].1).unwrap();
         assert_eq!(manifest["name"], "styx-original");
         let ui = &manifest["extensions"]["com.openai"]["interface"];
@@ -430,11 +504,11 @@ mod tests {
         );
         let before = output[1].1.clone();
         profile.presentation.icon = None;
-        let restored = files(&profile, &tunnel, &proof()).unwrap();
+        let restored = files(&profile, &proof()).unwrap();
         assert_eq!(before, restored[1].1);
         assert_eq!(restored.last().unwrap().1, DEFAULT_ICON);
         assert!(
-            archive(&profile, &tunnel, &proof())
+            archive(&profile, &proof())
                 .unwrap()
                 .starts_with(b"PK\x03\x04")
         );

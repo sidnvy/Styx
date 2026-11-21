@@ -421,6 +421,7 @@ async fn paired_journey(capacity: bool, computers: usize, browser_handoff: bool)
             url: "https://styx-public.example/mcp".into(),
             allowed_origins: Default::default(),
             authentication: PublicMcpAuthentication::Bearer,
+            secret_file: None,
         },
         || unreachable!("Bearer ingress has no OAuth secret"),
     )
