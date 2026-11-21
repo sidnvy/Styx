@@ -1,4 +1,4 @@
-//! One standard Cua set_value call with its strict text-only native route.
+//! One native set_value call bound to the original observed target.
 //! Core retains operation ownership, the late write gate and no-unknown-replay.
 use super::*;
 
@@ -263,54 +263,64 @@ pub(super) async fn invoke(
     }
     let mut arguments = serde_json::json!({
         "pid":request.pid,"window_id":request.window_id,
-        "element_token":request.element_token,"value":request.value,
-        "styx_strict_text":true
+        "element_token":request.element_token,"value":request.value
     })
     .as_object()
     .expect("literal object")
     .clone();
+    if cfg!(target_os = "linux") {
+        arguments.insert("delivery_mode".into(), Value::String("foreground".into()));
+    } else {
+        arguments.insert("styx_strict_text".into(), Value::Bool(true));
+    }
     if let Some(session) = session {
         arguments.insert("session".into(), Value::String(session.into()));
     }
     let write = CallToolRequestParams::new("set_value").with_arguments(arguments);
-    // Only this Host-generated request contains the internal strict flag. One
-    // poll of one official RPC; any failed/lost/malformed post-send reply is
-    // terminal Unknown, never permission to try another setter or transport.
-    let response = tokio::select! {
-        biased;
-        _ = stop.cancelled() => None,
-        _ = deadline_elapsed(until) => None,
-        result = peer.call_tool_once(write) => Some(result),
-    };
-    let result = match response {
-        Some(Ok(CallToolResponse::Complete(value))) => match write_evidence(&value) {
-            CuaEvidence::Acknowledged => (
-                CuaEvidence::Acknowledged,
-                Some(CallToolResult::structured(serde_json::json!({
-                    "schema":1,"outcome":"acknowledged","effect":"unverified"
-                }))),
-                None,
-            ),
-            CuaEvidence::NotDispatched => {
-                // Preserve the validated native refusal: a missing EditableText
-                // interface or stale target is not an OS permission denial.
-                let code = value
-                    .structured_content
-                    .as_ref()
-                    .and_then(|value| value.get("code"))
-                    .and_then(Value::as_str)
-                    .expect("validated strict text refusal code");
-                let cause = refusal_cause(code).expect("validated refusal classification");
-                diagnostic("native_refusal", code);
-                (
-                    CuaEvidence::NotDispatched,
-                    Some(refused_result(code, cause)),
-                    Some(cause),
-                )
-            }
-            CuaEvidence::Unknown => (CuaEvidence::Unknown, Some(value), Some(CuaError::Unknown)),
-        },
-        _ => (CuaEvidence::Unknown, None, Some(CuaError::Unknown)),
+    let result = if cfg!(target_os = "linux") {
+        // Preserve the normal native result, including route, delivery and
+        // effect evidence. The shared transport invokes the tool only once.
+        driver_result::invoke(peer, write, stop, until).await
+    } else {
+        // Preserve the existing strict setter path on macOS/Windows.
+        let response = tokio::select! {
+            biased;
+            _ = stop.cancelled() => None,
+            _ = deadline_elapsed(until) => None,
+            result = peer.call_tool_once(write) => Some(result),
+        };
+        match response {
+            Some(Ok(CallToolResponse::Complete(value))) => match write_evidence(&value) {
+                CuaEvidence::Acknowledged => (
+                    CuaEvidence::Acknowledged,
+                    Some(CallToolResult::structured(serde_json::json!({
+                        "schema":1,"outcome":"acknowledged","effect":"unverified"
+                    }))),
+                    None,
+                ),
+                CuaEvidence::NotDispatched => {
+                    // Preserve the validated native refusal: a missing EditableText
+                    // interface or stale target is not an OS permission denial.
+                    let code = value
+                        .structured_content
+                        .as_ref()
+                        .and_then(|value| value.get("code"))
+                        .and_then(Value::as_str)
+                        .expect("validated strict text refusal code");
+                    let cause = refusal_cause(code).expect("validated refusal classification");
+                    diagnostic("native_refusal", code);
+                    (
+                        CuaEvidence::NotDispatched,
+                        Some(refused_result(code, cause)),
+                        Some(cause),
+                    )
+                }
+                CuaEvidence::Unknown => {
+                    (CuaEvidence::Unknown, Some(value), Some(CuaError::Unknown))
+                }
+            },
+            _ => (CuaEvidence::Unknown, None, Some(CuaError::Unknown)),
+        }
     };
     if result.0 == CuaEvidence::Unknown && result.1.is_none() {
         *uncertain = true;

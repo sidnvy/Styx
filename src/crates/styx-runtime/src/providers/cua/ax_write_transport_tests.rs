@@ -24,6 +24,8 @@ struct Trace {
 #[derive(Clone, Copy)]
 enum Reply {
     Ack,
+    ForegroundAck,
+    ReadbackAck,
     Refused(&'static str, CuaError, &'static str),
     PostEffectError,
     Late,
@@ -67,6 +69,15 @@ impl ServerHandler for RpcFixture {
             Reply::Ack | Reply::Late => CallToolResult::structured(
                 json!({"route":"accessibility","effect":"unverifiable","delivery":{"mode":"unknown"},"summary":"official action result fixture"}),
             ),
+            Reply::ForegroundAck => CallToolResult::structured(json!({
+                "route":"global_input", "effect":"unverifiable",
+                "delivery":{"mode":"foreground"}, "summary":"native foreground result"
+            })),
+            Reply::ReadbackAck => CallToolResult::structured(json!({
+                "route":"accessibility", "effect":"confirmed",
+                "delivery":{"mode":"background"},
+                "evidence":[{"kind":"value_readback","detail":"owned fixture readback"}]
+            })),
             Reply::Refused(code, _, _) => {
                 let mut value = CallToolResult::structured(
                     json!({"schema":1,"outcome":"refused","effect":"unverified","code":code,"hint":"official read-again hint","next_call":{"tool":"get_window_state","arguments":{"pid":42,"window_id":7}}}),
@@ -83,10 +94,12 @@ impl ServerHandler for RpcFixture {
 }
 
 #[tokio::test]
-async fn standard_set_value_runs_gate_before_one_strict_call_and_never_replays() {
+async fn set_value_runs_gate_before_one_platform_call_and_never_replays() {
     for (deny_gate, reply) in [
         (true, Reply::Ack),
         (false, Reply::Ack),
+        (false, Reply::ForegroundAck),
+        (false, Reply::ReadbackAck),
         (
             false,
             Reply::Refused(
@@ -241,14 +254,81 @@ async fn standard_set_value_runs_gate_before_one_strict_call_and_never_replays()
             assert!(!uncertain);
             continue;
         }
-        assert_eq!(trace.calls.iter().filter(|(name, _)| name == "set_value").cloned().collect::<Vec<_>>(),vec![("set_value".into(),json!({"pid":42,"window_id":7,"element_token":"s00000001:2","value":"owned-fixture-replacement","styx_strict_text":true}).as_object().unwrap().clone())]);
+        let mut expected_args = json!({
+            "pid":42,"window_id":7,"element_token":"s00000001:2",
+            "value":"owned-fixture-replacement"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        if cfg!(target_os = "linux") {
+            expected_args.insert("delivery_mode".into(), json!("foreground"));
+        } else {
+            expected_args.insert("styx_strict_text".into(), json!(true));
+        }
+        assert_eq!(
+            trace
+                .calls
+                .iter()
+                .filter(|(name, _)| name == "set_value")
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![("set_value".into(), expected_args)]
+        );
         assert_eq!(trace.write_observed_gate, Some(1));
         match reply {
             Reply::Ack => {
                 assert_eq!(result.0, CuaEvidence::Acknowledged);
                 assert!(result.1.is_some());
+                if cfg!(target_os = "linux") {
+                    let native = result
+                        .1
+                        .as_ref()
+                        .unwrap()
+                        .structured_content
+                        .as_ref()
+                        .unwrap();
+                    assert_eq!(native["route"], "accessibility");
+                    assert_eq!(native["summary"], "official action result fixture");
+                }
                 assert!(!uncertain);
                 assert_eq!(trace.effects, 1);
+            }
+            Reply::ForegroundAck | Reply::ReadbackAck => {
+                assert_eq!(
+                    result.0,
+                    if cfg!(target_os = "linux") {
+                        CuaEvidence::Acknowledged
+                    } else {
+                        CuaEvidence::Unknown
+                    }
+                );
+                let native = result
+                    .1
+                    .as_ref()
+                    .unwrap()
+                    .structured_content
+                    .as_ref()
+                    .unwrap();
+                if matches!(reply, Reply::ForegroundAck) {
+                    assert_eq!(native["route"], "global_input");
+                    assert_eq!(native["effect"], "unverifiable");
+                    assert_eq!(native["delivery"]["mode"], "foreground");
+                } else {
+                    assert_eq!(native["effect"], "confirmed");
+                    assert_eq!(native["evidence"][0]["detail"], "owned fixture readback");
+                }
+                assert!(!uncertain);
+                assert_eq!(trace.effects, 1);
+            }
+            Reply::Refused(..) if cfg!(target_os = "linux") => {
+                // Linux no longer interprets the private strict-setter envelope.
+                // The shared native handler preserves this complete error as Unknown.
+                assert_eq!(result.0, CuaEvidence::Unknown);
+                assert_eq!(result.2, Some(CuaError::Unknown));
+                assert_eq!(result.1.as_ref().unwrap().is_error, Some(true));
+                assert!(!uncertain);
+                assert_eq!(trace.effects, 0);
             }
             Reply::Refused(code, cause, category) => {
                 assert_eq!(result.0, CuaEvidence::NotDispatched);

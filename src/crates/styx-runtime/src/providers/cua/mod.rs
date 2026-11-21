@@ -1167,9 +1167,9 @@ impl CuaActionSlot {
         if write_attempt != write_request.is_some() || (write_attempt && write_gate.is_none()) {
             return refused("write_contract", CuaError::PermissionDenied);
         }
-        if write_attempt && !self.live.ax_once_available {
-            // A stock worker lacks the strict text-only flag. Keep writes closed
-            // rather than using upstream's alternate-setter/activation behavior.
+        if write_attempt && !cfg!(target_os = "linux") && !self.live.ax_once_available {
+            // macOS/Windows retain their existing strict setter extension.
+            // Linux uses standard native set_value after the same Host gate.
             return refused("write_extension_missing", CuaError::Unsupported);
         }
         if permit.purpose() != OperationPurpose::Execute

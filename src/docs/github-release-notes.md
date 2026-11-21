@@ -7,29 +7,24 @@ several conversations can use the same computer.
 
 ## Changes
 
-This release candidate repairs native Desktop text input on Linux/Hyprland
-with Lua dispatch (validated on Hyprland 0.57.1).
-The new `type_text` tool inserts text at the caret in a freshly observed editable
-control. Callers explicitly select foreground delivery, which permits activation
-of the target window. It can interrupt work in the foreground and does not
-restore the previous focus. The native worker checks the exact process, window
-and focused editable element before every keystroke.
+This release candidate restores the existing `set_value` operation in ordinary
+Chrome on Linux/Hyprland. It replaces the contents of an observed input, including
+clearing the field with an empty value, using the same public arguments.
 
-Strict `set_value` remains an exact native replacement operation. When an
-application such as Chrome does not expose AT-SPI EditableText, Styx reports
-Unsupported instead of incorrectly reporting an OS permission denial. It does
-not switch from a failed setter to keyboard input. Unknown input outcomes are
-preserved and must be inspected before any further action.
+Linux now uses Cua's normal setter instead of the Styx-only strict extension.
+When the control has no accessibility setter, native Hyprland input selects all
+and replaces the contents. This may bring the target window forward and focus
+the field; previous focus is not restored. The existing `type_text` operation
+continues to insert at the caret.
 
-Host input admission uses keyboard availability from the same native worker,
-including the Wayland virtual keyboard protocol. Existing owner, observation,
-capability and once-only dispatch checks remain in the normal Core/Host route.
+The adapter preserves Cua's native result and keeps the existing Computer Use
+setting, observed target and operation ownership. Actual native setter errors
+are propagated instead of being mistaken for a missing route and retried.
+Independent observation confirms the application's resulting value.
 
-Update both Gateway and the Linux Host. Gateway advertises `type_text`; the Host
-and its bundled native worker execute it. Refresh the existing ChatGPT Styx
-connection's metadata after the Gateway update, then use a fresh conversation
-to verify that the tool is exposed. This candidate's installed public MCP input
-acceptance is recorded separately from its source and native-component tests.
+Update the Linux Host to obtain the native fix and Gateway to obtain the updated
+tool descriptions. The existing `set_value` arguments and tool name are unchanged.
+The macOS and Windows setter implementations are unchanged.
 
 ### Android package availability
 

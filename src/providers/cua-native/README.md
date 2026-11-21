@@ -8,7 +8,8 @@ owned-proxy file-descriptor extension in this worker.
 
 `cua-0.47.24-styx-fixes.patch` retains only demonstrated behavior differences:
 
-- An internal `styx_strict_text:true` flag on standard `set_value`. It selects
+- On macOS and Windows, an internal `styx_strict_text:true` flag on standard
+  `set_value` selects
   one text setter on the upstream snapshot object. It has no alternate setter,
   post-write activation, keyboard fallback or automatic write retry. A failed
   or lost setter reply remains Unknown. Normal upstream calls stay unchanged.
@@ -20,12 +21,19 @@ owned-proxy file-descriptor extension in this worker.
   failures and partial input remain errors; a completed dispatch is not proof
   of the application effect.
 
-The public Styx `set_value` contract stays native-only. Host inserts the internal
-text flag only after Core's existing owner/grant/session/observation/deadline checks and
-one-use dispatch permit. Upstream's standard ActionResult publishes a successful
-strict write as unverified; independent fresh readback proves the effect. No
-new native token is acquired or cached by Styx. An uncertain write fences its
-resource and is not automatically replayed.
+Linux Styx `set_value` uses upstream's normal route with the existing foreground
+delivery option. Its AX/selection attempt remains first. If that route is unavailable
+on Hyprland, the existing foreground keyboard selects all and replaces the value;
+an empty value clears it. This shares the exact-target focus checks, in-process
+Keyboard session, Unicode planner and outcome record used by `type_text`. The
+replacement plan is complete before selection is sent, and no trailing Tab is added.
+The superseded Linux strict extension and its dedicated fixture are removed;
+macOS and Windows retain their existing implementations.
+
+Core's owner/grant/session/observation/deadline checks and one-use dispatch permit
+still apply. The standard ActionResult reports keyboard delivery as unverified;
+independent fresh readback proves the value. No new native token is acquired or
+cached by Styx. An uncertain write is not automatically replayed.
 
 On macOS the existing signed App retains its embedded daemon and TCC identity.
 Host uses the official MCP proxy and a distinct standard lifecycle session per
@@ -59,8 +67,7 @@ before dispatch. It requires an observed enabled editable element, the exact
 compositor window/PID, and native element focus. Each key rechecks that focus
 and the existing action admission. It reuses Cua's Unicode key planner and
 in-process Wayland virtual keyboard, including bounded roundtrips and cleanup;
-no wtype child, optional isolated-input plugin, AX-to-keyboard fallback, or
-second writer is used. A focus change, cancellation or failed native reply
+no wtype child, optional isolated-input plugin or second writer is used. A focus change, cancellation or failed native reply
 stops the call with an uncertain outcome and never authorizes replay.
 
 The read-only `wayland_virtual_keyboard` fact reports normal compositor protocol

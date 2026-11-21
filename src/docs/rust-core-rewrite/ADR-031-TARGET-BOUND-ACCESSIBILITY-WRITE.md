@@ -1,13 +1,15 @@
 # ADR-031 — Exact-object accessibility write attempt
 
-Current implementation update (2026-11-13): the original private acquire/write
+Current implementation update (2026-11-21): the original private acquire/write
 protocol described below is retired. Cua 0.47.24 owns snapshots and retained
-objects. Host uses standard `set_value` with one internal strict-text flag after
-Core's existing late gate and once-use permit. Only a single native text setter
-is invoked; no alternate setter or activation follows an uncertain/successful
-reply. See [the current adapter](../../providers/cua-native/README.md) and
-[the upstream audit](CUA-UPSTREAM-REUSE-AUDIT-20261113.md). The remaining text is
-historical design rationale, not a requirement to restore private token stores.
+objects. Linux uses standard `set_value` with its native result, including
+foreground replacement on Hyprland when the control has no accessibility setter.
+Core retains the existing owner, observed target, late gate and one RPC dispatch.
+The strict-text extension remains used by the existing macOS/Windows adapters.
+See [the current adapter](../../providers/cua-native/README.md) and
+[the current Linux behavior](ADR-023-AX-READ-ACQUISITION.md).
+The remaining text records historical implementation rationale; it does not define
+a user requirement to restrict text replacement to one accessibility interface.
 
 Status: integrator accepted for incremental implementation; not built, tested,
 packaged or enabled by this document. The accepted a8572d2 .8 candidate remains
