@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use styx_contracts::identity::{OwnerId, Sha256Digest};
 use uuid::Uuid;
 mod owners;
+pub(crate) mod public_mcp;
 use owners::Owners;
 use std::sync::{Arc, Mutex};
 
@@ -72,12 +73,15 @@ pub enum GatewayAuthError {
     Unauthenticated,
     #[error("Gateway ingress is not authorized")]
     Forbidden,
+    #[error("Gateway authorization service unavailable")]
+    AuthorizationUnavailable,
 }
 
 pub struct GatewayBearerPolicy {
     owners: Arc<Mutex<Owners>>,
     token_digest: Sha256Digest,
     tunnel_token_digest: Option<Sha256Digest>,
+    public_mcp: Option<public_mcp::PublicMcp>,
     allowed_hosts: BTreeSet<String>,
     allowed_origins: BTreeSet<String>,
 }
@@ -242,6 +246,7 @@ impl GatewayBearerPolicy {
             owners: Arc::new(Mutex::new(Owners::default())),
             token_digest: Sha256Digest::of_bytes(token),
             tunnel_token_digest: None,
+            public_mcp: None,
             allowed_hosts: allowed_hosts.into_iter().collect(),
             allowed_origins: allowed_origins.into_iter().collect(),
         })
@@ -264,10 +269,33 @@ impl GatewayBearerPolicy {
         self.tunnel_token_digest = Some(digest);
         Ok(self)
     }
-    pub fn authorize(
-        &self,
-        headers: &HeaderMap,
-    ) -> Result<AuthenticatedGatewayPrincipal, GatewayAuthError> {
+    pub(crate) fn with_public_mcp(
+        mut self,
+        public_mcp: public_mcp::PublicMcp,
+    ) -> Result<Self, GatewayAuthError> {
+        if self.allowed_hosts.contains(public_mcp.authority()) {
+            return Err(GatewayAuthError::InvalidConfiguration);
+        }
+        self.public_mcp = Some(public_mcp);
+        Ok(self)
+    }
+
+    pub(super) fn mcp_authorities(&self) -> impl Iterator<Item = &str> {
+        self.allowed_hosts
+            .iter()
+            .map(String::as_str)
+            .chain(self.public_mcp.iter().map(public_mcp::PublicMcp::authority))
+    }
+
+    pub(super) fn public_mcp(&self, headers: &HeaderMap) -> Option<&public_mcp::PublicMcp> {
+        self.public_mcp.as_ref().filter(|public| {
+            headers
+                .get(HOST)
+                .is_some_and(|host| host == public.authority())
+        })
+    }
+
+    pub(super) fn admit_ingress(&self, headers: &HeaderMap) -> Result<(), GatewayAuthError> {
         if headers.get_all(HOST).iter().count() != 1 || headers.get_all(ORIGIN).iter().count() > 1 {
             return Err(GatewayAuthError::Forbidden);
         }
@@ -275,12 +303,14 @@ impl GatewayBearerPolicy {
             .get(HOST)
             .and_then(|v| v.to_str().ok())
             .ok_or(GatewayAuthError::Forbidden)?;
-        if !self.allowed_hosts.contains(host) {
-            return Err(GatewayAuthError::Forbidden);
-        }
+        let origins = match self.public_mcp(headers) {
+            Some(public) => public.allowed_origins(),
+            None if self.allowed_hosts.contains(host) => &self.allowed_origins,
+            None => return Err(GatewayAuthError::Forbidden),
+        };
         if let Some(origin) = headers.get(ORIGIN) {
             let origin = origin.to_str().map_err(|_| GatewayAuthError::Forbidden)?;
-            if !self.allowed_origins.contains(origin) {
+            if !origins.contains(origin) {
                 return Err(GatewayAuthError::Forbidden);
             }
         }
@@ -289,6 +319,10 @@ impl GatewayBearerPolicy {
         if headers.contains_key("x-styx-tunnel-context") {
             return Err(GatewayAuthError::Forbidden);
         }
+        Ok(())
+    }
+
+    fn bearer(headers: &HeaderMap) -> Result<&str, GatewayAuthError> {
         if headers.get_all(AUTHORIZATION).iter().count() != 1 {
             return Err(GatewayAuthError::Unauthenticated);
         }
@@ -296,9 +330,47 @@ impl GatewayBearerPolicy {
             .get(AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .ok_or(GatewayAuthError::Unauthenticated)?;
-        let token = authorization
-            .strip_prefix("Bearer ")
+        let (scheme, token) = authorization
+            .split_once(' ')
             .ok_or(GatewayAuthError::Unauthenticated)?;
+        if !scheme.eq_ignore_ascii_case("Bearer") {
+            return Err(GatewayAuthError::Unauthenticated);
+        }
+        Ok(token.trim_start_matches(' '))
+    }
+
+    pub fn authorize(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<AuthenticatedGatewayPrincipal, GatewayAuthError> {
+        self.admit_ingress(headers)?;
+        if self.public_mcp(headers).is_some() {
+            return Err(GatewayAuthError::Forbidden);
+        }
+        let token = Self::bearer(headers)?;
+        self.authorize_static(token, true)
+    }
+
+    pub(super) async fn authorize_mcp(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<AuthenticatedGatewayPrincipal, GatewayAuthError> {
+        self.admit_ingress(headers)?;
+        let token = Self::bearer(headers)?;
+        match self.public_mcp(headers) {
+            Some(public) => match public.oauth() {
+                Some(oauth) => Ok(self.principal(oauth.authenticate(token).await?, false)),
+                None => self.authorize_static(token, false),
+            },
+            None => self.authorize_static(token, true),
+        }
+    }
+
+    fn authorize_static(
+        &self,
+        token: &str,
+        allow_tunnel: bool,
+    ) -> Result<AuthenticatedGatewayPrincipal, GatewayAuthError> {
         if !(32..=4096).contains(&token.len())
             || !token
                 .bytes()
@@ -309,17 +381,22 @@ impl GatewayBearerPolicy {
         let digest = Sha256Digest::of_bytes(token.as_bytes());
         let ordinary =
             verify_slices_are_equal(digest.as_bytes(), self.token_digest.as_bytes()).is_ok();
-        let tunnel = self.tunnel_token_digest.is_some_and(|expected| {
-            verify_slices_are_equal(digest.as_bytes(), expected.as_bytes()).is_ok()
-        });
+        let tunnel = allow_tunnel
+            && self.tunnel_token_digest.is_some_and(|expected| {
+                verify_slices_are_equal(digest.as_bytes(), expected.as_bytes()).is_ok()
+            });
         if !ordinary && !tunnel {
             return Err(GatewayAuthError::Unauthenticated);
         }
-        Ok(AuthenticatedGatewayPrincipal {
+        Ok(self.principal(digest, tunnel))
+    }
+
+    fn principal(&self, digest: Sha256Digest, tunnel: bool) -> AuthenticatedGatewayPrincipal {
+        AuthenticatedGatewayPrincipal {
             owners: self.owners.clone(),
             digest,
             tunnel,
-        })
+        }
     }
 }
 
@@ -420,7 +497,7 @@ mod tests {
                     h.insert("x-styx-tunnel-context", "claimed-context".parse().unwrap());
                 }
                 7 => {
-                    h.insert(AUTHORIZATION, format!("bearer {}", token).parse().unwrap());
+                    h.insert(AUTHORIZATION, format!("Basic {}", token).parse().unwrap());
                 }
                 _ => unreachable!(),
             }

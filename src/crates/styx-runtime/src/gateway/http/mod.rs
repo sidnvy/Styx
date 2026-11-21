@@ -6,7 +6,10 @@ mod conversation;
 pub mod lifecycle;
 mod session;
 use crate::gateway::{
-    auth::{GatewayBearerPolicy, VerifiedGatewayOwner},
+    auth::{
+        AuthenticatedGatewayPrincipal, GatewayAuthError, GatewayBearerPolicy, VerifiedGatewayOwner,
+        public_mcp::RESOURCE_METADATA_PATH,
+    },
     mcp::{GatewayMcp, GatewayToolBackend},
 };
 use backend::BackendBridge;
@@ -32,6 +35,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+pub(crate) const MCP_PATH: &str = "/mcp";
 pub const MESSAGE_BYTES: usize = 256 * 1024;
 const OLDEST: &str = "2024-10-07";
 const SID: &str = "mcp-session-id";
@@ -167,12 +171,13 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             #[cfg(test)]
             before_register: Mutex::new(None),
         });
-        let mut config = StreamableHttpServerConfig::default();
+        let mut config =
+            StreamableHttpServerConfig::default().with_allowed_hosts(self.policy.mcp_authorities());
         config.max_request_body_bytes = MESSAGE_BYTES;
         config.sse_keep_alive = Some(Duration::from_secs(10));
         config.session_store = None;
-        // Outer original-header GatewayBearerPolicy is authoritative and stricter.
-        // SDK retains its default loopback guard in this loopback-only development slice.
+        // The SDK and outer policy use the same configured Host authorities.
+        // The outer policy applies exact Host and ingress-specific Origin checks.
         let sdk = StreamableHttpService::new(
             move || {
                 Ok(GatewayMcp::new(
@@ -269,30 +274,90 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
         self: Arc<Self>,
         request: Request<hyper::body::Incoming>,
     ) -> Result<Response<HeldBody>, Infallible> {
-        let authorized = self.policy.authorize(request.headers()).is_ok();
-        let mut response = self.handle_inner(request).await;
+        let response = self.handle_inner(request).await;
         crate::foreground::tunnel::record_gateway_http_status(response.status());
-        if authorized {
-            self.status_headers(&mut response);
-        }
         Ok(response)
     }
+
     async fn handle_inner<I: Body<Data = Bytes>>(&self, request: Request<I>) -> Response<HeldBody>
     where
         I::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let principal = match self.policy.authorize(request.headers()) {
-            Ok(p) => p,
-            Err(crate::gateway::auth::GatewayAuthError::Unauthenticated) => {
-                return plain(StatusCode::UNAUTHORIZED);
+        use http::header::{CACHE_CONTROL, CONTENT_TYPE, WWW_AUTHENTICATE};
+
+        let origin_form = request.uri().query().is_none()
+            && request.uri().scheme().is_none()
+            && request.uri().authority().is_none();
+        let mut response = if request.uri().path() == RESOURCE_METADATA_PATH && origin_form {
+            match self
+                .policy
+                .public_mcp(request.headers())
+                .and_then(|public| public.oauth())
+            {
+                None => plain(StatusCode::NOT_FOUND),
+                Some(_) if self.policy.admit_ingress(request.headers()).is_err() => {
+                    plain(StatusCode::FORBIDDEN)
+                }
+                Some(_) if request.method() != Method::GET => plain(StatusCode::METHOD_NOT_ALLOWED),
+                Some(oauth) => {
+                    let mut response = Response::new(HeldBody::new(
+                        Full::new(Bytes::copy_from_slice(&oauth.metadata)).boxed(),
+                        None,
+                    ));
+                    response
+                        .headers_mut()
+                        .insert(CONTENT_TYPE, "application/json".parse().unwrap());
+                    response
+                }
             }
-            Err(_) => return plain(StatusCode::FORBIDDEN),
+        } else if request.uri().path() != MCP_PATH {
+            plain(StatusCode::NOT_FOUND)
+        } else {
+            match self.policy.authorize_mcp(request.headers()).await {
+                Ok(principal) => {
+                    let mut response = if origin_form {
+                        self.handle_authenticated(request, principal).await
+                    } else {
+                        plain(StatusCode::NOT_FOUND)
+                    };
+                    self.status_headers(&mut response);
+                    response
+                }
+                Err(GatewayAuthError::Unauthenticated) => {
+                    let mut response = plain(StatusCode::UNAUTHORIZED);
+                    let challenge = self
+                        .policy
+                        .public_mcp(request.headers())
+                        .and_then(|public| public.oauth())
+                        .map_or_else(
+                            || http::HeaderValue::from_static("Bearer"),
+                            |oauth| oauth.challenge.clone(),
+                        );
+                    response.headers_mut().insert(WWW_AUTHENTICATE, challenge);
+                    response
+                }
+                Err(GatewayAuthError::AuthorizationUnavailable) => {
+                    plain(StatusCode::SERVICE_UNAVAILABLE)
+                }
+                Err(_) => plain(StatusCode::FORBIDDEN),
+            }
         };
+        response
+            .headers_mut()
+            .insert(CACHE_CONTROL, http::HeaderValue::from_static("no-store"));
+        response
+    }
+
+    async fn handle_authenticated<I: Body<Data = Bytes>>(
+        &self,
+        request: Request<I>,
+        principal: AuthenticatedGatewayPrincipal,
+    ) -> Response<HeldBody>
+    where
+        I::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
         if self.stop.is_cancelled() {
             return plain(StatusCode::SERVICE_UNAVAILABLE);
-        }
-        if request.uri().path() != "/mcp" || request.uri().query().is_some() {
-            return plain(StatusCode::NOT_FOUND);
         }
         if !matches!(
             *request.method(),
@@ -391,7 +456,8 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
                         // client's own startup probe sends initialize/tools/list
                         // with the same forwarding headers. Recorded after bearer
                         // admission; the marker grants no authority.
-                        if let Some(marker) = parts.headers.get("x-styx-tunnel-observation")
+                        if principal.is_tunnel()
+                            && let Some(marker) = parts.headers.get("x-styx-tunnel-observation")
                             && let Some(observation) = self
                                 .tunnel_observation
                                 .lock()

@@ -4,9 +4,11 @@
 
 ## 一次调用与两种角色
 
-模型入口只有一条：**ChatGPT → OpenAI Private MCP Tunnel → Gateway → 选定的 Host → 执行器**。结果沿原路返回。一套部署有一个 Gateway，只有它持有 Tunnel 配置和凭据。Host 主动连接配对时指定的 Gateway。网络由用户提供，Tailnet、站点间路由或局域网均可；Styx 使用可直达的地址，并报告连接结果。
+模型客户端通过 **Public HTTPS 或 OpenAI Private MCP Tunnel → Gateway MCP → 选定的 Host → 执行器**，结果沿原路返回。一套部署有一个 Gateway，连接方式与认证由该中心配置。Public HTTPS 可以使用任意符合部署契约的 HTTPS 反向代理。Host 主动连接配对时指定的 Gateway。网络由用户提供，Tailnet、站点间路由或局域网均可；Styx 使用可直达的地址，并报告连接结果。
 
-**Gateway 是设备目录和路由中心。** 它持有邀请、设备信任与撤销记录，观察哪些 Host 在线，并向 ChatGPT 提供管理和执行入口。可使用这个 MCP 入口的人都拥有整套部署的管理权限，包括生成邀请、移除设备和请求变更 Host 设置。部署共用一个管理范围；对话标识用于选择资源和延续上下文。设备身份验证、Tunnel 身份验证和本机系统授权继续有效。
+**Gateway 是设备目录和路由中心。** 它持有邀请、设备信任与撤销记录，观察哪些 Host 在线，并向 MCP 客户端提供管理和执行入口。可使用这个 MCP 入口的人都拥有整套部署的管理权限，包括生成邀请、移除设备和请求变更 Host 设置。部署共用一个管理范围；对话标识用于选择资源和延续上下文。Gateway 分别验证模型入口凭据和设备身份；Host 执行本机系统授权。标准 MCP 会话的 owner 由 Gateway 生成，OpenAI 对话关联只在可信转发入口启用。
+
+[Gateway MCP 接入契约](GATEWAY-MCP.md) 记录受支持的 HTTP、认证和反代配置。
 
 **Host 是本机设置、执行与结果的负责人。** Exec、Browser、Computer Use 的开关由 Host 保存并执行。在本机设置和在 ChatGPT 中要求修改，最终调用同一个 Host 操作。Host 成功应用后报告实际能力；需要系统授权时报告等待授权。Gateway 按 Host 报告的能力路由。关闭某项能力立即拒绝后续调用，并停止该能力已启动的任务；其他能力、设备连接及配对继续保留。三个能力全关仍能接收设置请求。开关不替换 Host 或整个执行器；执行器依照 Host 生命周期退出。安装器负责安装与更新的完整验签。Rust Core 共享身份、协议及操作规则；GUI、CLI 和 headless 服务按需要组合角色。
 
@@ -45,10 +47,10 @@ Computer Use 未提供截止时间时由 Cua 正常处理，不由 Gateway/Host 
 | 安装方式 | 首次设置完成时的用户体验 |
 | --- | --- |
 | macOS、Windows、Linux 桌面 · Host-only | 输入 Gateway 地址与一次性短码，本机确认加入，选择本机能力。也可以一次粘贴地址和短码。整个向导只有设备侧设置。 |
-| 同三种桌面 · Gateway + Host | 在向导中配置 Tunnel，这一步必做。本机自动成为第一台配对设备，直接选择本机能力。之后其他设备用邀请加入。 |
-| Linux headless · Gateway-only | 现有服务管理器启动 Gateway；CLI 可以先生成邀请、接入设备，再配置 Tunnel。Gateway 独立运行，无需图形会话、浏览器或本机执行器。 |
+| 同三种桌面 · Gateway + Host | 在向导中配置模型入口。本机自动成为第一台配对设备，直接选择本机能力。之后其他设备用邀请加入。 |
+| Linux headless · Gateway-only | 现有服务管理器启动 Gateway；CLI 可以先生成邀请、接入设备，再配置模型入口。Gateway 独立运行，无需图形会话、浏览器或本机执行器。 |
 
-桌面 Host 的能力初始值为 Exec 默认勾选且可取消，Browser、Computer Use 默认关闭。生成邀请即批准一台设备加入。可手输的短码一次有效，首次配对仍需认证正确的 Gateway；协议选型、码长与过期时间属于实现决定，优先采用成熟配对机制。设备重连沿用身份和配对。已配置设备在本次软件重构中保留身份；用户主动换 Gateway 时，旧中心先列出受影响设备，新中心配置 Tunnel，各台 Host 分别用新邀请重新加入。
+桌面 Host 的能力初始值为 Exec 默认勾选且可取消，Browser、Computer Use 默认关闭。生成邀请即批准一台设备加入。可手输的短码一次有效，首次配对仍需认证正确的 Gateway；协议选型、码长与过期时间属于实现决定，优先采用成熟配对机制。设备重连沿用身份和配对。已配置设备在本次软件重构中保留身份；用户主动换 Gateway 时，旧中心先列出受影响设备，新中心配置模型入口，各台 Host 分别用新邀请重新加入。
 
 ## 设备选择和操作归属
 
@@ -76,9 +78,9 @@ Browser 与 Computer Use 优先沿用**固定版本**的 Playwright、Cua 工具
 | 当前入口 | 改造决定 |
 | --- | --- |
 | [Gateway 配对管理](../../crates/styx-runtime/src/app/gateway_ui.rs)、[现有邀请编码](../../crates/styx-runtime/src/enrollment/pairing_link.rs)、[设备加入](../../crates/styx-runtime/src/management/native_join.rs) | 保留设备身份、信任校验、一次消费和撤销。新入口采用地址加短码。新配对流程移除创建邀请后的第二次管理员批准，以及批准时为设备分配 Browser/Computer 权限的步骤；现有设备的能力设置显式承接，避免升级时静默开启。 |
-| [Tunnel](../../crates/styx-runtime/src/foreground/tunnel.rs)、[Gateway 路由](../../crates/styx-runtime/src/gateway/paired)、[对话关联](ADR-036-TUNNEL-CONVERSATION-OWNER.md) | 保留单入口、设备选择与原请求关联。管理操作可从 ChatGPT 到达对应角色。将“哪段对话拥有资源”按上述三种能力分别处理；关闭 A 的传输或聊天后，B 仍可访问同一 Host 上的原 Exec 任务。 |
+| [Tunnel](../../crates/styx-runtime/src/foreground/tunnel.rs)、[Gateway 路由](../../crates/styx-runtime/src/gateway/paired)、[对话关联](ADR-036-TUNNEL-CONVERSATION-OWNER.md) | 两个接入选项共用 MCP 工具后端、设备选择和调用路由。管理操作可从 MCP 客户端到达对应角色。将“哪段对话拥有资源”按上述三种能力分别处理；关闭 A 的传输或聊天后，B 仍可访问同一 Host 上的原 Exec 任务。 |
 | [Host 协调与清理](../../crates/styx-runtime/src/host/coordinator)、[操作记录](../../crates/styx-core/src/operations.rs)、[执行器适配](../../crates/styx-runtime/src/providers) | 保留原操作身份、已派发结果未知时的保护，以及实际进程清理。Exec 的任务寿命与对话解绑；Browser 明确转交现有会话；保留 Cua 实际需要的资源保护。 |
-| [Rust App 入口](../../crates/styx-runtime/src/app.rs)、[Mac](../../host/macos/product-ui/ProductViews.swift)、[Windows](../../host/windows/Styx.cs)、[CLI 设置](../../crates/styx/src/setup.rs) | 按安装模式组成向导。移除桌面独立「暂停连接」操作和旧的二次批准界面；底层断连、退出清理和撤销仍各有调用方。Host-only 隐去 Tunnel 设置，桌面建中心的流程必须完成 Tunnel 配置。 |
+| [Rust App 入口](../../crates/styx-runtime/src/app.rs)、[Mac](../../host/macos/product-ui/ProductViews.swift)、[Windows](../../host/windows/Styx.cs)、[CLI 设置](../../crates/styx/src/setup.rs) | 按安装模式组成向导。移除桌面独立「暂停连接」操作和旧的二次批准界面；底层断连、退出清理和撤销仍各有调用方。Host-only 隐去模型入口设置，桌面建中心的流程配置所选接入方式。 |
 
 ## Exec 边界的实现落点
 

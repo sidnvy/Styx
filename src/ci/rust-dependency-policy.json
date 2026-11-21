@@ -332,7 +332,7 @@
     "enrollment::service::tests::paired_journey::actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey": {
       "kind": "owned_tls_mcp_wss_native_fixture",
       "input": "--paired-host --codex-bin --node22 --tls-fixtures --enrollment-service and fresh owned root",
-      "required_for": "actual signed synthetic pairing, official MCP TLS client, outbound paired Host WSS, native Codex nonce/stdin, cross-owner rejection and device revoke; not installed platform/account acceptance"
+      "required_for": "actual signed synthetic pairing, official MCP TLS client with configured public authority, outbound paired Host WSS, native Codex nonce/stdin, cross-owner rejection and device revoke; not installed platform/account acceptance"
     },
     "store::payload::tests::payload_inventory_stream_pin_and_replacement_alias_budget_negatives": {
       "kind": "owned_private_filesystem_native_image_fixture",

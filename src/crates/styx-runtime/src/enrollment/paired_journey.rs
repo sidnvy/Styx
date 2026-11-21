@@ -415,10 +415,22 @@ async fn paired_journey(capacity: bool, computers: usize, browser_handoff: bool)
     let gateway_epoch =
         GatewayEpoch::try_from(format!("owned-gateway-{}", uuid::Uuid::new_v4())).unwrap();
 
+    use crate::gateway::auth::public_mcp::{PublicMcp, PublicMcpAuthentication, PublicMcpConfig};
+    let public_mcp = PublicMcp::new(
+        PublicMcpConfig {
+            url: "https://styx-public.example/mcp".into(),
+            allowed_origins: Default::default(),
+            authentication: PublicMcpAuthentication::Bearer,
+        },
+        || unreachable!("Bearer ingress has no OAuth secret"),
+    )
+    .unwrap();
     let policy = Arc::new(
         GatewayBearerPolicy::new(mcp.as_bytes(), vec![host_header.clone()], vec![])
             .unwrap()
             .with_tunnel_ingress(forwarding.as_bytes())
+            .unwrap()
+            .with_public_mcp(public_mcp)
             .unwrap(),
     );
     // Constructor is composed with the same service, TLS leaf and listener.
@@ -691,6 +703,55 @@ async fn paired_journey(capacity: bool, computers: usize, browser_handoff: bool)
                 "paired Host ready deadline"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if !capacity {
+            // TLS connects directly to the fixture; Host is the authority an
+            // HTTPS reverse proxy preserves when forwarding to this listener.
+            let public_headers = std::collections::HashMap::from([(
+                http::header::HOST,
+                http::HeaderValue::from_static("styx-public.example"),
+            )]);
+            let config = StreamableHttpClientTransportConfig::with_uri(uri.clone())
+                .auth_header(mcp.to_string())
+                .custom_headers(public_headers);
+            let public_owner = ClientConfig::new(
+                ClientCapabilities::default(),
+                Implementation::new("public-mcp-paired-oracle", "1"),
+            )
+            .with_protocol_version(ProtocolVersion::V_2025_11_25)
+            .serve_with_lifecycle(
+                StreamableHttpClientTransport::with_client(raw.clone(), config),
+                ClientLifecycleMode::Initialize,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(public_owner.list_tools(None).await.unwrap().tools).unwrap(),
+                public["tools"]
+            );
+            let nonce = uuid::Uuid::new_v4().to_string();
+            let request = CallToolRequestParams::new("exec_command").with_arguments(
+                json!({
+                    "cmd": format!("printf '%s' '{nonce}' > public-mcp-nonce.txt"),
+                    "login": false,
+                    "environment_id": device.as_str()
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            );
+            data(public_owner.call_tool(request).await.unwrap());
+            file_within(&root_work.join("public-mcp-nonce.txt"), &nonce).await;
+            public_owner.cancel().await.unwrap();
+
+            let response = raw
+                .post(&uri)
+                .header(http::header::HOST, "styx-public.example")
+                .bearer_auth(forwarding.as_str())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
         }
         if browser_handoff {
             browser_session_journey(&raw, &uri, mcp.as_ref(), &device, &reconnect_tx, &root_work)

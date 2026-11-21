@@ -355,8 +355,13 @@ mod platform {
     #[cfg(all(test, unix))]
     #[test]
     fn public_mcp_forwarder_file_is_optional_and_private() {
-        use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt};
+        use std::{
+            fs::{OpenOptions, Permissions, set_permissions},
+            io::Write,
+            os::unix::fs::{OpenOptionsExt, PermissionsExt},
+        };
         let root = tempfile::tempdir().expect("private state");
+        set_permissions(root.path(), Permissions::from_mode(0o700)).unwrap();
         assert!(public_mcp_ingress(root.path()).unwrap().is_none());
         let mut file = OpenOptions::new()
             .write(true)
@@ -496,14 +501,20 @@ mod platform {
             .strip_prefix("https://")
             .ok_or(error("gateway_origin_invalid"))?
             .to_owned();
-        let policy = Arc::new(
-            GatewayBearerPolicy::new(
-                &runtime.model_token,
-                vec![authority.clone()],
-                vec![runtime.origin.clone()],
-            )
-            .map_err(|_| error("gateway_model_authority_invalid"))?,
-        );
+        let mut policy = GatewayBearerPolicy::new(
+            &runtime.model_token,
+            vec![authority.clone()],
+            vec![runtime.origin.clone()],
+        )
+        .map_err(|_| error("gateway_model_authority_invalid"))?;
+        if let Some(public) = crate::gateway::auth::public_mcp::PublicMcp::load(path)
+            .map_err(|_| error("gateway_public_mcp_configuration_invalid"))?
+        {
+            policy = policy
+                .with_public_mcp(public)
+                .map_err(|_| error("gateway_public_mcp_configuration_invalid"))?;
+        }
+        let policy = Arc::new(policy);
         let journal = OwnedEnrollmentJournal::from_configuration(
             configuration.clone(),
             JournalBudget::default(),
@@ -736,9 +747,8 @@ mod platform {
         })
         .await
         .map_err(|_| error("gateway_reader_failed"))??;
-        // One authenticated forwarding domain at a time. When the old Tunnel
-        // is disabled, the independent Public MCP file admits the same
-        // TunnelConversation lifecycle without starting its client process.
+        // Keep the deployed bridge on the local authority until migration.
+        // This credential cannot enter the configured external authority.
         let public_ingress = if tunnel_ingress.is_none() {
             let state = tunnel_state.clone();
             tokio::task::spawn_blocking(move || public_mcp_ingress(&state))

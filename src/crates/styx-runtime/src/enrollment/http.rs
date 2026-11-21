@@ -210,8 +210,11 @@ impl EnrollmentHttp {
                 None => failure(404, "not_found", true).map(BodyExt::boxed),
             };
         }
-        if request.uri().path() == "/mcp"
-            && let Some(mcp) = &self.mcp
+        if matches!(
+            request.uri().path(),
+            crate::gateway::http::MCP_PATH
+                | crate::gateway::auth::public_mcp::RESOURCE_METADATA_PATH
+        ) && let Some(mcp) = &self.mcp
         {
             return mcp(request).await;
         }
