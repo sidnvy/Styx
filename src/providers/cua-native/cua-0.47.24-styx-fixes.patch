@@ -280,12 +280,10 @@ diff --git a/libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs b
      unavailable_wayland_focused_input_background, unavailable_webkit_keyboard_background,
      values_agree, KeyRoute, ToolState,
  };
-@@ -62,6 +61,66 @@
-     // made models re-type text that had already landed. Refusals carry their own.
-     let _ = verified;
+@@ -64,6 +63,66 @@
      s
-+}
-+
+ }
+ 
 +/// Publish only after the native writer completed, without claiming an app readback.
 +fn foreground_text_completed_result() -> ToolResult {
 +    hyprland_input_result(Ok(json!({"ok": true})), true)
@@ -344,9 +342,11 @@ diff --git a/libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs b
 +    .with_structured(json!({
 +        "code":"foreground_input_unknown","effect":"unknown","detail":detail
 +    }))
- }
- 
++}
++
  /// Structured payload for the Electron/Chromium AX-echo case: the AT-SPI
+ /// `insertText` rung returned success on a Chromium embedder, but on those
+ /// surfaces the a11y bridge can accept and echo the write while the renderer
 @@ -163,6 +222,40 @@
      use super::*;
  
@@ -388,41 +388,7 @@ diff --git a/libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs b
      fn typed_text_is_confirmed_only_when_read_back() {
          let confirmed =
              type_text_readback_result(1, 3, "-40", "via targeted AT-SPI", Some("-40.0".into()));
-@@ -268,6 +361,25 @@
-     async fn invoke(&self, args: Value) -> ToolResult {
-         use cua_driver_core::tool_args::ArgsExt;
-         let pacing = crate::input::TypePacing::from_args(&args);
-+        let delivery = crate::input::delivery::DeliveryMode::from_args(&args);
-+        if delivery.is_foreground() {
-+            if !hyprland_foreground(delivery) {
-+                return ToolResult::error("observed foreground typing requires Hyprland")
-+                    .with_structured(json!({"code":"foreground_unavailable","effect":"none"}));
-+            }
-+            if args.get("element_token").is_none()
-+                || args.u64_or("pid", 0) == 0
-+                || args.get("x").is_some()
-+                || args.get("y").is_some()
-+                || args.opt_str("scope").as_deref() == Some("desktop")
-+                || coordinate_frame_is_desktop(&args)
-+            {
-+                return ToolResult::error(
-+                    "foreground typing requires an observed element and process",
-+                )
-+                .with_structured(json!({"code":"input_invalid_args","effect":"none"}));
-+            }
-+        }
-         if (args.opt_str("scope").as_deref() == Some("desktop")
-             || coordinate_frame_is_desktop(&args))
-             && args.get("pid").is_none()
-@@ -383,7 +495,6 @@
-                 }
-             }
-         };
--        let delivery = crate::input::delivery::DeliveryMode::from_args(&args);
-         if isolated_hyprland_background(delivery)
-             && resolved_elem_idx.is_none()
-             && args.get("x").is_none()
-@@ -444,93 +555,27 @@
+@@ -444,93 +537,27 @@
          }
  
          if hyprland_foreground(delivery) {
@@ -456,25 +422,7 @@ diff --git a/libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs b
 -                            "via targeted AT-SPI",
 -                        );
 -                    }
-+            // Explicit foreground typing uses the normal compositor and virtual
-+            // keyboard protocol. It does not require the optional isolated-input
-+            // compositor plugin and never tries AX then repeats through keys.
-+            let Some(element) = token.as_ref() else {
-+                return ToolResult::error("a fresh exact element token is required")
-+                    .with_structured(json!({"code":"input_invalid_args","effect":"none"}));
-+            };
-+            if xid_opt.is_none() || px.is_some() || py.is_some() {
-+                return ToolResult::error("an exact element/window target is required")
-+                    .with_structured(json!({"code":"input_invalid_args","effect":"none"}));
-+            }
-+            let object = match element.object() {
-+                Ok(object) => object.clone(),
-+                Err(_) => {
-+                    return ToolResult::error(
-+                        "cached element is unavailable; observe the window again",
-+                    )
-+                    .with_structured(json!({"code":"input_stale_observation","effect":"none"}));
-                 }
+-                }
 -            }
 -            match crate::wayland::hyprland_input::text_actions(&text) {
 -                Ok(actions) if !actions.is_empty() => {}
@@ -486,7 +434,17 @@ diff --git a/libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs b
 -                    .await
 -            {
 -                return error;
--            }
++            // Explicit foreground typing uses the normal compositor and virtual
++            // keyboard protocol. It does not require the optional isolated-input
++            // compositor plugin and never tries AX then repeats through keys.
++            let Some(element) = token.as_ref() else {
++                return ToolResult::error("a fresh exact element token is required")
++                    .with_structured(json!({"code":"input_invalid_args","effect":"none"}));
++            };
++            if xid_opt.is_none() || px.is_some() || py.is_some() {
++                return ToolResult::error("an exact element/window target is required")
++                    .with_structured(json!({"code":"input_invalid_args","effect":"none"}));
+             }
 -            if named_session_cursor_key(&args).is_some() {
 -                if px.is_none() {
 -                    position_named_session_keyboard_cursor(
@@ -497,9 +455,15 @@ diff --git a/libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs b
 -                        token.clone(),
 -                        None,
 -                        true,
--                    )
++            let object = match element.object() {
++                Ok(object) => object.clone(),
++                Err(_) => {
++                    return ToolResult::error(
++                        "cached element is unavailable; observe the window again",
+                     )
 -                    .await;
--                }
++                    .with_structured(json!({"code":"input_stale_observation","effect":"none"}));
+                 }
 -            } else {
 -                announce_keyboard_target(&args, pid, xid, token.clone(), px.zip(py)).await;
 -            }
@@ -1144,3 +1108,4 @@ diff --git a/libs/cua-driver/rust/crates/platform-linux/tests/set_value_outcome.
 +    assert_eq!(observed.setters, before.setters);
 +    assert_eq!(observed.effects, before.effects);
 +}
+
