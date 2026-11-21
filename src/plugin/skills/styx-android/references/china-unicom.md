@@ -17,7 +17,9 @@ Installed version: **13.2.1**, versionCode 197, targetSdk 30; installed
   properties. These lines do **not** prove root/tamper detection caused the
   SIGSEGV. There was no new readable native tombstone for this crash.
 - The device's standard `su` command denied shell access; no root-level
-  diagnostic or security changes were performed.
+  diagnostic or security changes were performed. Boot properties reported
+  verified-boot state `green` and flash lock `1`; neither this nor the
+  hidden-API warnings establish the specific crash cause.
 - System Settings showed approx. 112 MB user data and 10.87 MB cache.
   The targeted Android-native `pm clear --cache-only` operation did not
   complete after more than a minute; its Host task was stopped with exit 137.
@@ -50,3 +52,11 @@ Installed version: **13.2.1**, versionCode 197, targetSdk 30; installed
    Pixel 7 Pro, providing a sanitized timestamp and process exit receipt.
 4. Use China Unicom's verified official web/mini-program channel for
    necessary account operations while awaiting a supported version.
+
+## Official alternative while the App crashes
+
+China Unicom maintains its [official web self-service portal](https://www.10010.com/wt_links/index.html)
+for account balances, bills, package queries and relevant service handling,
+and [official WeChat service information](https://iservice.10010.com/e4/PublicitychannelView/wechat_new.html).
+Prefer these verified domains to third-party APK mirrors or unverified mini
+programs until the vendor ships a compatible Android build.
