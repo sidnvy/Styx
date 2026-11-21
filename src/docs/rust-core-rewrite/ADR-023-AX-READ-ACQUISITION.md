@@ -95,13 +95,22 @@ and does not confer authority. Cardinality is checked once against returned
 rows rather than imposing a second conflicting completeness flag.
 
 
-## Explicit Linux/Hyprland foreground text (2026-11-21)
+## Linux/Hyprland text replacement and insertion (2026-11-21)
 
-`set_value` remains a direct accessibility replacement, not an implicit keyboard
-fallback. The native codes `editable_unavailable` and `strict_text_unavailable`
-are CapabilityUnsupported; a stale target is StaleObservation and only actual
-permission rejection is PermissionDenied. The original code is retained in the
-sanitized refusal. Unknown native outcomes are never reclassified as not sent.
+Linux `set_value` uses Cua's standard operation with the original public PID,
+window, element token and value. The adapter supplies the existing foreground
+mode so native replacement can activate the target when necessary. Cua first
+uses the control's accessibility setter. When that route is unavailable on
+Hyprland, it reuses the existing native keyboard writer to select all and replace
+the contents; an empty value clears the field. This fixes the actual standard-call
+Chrome reproduction, whose entry exposes neither EditableText nor Value.
+
+The Host retains its existing Computer setting, owner, observation and late gate.
+Linux no longer requires the Styx strict-text extension or its narrow response
+shape. The existing one-call transport preserves Cua's native result, including
+its route, delivery and readback evidence. A native acknowledgement is followed
+by independent observation; transport uncertainty never triggers another call.
+The macOS and Windows setter paths are unchanged.
 
 `type_text` is an explicit Linux/Hyprland foreground keyboard action on the same exact
 Host-owned AX element used by click. It requires PID, window ID, current element
@@ -118,8 +127,9 @@ active window and enabled, editable, focused element; paired press/release and
 flush stay under Action::admit. Cancellation fences the connection and cleanup
 is bounded. The previous desktop focus is not restored.
 
-This path does not require Cua's optional compositor plugin and does not try AX
-insertion before keyboard delivery. Any uncertainty after focus or input is
-returned without a second writer. Native permission discovery uses actual
+The shared keyboard writer does not require Cua's optional compositor plugin.
+`type_text` inserts directly through that writer; `set_value` first tries its
+standard accessibility route. Any uncertainty from the keyboard writer is
+returned without another input attempt. Native permission discovery uses actual
 virtual-keyboard globals, not XWayland availability or an environment hint.
 User input must be independently observed after completion.
