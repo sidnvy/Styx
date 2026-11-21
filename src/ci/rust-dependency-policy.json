@@ -581,20 +581,10 @@
       "input": "STYX_TEST_INSTALLED_MAC_SOURCE=read-only; owner-authorized installed /Applications/Styx.app and its live original embedded Cua",
       "required_for": "fixed original certificate/images, protected descriptor, process births, kernel peer and original-FD console facts; no session/input, no GUI or installation acceptance"
     },
-    "providers::cua::driver_result::native_reference::installed_ax_refusal_wire_read_only": {
-      "kind": "explicit_disposable_macos_ax_wire_refusal_reference",
-      "input": "STYX_TEST_INSTALLED_MAC_SOURCE=read-only; STYX_TEST_MAC_AX_FIXTURE names a NEW disposable fixture with exact process birth and parent/Sheet window IDs",
-      "required_for": "actual signed native reply shape, production refusal classification and same-proxy read continuation; original transport drain required; no original Unknown target replay, input or installed account acceptance"
-    },
     "providers::cua::macos_source::installed_source_tests::installed_source_windows_read_only": {
       "kind": "explicit_installed_macos_source_window_read_and_original_drain",
       "input": "STYX_TEST_INSTALLED_MAC_SOURCE=read-only; same owner-authorized installed original Mac App/Cua",
       "required_for": "native read-only window acquisition and same original probe transport drain, joined tasks; no input, screenshots or final GUI acceptance"
-    },
-    "providers::cua::window_capture::tests::original_owned_macos_capture_projection_reference": {
-      "kind": "original_owned_macos_capture_response_projection",
-      "input": "STYX_TEST_MAC_CAPTURE_REFERENCE explicit bounded evidence file containing original native response, original Gateway request and independently recorded PNG hash",
-      "required_for": "exact original Mac capture bytes and strict target/geometry/empty-tree projection; no new native call or input, not GUI/platform acceptance"
     },
     "app::maintenance_integration_tests::native_gui_computer_management_keeps_binding_and_local_identity": {
       "kind": "explicit_signed_native_payload",

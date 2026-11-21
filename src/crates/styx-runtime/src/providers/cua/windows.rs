@@ -19,7 +19,7 @@ pub(super) async fn ensure_daemon(
 ) -> Result<String> {
     let mut guard = slot.lock().await;
     if let Some(daemon) = guard.as_mut() {
-        let alive = daemon.child.try_wait().ok().flatten().is_none();
+        let alive = daemon.child.observed_exit().ok().flatten().is_none();
         if alive && ClientOptions::new().open(&daemon.socket).is_ok() {
             return Ok(daemon.socket.clone());
         }
@@ -87,7 +87,7 @@ pub(super) async fn ensure_daemon(
         if ClientOptions::new().open(&socket).is_ok() {
             break;
         }
-        if child.try_wait().ok().flatten().is_some() || Instant::now() >= ready_deadline {
+        if child.observed_exit().ok().flatten().is_some() || Instant::now() >= ready_deadline {
             let _ = tokio::time::timeout(Duration::from_secs(2), child.terminate_and_wait()).await;
             return Err(CuaError::Unknown);
         }
