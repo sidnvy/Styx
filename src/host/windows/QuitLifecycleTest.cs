@@ -14,7 +14,11 @@ namespace StyxNative {
   static void Set(object value,string name,object data){value.GetType().GetField(name,Fields).SetValue(value,data);}
   static void Check(bool value,string code){if(!value)throw new Exception(code);}
   static Button FindButton(Settings settings,string title){foreach(Control c in ((FlowLayoutPanel)Get(settings,"content")).Controls)if(c is Button&&c.Text==title)return (Button)c;return null;}
-  static bool HasText(Settings settings,string text){foreach(Control c in ((FlowLayoutPanel)Get(settings,"content")).Controls)if(c.Text.Contains(text))return true;return false;}
+  static bool HasText(Settings settings,string text){return HasControlText((Control)Get(settings,"content"),text);}
+  static bool HasControlText(Control parent,string text){
+   foreach(Control child in parent.Controls)if(child.Text.Contains(text)||HasControlText(child,text))return true;
+   return false;
+  }
   static async Task Until(Func<bool> ready,int seconds){var until=DateTime.UtcNow.AddSeconds(seconds);while(!ready()){if(DateTime.UtcNow>until)throw new Exception("fixture_deadline");await Task.Delay(20);}}
   static int Child(string mode,string dir){
    if(mode=="worker"){Console.In.ReadLine();return 0;}
@@ -105,13 +109,15 @@ namespace StyxNative {
     Set(context,"snapshot",Json.Obj("mode","rust_host","enrollment",Json.Obj("status","awaiting_approval"),"supportedOperations",operations));
     settings.ShowPage("general");Check(FindButton(settings,"Join another Gateway…")!=null&&FindButton(settings,"Join an existing Gateway")==null,"pending_join_offered_direct_fresh_setup");
     settings.ShowPage("overview");Check(HasText(settings,"Waiting for the original invitation to be approved.")&&FindButton(settings,"Check approval")!=null,"pending_join_did_not_explain_gateway_approval");
-    Set(context,"snapshot",Json.Obj("mode","rust_host","gateway",Json.Obj(),"supportedOperations",new object[]{"tunnelSave","tunnelStatus"}));settings.ShowPage("chat");
-    foreach(string step in new[]{"1. Connect the Gateway to Tunnel","2. Open ChatGPT Plugins","3. Set the name and icon","4. Fill in the connection fields","5. Connect and try Styx"})Check(HasText(settings,step),"chatgpt_setup_step_missing");
-    Check(HasText(settings,"single Styx plugin")&&HasText(settings,"Authentication: No authentication")&&HasText(settings,"runtime API key in Styx only"),"chatgpt_gateway_fields_or_key_boundary_missing");
+    Set(context,"snapshot",Json.Obj("mode","rust_host","gateway",Json.Obj(),"supportedOperations",new object[]{"tunnelSave","tunnelStatus","publicMcpSave","publicMcpStatus"}));settings.ShowPage("chat");
+    foreach(string step in new[]{"1. Configure the Gateway connection","2. Open ChatGPT Plugins","3. Set the name and icon","4. Fill in the connection fields","5. Connect and try Styx"})Check(HasText(settings,step),"chatgpt_setup_step_missing");
+    Check(HasText(settings,"All joined computers use this Gateway")&&HasText(settings,"select No authentication")&&HasText(settings,"Keep the runtime key in Styx")&&HasText(settings,"Static Bearer requires a client"),"chatgpt_gateway_fields_or_key_boundary_missing");
+    Check(FindButton(settings,"Configure Public HTTPS…")!=null&&FindButton(settings,"Check MCP connection")!=null,"public_mcp_settings_actions_missing");
     Set(context,"snapshot",fresh);settings.ShowPage("chat");Check(!HasText(settings,"4. Fill in the connection fields"),"host_offered_gateway_tunnel_configuration");
     foreach(string page in new[]{"create","join"}){
      settings.ShowPage(page);
      Check(HasText(settings,"Tunnel runtime API key")== (page=="create"),"tunnel_field_wrong_role");
+     Check(HasText(settings,"Public MCP URL")== (page=="create"),"public_mcp_field_wrong_role");
      var exec=(CheckBox)Get(settings,"exec");Check(exec.Enabled&&exec.Checked,"exec_default_not_editable");exec.Checked=false;
      var computer=(CheckBox)Get(settings,"computer");Check(computer.Enabled&&!computer.Checked,"fresh_desktop_not_explicit_opt_in");computer.Checked=true;
      var choice=(System.Collections.Generic.Dictionary<string,object>)typeof(Settings).GetMethod("Choice",Fields).Invoke(settings,null);Check(Equals(choice["computer"],true),"desktop_choice_not_sent_to_core");Check(Equals(choice["exec"],false),"disabled_exec_choice_not_sent_to_core");
