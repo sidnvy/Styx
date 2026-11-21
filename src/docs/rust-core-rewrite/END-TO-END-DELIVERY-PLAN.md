@@ -2,13 +2,35 @@
 
 ## 当前源码与实机证据的边界（2026-11-21）
 
-当前已核对的正式部署为 [v0.7.1](https://github.com/sidnvy/Styx/releases/tag/v0.7.1)，
-源码 a5587e98609fd82cc7c5cf79c7c7f2a1548c21d7。moedeu-apps Gateway、niuda、
-NAB5 和 PilotMac 的实际 Runtime/包身份均已核对；这替代此前“PR #68 尚未部署”的状态。
-PilotMac 的 Computer Use 曾因旧 Cua socket/PID 残留而不可用；确认原进程已退出后，
-经正常 App 重开恢复，窗口树与截图已通过。该现场恢复不等于下述源码修复已经部署。
+当前已核对的正式部署为 [v0.8.0](https://github.com/sidnvy/Styx/releases/tag/v0.8.0)，
+源码 `6b6ba1426b517fde7179c34f132f1d28a6fc6f5b`。moedeu-apps Gateway、niuda、
+NAB5-WIN 和 PilotMac 均已核对实际版本、Runtime 身份及升级后的连接。
+记录：`/home/sid/Developer/Artifacts/Styx/release-0.8.0/delivery-verified.json`。
+这替代原先仍写作“已部署 0.7.1、0.8.0 仅有源码”的状态。
 
-本轮 0.8.0 源码范围：
+### 0.8.1-rc.1 原生输入候选
+
+- Chrome 的可编辑控件没有实现 AT-SPI EditableText；原生严格 setter 在派发前返回
+  `editable_unavailable`，旧 Provider 将这类拒绝全部改成 PermissionDenied。
+  修复保留 Unsupported、StaleObservation、InvalidRequest 和真实 PermissionDenied 的区分。
+- 显式 `type_text` 复用现有元素观测、owner、capability、一次性派发及结果交付检查。
+  仅接受完整 PID/window/token 和 `delivery_mode:"foreground"`；它在光标处插入文本，
+  会改变窗口/控件焦点且不恢复原焦点。它不代表后台无干扰输入。
+- 原生执行复用 Cua 进程内 Wayland Unicode 键盘 writer；每个按键都检查精确窗口和
+  可编辑控件焦点。Hyprland 激活使用当前 Lua dispatcher，验证环境为 0.57.1。
+  未新增 Browser Profile 接管、Cookie 迁移、键盘子进程或权限旁路。
+- 完整源码质量 gate 已 PASS，输入及 Git 稳定性检查 PASS；Provider、Host observation、
+  Gateway routing、公共工具路由和原生焦点/键盘回归均通过。旧路径未生成执行记录的问题
+  已改为复用既有 Hyprland 结果函数，只在原生 writer 完成后记录派发，仍要求观察实际效果。
+- 最终冻结 worker 已在日常 Chrome 非敏感页面分别完成一次 ASCII 和一次中文/换行输入。
+  两次均返回正常执行记录，页面独立记录及无障碍读回一致。原始失败尝试和验收脚本的
+  token/空白比较中断保留原记录；没有重放任何结果不确定的写入。汇总证据：
+  `/home/sid/Developer/Artifacts/Styx/chrome-read-debug/native-input-final-component-acceptance.json`。
+- 当前候选尚未发布或部署。源码 gate、原生组件实际输入已通过；官方 Release、
+  安装后的公共 MCP 输入效果和 ChatGPT 工具目录刷新仍需分别验收，不能互相代替。
+
+### 已部署的 0.8.0 基线
+
 
 - Browser 的完整原生 profile 保留在 Host 固定私有目录；关闭 context 或重启 Host
   后可按同一 profile ID 复用。后续对话先列出已有 profile，需要时沿用现有接手工具。

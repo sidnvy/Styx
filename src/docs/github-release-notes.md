@@ -7,32 +7,29 @@ several conversations can use the same computer.
 
 ## Changes
 
-Browser login profiles now persist on the selected Host. A later conversation
-can list and reuse the same profile; closing its Browser window or restarting
-the Host retains the profile's native persistent cookies, localStorage and IndexedDB.
-Existing website expiry and sign-out rules still apply.
+This release candidate repairs native Desktop text input on Linux/Hyprland
+with Lua dispatch (validated on Hyprland 0.57.1).
+The new `type_text` tool inserts text at the caret in a freshly observed editable
+control. Callers explicitly select foreground delivery, which permits activation
+of the target window. It can interrupt work in the foreground and does not
+restore the previous focus. The native worker checks the exact process, window
+and focused editable element before every keystroke.
 
-A running Browser session can be explicitly taken over by another conversation
-without launching a second browser or losing its tabs. When there is one
-available saved profile, opening Browser reuses it automatically. When there
-are several, select its browser_session_id. Independent profiles retain
-independent sign-ins, and an active operator is not silently displaced.
-After a Host restart, saved profiles are listed without launching browsers;
-new execution identities and references are created when a profile is opened.
+Strict `set_value` remains an exact native replacement operation. When an
+application such as Chrome does not expose AT-SPI EditableText, Styx reports
+Unsupported instead of incorrectly reporting an OS permission denial. It does
+not switch from a failed setter to keyboard input. Unknown input outcomes are
+preserved and must be inspected before any further action.
 
-Sign in once in the visible Styx Browser window. This release does not import
-a daily Chrome/Edge profile or recover the temporary Browser profiles used by
-earlier Styx releases. A fresh snapshot is still required after taking over
-a live session. Browser tasks and page references are not restored after exit.
+Host input admission uses keyboard availability from the same native worker,
+including the Wayland virtual keyboard protocol. Existing owner, observation,
+capability and once-only dispatch checks remain in the normal Core/Host route.
 
-On macOS, Styx now recovers its native Computer Use driver after a prior crash
-leaves a dead local socket. It checks both the prior process and socket before
-cleaning a stale endpoint, and preserves any live driver or unknown state.
-
-Gateway diagnostics now record the numeric status of failed MCP HTTP responses
-in the existing diagnostic stream. They omit request contents and credentials.
-This helps investigate future HTTP errors; it does not identify the cause of
-historical errors.
+Update both Gateway and the Linux Host. Gateway advertises `type_text`; the Host
+and its bundled native worker execute it. Refresh the existing ChatGPT Styx
+connection's metadata after the Gateway update, then use a fresh conversation
+to verify that the tool is exposed. This candidate's installed public MCP input
+acceptance is recorded separately from its source and native-component tests.
 
 ### Android package availability
 

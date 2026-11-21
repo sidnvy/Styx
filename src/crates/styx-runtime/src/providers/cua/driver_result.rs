@@ -58,9 +58,12 @@ pub(super) fn outcome(
                     )
                 ));
         let cause = match direct.or(refusal) {
-            Some("invalid_element_token" | "bad_element_token") => Some(CuaError::InvalidRequest),
+            Some("invalid_element_token" | "bad_element_token" | "input_invalid_args") => {
+                Some(CuaError::InvalidRequest)
+            }
             Some(
                 "stale_element_token"
+                | "input_stale_observation"
                 | "stale_snapshot"
                 | "element_outside_target_window"
                 | "window_not_found"
@@ -68,6 +71,7 @@ pub(super) fn outcome(
                 | "element_not_visible",
             ) => Some(CuaError::StaleObservation),
             Some("permission_denied" | "permission_required") => Some(CuaError::PermissionDenied),
+            Some("keyboard_unavailable" | "foreground_unavailable") => Some(CuaError::Unsupported),
             _ => None,
         };
         if let Some(cause) = cause.filter(|_| before_dispatch) {
@@ -97,6 +101,38 @@ pub(super) async fn invoke(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn typed_input_refusals_require_explicit_no_dispatch() {
+        for (code, cause) in [
+            ("keyboard_unavailable", CuaError::Unsupported),
+            ("foreground_unavailable", CuaError::Unsupported),
+            ("input_invalid_args", CuaError::InvalidRequest),
+            ("input_stale_observation", CuaError::StaleObservation),
+        ] {
+            let mut reply =
+                CallToolResult::structured(serde_json::json!({"code":code,"effect":"none"}));
+            reply.is_error = Some(true);
+            let result = outcome(reply.clone());
+            assert_eq!(result.0, CuaEvidence::NotDispatched, "{code}");
+            assert_eq!(result.2, Some(cause), "{code}");
+            for effect in ["unknown", "refused"] {
+                reply.structured_content.as_mut().unwrap()["effect"] = Value::String(effect.into());
+                assert_eq!(
+                    outcome(reply.clone()).0,
+                    CuaEvidence::Unknown,
+                    "{code}/{effect}"
+                );
+            }
+            reply
+                .structured_content
+                .as_mut()
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove("effect");
+            assert_eq!(outcome(reply).0, CuaEvidence::Unknown, "{code}/missing");
+        }
+    }
     #[tokio::test]
     async fn complete_unknown_click_does_not_prevent_independent_read_on_same_transport() {
         let driver = super::super::fake_driver::FakeDriver::start(

@@ -9,7 +9,7 @@ pub(crate) enum PublicComputerRoute {
     Metadata,
     WindowRead,
     DesktopRead,
-    ElementClick,
+    ElementInput,
     ElementValue,
     VerifyRead,
 }
@@ -19,7 +19,7 @@ pub(crate) fn route(name: &str) -> Option<PublicComputerRoute> {
         "list_apps" | "list_windows" => PublicComputerRoute::Metadata,
         "get_window_state" => PublicComputerRoute::WindowRead,
         "get_desktop_state" => PublicComputerRoute::DesktopRead,
-        "click" => PublicComputerRoute::ElementClick,
+        "click" | "type_text" => PublicComputerRoute::ElementInput,
         "set_value" => PublicComputerRoute::ElementValue,
         "verify_state" => PublicComputerRoute::VerifyRead,
         // The Host currently has no retained observation adapter for these
@@ -51,7 +51,7 @@ fn schemas() -> Result<&'static BTreeMap<String, jsonschema::Validator>> {
                     return Err(CuaError::ProtocolMismatch);
                 }
             }
-            if schemas.len() != 7 {
+            if schemas.len() != 8 {
                 return Err(CuaError::ProtocolMismatch);
             }
             Ok(schemas)
@@ -84,13 +84,22 @@ pub(crate) fn decode(name: &str, arguments: Map<String, Value>) -> Result<CuaAct
                 .accessibility_write_request()?
                 .ok_or(CuaError::Unsupported)?;
         }
-        PublicComputerRoute::ElementClick => {
+        PublicComputerRoute::ElementInput => {
             // Platform-specific gesture admission belongs to the selected
             // Host, not the platform on which the Gateway happens to run.
             let token = action.arguments["element_token"]
                 .as_str()
                 .ok_or(CuaError::InvalidRequest)?;
             super::ax_write::validate_token(token)?;
+            if name == "type_text"
+                && action
+                    .arguments
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_none_or(|text| text.is_empty() || text.len() > 16 * 1024)
+            {
+                return Err(CuaError::InvalidRequest);
+            }
         }
         _ => {
             action.required_capabilities()?;
