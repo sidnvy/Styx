@@ -112,10 +112,10 @@
       "runtime_memory_sampled": false,
       "linux_source": "Same authenticated worker check_permissions.atspi; fresh true means Granted/Available. Missing, false or expired means Unknown/Unavailable. xsend_event is not the DesktopAccessibility permission."
     },
-    "bindings": "install/prepare/validate_dispatch and recheck_write retain owner, resource, session, source, target, observation generation, age and native token checks; none are changed."
+    "bindings": "Strict setter install/prepare/validate_dispatch and recheck_write retain owner, resource, session, source, target, observation generation, age and native token checks. The explicit typing follow-up reuses these gates and additionally requires DesktopKeyboard and DesktopWindowsControl with DesktopAccessibility."
   },
   "patch": {
-    "scope": "Provider refusal classification and bounded native_refusal diagnostic only; no Browser, Gateway, native setter, capability, owner or observation changes.",
+    "scope": "Original strict-setter classification patch at 78ad8c7: provider refusal classification and bounded native_refusal diagnostic only. The separately recorded explicit type_text follow-up below adds the normal public/Host/native typing route; strict setter behavior and owner checks remain intact.",
     "mapping": {
       "editable_unavailable": "CAPABILITY_UNSUPPORTED",
       "strict_text_unavailable": "CAPABILITY_UNSUPPORTED",
@@ -151,6 +151,92 @@
     "chrome_strict_text_input": "NOT_RESTORED: both real Chrome targets lack the required native setter",
     "successful_chrome_get_set_get": "NOT_PASSED",
     "deployed": false,
-    "deployment_effect": "A new official Host release is required for the error-classification fix. Deploying it alone does not enable Chrome strict set_value."
+    "deployment_effect": "Both Host and Gateway need the new official release for explicit public type_text. Strict set_value remains unsupported on the observed Chrome controls because they lack AT-SPI EditableText.",
+    "explicit_chrome_native_typing": "PASSED in final frozen native component: ASCII and Chinese/multiline actual effects and AX readback. Installed public MCP validation remains pending."
+  },
+  "typing_followup": {
+    "candidate_version": "0.8.1-rc.1",
+    "public_route": "Explicit type_text on the existing catalog, Core admission, Host observation owner/capabilities and one native dispatch.",
+    "delivery": "foreground only; inserts at the caret, activates the exact window/editable target, and does not restore previous focus",
+    "platform": "Linux with Lua-dispatch Hyprland; actual acceptance on 0.57.1",
+    "implementation": "Existing in-process Cua Wayland Unicode keyboard writer; no shell keyboard process, clipboard, profile/cookie change, setter fallback, permission bypass or replay.",
+    "old_pr52_issues": [
+      "Legacy Hyprland focus command is invalid under the current Lua dispatch API; adding a slash alone did not fix it.",
+      "The legacy wayland_keyboard result could not create a typed execution record. One earlier case delivered text and then correctly became unknown; it was not replayed. The final route records LinuxHyprlandForegroundInput only after the native writer completes."
+    ],
+    "final_component": {
+      "schema": 1,
+      "status": "passed",
+      "scope": "final frozen native component in real daily Chrome; installed Core/public MCP acceptance remains pending",
+      "version_candidate": "0.8.1-rc.1",
+      "patch_sha256": "6ce1cc14f32d30630018cd06d1779ae122de5582c5705cd8b9118c48093df296",
+      "driver_sha256": "8d77d443c55b5f2149b9256144cc410e99fe4ab7c758ab8ba22f94db1f5df05d",
+      "pid": 2403698,
+      "window_id": 94481099062240,
+      "permissions": {
+        "atspi": true,
+        "xsend_event": true,
+        "wayland": true,
+        "wayland_enabled": true,
+        "wayland_virtual_keyboard": true
+      },
+      "strict_setter": {
+        "code": "editable_unavailable",
+        "effect": "unverified",
+        "outcome": "refused",
+        "schema": 1
+      },
+      "ascii": {
+        "text": "Styx native input acceptance",
+        "write_calls": 1,
+        "normal_execution_record": true,
+        "actual_readback": true
+      },
+      "unicode_multiline": {
+        "text": "Styx 中文输入\nline 2",
+        "write_calls": 1,
+        "normal_execution_record": true,
+        "actual_readback": true,
+        "native_accessibility_echo": "Plain: Styx native input acceptance; Multiline: Styx 中文输入 line 2"
+      },
+      "effects": {
+        "chrome_plain": "Styx native input acceptance",
+        "chrome_multiline": "Styx 中文输入\nline 2",
+        "gtk_plain": "",
+        "events": 74
+      },
+      "original_harness_stops": {
+        "ascii": "Next-target lookup stopped before the CJK dispatch because title synchronization briefly withheld exact-window tokens; later observation restored them. The ASCII write was not retried.",
+        "unicode_multiline": "Input and exact independent newline readback passed; the harness then incorrectly expected an AX statusbar label to preserve newlines. Verified normalized AX whitespace against exact fixture input value; no input was replayed."
+      },
+      "evidence_files": {
+        "native-foreground-recorded-20261121.json": "2252f5dec9250eb7b1c8ab0d651f9d58cfb798cbf536074e7c8a0049d1ed8614",
+        "native-foreground-cjk-final-20261121.json": "d566488d47c05aef7d3ebcacce5a69536bf5e57614daadb8341c344514c97934",
+        "text-input-actual-effects.json": "0ad939d86581de9a31f3c40df4c56f786638bc54abfa918b442bbd220d32d412",
+        "native-input-0.8.1rc1-quality/receipt.json": "df2def8d0021b3ed6195fc2c010f1167267518212cedeb9a252a4cefad30379a"
+      },
+      "workspace_quality": "PASS",
+      "installed_public_mcp": "pending"
+    },
+    "targeted_checks": {
+      "provider_cua": "65 passed, one existing ignored Mac evidence test",
+      "host_observation": "7 passed",
+      "gateway_computer": "7 passed",
+      "refusal_classification": "3 passed",
+      "public_catalog_route": "1 passed",
+      "native_foreground": "9 passed",
+      "shared_keyboard": "24 passed",
+      "native_focus_socket": "3 passed",
+      "counts": "Suite totals overlap; not a unique test count."
+    },
+    "quality_gate": {
+      "status": "PASS",
+      "input_stability": "PASS",
+      "git_stability": "PASS",
+      "evidence": "/home/sid/Developer/Artifacts/Styx/chrome-read-debug/native-input-0.8.1rc1-quality/receipt.json",
+      "scope": "Complete required workspace quality command, frozen functional sources; following changes only finalize documentation/evidence."
+    },
+    "observation_note": "After ASCII changed the fixture title, compositor metadata and AX top-level title differed and the read conservatively withheld exact-window tokens. A later read restored exact binding. Bounded read-only acquisition was used before the next single write; no product targeting checks changed.",
+    "release": "Not yet published or installed at source checkpoint; official PR/CI/Release and installed public MCP evidence are separate gates."
   }
 }

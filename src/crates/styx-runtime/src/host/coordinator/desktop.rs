@@ -711,9 +711,10 @@ impl HostCoordinator {
             return Err(ErrorCategory::ProtocolMismatch.into());
         }
         handle(desktop(&state)?, owner, &target)?;
-        if let Some(request) = action.click_request()? {
-            let (translated, observation) =
-                super::desktop_observation::prepare_click(&state, owner, &target, &request)?;
+        if let Some(request) = action.element_input_request()? {
+            let (translated, observation) = super::desktop_observation::prepare_element_input(
+                &state, owner, &target, &request,
+            )?;
             context.observation = Some(observation);
             return Ok(state.ledger.prepare_targeted(
                 owner,
@@ -819,7 +820,7 @@ impl HostCoordinator {
                     .map_err(|_| CuaError::InvalidRequest)?;
             let acquisition = action.desktop_read_request()?;
             let write = action.accessibility_write_request()?;
-            let click = action.click_request()?;
+            let click = action.element_input_request()?;
             if write.is_some()
                 != (state.ledger.inspect_purpose(owner, id, digest)?
                     == styx_core::operations::OperationPurpose::DesktopAccessibilityWriteAttempt)
@@ -831,7 +832,7 @@ impl HostCoordinator {
                 publish_desktop_permissions(&mut state, permissions.as_ref())?;
             }
             let primary = if let Some(request) = click.as_ref() {
-                super::desktop_observation::validate_click_dispatch(
+                super::desktop_observation::validate_element_input_dispatch(
                     &state,
                     owner,
                     target,
@@ -969,7 +970,7 @@ impl HostCoordinator {
                                     return Err(CuaError::StaleObservation);
                                 }
                                 if is_click {
-                                    retained.recheck_click(
+                                    retained.recheck_element_input(
                                         &state,
                                         &gate_owner,
                                         &gate_operation,
@@ -1033,7 +1034,7 @@ impl HostCoordinator {
                         let f = if let (Some(request), Some(observation)) =
                             (click.as_ref(), write_observation.as_ref())
                         {
-                            observation.click_result_facts(
+                            observation.element_input_result_facts(
                                 &state,
                                 bound.owner(),
                                 bound.target(),

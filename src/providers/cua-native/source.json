@@ -6,15 +6,15 @@
   "official_archive_sha256": "8a2b76c50cffd076b40c29c593e69d51b51c2563b6bf51dc1926d1dac9558cfe",
   "archive_root_mtime": 1794515309,
   "patch": "cua-0.47.24-styx-fixes.patch",
-  "patch_sha256": "4608100b00a98c0f0eda5e51c64213aef01787e69cac652f75988dfed8c1bce1",
+  "patch_sha256": "6ce1cc14f32d30630018cd06d1779ae122de5582c5705cd8b9118c48093df296",
   "files": [
     {
       "path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs",
       "original_sha256": "5df205dd3655ffb37980a3bef9e85328efd02be510621fca2297564c7cbef776",
       "original_git_blob_sha1": "bae6dee0c127c3528cf22944a11c48e4531df668",
-      "final_sha256": "6d635312f04d55c262dba4d4f25b3e8b26f38402a0b02bc1249f040b8139f3c0",
+      "final_sha256": "ae365285f9eaa2477a64fb4e5da230466aa8117d563503f4dc4c16f10bd1606d",
       "original_bytes": 372519,
-      "final_bytes": 374508
+      "final_bytes": 376189
     },
     {
       "path": "libs/cua-driver/rust/crates/platform-linux/src/tools/set_value.rs",
@@ -71,6 +71,54 @@
       "final_sha256": "10086f9b1f14ad5ab006377feda3e743b26018c153acadf302b46f232dfe2eda",
       "original_bytes": 15514,
       "final_bytes": 21912
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs",
+      "original_sha256": "bc69507bf3e3fa3e68b24f8da25c0640a22e6fa1f465c48f33b3bb80299d1676",
+      "original_git_blob_sha1": "abd52cc5754bf573b941d5327c2ab0fcd189f4e0",
+      "final_sha256": "279d91d666f26305dc7d63a24069b39d5bab8cf8c0cae1828396b2530db47c47",
+      "original_bytes": 55800,
+      "final_bytes": 58121
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/mod.rs",
+      "original_sha256": "78b37958274cbf1956712d78b6be1cfa4484f0fa3478e2dd1c08ed178161820d",
+      "original_git_blob_sha1": "13c2d2278efd629e04238d7232e80d39efded4f7",
+      "final_sha256": "53a65597b8f7c982250003aa1f48a941cec16d4c46fb95528e23d8c4d01f5382",
+      "original_bytes": 210680,
+      "final_bytes": 211222
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/virtual_keyboard.rs",
+      "original_sha256": "d1d37515954768fa337e1ea98635a6d3a4d6a62d0b4a9dc0d5c6d6377dc2417d",
+      "original_git_blob_sha1": "8bdb5ae1f84432bf8dc2e57eabf2523d8e01f8cf",
+      "final_sha256": "51909062f5f070666bf0cd502568e3b365298d52c160ef25945b01ff3d874d02",
+      "original_bytes": 8254,
+      "final_bytes": 9285
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs",
+      "original_sha256": "bb2038bfe9313e46b12a4bb317934b1f379f881ff4766989095a6ce0903a42c1",
+      "original_git_blob_sha1": "f16e4ed3716ec7f7bfee124412970f18fdbd0204",
+      "final_sha256": "1dc3777cb6c7247357b63b5749888146eedf0dedbed56cef69045bdefd50dbf8",
+      "original_bytes": 70767,
+      "final_bytes": 71712
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/tools/check_permissions.rs",
+      "original_sha256": "e9779306fd15837d3fe4a00d17fcc5316b69823a3dcafd3411b7df26e4e9b8f8",
+      "original_git_blob_sha1": "b2569be008ed21d136c7db8d43b1df27aacdbb83",
+      "final_sha256": "8e3222a78070ca378ce9bc0a806aba24ce52a1c4dbb8d6538dad0a02a31df63d",
+      "original_bytes": 3969,
+      "final_bytes": 4041
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/niri/keyboard.rs",
+      "original_sha256": "6d6a55d1477f0683b8030219ae5e226292044d9d674a12a55c767776797af32c",
+      "original_git_blob_sha1": "e755809ef2ca700a1feebe05f475def9020358d6",
+      "original_bytes": 46043,
+      "final_sha256": "034ae650dacf026e386a8aedb53894baf233cf9c011be7f2da5abaad80d1f3f7",
+      "final_bytes": 49300
     }
   ],
   "rust_toolchain": "1.97.1",
@@ -88,12 +136,13 @@
   "upstream_lock_sha256": "c454ac5d2bb8356d95a80edf15dcf9570ec8c5a9de917615839139b656a76f7f",
   "patched_lock_sha256": "c454ac5d2bb8356d95a80edf15dcf9570ec8c5a9de917615839139b656a76f7f",
   "native_private_tools": [],
-  "public_styx_catalog_changed": false,
+  "public_styx_catalog_changed": true,
   "strict_text_argument": "styx_strict_text",
   "retained_fixes": [
     "single native text setter without fallback or explicit activation API",
     "Windows DPI-unaware compositor capture",
-    "typed Windows completed-click focus transition"
+    "typed Windows completed-click focus transition",
+    "Hyprland observed-element foreground typing through the existing in-process Unicode virtual keyboard"
   ],
   "snapshot_and_session_implementation": "official upstream, no Styx replacement cache or private drain protocol"
 }
