@@ -10,6 +10,10 @@ use crate::session::ProviderEvidence;
 use std::collections::BTreeMap;
 use styx_contracts::{capability::*, session::SessionBinding};
 
+/// SessionRegistry provider-evidence TTL for an actively watched desktop source.
+/// Hard session fences (lock/switch/logout/watch-exit) still disconnect immediately.
+const DESKTOP_EVIDENCE_TTL: Duration = Duration::from_secs(30);
+
 /// Trusted configuration/grant facts. Native availability is NEVER stored here.
 #[derive(Clone)]
 pub(crate) struct DesktopGrant {
@@ -218,7 +222,7 @@ impl HostAuthority {
         // Collect every fallible source-derived projection BEFORE registration.
         // No native query occurs while the Host state mutex is held. Missing or
         // expired Mac facts cannot strand a registered session without its lane.
-        let providers = vec![(window_read_evidence(&source)?, Duration::from_secs(1))];
+        let providers = vec![(window_read_evidence(&source)?, DESKTOP_EVIDENCE_TTL)];
         let mut state = self.inner.state.lock().expect("Host state mutex");
         if state.shutting_down || state.desktop.is_some() {
             return Err(CoordinatorError::Busy);
@@ -425,7 +429,7 @@ impl HostCoordinator {
             .provider(
                 &binding,
                 window_read_evidence(&source)?,
-                Duration::from_secs(1),
+                DESKTOP_EVIDENCE_TTL,
             )
             .map_err(|_| CuaError::PermissionDenied)?;
         Ok(())

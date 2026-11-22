@@ -41,6 +41,8 @@ impl DesktopSourceError {
     }
 }
 type Result<T> = std::result::Result<T, DesktopSourceError>;
+const OBSERVATION_TTL: Duration = Duration::from_secs(15);
+const REPROBE_INTERVAL: Duration = Duration::from_secs(5);
 struct Observed {
     native: NativeObservation,
     windows: Option<WindowReadEvidence>,
@@ -192,6 +194,18 @@ impl DesktopSource {
         // The source lifecycle owns qualification; a stale projection cannot
         // reopen its initial claim. Discard old facts and take a strict read.
         let initial_probe = !self.inner.source.ready();
+        if !initial_probe {
+            let recent_valid = self.inner.observations.lock().is_ok_and(|held| {
+                held.as_ref().is_some_and(|obs| {
+                    obs.windows.is_some()
+                        && obs.native.observed_unlocked()
+                        && obs.at.elapsed() < REPROBE_INTERVAL
+                })
+            });
+            if recent_valid && !self.fenced() {
+                return Ok(());
+            }
+        }
         let source = self.inner.source.clone();
         *slot = Some(tokio::task::spawn_blocking(move || {
             let until = Instant::now() + Duration::from_secs(10);
@@ -251,7 +265,7 @@ impl DesktopSource {
             self.remember_lookup_failure(ProbeCause::EvidenceMissing, Instant::now());
             DesktopSourceError::Unavailable
         })?;
-        if value.at.elapsed() > Duration::from_secs(1) {
+        if value.at.elapsed() > OBSERVATION_TTL {
             self.remember_lookup_failure(ProbeCause::EvidenceExpired, value.at);
             return Err(DesktopSourceError::Unavailable);
         }
@@ -268,7 +282,7 @@ impl DesktopSource {
                 ProbeStage::EvidenceLookup,
                 cause,
                 started,
-                started + Duration::from_secs(1),
+                started + OBSERVATION_TTL,
             ));
     }
     pub(crate) fn initial_facts(
