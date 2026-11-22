@@ -67,15 +67,7 @@ pub(super) fn desktop(state: &State) -> Result<&DesktopLane, CoordinatorError> {
 }
 fn validate_context(lane: &DesktopLane, context: &PreparedContext) -> Result<(), CoordinatorError> {
     if context.session.as_ref() != Some(&lane.binding)
-        || !matches!(
-            context.capability,
-            CapabilityId::DesktopWindowsRead
-                | CapabilityId::DesktopWindowsControl
-                | CapabilityId::DesktopCapture
-                | CapabilityId::DesktopPointer
-                | CapabilityId::DesktopKeyboard
-                | CapabilityId::DesktopAccessibility
-        )
+        || context.capability != CapabilityId::DesktopWindowsRead
         || lane.source.fenced()
     {
         return Err(ErrorCategory::SessionDisconnected.into());
@@ -401,25 +393,6 @@ impl HostCoordinator {
                 Duration::from_secs(1),
             )
             .map_err(|_| CuaError::PermissionDenied)?;
-        #[cfg(target_os = "macos")]
-        for cap in [
-            CapabilityId::DesktopWindowsControl,
-            CapabilityId::DesktopCapture,
-            CapabilityId::DesktopPointer,
-            CapabilityId::DesktopKeyboard,
-            CapabilityId::DesktopAccessibility,
-        ] {
-            state
-                .sessions
-                .provider(
-                    &binding,
-                    source
-                        .provider_evidence(cap)
-                        .map_err(|_| CuaError::PermissionDenied)?,
-                    Duration::from_secs(1),
-                )
-                .map_err(|_| CuaError::PermissionDenied)?;
-        }
         Ok(())
     }
     pub(crate) fn prepare_desktop_open(
@@ -662,10 +635,18 @@ impl HostCoordinator {
         id: &OperationId,
         digest: Sha256Digest,
     ) -> Result<DesktopActionSubmission, CoordinatorError> {
-        self.refresh_desktop_source().await?;
+        let execution = loop {
+            self.refresh_desktop_source().await?;
+            match self.inner.execution_gate.clone().try_read_owned() {
+                Ok(execution) => break execution,
+                Err(_) => {
+                    // Refresh again after waiting for cleanup/maintenance so the
+                    // bounded 1s desktop-source evidence cannot expire before facts().
+                    let _waited = self.execution_for_operation(owner, id, digest).await?;
+                }
+            }
+        };
         let rx = {
-            let execution = self.execution_for_operation(owner, id, digest).await?;
-
             let runtime =
                 tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
             let mut state = self.inner.state.lock().expect("Host state mutex");
@@ -780,26 +761,19 @@ pub(super) fn test_lane(binding: SessionBinding) -> DesktopLane {
         worker: CuaWorker::new(),
         source: DesktopSource::for_tests(),
         binding,
-        grants: [
-            CapabilityId::DesktopWindowsRead,
-            CapabilityId::DesktopCapture,
-            CapabilityId::DesktopAccessibility,
-            CapabilityId::DesktopPointer,
-            CapabilityId::DesktopKeyboard,
-            CapabilityId::DesktopWindowsControl,
-        ]
-        .into_iter()
-        .map(|cap| {
-            (
-                cap,
-                DesktopGrant {
-                    configured: true,
-                    remote_grant: true,
-                    local_policy_allowed: true,
-                },
-            )
-        })
-        .collect(),
+        grants: [CapabilityId::DesktopWindowsRead]
+            .into_iter()
+            .map(|cap| {
+                (
+                    cap,
+                    DesktopGrant {
+                        configured: true,
+                        remote_grant: true,
+                        local_policy_allowed: true,
+                    },
+                )
+            })
+            .collect(),
         profiles: BTreeMap::new(),
         handles: BTreeMap::new(),
         open_history: Vec::new(),

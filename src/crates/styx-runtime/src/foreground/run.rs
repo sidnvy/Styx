@@ -233,23 +233,14 @@ async fn prepare_computer(
         .map_err(|_| ForegroundError("computer_native_session_unavailable"))?;
     custody.retain_source(source.clone());
     let mut grants = BTreeMap::new();
-    for cap in [
+    grants.insert(
         CapabilityId::DesktopWindowsRead,
-        CapabilityId::DesktopWindowsControl,
-        CapabilityId::DesktopCapture,
-        CapabilityId::DesktopPointer,
-        CapabilityId::DesktopKeyboard,
-        CapabilityId::DesktopAccessibility,
-    ] {
-        grants.insert(
-            cap,
-            crate::host::coordinator::DesktopGrant {
-                configured: true,
-                remote_grant: true,
-                local_policy_allowed: true,
-            },
-        );
-    }
+        crate::host::coordinator::DesktopGrant {
+            configured: true,
+            remote_grant: true,
+            local_policy_allowed: true,
+        },
+    );
     let binding = match host
         .authority()
         .configure_desktop(source.clone(), grants)
@@ -325,23 +316,14 @@ async fn prepare_computer(
         .map_err(|e| ForegroundError(e.code()))?;
     custody.retain_source(source.clone());
     let mut grants = BTreeMap::new();
-    for cap in [
+    grants.insert(
         CapabilityId::DesktopWindowsRead,
-        CapabilityId::DesktopWindowsControl,
-        CapabilityId::DesktopCapture,
-        CapabilityId::DesktopPointer,
-        CapabilityId::DesktopKeyboard,
-        CapabilityId::DesktopAccessibility,
-    ] {
-        grants.insert(
-            cap,
-            crate::host::coordinator::DesktopGrant {
-                configured: true,
-                remote_grant: true,
-                local_policy_allowed: true,
-            },
-        );
-    }
+        crate::host::coordinator::DesktopGrant {
+            configured: true,
+            remote_grant: true,
+            local_policy_allowed: true,
+        },
+    );
     let binding = match host
         .authority()
         .configure_desktop(source.clone(), grants)
