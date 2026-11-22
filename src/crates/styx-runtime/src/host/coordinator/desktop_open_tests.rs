@@ -117,7 +117,7 @@ fn running(host: &HostCoordinator, owner: &OwnerLease, open: &OperationSnapshot)
 }
 async fn action(driver: &FakeDriver) {
     let before = driver.calls.lock().unwrap().len();
-    let action = CuaAction::new("list_windows".into(), Default::default()).unwrap();
+    let action = CuaAction::call_tool("list_windows".into(), Default::default()).unwrap();
     assert_eq!(driver.call(&action).await.0, CuaEvidence::Acknowledged);
     assert_eq!(driver.calls.lock().unwrap().len(), before + 1);
 }

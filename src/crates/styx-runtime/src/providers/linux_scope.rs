@@ -62,10 +62,15 @@ enum Launch {
         desktop_environment: Vec<String>,
     },
     Cua {
+        mode: CuaLaunchMode,
         wayland_display: String,
         hyprland_instance: String,
         x11_display: Option<String>,
     },
+}
+enum CuaLaunchMode {
+    Serve,
+    Proxy { socket: PathBuf },
 }
 impl ScopeCommand {
     pub(crate) fn browser(
@@ -89,13 +94,59 @@ impl ScopeCommand {
         value.validate()?;
         Ok(value)
     }
-    pub(crate) async fn cua(
+    pub(crate) async fn cua_serve(
         driver: PathBuf,
         workspace: PathBuf,
         home: PathBuf,
         wayland_display: String,
         hyprland_instance: String,
         compositor_peer: (u32, u64),
+        until: Option<Instant>,
+    ) -> Result<Self> {
+        Self::cua_with_mode(
+            driver,
+            workspace,
+            home,
+            wayland_display,
+            hyprland_instance,
+            compositor_peer,
+            CuaLaunchMode::Serve,
+            until,
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn cua_proxy(
+        driver: PathBuf,
+        workspace: PathBuf,
+        home: PathBuf,
+        wayland_display: String,
+        hyprland_instance: String,
+        compositor_peer: (u32, u64),
+        socket: PathBuf,
+        until: Option<Instant>,
+    ) -> Result<Self> {
+        Self::cua_with_mode(
+            driver,
+            workspace,
+            home,
+            wayland_display,
+            hyprland_instance,
+            compositor_peer,
+            CuaLaunchMode::Proxy { socket },
+            until,
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn cua_with_mode(
+        driver: PathBuf,
+        workspace: PathBuf,
+        home: PathBuf,
+        wayland_display: String,
+        hyprland_instance: String,
+        compositor_peer: (u32, u64),
+        mode: CuaLaunchMode,
         until: Option<Instant>,
     ) -> Result<Self> {
         // These bounded names come from the trusted association lease, not a
@@ -117,6 +168,7 @@ impl ScopeCommand {
             workspace,
             home,
             launch: Launch::Cua {
+                mode,
                 wayland_display,
                 hyprland_instance,
                 x11_display,
@@ -129,6 +181,13 @@ impl ScopeCommand {
         let mut paths = vec![&self.executable, &self.workspace, &self.home];
         if let Launch::Browser { worker, config, .. } = &self.launch {
             paths.extend([worker, config]);
+        }
+        if let Launch::Cua {
+            mode: CuaLaunchMode::Proxy { socket },
+            ..
+        } = &self.launch
+        {
+            paths.push(socket);
         }
         for path in paths {
             if !path.is_absolute()
@@ -339,6 +398,9 @@ impl std::fmt::Debug for LinuxOwnedScope {
     }
 }
 impl LinuxOwnedScope {
+    pub(crate) fn cua_socket_path(&self) -> PathBuf {
+        self.private_tmp.join("cua.sock")
+    }
     /// The provider retains verified executable/worker/config fd pins and stores this
     /// scope BEFORE spawning/awaiting. Failed first attestation stays owned and
     /// Unknown; no tool or MCP initialize is permitted before it succeeds.
@@ -426,6 +488,7 @@ impl LinuxOwnedScope {
                     .arg(config);
             }
             Launch::Cua {
+                mode,
                 wayland_display,
                 hyprland_instance,
                 x11_display,
@@ -441,7 +504,22 @@ impl LinuxOwnedScope {
                 if let Some(display) = x11_display {
                     command.arg(format!("DISPLAY={display}"));
                 }
-                command.arg(&input.executable).arg("mcp");
+                match mode {
+                    CuaLaunchMode::Serve => {
+                        command
+                            .arg(&input.executable)
+                            .args(["serve", "--socket"])
+                            .arg(private_tmp.join("cua.sock"))
+                            .arg("--pid-file")
+                            .arg(private_tmp.join("cua.pid"));
+                    }
+                    CuaLaunchMode::Proxy { socket } => {
+                        command
+                            .arg(&input.executable)
+                            .args(["mcp", "--socket"])
+                            .arg(socket);
+                    }
+                }
             }
         }
         command
@@ -1367,6 +1445,9 @@ mod tests {
                 workspace: "/unused/workspace".into(),
                 home: "/unused/home".into(),
                 launch: Launch::Cua {
+                    mode: CuaLaunchMode::Proxy {
+                        socket: "/run/user/1000/styx-cua-shared/cua.sock".into(),
+                    },
                     wayland_display: "wayland-2".into(),
                     hyprland_instance: "selected-instance".into(),
                     x11_display: display.clone(),
@@ -1382,12 +1463,19 @@ mod tests {
                 .iter()
                 .position(|arg| arg == "/usr/bin/env")
                 .unwrap();
-            assert_eq!(arguments.last().unwrap(), "mcp");
+            assert_eq!(
+                &arguments[arguments.len() - 3..],
+                [
+                    OsString::from("mcp"),
+                    OsString::from("--socket"),
+                    OsString::from("/run/user/1000/styx-cua-shared/cua.sock"),
+                ]
+            );
             // Execute the exact env -i assignments built for the scoped child,
-            // using env as the fixture driver and omitting only its mcp argument.
+            // using env as the fixture driver and omitting only its mcp arguments.
             let mut launched = Command::new("/usr/bin/env");
             launched
-                .args(&arguments[env + 1..arguments.len() - 1])
+                .args(&arguments[env + 1..arguments.len() - 3])
                 .env("DISPLAY", ":999")
                 .env("CUA_DRIVER_RS_ENABLE_WAYLAND", "0")
                 .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "1")

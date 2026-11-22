@@ -27,7 +27,7 @@ use tokio_tungstenite::{
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-pub const MAX_MESSAGE: usize = 2 * 1024 * 1024;
+pub const MAX_MESSAGE: usize = styx_contracts::DESKTOP_BROWSER_FRAME_BYTES + 64 * 1024;
 
 /// Tungstenite has already queued an automatic pong when the ping is read.
 /// One pending flush is sufficient for all queued pongs: a full notification

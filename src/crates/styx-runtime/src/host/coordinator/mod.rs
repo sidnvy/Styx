@@ -8,10 +8,6 @@ pub use browser::*;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod desktop;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-mod desktop_observation;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-mod desktop_read;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) use desktop::*;
 #[cfg(target_os = "linux")]
 mod desktop_source;
