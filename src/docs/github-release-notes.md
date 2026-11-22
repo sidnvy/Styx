@@ -7,30 +7,36 @@ several conversations can use the same computer.
 
 ## Changes
 
-This release candidate replaces Styx's hand-written 8-tool Desktop API with
-direct passthrough to each Host's native `cua-driver` (`0.47.24`) MCP server:
+This release candidate converges Desktop session ownership into the Host, fixes
+Gateway owner rebinding after abrupt Host disconnects, and adds Android
+multi-display & transition-observation support on top of native `cua-driver`
+(`0.47.24`) passthrough:
 
-- **Public MCP surface (38 tools)**: Replaces the 8 legacy `computer_*` Desktop
-  tools with `desktop_list_tools` and `desktop_call`. Styx handles
-  authentication, Host routing and runtime lifecycle while forwarding native
-  CUA tool catalogs, arguments, multimodal results (`image`, `structuredContent`)
-  and native refusals verbatim.
-- **Host-owned Desktop lifecycle**: Linux and Windows Hosts now manage a shared
-  `cua-driver serve` daemon with per-caller `cua-driver mcp --socket` proxies,
-  isolating caller sessions while preserving shared Desktop state. macOS uses
-  the App-owned CUA daemon directly without injecting synthetic session IDs.
-- **8 MiB Desktop framing**: Aligns Gateway, Host link and CUA transport frame
-  limits to 8 MiB so combined accessibility-tree + screenshot responses pass
-  through intact.
-- **Linux/Hyprland native CUA fixes**: Adds AT-SPI checkbox/radio role support
-  for radio buttons and routes Hyprland foreground `press_key` through Wayland
-  virtual keyboard without requiring the optional `hyprland_input` plugin.
-- **Gateway forwarding credential**: Admits the independent public MCP
-  forwarding credential alongside existing Bearer access.
+- **Host-owned Desktop sessions & stateless Gateway routing (`computer_v3`)**:
+  Moves Desktop session lifecycle, `OperationLedger` once-only dispatch and
+  caller state fully into the Host; Gateway becomes a stateless authenticated
+  router for Desktop just like Exec, Browser and Android. Removes dead
+  pre-passthrough Desktop policies and legacy artifacts.
+- **Abrupt Host disconnect recovery**: Retires superseded old-generation owner
+  bindings cleanly when a Host reconnects with a new generation after an abrupt
+  crash, power loss or kernel panic, without replaying prior operations,
+  fabricating cleanup completion or weakening authorization.
+- **Public MCP surface (39 tools)**: Adds `android_list_displays` and per-display
+  routing (`display_id`) for `android_observe`, `android_act` and
+  `android_run_steps`, alongside `desktop_list_tools` and `desktop_call` native
+  CUA passthrough (8 MiB framing, verbatim multimodal results and refusals).
+- **Android transition observation & multi-display isolation**: Waits for
+  post-action UI transitions with independent `(caller, display_id)`
+  observations so concurrent callers or multiple virtual displays do not
+  contaminate each other.
+- **Linux/Hyprland native CUA & Gateway forwarding**: Retains AT-SPI
+  checkbox/radio support, Wayland virtual keyboard routing, Desktop source
+  refresh hardening and independent public MCP forwarding credential support.
 
-Update both Gateway and desktop Hosts to `0.8.1-rc.4`, then refresh your
-ChatGPT Custom MCP connector so it rediscovers the updated 38-tool schema.
-Existing profiles, identities, pairing and capability grants are preserved.
+Update both Gateway and desktop Hosts together to `0.8.1-rc.5` (Desktop wire
+protocol updated to `computer_v3`), then refresh your ChatGPT Custom MCP
+connector so it rediscovers the updated 39-tool schema. Existing profiles,
+identities, pairing and capability grants are preserved.
 
 ### Android package availability
 
