@@ -77,7 +77,7 @@ impl HostScope {
         self.settings.lock().ok()?.upgrade()
     }
 
-    fn open(state_dir: &Path) -> Result<Self, AppError> {
+    pub(crate) fn open(state_dir: &Path) -> Result<Self, AppError> {
         if !state_dir.is_absolute()
             || state_dir.components().any(|p| {
                 !matches!(
@@ -633,11 +633,17 @@ impl HostApp {
             // paired, Stopped Host must remain reopenable and normally quitable.
             // No credentials or execution-capable Stopped snapshot escape.
             let host_scope = app.scope.clone();
-            let binding = tokio::task::spawn_blocking(move || {
-                crate::store::native_host_snapshot::NativeHostSnapshot::inspect_gateway_binding_for_app(
+            let bundle = app.native_runtime.clone();
+            let binding = tokio::task::spawn_blocking(move || match bundle {
+                Some(runtime) => crate::store::native_host_snapshot::NativeHostSnapshot::inspect_gateway_binding_for_app_retained(
                     host_scope.state_dir(),
                     host_scope.clone(),
-                )
+                    runtime,
+                ),
+                None => crate::store::native_host_snapshot::NativeHostSnapshot::inspect_gateway_binding_for_app(
+                    host_scope.state_dir(),
+                    host_scope.clone(),
+                ),
             })
             .await
             .map_err(|_| AppError("app_host_binding_reader_failed"))?;
