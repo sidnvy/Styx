@@ -97,12 +97,38 @@ class StyxAccessibilityService : AccessibilityService() {
 
     // Windows belong to their own displays. rootInActiveWindow may point at a different
     // display after a remote agent switches focus, so it is not safe for display routing.
+    // Prefer the focused/active application or system overlay window (e.g. NotificationShade,
+    // Quick Settings, permission dialogs) before falling back to any application window on
+    // unfocused secondary displays.
     private fun rootOnDisplay(displayId: Int): AccessibilityNodeInfo? {
         val windows = windowsOnAllDisplays[displayId] ?: return null
-        for (window in windows) {
+        val interactive = windows.filter {
+            it.type == AccessibilityWindowInfo.TYPE_APPLICATION ||
+                it.type == AccessibilityWindowInfo.TYPE_SYSTEM
+        }
+        // 1. Focused or active window (handles both foreground apps and active system overlays
+        //    such as NotificationShade / Quick Settings while skipping passive status/task bars).
+        for (window in interactive) {
+            if (window.isFocused || window.isActive) {
+                window.root?.let { return it }
+            }
+        }
+        // 2. Application window (covers unfocused secondary displays).
+        for (window in interactive) {
             if (window.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
                 window.root?.let { return it }
             }
+        }
+        // 3. Largest system window as last resort if a ROM omits focus flags on a modal overlay.
+        val bounds = Rect()
+        val byArea = interactive
+            .filter { it.type == AccessibilityWindowInfo.TYPE_SYSTEM }
+            .sortedByDescending {
+                it.getBoundsInScreen(bounds)
+                bounds.width().toLong() * bounds.height().toLong()
+            }
+        for (window in byArea) {
+            window.root?.let { return it }
         }
         return null
     }
@@ -132,11 +158,15 @@ class StyxAccessibilityService : AccessibilityService() {
             val metrics = DisplayMetrics().also { target.getRealMetrics(it) }
             val windows = JSONArray()
             for (window in allWindows[target.displayId].orEmpty()) {
-                if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
+                val isApp = window.type == AccessibilityWindowInfo.TYPE_APPLICATION
+                val isActiveSystem = window.type == AccessibilityWindowInfo.TYPE_SYSTEM &&
+                    (window.isFocused || window.isActive)
+                if (!isApp && !isActiveSystem) continue
                 val root = window.root
                 val packageName = try { root?.packageName?.toString() } finally { root?.recycle() }
                 val bounds = Rect().also { window.getBoundsInScreen(it) }
                 windows.put(JSONObject().put("window_id", window.id)
+                    .put("type", if (isApp) "application" else "system")
                     .put("bounds", JSONArray(listOf(bounds.left, bounds.top, bounds.right, bounds.bottom)))
                     .put("package_name", packageName ?: JSONObject.NULL)
                     .put("title", window.title?.toString() ?: JSONObject.NULL)
