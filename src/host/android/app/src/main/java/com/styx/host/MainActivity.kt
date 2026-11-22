@@ -155,6 +155,13 @@ class MainActivity : Activity() {
         }
         setContentView(scroll)
         renderState(null)
+        handlePairingIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handlePairingIntent(intent)
     }
 
     override fun onResume() {
@@ -438,10 +445,20 @@ class MainActivity : Activity() {
         return permCard
     }
 
-    /** Parse Gateway's standard "https://host:port CODE" or single-token clipboard text. */
+    /** Parse Gateway's standard "https://host:port CODE", styx://pair URI, or single-token clipboard text. */
     private fun parseInvitation(raw: String): Pair<String?, String?> {
         val trimmed = raw.trim()
         if (trimmed.isEmpty()) return null to null
+        if (trimmed.startsWith("styx://", ignoreCase = true)) {
+            val uri = Uri.parse(trimmed)
+            if (uri.host.equals("pair", ignoreCase = true)) {
+                val origin = uri.getQueryParameter("origin")?.trim()?.takeIf {
+                    it.startsWith("https://", ignoreCase = true) || it.startsWith("http://", ignoreCase = true)
+                }
+                val code = uri.getQueryParameter("code")?.trim()?.takeIf { it.isNotEmpty() }
+                if (origin != null || code != null) return origin to code
+            }
+        }
         val tokens = trimmed.split(Regex("\\s+")).filter { it.isNotBlank() }
         if (tokens.size >= 2) {
             val urlToken = tokens.firstOrNull { it.startsWith("https://", true) || it.startsWith("http://", true) }
@@ -455,6 +472,29 @@ class MainActivity : Activity() {
         } else {
             null to trimmed
         }
+    }
+
+    private fun handlePairingIntent(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_VIEW) return
+        val uri = intent.data ?: return
+        if (!uri.scheme.equals("styx", ignoreCase = true) || !uri.host.equals("pair", ignoreCase = true)) return
+        intent.data = null
+        val origin = uri.getQueryParameter("origin")?.trim()?.takeIf {
+            it.startsWith("https://", ignoreCase = true) || it.startsWith("http://", ignoreCase = true)
+        }
+        val code = uri.getQueryParameter("code")?.trim()?.takeIf { it.isNotEmpty() }
+        if (origin == null && code == null) return
+        if (CredentialStore(applicationContext).exists()) {
+            AlertDialog.Builder(this)
+                .setTitle("Already paired")
+                .setMessage("This device is already paired to a Gateway. Tap Forget Pairing first if you want to pair it to another Gateway.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        if (origin != null) gatewayInput.setText(origin)
+        if (code != null) codeInput.setText(code)
+        showSetupMessage("Filled invitation from QR code. Review the Gateway address and tap Pair Device.", isError = false)
     }
 
     private fun pasteInvitationFromClipboard() {
