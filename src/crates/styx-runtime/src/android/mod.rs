@@ -123,7 +123,7 @@ impl From<LinkError> for ConnectFailure {
                 retryable: false,
                 revoked: true,
             },
-            LinkError::UpgradeStatus(503) => Self::network("gateway_wss_unavailable"),
+            LinkError::UpgradeStatus(409 | 503) => Self::network("gateway_wss_unavailable"),
             LinkError::Deadline | LinkError::Tls(TlsError::HandshakeTimeout) => {
                 Self::network("gateway_transport_deadline")
             }
