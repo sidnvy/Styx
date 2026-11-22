@@ -5,9 +5,11 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use regex::RegexSet;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
+#[cfg(not(target_os = "android"))]
+use styx_contracts::legacy::CapabilityPayload;
 use styx_contracts::{
     identity::{DeviceId, Sha256Digest},
-    legacy::{CapabilityPayload, JoinPayload},
+    legacy::JoinPayload,
 };
 
 const MAX_BODY: usize = 16 * 1024;
@@ -62,10 +64,13 @@ pub(super) enum ProfileError {
     Signature,
     #[error("device identity proof rejected")]
     Proof,
+    #[cfg(not(target_os = "android"))]
     #[error("capability proof does not identify this stored device")]
     CapabilityIdentity,
+    #[cfg(not(target_os = "android"))]
     #[error("capability proof supplied a different SPKI")]
     CapabilityKey,
+    #[cfg(not(target_os = "android"))]
     #[error("invalid capability signing scope")]
     CapabilityScope,
     #[error("profile validator unavailable")]
@@ -91,6 +96,7 @@ pub(super) struct StoredProfile {
 pub(super) struct VerifiedProfile {
     raw: Vec<u8>,
     profile: StoredProfile,
+    #[cfg(not(target_os = "android"))]
     public_key: DevicePublicKey,
 }
 impl std::fmt::Debug for VerifiedProfile {
@@ -236,9 +242,11 @@ pub(super) fn verify_join(
     Ok(VerifiedProfile {
         raw,
         profile,
+        #[cfg(not(target_os = "android"))]
         public_key,
     })
 }
+#[cfg(not(target_os = "android"))]
 impl VerifiedProfile {
     /// Caller first proves role, exact stored content hash and private-reader
     /// provenance. Preserve these ORIGINAL profile bytes, never normalize them.

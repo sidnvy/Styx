@@ -15,10 +15,12 @@ use zeroize::Zeroizing;
 // Distinct from legacy 43-character tokens. Both tagged values retain the full
 // random 256 bits and are authenticated by the existing enrollment journal.
 pub(crate) const INVITE_PREFIX: &str = "SCP1";
+#[cfg(not(target_os = "android"))]
 pub(super) const CLAIM_PREFIX: &str = "SCC1";
 pub(crate) fn is_invitation(token: &str) -> bool {
     token.len() == 47 && token.starts_with(INVITE_PREFIX)
 }
+#[cfg(not(target_os = "android"))]
 pub(super) fn is_claim(token: &str) -> bool {
     token.len() == 47 && token.starts_with(CLAIM_PREFIX)
 }
@@ -31,6 +33,7 @@ const CLIENT: &[u8] = b"Styx Host pairing v1";
 type Result<T> = std::result::Result<T, &'static str>;
 const INVALID: &str = "pairing_code_invalid_or_expired";
 
+#[cfg(not(target_os = "android"))]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Issued {
@@ -38,6 +41,7 @@ pub(crate) struct Issued {
     pub(crate) expires_at: u64,
     one_use: bool,
 }
+#[cfg(not(target_os = "android"))]
 impl Issued {
     pub(crate) fn valid(&self, now: u64) -> bool {
         let code = self.pairing_code.as_bytes();

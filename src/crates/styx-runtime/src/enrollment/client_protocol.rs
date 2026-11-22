@@ -64,13 +64,17 @@ type Result<T> = std::result::Result<T, ProtocolError>;
 
 pub(crate) struct PendingJoin {
     pub(crate) request_id: String,
+    #[cfg(not(target_os = "android"))]
     pub(crate) comparison_code: String,
     pub(crate) expires_at: u64,
     pub(crate) claim_secret: Zeroizing<String>,
 }
 pub(crate) struct ObservedSelf {
+    #[cfg(not(target_os = "android"))]
     pub(crate) generation: String,
+    #[cfg(not(target_os = "android"))]
     pub(crate) computer_approved: bool,
+    #[cfg(not(target_os = "android"))]
     pub(crate) browser_approved: bool,
 }
 
@@ -223,6 +227,7 @@ pub(crate) fn validate_recorded_pending(
     }
     Ok(PendingJoin {
         request_id: response.request_id,
+        #[cfg(not(target_os = "android"))]
         comparison_code: response.comparison_code,
         expires_at: response.expires_at,
         claim_secret: response.claim_secret,
@@ -243,7 +248,9 @@ pub(crate) fn claim_request(pending: &PendingJoin) -> Result<Zeroizing<Vec<u8>>>
 #[derive(Deserialize)]
 struct Capabilities {
     exec: bool,
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     computer: bool,
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     browser: bool,
 }
 #[derive(Deserialize)]
@@ -435,8 +442,11 @@ pub(crate) fn validate_self(seed: &JoinIdentity, raw: &[u8]) -> Result<ObservedS
         return Err(ProtocolError("self_proof"));
     }
     Ok(ObservedSelf {
+        #[cfg(not(target_os = "android"))]
         generation: response.generation,
+        #[cfg(not(target_os = "android"))]
         computer_approved: response.capabilities.computer,
+        #[cfg(not(target_os = "android"))]
         browser_approved: response.capabilities.browser,
     })
 }

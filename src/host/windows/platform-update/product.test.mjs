@@ -11,7 +11,7 @@ test('Windows native installer admission holds package mutex and observes runnin
   const csc=path.join(process.env.WINDIR,'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),gate=path.join(temp,'gate.exe'),harness=path.join(temp,'test.exe');
   const compile=args=>execFileSync(csc,['/nologo','/warn:4','/warnaserror+','/target:exe','/reference:System.Web.Extensions.dll',...args],{windowsHide:true,stdio:'pipe'});
   compile(['/out:'+gate,path.join(here,'InstallGate.cs')]);
-  compile(['/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/main:InstallCoordinationTest','/out:'+harness,path.join(here,'../Styx.cs'),path.join(here,'InstallCoordinationTest.cs')]);
+  compile(['/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/main:InstallCoordinationTest','/out:'+harness,path.join(here,'../Styx.cs'),path.join(here,'../NativeBootstrap.cs'),path.join(here,'../CoreClient.cs'),path.join(here,'../LocalAppControl.cs'),path.join(here,'InstallCoordinationTest.cs')]);
   execFileSync(harness,[path.join(temp,'Programs Styx 中文'),gate],{windowsHide:true,timeout:30000,stdio:'pipe'});
 });
 
