@@ -2,6 +2,7 @@ package com.styx.host
 
 import android.app.KeyguardManager
 import android.content.Context
+import android.os.PowerManager
 import org.json.JSONException
 import org.json.JSONObject
 
@@ -41,6 +42,11 @@ class AndroidPlatform(context: Context) {
         fun readiness(context: Context): JSONObject = JSONObject()
             .put("accessibility", StyxAccessibilityService.instance != null)
             .put("device_locked", context.getSystemService(KeyguardManager::class.java).isKeyguardLocked)
+            .put(
+                "ignoring_battery_optimizations",
+                context.getSystemService(PowerManager::class.java)
+                    .isIgnoringBatteryOptimizations(context.packageName)
+            )
         fun failure(code: String, message: String, uncertain: Boolean = false): JSONObject = JSONObject()
             .put("ok", false)
             .put("error", JSONObject().put("code", code).put("message", message).put("uncertain", uncertain))

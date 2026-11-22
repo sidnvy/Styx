@@ -76,8 +76,9 @@ class MainActivity : Activity() {
         }
         content.addView(pairButton)
         content.addView(button("Enable Android control") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
+        content.addView(button("Battery optimization settings") { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) })
         content.addView(button("Start Host") { startHost() })
-        content.addView(button("Stop Host") { stopService(Intent(this, HostService::class.java)); refreshStatus() })
+        content.addView(button("Stop Host") { stopHost(); refreshStatus() })
         content.addView(button("Refresh status") { refreshStatus() })
         forgetButton = button("Forget pairing") { confirmForgetPairing() }
         content.addView(forgetButton)
@@ -102,7 +103,7 @@ class MainActivity : Activity() {
             .setMessage("Stop this Host and remove its local pairing. A new invitation is required to pair again. Revoke the old device separately on your Gateway.")
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Forget") { _, _ ->
-                stopService(Intent(this, HostService::class.java))
+                stopHost()
                 pairButton.isEnabled = false
                 forgetButton.isEnabled = false
                 statusView.text = "Forgetting pairing…"
@@ -126,6 +127,11 @@ class MainActivity : Activity() {
         }
         startForegroundService(Intent(this, HostService::class.java))
         refreshStatus()
+    }
+
+    private fun stopHost() {
+        // Send STOP action so HostService completes Gateway transport drain before stopping itself.
+        startService(Intent(this, HostService::class.java).setAction(HostService.STOP))
     }
 
     private fun refreshStatus() {

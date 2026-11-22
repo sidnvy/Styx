@@ -1,10 +1,28 @@
+import java.util.Properties
+
 plugins { id("com.android.application") }
 
 val workspaceVersion = rootProject.file("../../../Cargo.toml").readLines()
     .map { it.trim() }.dropWhile { it != "[workspace.package]" }.drop(1)
     .takeWhile { !it.startsWith("[") }.first { it.startsWith("version =") }
     .substringAfter('"').substringBefore('"')
-val releaseKeystore = providers.environmentVariable("STYX_ANDROID_KEYSTORE")
+
+// Fixed release signing comes from environment variables or an external
+// signing.properties file outside the repository (never committed to Git).
+val signingProps = Properties().apply {
+    val propsPath = providers.environmentVariable("STYX_ANDROID_SIGNING_PROPERTIES").orNull
+    if (!propsPath.isNullOrBlank()) {
+        val propsFile = file(propsPath)
+        require(propsFile.isFile) { "STYX_ANDROID_SIGNING_PROPERTIES file does not exist: $propsPath" }
+        propsFile.inputStream().use { load(it) }
+    }
+}
+fun signingSetting(envName: String, propName: String): String? =
+    providers.environmentVariable(envName).orNull?.takeIf { it.isNotBlank() }
+        ?: signingProps.getProperty(propName)?.takeIf { it.isNotBlank() }
+
+val releaseKeystorePath = signingSetting("STYX_ANDROID_KEYSTORE", "storeFile")
+val debugKeystorePath = providers.environmentVariable("STYX_ANDROID_DEBUG_KEYSTORE").orNull?.takeIf { it.isNotBlank() }
 
 android {
     namespace = "com.styx.host"
@@ -20,20 +38,52 @@ android {
         ndk { abiFilters += "arm64-v8a" }
     }
     signingConfigs {
-        if (releaseKeystore.isPresent) {
+        if (debugKeystorePath != null) {
+            getByName("debug") {
+                storeFile = file(debugKeystorePath)
+                storePassword = providers.environmentVariable("STYX_ANDROID_DEBUG_KEYSTORE_PASSWORD").orElse("android").get()
+                keyAlias = providers.environmentVariable("STYX_ANDROID_DEBUG_KEY_ALIAS").orElse("androiddebugkey").get()
+                keyPassword = providers.environmentVariable("STYX_ANDROID_DEBUG_KEY_PASSWORD").orElse("android").get()
+                enableV1Signing = false
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
+        if (releaseKeystorePath != null) {
             create("release") {
-                storeFile = file(releaseKeystore.get())
-                storePassword = providers.environmentVariable("STYX_ANDROID_KEYSTORE_PASSWORD").get()
-                keyAlias = providers.environmentVariable("STYX_ANDROID_KEY_ALIAS").get()
-                keyPassword = providers.environmentVariable("STYX_ANDROID_KEY_PASSWORD").get()
+                storeFile = file(releaseKeystorePath)
+                storePassword = requireNotNull(signingSetting("STYX_ANDROID_KEYSTORE_PASSWORD", "storePassword")) {
+                    "Set STYX_ANDROID_KEYSTORE_PASSWORD (or storePassword in signing.properties)"
+                }
+                keyAlias = requireNotNull(signingSetting("STYX_ANDROID_KEY_ALIAS", "keyAlias")) {
+                    "Set STYX_ANDROID_KEY_ALIAS (or keyAlias in signing.properties)"
+                }
+                keyPassword = requireNotNull(signingSetting("STYX_ANDROID_KEY_PASSWORD", "keyPassword")) {
+                    "Set STYX_ANDROID_KEY_PASSWORD (or keyPassword in signing.properties)"
+                }
+                // minSdk=30: v2/v3 only avoids legacy JAR v1 tampering and supports key rotation.
+                enableV1Signing = false
+                enableV2Signing = true
+                enableV3Signing = true
             }
         }
     }
     buildTypes {
         release {
-            isMinifyEnabled = false
-            if (releaseKeystore.isPresent) signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (releaseKeystorePath != null) signingConfig = signingConfigs.getByName("release")
         }
+    }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+    lint {
+        // Keep offline reproducible release builds independent of uncached lint-gradle downloads.
+        checkReleaseBuilds = false
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
