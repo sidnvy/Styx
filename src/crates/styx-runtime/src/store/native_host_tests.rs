@@ -691,3 +691,172 @@ fn changed_phase_material_or_journal_during_prefix_never_delivers_captured_bytes
         );
     }
 }
+
+#[test]
+fn gateway_binding_inspection_uses_upgraded_app_bundle_with_same_publisher() {
+    let fixture = PrefixFixture::new();
+    let parent = PrivateRoot::open(&fixture.0).unwrap();
+    let inputs = RejectionInputs::new(&fixture.0);
+    let root = fresh(&parent, "upgraded-host");
+    let device_id: styx_contracts::identity::DeviceId = "store-upgrade-binding".try_into().unwrap();
+    let fingerprint = Sha256Digest::of_bytes(inputs.identity.public_key().spki_der());
+    let seed = NativeHostJoinSeed {
+        schema: NATIVE_HOST_JOIN_SEED_SCHEMA,
+        root_identity: root.marker().root_identity.clone(),
+        scope_generation: root.marker().scope_generation,
+        deployment_raw_sha256: Sha256Digest::of_bytes(DEPLOYMENT),
+        runtime: inputs.selection.clone(),
+        gateway_origin: "https://127.0.0.1:22022".into(),
+        anchor_sha256: inputs.anchor_sha256,
+        device_id: device_id.clone(),
+        fingerprint,
+        public_key_pem: inputs.identity.public_key_pem().into(),
+        label: "Upgraded local gateway host".into(),
+        platform: "linux".into(),
+        cwd: "/".into(),
+        shell: "/bin/sh".into(),
+        computer_requested: true,
+        browser_requested: true,
+    };
+    let raw_seed = serde_json::to_vec(&seed).unwrap();
+    let mut canonical = state(&root);
+    canonical.desired.host = Some(NativeComponentDesired {
+        manager: NativeManager::AppManaged,
+        run: NativeRunDesired::Running,
+        autostart: NativeAutostartDesired::Disabled,
+    });
+    canonical.extensions.insert(
+        SEED_EXTENSION.into(),
+        serde_json::value::to_raw_value(&Sha256Digest::of_bytes(&raw_seed)).unwrap(),
+    );
+    canonical.extensions.insert(
+        NATIVE_RUNTIME_SELECTION_KEY.into(),
+        serde_json::value::to_raw_value(&inputs.selection).unwrap(),
+    );
+    let mut store = root
+        .initialize_host_pending(
+            DEPLOYMENT,
+            &canonical,
+            FreshHostFiles {
+                ca_certificate_pem: &inputs.ca,
+                private_identity_pem: inputs.identity.protected_pkcs8_pem(),
+                seed_binding: &raw_seed,
+            },
+            NOW,
+        )
+        .unwrap_or_else(|failure| panic!("init host: {:?}", failure.error()));
+    let credential = b"0123456789abcdef0123456789abcdef_token";
+    store
+        .append(NativeHostJoinFile::JoinDispatched, PREFIX_PHASES[0])
+        .unwrap();
+    store
+        .append(NativeHostJoinFile::JoinReply, PREFIX_PHASES[1])
+        .unwrap();
+    store
+        .append(NativeHostJoinFile::Credential, credential)
+        .unwrap();
+    store
+        .append(NativeHostJoinFile::ConfirmDispatched, PREFIX_PHASES[3])
+        .unwrap();
+    let ready = serde_json::to_vec(&styx_contracts::native_host::NativeHostReady {
+        schema: 1,
+        seed_sha256: Sha256Digest::of_bytes(&raw_seed),
+        request_id: "upgrade-req-1".into(),
+        device_id,
+        fingerprint,
+        generation: "gen-1".into(),
+        credential_sha256: Sha256Digest::of_bytes(credential),
+        computer_approved: true,
+        browser_approved: true,
+    })
+    .unwrap();
+    store.append(NativeHostJoinFile::Ready, &ready).unwrap();
+    drop(store);
+
+    let build_release = |dir_name: &str, version: &str, key_byte: u8| {
+        let package = fixture.0.join(dir_name);
+        fs::DirBuilder::new().mode(0o700).create(&package).unwrap();
+        let payload = package.join("payload");
+        fs::DirBuilder::new().mode(0o700).create(&payload).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(payload.join("bin"))
+            .unwrap();
+        let files: Vec<_> = [
+            ("LICENSE", b"synthetic store fixture".as_slice(), false),
+            (
+                "bin/styx",
+                format!("\x7fELF synthetic {version}").into_bytes().leak() as &[u8],
+                true,
+            ),
+            ("source-inputs.json", b"{}".as_slice(), false),
+        ]
+        .into_iter()
+        .map(|(name, bytes, executable)| {
+            rejection_fixture_file(&payload.join(name), bytes, executable);
+            serde_json::json!({"path":name,"size":bytes.len(),
+                "sha256":Sha256Digest::of_bytes(bytes),"executable":executable})
+        })
+        .collect();
+        let signer = SigningKey::from_bytes(&[key_byte; 32]);
+        let der = signer.verifying_key().to_public_key_der().unwrap();
+        let pem = format!(
+            "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
+            base64::engine::general_purpose::STANDARD.encode(der.as_bytes())
+        );
+        let publisher = package.join("publisher.pem");
+        rejection_fixture_file(&publisher, pem.as_bytes(), false);
+        let pin = crate::crypto::PublisherVerifyingKey::from_spki_pem(pem.as_bytes())
+            .unwrap()
+            .fingerprint()
+            .unwrap();
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "schema":2,"runtime_format":"native_rust_v1","component":"styx",
+            "scope":"runtime_candidate","minimum_reader":"native_runtime_v2",
+            "target":"x86_64-unknown-linux-gnu","version":version,"entrypoint":"bin/styx",
+            "source":{"revision":"2".repeat(40),"inputs_sha256":Sha256Digest::of_bytes(b"{}")},
+            "contracts":{"control":1,"management_state":1},"files":files,"external_workers":[]
+        }))
+        .unwrap();
+        rejection_fixture_file(&payload.join("manifest.json"), &manifest, false);
+        rejection_fixture_file(
+            &payload.join("manifest.sig"),
+            &signer.sign(&manifest).to_bytes(),
+            false,
+        );
+        std::sync::Arc::new(crate::release::verify(&payload, &publisher, &pin).unwrap())
+    };
+    let upgraded = build_release("upgraded-v2", "0.8.1-test.2", 76);
+    let foreign = build_release("foreign-v2", "0.8.1-test.2", 77);
+
+    // Simulate replacing the installed App bundle so the old persisted selection is gone.
+    fs::remove_dir_all(fixture.0.join("signed-rejection-input")).unwrap();
+
+    let profile = fixture.0.join("upgraded-host");
+    let scope = std::sync::Arc::new(crate::app::HostScope::open(&profile).unwrap());
+    assert!(
+        crate::store::native_host_snapshot::NativeHostSnapshot::inspect_gateway_binding_for_app(
+            &profile,
+            scope.clone(),
+        )
+        .is_err(),
+        "stale persisted selection without bundled candidate must fail"
+    );
+    let binding = crate::store::native_host_snapshot::NativeHostSnapshot::inspect_gateway_binding_for_app_retained(
+        &profile,
+        scope.clone(),
+        upgraded,
+    )
+    .expect("upgraded bundle with matching publisher must preserve local gateway binding");
+    assert_eq!(binding.gateway_origin(), "https://127.0.0.1:22022");
+    assert_eq!(*binding.anchor_sha256(), inputs.anchor_sha256);
+    assert!(
+        crate::store::native_host_snapshot::NativeHostSnapshot::inspect_gateway_binding_for_app_retained(
+            &profile,
+            scope,
+            foreign,
+        )
+        .is_err(),
+        "foreign publisher bundle must still be refused"
+    );
+}

@@ -132,6 +132,24 @@ impl NativeHostSnapshot {
             anchor_sha256: snapshot.seed.anchor_sha256,
         })
     }
+    pub(crate) fn inspect_gateway_binding_for_app_retained(
+        path: &Path,
+        scope: Arc<crate::app::HostScope>,
+        runtime: Arc<crate::release::VerifiedNativeRelease>,
+    ) -> JournalResult<HostGatewayBinding> {
+        let snapshot = Self::open_source_retained(
+            path,
+            Some(scope),
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            None,
+            RunPolicy::ControlBinding,
+            Some(runtime),
+        )?;
+        Ok(HostGatewayBinding {
+            gateway_origin: snapshot.seed.gateway_origin.clone(),
+            anchor_sha256: snapshot.seed.anchor_sha256,
+        })
+    }
     pub(crate) fn open(path: &Path) -> JournalResult<Self> {
         Self::open_source(
             path,
