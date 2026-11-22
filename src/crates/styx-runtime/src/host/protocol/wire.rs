@@ -177,8 +177,10 @@ pub enum TransportDrainOutcome {
 }
 /// Existing wait_for permits thirty seconds. Keep an explicit bounded margin
 /// for provider settlement; ordinary operations and owner cleanup are unchanged.
+#[cfg(not(target_os = "android"))]
 pub(crate) const BROWSER_WAIT_PREPARE_TIMEOUT_MS: u32 = 35_000;
 impl Call {
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn response_budget(&self) -> Option<std::time::Duration> {
         if self.is_computer() {
             return None;

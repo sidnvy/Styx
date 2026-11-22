@@ -11,26 +11,32 @@ use super::{
 pub(crate) mod browser;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) mod computer;
-use super::callers::{OwnerRecord, order as owner_order};
+use super::callers::OwnerRecord;
+#[cfg(not(target_os = "android"))]
+use super::callers::order as owner_order;
 #[cfg(not(target_os = "android"))]
 use super::exec_tasks::{self as tasks, operations::ExecPort};
 pub mod wire;
 #[cfg(test)]
 use super::coordinator::CoordinatorError;
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
+#[cfg(not(target_os = "android"))]
 pub(crate) use owner_order::epoch_key as paired_owner_epoch;
-use std::{collections::BTreeMap, io::Write, time::Duration};
+#[cfg(not(target_os = "android"))]
+use std::collections::BTreeMap;
+use std::{io::Write, time::Duration};
+#[cfg(not(target_os = "android"))]
+use styx_contracts::{capability::CapabilityId, operation::*};
 use styx_contracts::{
-    capability::CapabilityId,
     error::{ErrorCategory, ExecutionCertainty},
     identity::*,
-    operation::*,
 };
 use styx_core::operations::{OperationSnapshot, OwnerLease};
 use tokio_util::sync::CancellationToken;
 use wire::*;
 
 const FRAME_LIMIT: usize = 256 * 1024;
+#[cfg(not(target_os = "android"))]
 const SPEC_LIMIT: usize = 128 * 1024;
 const RESPONSE_LIMIT: usize = 128 * 1024;
 
@@ -126,6 +132,7 @@ pub struct HostProtocol<'a> {
     coordinator: HostCoordinator,
     authority: &'a HostAuthority,
     paired: bool,
+    #[cfg(not(target_os = "android"))]
     command_environment: BTreeMap<String, String>,
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     browser: Option<std::sync::Arc<browser::BrowserInputs>>,
@@ -185,6 +192,7 @@ impl<'a> HostProtocol<'a> {
             coordinator,
             authority,
             paired,
+            #[cfg(not(target_os = "android"))]
             command_environment: BTreeMap::new(),
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             browser: None,
@@ -195,6 +203,7 @@ impl<'a> HostProtocol<'a> {
     /// Trusted local OS defaults are resolved BEFORE Core preparation, so
     /// the operation digest and retained payload include every effective value.
     /// This is bootstrap data, never a post-permit provider environment fallback.
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn with_command_environment(
         mut self,
         environment: BTreeMap<String, String>,
@@ -599,8 +608,10 @@ impl<'a> HostProtocol<'a> {
                         rejection(ErrorCategory::Unauthorized)
                     };
                 };
+                #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
                 let until =
                     tokio::time::Instant::now() + Duration::from_millis(u64::from(timeout_ms));
+                #[cfg_attr(target_os = "android", allow(unused_mut))]
                 let mut complete = match self
                     .authority
                     .cleanup_owner(&cleanup, Duration::from_millis(u64::from(timeout_ms)))

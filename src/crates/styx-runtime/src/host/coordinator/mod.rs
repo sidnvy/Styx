@@ -96,10 +96,10 @@ struct State {
     desktop: Option<desktop::DesktopLane>,
 }
 impl State {
-    fn new(ledger: OperationLedger, facts: AdmissionFacts, origin: Instant) -> Self {
+    fn new(ledger: OperationLedger, facts: AdmissionFacts, _origin: Instant) -> Self {
         #[cfg(not(target_os = "android"))]
         let sessions =
-            crate::session::HostSessions::bootstrap(ledger.host_generation().clone(), origin);
+            crate::session::HostSessions::bootstrap(ledger.host_generation().clone(), _origin);
         Self {
             ledger,
             facts,
@@ -453,6 +453,7 @@ impl HostCoordinator {
             None => Ok(wait.await),
         }
     }
+    #[cfg(not(target_os = "android"))]
     async fn execution_for_operation(
         &self,
         owner: &OwnerLease,
@@ -469,12 +470,14 @@ impl HostCoordinator {
         self.execution_before(deadline).await
     }
 }
+#[cfg(not(target_os = "android"))]
 struct UnsettledAction {
     inner: Arc<Inner>,
     operation: OperationId,
     settled: bool,
     _execution: OwnedRwLockReadGuard<()>,
 }
+#[cfg(not(target_os = "android"))]
 impl Drop for UnsettledAction {
     fn drop(&mut self) {
         if !self.settled {
@@ -487,12 +490,14 @@ impl Drop for UnsettledAction {
         }
     }
 }
+#[cfg(not(target_os = "android"))]
 struct UnsettledStart {
     inner: Arc<Inner>,
     operation: OperationId,
     settled: bool,
     _execution: OwnedRwLockReadGuard<()>,
 }
+#[cfg(not(target_os = "android"))]
 impl Drop for UnsettledStart {
     fn drop(&mut self) {
         if !self.settled {
@@ -562,6 +567,7 @@ impl HostAuthority {
     /// and resources belonging to enabled providers remain in the same ledger.
     pub(crate) async fn stop_disabled_capabilities(
         &self,
+        #[cfg_attr(target_os = "android", allow(unused_variables))]
         enabled: crate::host::settings::Capabilities,
     ) -> Result<(), ErrorCategory> {
         let until = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -572,7 +578,9 @@ impl HostAuthority {
             tokio::time::timeout_at(until, self.inner.execution_gate.clone().write_owned())
                 .await
                 .map_err(|_| ErrorCategory::Busy)?;
+        #[cfg(not(target_os = "android"))]
         let remaining = || until.saturating_duration_since(tokio::time::Instant::now());
+        #[cfg_attr(target_os = "android", allow(unused_mut))]
         let mut complete = true;
         #[cfg(not(target_os = "android"))]
         if !enabled.exec {
@@ -735,6 +743,7 @@ impl HostAuthority {
 #[cfg(all(test, not(target_os = "android")))]
 mod tests;
 
+#[cfg(not(target_os = "android"))]
 impl HostCoordinator {
     pub(crate) fn owner_is_active(&self, owner: &OwnerLease) -> bool {
         self.inner

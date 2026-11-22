@@ -4,6 +4,7 @@ use super::*;
 pub(crate) struct Order {
     high: BTreeMap<GatewayEpoch, u64>,
 }
+#[cfg(not(target_os = "android"))]
 pub(crate) fn epoch_key(epoch: &GatewayEpoch, sequence: u64) -> OwnerEpoch {
     format!(
         "paired-{}-{sequence:016x}",

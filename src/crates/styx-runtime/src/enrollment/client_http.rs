@@ -261,6 +261,7 @@ pub(crate) async fn exchange_self(
 }
 /// Owner-local setup uses the existing once-only exchange and original Gateway
 /// admin credential. No generic admin route, redirect or retry is introduced.
+#[cfg(not(target_os = "android"))]
 pub(crate) async fn exchange_local_admin(
     origin: &url::Url,
     tls: &GatewayClientTls,
@@ -286,6 +287,7 @@ pub(crate) async fn exchange_local_admin(
 }
 /// Fixed one-shot local-admin rejection. A lost reply remains unknown; this
 /// helper never retries, redirects or turns the request into discovery.
+#[cfg(not(target_os = "android"))]
 pub(crate) async fn exchange_local_rejection(
     origin: &url::Url,
     tls: &GatewayClientTls,
@@ -304,6 +306,7 @@ pub(crate) async fn exchange_local_rejection(
     .await
 }
 /// Fixed read-only admin discovery; never retries a failed mutation.
+#[cfg(not(target_os = "android"))]
 pub(crate) async fn exchange_local_pending(
     origin: &url::Url,
     tls: &GatewayClientTls,
@@ -321,6 +324,7 @@ pub(crate) async fn exchange_local_pending(
     .await
 }
 /// Fixed computer administration routes; reuse once-only TLS exchange semantics.
+#[cfg(not(target_os = "android"))]
 pub(crate) async fn exchange_local_computers(
     origin: &url::Url,
     tls: &GatewayClientTls,

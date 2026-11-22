@@ -6,6 +6,7 @@ pub struct OwnerCleanupHandle {
     inner: Arc<Inner>,
     authority: Arc<OwnerCleanupAuthority>,
 }
+#[cfg(not(target_os = "android"))]
 impl OwnerCleanupHandle {
     pub(crate) fn owner(&self) -> &OwnerLease {
         self.authority.owner()
@@ -89,6 +90,7 @@ impl HostAuthority {
         Ok(OwnerCleanupTicket { response: receiver })
     }
 }
+#[cfg(not(target_os = "android"))]
 fn owner_inventory(
     handle: &OwnerCleanupHandle,
 ) -> Result<Vec<ProviderRecordKey>, CoordinatorError> {

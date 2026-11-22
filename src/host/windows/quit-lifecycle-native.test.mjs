@@ -14,7 +14,7 @@ test('original Quit custody joins owned work, preserves uncertainty and refuses 
  const resources=path.join(root,'resources');fs.mkdirSync(resources);
  fs.copyFileSync(path.join(here,'../../assets/brand/styx-logo.png'),path.join(resources,'styx-logo.png'));
  const exe=path.join(root,'QuitLifecycleTest.exe'),csc=path.join(process.env.WINDIR,'Microsoft.NET/Framework64/v4.0.30319/csc.exe');
- const built=spawnSync(csc,['/nologo','/warn:4','/warnaserror+','/define:STYX_QUIT_TEST','/target:exe','/main:StyxNative.QuitLifecycleTest','/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/reference:System.Web.Extensions.dll','/out:'+exe,path.join(here,'Styx.cs'),path.join(here,'QuitLifecycleTest.cs')],{encoding:'utf8',windowsHide:true});
+ const built=spawnSync(csc,['/nologo','/warn:4','/warnaserror+','/define:STYX_QUIT_TEST','/target:exe','/main:StyxNative.QuitLifecycleTest','/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/reference:System.Web.Extensions.dll','/out:'+exe,path.join(here,'Styx.cs'),path.join(here,'NativeBootstrap.cs'),path.join(here,'CoreClient.cs'),path.join(here,'LocalAppControl.cs'),path.join(here,'QuitLifecycleTest.cs')],{encoding:'utf8',windowsHide:true});
  assert.equal(built.status,0,built.stdout+built.stderr);
  for(const mode of ['idle','presend','active','disconnected','slow','busy','failed','startup-failed','crashed','lost','reservation','observe','dispose','bootstrap','capability-draft']){
   const dir=path.join(root,mode),run=spawnSync(exe,[resources,dir,mode],{encoding:'utf8',timeout:60000,windowsHide:true});

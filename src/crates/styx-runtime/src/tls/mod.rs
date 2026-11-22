@@ -5,16 +5,23 @@
 //! server mode does not authenticate client certificates. An existing mTLS
 //! profile must not silently select it; that policy requires an explicit adapter.
 use rustls::{
-    ClientConfig, RootCertStore, ServerConfig,
-    pki_types::{CertificateDer, PrivateKeyDer, ServerName},
+    ClientConfig, RootCertStore,
+    pki_types::{CertificateDer, ServerName},
 };
+#[cfg(not(target_os = "android"))]
+use rustls::{ServerConfig, pki_types::PrivateKeyDer};
 use std::{io::Cursor, sync::Arc, time::Duration};
 use styx_contracts::identity::{GatewayId, Sha256Digest};
 use tokio::net::TcpStream;
-use tokio_rustls::{TlsAcceptor, TlsConnector};
-use zeroize::{Zeroize, Zeroizing};
+#[cfg(not(target_os = "android"))]
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::TlsConnector;
+use zeroize::Zeroize;
+#[cfg(not(target_os = "android"))]
+use zeroize::Zeroizing;
 
 const MAX_CERTIFICATE_PEM_BYTES: usize = 128 * 1024;
+#[cfg(not(target_os = "android"))]
 const MAX_PRIVATE_PEM_BYTES: usize = 64 * 1024;
 const MAX_CERTIFICATES: usize = 8;
 
@@ -179,7 +186,9 @@ pub(crate) fn paired_gateway_namespace(anchor: &TrustAnchorPin) -> GatewayId {
 /// Owned bytes supplied by the existing protected reader. This constructor does
 /// not establish that a file was protected; the caller owns that boundary.
 /// The original input is moved and zeroized on drop rather than copied/logged.
+#[cfg(not(target_os = "android"))]
 pub struct PrivateKeyPem(Zeroizing<Vec<u8>>);
+#[cfg(not(target_os = "android"))]
 impl PrivateKeyPem {
     /// Borrow only for the protected reader / same-transaction private writer.
     /// Never serialize, log, or use this as proof of writer or source authority.
@@ -197,6 +206,7 @@ impl PrivateKeyPem {
         Ok(Self(bytes))
     }
 }
+#[cfg(not(target_os = "android"))]
 impl std::fmt::Debug for PrivateKeyPem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("PrivateKeyPem([REDACTED])")
@@ -236,6 +246,7 @@ fn certificate_chain(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, TlsErro
     }
     Ok(certificates)
 }
+#[cfg(not(target_os = "android"))]
 fn private_key(pem: &PrivateKeyPem) -> Result<PrivateKeyDer<'static>, TlsError> {
     let mut keys = Zeroizing::new(Vec::<PrivateKeyDer<'static>>::new());
     for item in rustls_pemfile::read_all(&mut Cursor::new(&*pem.0)) {
@@ -266,16 +277,19 @@ fn deadline(timeout: Duration) -> Result<tokio::time::Instant, TlsError> {
 /// Legacy CA-file+hostname profiles remain CA-file+hostname profiles: a missing
 /// leaf pin is not inferred from the CA pin, and configured leaf pins are kept.
 pub struct GatewayClientTls {
+    #[cfg(not(target_os = "android"))]
     http_config: Arc<rustls::ClientConfig>,
     connector: TlsConnector,
     leaf_pin: Option<GatewayLeafPin>,
     anchor_pins: Vec<TrustAnchorPin>,
 }
+#[cfg(not(target_os = "android"))]
 #[derive(Debug)]
 struct PinnedHttpPeer {
     chain: Arc<rustls::client::WebPkiServerVerifier>,
     leaf: GatewayLeafPin,
 }
+#[cfg(not(target_os = "android"))]
 impl rustls::client::danger::ServerCertVerifier for PinnedHttpPeer {
     fn verify_server_cert(
         &self,
@@ -326,6 +340,7 @@ impl std::fmt::Debug for GatewayClientTls {
     }
 }
 impl GatewayClientTls {
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn http_client_config(&self) -> rustls::ClientConfig {
         self.http_config.as_ref().clone()
     }
@@ -369,24 +384,29 @@ impl GatewayClientTls {
             .with_root_certificates(roots.clone())
             .with_no_client_auth();
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
-        let mut http_config = config.clone();
-        if let Some(leaf) = &configured_leaf {
-            let chain = rustls::client::WebPkiServerVerifier::builder_with_provider(
-                Arc::new(roots),
-                provider(),
-            )
-            .build()
-            .map_err(|_| TlsError::ConfigurationRejected)?;
-            http_config
-                .dangerous()
-                .set_certificate_verifier(Arc::new(PinnedHttpPeer {
-                    chain,
-                    leaf: leaf.clone(),
-                }));
-        }
+        #[cfg(not(target_os = "android"))]
+        let http_config = {
+            let mut http_config = config.clone();
+            if let Some(leaf) = &configured_leaf {
+                let chain = rustls::client::WebPkiServerVerifier::builder_with_provider(
+                    Arc::new(roots),
+                    provider(),
+                )
+                .build()
+                .map_err(|_| TlsError::ConfigurationRejected)?;
+                http_config
+                    .dangerous()
+                    .set_certificate_verifier(Arc::new(PinnedHttpPeer {
+                        chain,
+                        leaf: leaf.clone(),
+                    }));
+            }
+            Arc::new(http_config)
+        };
         let config = Arc::new(config);
         Ok(Self {
-            http_config: Arc::new(http_config),
+            #[cfg(not(target_os = "android"))]
+            http_config,
             connector: TlsConnector::from(config),
             leaf_pin: configured_leaf,
             anchor_pins: expected_anchors.to_vec(),

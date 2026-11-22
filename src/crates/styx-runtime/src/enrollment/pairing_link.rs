@@ -125,6 +125,7 @@ fn validate_expiry(expires: u64, now_ms: u64) -> Result<()> {
 /// The local Gateway can advance its enrollment clock beyond wall time.
 /// Export a deadline that neither exceeds its committed expiry nor starts
 /// a fresh validity window when the reply arrives.
+#[cfg(not(target_os = "android"))]
 pub(crate) fn local_export_expiry(
     gateway_expires_ms: u64,
     dispatched_wall_ms: u64,
@@ -309,6 +310,7 @@ impl Fields {
 }
 /// Produce the same canonical scalar JSON accepted by inspection. The link is
 /// a secret: callers publish it only to a new private file, never a report.
+#[cfg(not(target_os = "android"))]
 pub(crate) fn build(
     origin: &str,
     invitation: &str,

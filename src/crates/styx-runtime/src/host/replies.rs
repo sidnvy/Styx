@@ -3,6 +3,7 @@ use super::{coordinator::CoordinatorError, protocol::wire::*};
 #[cfg(not(target_os = "android"))]
 use crate::providers::codex::{ActionAcknowledgment, ActionEvidence, ActionReceipt};
 use styx_contracts::error::{ErrorCategory, ExecutionCertainty};
+#[cfg(not(target_os = "android"))]
 use styx_core::operations::OperationSnapshot;
 #[cfg(not(target_os = "android"))]
 pub(crate) fn action_reply(
