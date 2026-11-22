@@ -584,6 +584,66 @@ fn cli_tunnel_requires_authorization_and_only_file_credentials() {
     let mut authorized = remove.to_vec();
     authorized.extend(["--authorize", "--json"]);
     assert!(Cli::try_parse_from(authorized).is_ok());
+
+    let pub_args = [
+        "styx",
+        "gateway",
+        "public-mcp",
+        "configure",
+        "--state-dir",
+        "/private/gateway",
+        "--issuer",
+        "https://team.cloudflareaccess.com",
+        "--audience",
+        "aud-123",
+        "--jwks-url",
+        "https://team.cloudflareaccess.com/cdn-cgi/access/certs",
+        "--port",
+        "22128",
+        "--enable",
+    ];
+    assert!(Cli::try_parse_from(pub_args).is_err());
+    let mut pub_auth = pub_args.to_vec();
+    pub_auth.extend(["--authorize", "--json"]);
+    assert!(matches!(
+        Cli::try_parse_from(pub_auth).unwrap().command,
+        Command::Gateway {
+            command: GatewayCommand::PublicMcp {
+                command: GatewayPublicMcpCommand::Configure {
+                    port: 22128,
+                    enable: true,
+                    authorize: true,
+                    json: true,
+                    ..
+                }
+            }
+        }
+    ));
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "gateway",
+            "public-mcp",
+            "status",
+            "--state-dir",
+            "/private/gateway",
+            "--json"
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "gateway",
+            "public-mcp",
+            "disable",
+            "--state-dir",
+            "/private/gateway",
+            "--authorize",
+            "--json"
+        ])
+        .is_ok()
+    );
 }
 
 #[test]

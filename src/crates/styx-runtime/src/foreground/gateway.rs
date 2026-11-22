@@ -769,9 +769,30 @@ mod platform {
         } else {
             policy
         };
+        let public_mcp_config = {
+            let state = tunnel_state.clone();
+            tokio::task::spawn_blocking(move || crate::gateway::public_mcp::load_config(&state))
+                .await
+                .map_err(|_| error("gateway_reader_failed"))?
+                .map_err(|_| error("gateway_public_ingress_invalid"))?
+                .filter(|c| c.enabled)
+        };
+        let public_mcp_listener = if let Some(config) = &public_mcp_config {
+            let verifier = Arc::new(
+                crate::gateway::public_mcp::JwksVerifier::new(config.clone())
+                    .map_err(|_| error("gateway_public_ingress_invalid"))?,
+            );
+            let bind_listener = TcpListener::bind(config.loopback_addr())
+                .await
+                .map_err(|_| error("gateway_public_mcp_listen_failed"))?;
+            Some((bind_listener, verifier))
+        } else {
+            None
+        };
         let mcp = GatewayHttp::new(policy, backend);
         mcp.observe_tunnel(crate::foreground::tunnel::observe_requests(&tunnel_state)?);
         let mcp_stop = mcp.paired_shutdown_handle();
+        let public_mcp_mcp = mcp.clone();
         let app = EnrollmentHttp::new_paired(tls, shared.clone(), relay.clone(), mcp, vec![host])
             .map_err(|_| error("gateway_listener_configuration_invalid"))?;
         if let Some(d) = &diagnostic {
@@ -900,6 +921,24 @@ mod platform {
                 .run_with_lan_addresses(listener, lan_listeners, server_stop)
                 .await
         });
+        let public_mcp_failed = CancellationToken::new();
+        let public_mcp_task = public_mcp_listener.map(|(pub_listener, verifier)| {
+            let pub_stop = stop.child_token();
+            let pub_failed = public_mcp_failed.clone();
+            tokio::spawn(async move {
+                let result = crate::gateway::public_mcp::serve(
+                    pub_listener,
+                    verifier,
+                    public_mcp_mcp,
+                    pub_stop,
+                )
+                .await;
+                if result.is_err() {
+                    pub_failed.cancel();
+                }
+                result
+            })
+        });
         if let Some(d) = &diagnostic {
             d.mark("listening");
         }
@@ -931,6 +970,11 @@ mod platform {
                 _ = control_failed.cancelled(), if !stop.is_cancelled() => {
                     failure = Some("gateway_service_control_failed");
                     emit(&events, "gateway_control_service_failed");
+                    stop.cancel();
+                }
+                _ = public_mcp_failed.cancelled(), if !stop.is_cancelled() => {
+                    failure = Some("gateway_public_mcp_failed");
+                    emit(&events, "gateway_public_mcp_failed");
                     stop.cancel();
                 }
                 result = &mut tunnel, if tunnel_expected && tunnel_completion.is_none() => {
@@ -979,6 +1023,10 @@ mod platform {
             Some(joined) => joined, // The original JoinHandle already yielded.
             None => tunnel.await.is_ok_and(|result| result.is_ok()),
         };
+        let public_mcp_joined = match public_mcp_task {
+            Some(task) => task.await.is_ok_and(|result| result.is_ok()),
+            None => true,
+        };
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         let control_joined = {
             stop.cancel();
@@ -991,8 +1039,10 @@ mod platform {
         // A timeout is not release. Keep the exact original input pins, writer
         // and execution lease while real blocking/read tasks finish.
         let mut joined = facts.blocking_jobs_joined;
-        let mut worker_failure =
-            facts.worker_failure_observed || !tunnel_joined || tunnel_early_failure.is_some();
+        let mut worker_failure = facts.worker_failure_observed
+            || !tunnel_joined
+            || !public_mcp_joined
+            || tunnel_early_failure.is_some();
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         {
             worker_failure |= !control_joined;

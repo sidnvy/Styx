@@ -321,6 +321,24 @@ impl GatewayBearerPolicy {
             tunnel,
         })
     }
+    /// Public MCP OIDC/JWKS admission after cryptographic JWT verification.
+    /// Mints a dedicated TunnelConversation principal isolated per (issuer, subject).
+    pub(crate) fn authorize_public_mcp_subject(
+        &self,
+        issuer: &str,
+        subject: &str,
+    ) -> AuthenticatedGatewayPrincipal {
+        let mut material = Vec::with_capacity(12 + issuer.len() + subject.len());
+        material.extend_from_slice(b"public-mcp:");
+        material.extend_from_slice(issuer.as_bytes());
+        material.push(0);
+        material.extend_from_slice(subject.as_bytes());
+        AuthenticatedGatewayPrincipal {
+            owners: self.owners.clone(),
+            digest: Sha256Digest::of_bytes(&material),
+            tunnel: true,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -491,11 +491,66 @@ enum GatewayInviteOrigin {
     Lan,
 }
 #[derive(Subcommand)]
+enum GatewayPublicMcpCommand {
+    /// Configure native OIDC/JWKS loopback ingress (for Cloudflare Access or HTTPS reverse proxies).
+    Configure {
+        #[arg(long)]
+        state_dir: PathBuf,
+        /// Expected JWT issuer (https://...).
+        #[arg(long)]
+        issuer: String,
+        /// Expected JWT audience (AUD).
+        #[arg(long)]
+        audience: String,
+        /// JWKS endpoint URL (https://...).
+        #[arg(long)]
+        jwks_url: String,
+        /// Loopback listen port on 127.0.0.1 (default: 22128).
+        #[arg(long, default_value_t = 22128)]
+        port: u16,
+        /// HTTP header carrying the JWT (default: cf-access-jwt-assertion; also supports authorization).
+        #[arg(long)]
+        jwt_header: Option<String>,
+        /// Allowed browser Origin URLs (repeatable; default: https://chatgpt.com).
+        #[arg(long = "allowed-origin")]
+        allowed_origin: Vec<String>,
+        /// Enable the native Public MCP loopback listener when Gateway starts.
+        #[arg(long)]
+        enable: bool,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the saved native Public MCP configuration.
+    Status {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Disable the native Public MCP loopback listener while preserving saved settings.
+    Disable {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum GatewayCommand {
     /// Configure the Gateway-owned Secure MCP Tunnel transport.
     Tunnel {
         #[command(subcommand)]
         command: GatewayTunnelCommand,
+    },
+    /// Configure native Public MCP HTTPS/OIDC loopback ingress (replaces external proxy scripts).
+    PublicMcp {
+        #[command(subcommand)]
+        command: GatewayPublicMcpCommand,
     },
     /// Create one invitation and publish its secret only to a new private file.
     Invite {
@@ -1742,6 +1797,93 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 json,
             ),
         },
+        Command::Gateway {
+            command: GatewayCommand::PublicMcp { command },
+        } => {
+            use styx_runtime::gateway::public_mcp;
+            let (result, json) = match command {
+                GatewayPublicMcpCommand::Configure {
+                    state_dir,
+                    issuer,
+                    audience,
+                    jwks_url,
+                    port,
+                    jwt_header,
+                    allowed_origin,
+                    enable,
+                    authorize,
+                    json,
+                } => {
+                    let origins = if allowed_origin.is_empty() {
+                        None
+                    } else {
+                        Some(allowed_origin)
+                    };
+                    let result = tokio::task::spawn_blocking(move || {
+                        public_mcp::configure(
+                            &state_dir,
+                            &issuer,
+                            &audience,
+                            &jwks_url,
+                            Some(port),
+                            jwt_header.as_deref(),
+                            origins,
+                            enable,
+                            authorize,
+                        )
+                    })
+                    .await;
+                    (
+                        result.unwrap_or_else(|_| {
+                            Err(public_mcp::PublicMcpError::new("public_mcp_worker_failed"))
+                        }),
+                        json,
+                    )
+                }
+                GatewayPublicMcpCommand::Status { state_dir, json } => {
+                    let result =
+                        tokio::task::spawn_blocking(move || public_mcp::status(&state_dir)).await;
+                    (
+                        result.unwrap_or_else(|_| {
+                            Err(public_mcp::PublicMcpError::new("public_mcp_worker_failed"))
+                        }),
+                        json,
+                    )
+                }
+                GatewayPublicMcpCommand::Disable {
+                    state_dir,
+                    authorize,
+                    json,
+                } => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        public_mcp::disable(&state_dir, authorize)
+                    })
+                    .await;
+                    (
+                        result.unwrap_or_else(|_| {
+                            Err(public_mcp::PublicMcpError::new("public_mcp_worker_failed"))
+                        }),
+                        json,
+                    )
+                }
+            };
+            match result {
+                Ok(report) => {
+                    if json {
+                        if write_json(&report).is_err() {
+                            return error("output_unavailable");
+                        }
+                    } else {
+                        println!(
+                            "Gateway Public MCP status: {} (use --json for details).",
+                            report.status
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => error(e.code()),
+            }
+        }
         Command::Gateway {
             command: GatewayCommand::Tunnel { command },
         } => {

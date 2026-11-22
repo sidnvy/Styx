@@ -265,6 +265,9 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             .count();
         (transports_joined, unconfirmed)
     }
+    pub(crate) fn policy(&self) -> &GatewayBearerPolicy {
+        &self.policy
+    }
     pub(crate) async fn handle(
         self: Arc<Self>,
         request: Request<hyper::body::Incoming>,
@@ -288,6 +291,16 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             }
             Err(_) => return plain(StatusCode::FORBIDDEN),
         };
+        self.handle_authorized(principal, request).await
+    }
+    pub(crate) async fn handle_authorized<I: Body<Data = Bytes>>(
+        &self,
+        principal: crate::gateway::auth::AuthenticatedGatewayPrincipal,
+        request: Request<I>,
+    ) -> Response<HeldBody>
+    where
+        I::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
         if self.stop.is_cancelled() {
             return plain(StatusCode::SERVICE_UNAVAILABLE);
         }

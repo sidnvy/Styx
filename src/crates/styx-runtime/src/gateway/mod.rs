@@ -6,6 +6,7 @@ pub mod auth;
 pub mod http;
 pub mod mcp;
 pub mod paired;
+pub mod public_mcp;
 
 use auth::{GatewayAuthError, GatewayBearerPolicy};
 use mcp::{GatewayMcp, GatewayToolBackend};
