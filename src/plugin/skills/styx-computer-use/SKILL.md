@@ -10,10 +10,24 @@ and get_execution_environment_status to select the user's actual paired computer
 and check desktop readiness. Resolve ambiguity before acting; never infer that
 connected means permissions are granted or actions succeeded.
 
-Use exposed discovery tools such as list_apps, list_windows or get_desktop_state,
-then get_window_state for the exact observed application/window. Use returned
-PIDs, window IDs and snapshot-bound element references. Do not invent identifiers
-or reuse references from another observation, window, computer or conversation.
+Use the two current public Computer Use entrypoints: `desktop_list_tools` and
+`desktop_call`. `desktop_list_tools` returns native CUA tool names, instructions,
+and schemas for the selected Host (`environment_id`). Call `desktop_call` with
+that same Host, the discovered exact `tool` name, and its verbatim `arguments`.
+Use the native `get_guide` tool when instructions are needed. The former eight
+public desktop methods (`list_apps`, `list_windows`, `get_desktop_state`, etc.)
+are *not* public MCP names anymore. Never dispatch an old name as a public tool.
+A native operation with a similar name is available only through `desktop_call`.
+
+For an existing Chrome `Default` session, use native Computer Use against the
+actual desktop/window, not the separate Styx `browser_*` profile. Do not modify
+Chrome flags or restart the user's browser as an access workaround.
+If the connected ChatGPT plugin lacks `desktop_list_tools` or `desktop_call`,
+compare its discovered tool catalog with the Gateway contract and refresh the
+plugin connection. Do not interpret `unknown tool` from an *obsolete public
+name* as evidence that the Host desktop driver is defective.
+Use returned PIDs, window IDs and snapshot-bound element references from a fresh
+native observation; do not invent or reuse references from other contexts.
 
 Prefer element-based actions supported by the current schema. Use screenshots
 for visual inspection and coordinates only when the tool supports them and the

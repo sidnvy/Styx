@@ -12,7 +12,7 @@ Generate only after the owner has provisioned an independent Gateway and perform
   "freshConnection": true,
   "verifiedAt": "<actual ISO timestamp>",
   "serverName": "styx-vnext",
-  "tools": ["list_execution_environments", "get_execution_environment_status", "exec_command", "write_stdin"],
+  "tools": ["list_execution_environments", "get_execution_environment_status", "exec_command", "write_stdin", "desktop_list_tools", "desktop_call", "android_list_displays"],
   "method": "authenticated-mcp-discovery"
 }
 ```

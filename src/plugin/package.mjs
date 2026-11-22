@@ -5,7 +5,7 @@ import {createHash} from 'node:crypto';
 import {inflateSync} from 'node:zlib';
 
 const root=path.dirname(fileURLToPath(import.meta.url));
-const requiredTools=['list_execution_environments','get_execution_environment_status','exec_command','write_stdin'];
+const requiredTools=['list_execution_environments','get_execution_environment_status','exec_command','write_stdin','desktop_list_tools','desktop_call','android_list_displays'];
 const fail=code=>{throw Error(code);};
 const object=x=>x!==null&&typeof x==='object'&&!Array.isArray(x);
 const MAX_ICON_BYTES=256*1024;

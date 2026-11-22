@@ -11,7 +11,7 @@ const now=Date.parse('2026-10-20T12:00:00Z');
 const url='https://styx.unit.test/mcp';
 function receipt(c={url}) {return {version:1,connection:c,independentStyx:true,freshConnection:true,
   verifiedAt:new Date(now).toISOString(),serverName:'styx-vnext',
-  tools:['list_execution_environments','get_execution_environment_status','exec_command','write_stdin'],method:'authenticated-mcp-discovery'};}
+  tools:['list_execution_environments','get_execution_environment_status','exec_command','write_stdin','desktop_list_tools','desktop_call','android_list_displays'],method:'authenticated-mcp-discovery'};}
 function fixture(t,c={url}) {
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-plugin-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
  const verificationFile=path.join(root,'verified.json'), config=path.join(root,'config.json'), output=path.join(root,'styx-native');
@@ -66,6 +66,15 @@ test('missing, stale, mismatched, foreign and unverified receipts refuse before 
   {tools:[...receipt().tools,'service_deploy']},{token:'never-package'}]) {
   fs.writeFileSync(f.verificationFile,JSON.stringify({...receipt(),...patch}));
   assert.throws(()=>buildPackage(f.config,f.output,{now}));assert.equal(fs.existsSync(f.output),false);
+ }
+});
+test('missing native CUA desktop and Android discovery tools reject stale plugin snapshots',t=>{
+ const f=fixture(t);
+ for(const missing of ['desktop_list_tools','desktop_call','android_list_displays']) {
+  const outdated={...receipt(),tools:receipt().tools.filter(tool=>tool!==missing)};
+  fs.writeFileSync(f.verificationFile,JSON.stringify(outdated));
+  assert.throws(()=>buildPackage(f.config,f.output,{now}),/native_discovery_required/);
+  assert.equal(fs.existsSync(f.output),false);
  }
 });
 test('strict config excludes secrets and unknown bindings',()=>{
