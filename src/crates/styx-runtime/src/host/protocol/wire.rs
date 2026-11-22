@@ -258,6 +258,8 @@ pub enum Reply {
         owner_issuance: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         grant_revision: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_version: Option<String>,
     },
     TransportDrainEnabled,
     TransportDrainResultAccepted {

@@ -241,11 +241,20 @@ struct ProductDevice: Identifiable, Equatable {
     let platform: String
     let online: Bool?
     let isLocal: Bool
+    let version: String?
+    var platformSymbol: String {
+        switch platform {
+        case "android": return "iphone"
+        case "win32", "windows": return "desktopcomputer"
+        default: return "laptopcomputer"
+        }
+    }
     init?(_ value: ProductJSON) {
         guard let id = value["device_id"].string, let label = value["label"].string else { return nil }
         isLocal = value["is_local"] == .bool(true)
         self.id = id; self.label = label
         platform = value["platform"].string ?? ""
         online = value["online"] == .bool(true) ? true : value["online"] == .bool(false) ? false : nil
+        version = value["version"].string
     }
 }

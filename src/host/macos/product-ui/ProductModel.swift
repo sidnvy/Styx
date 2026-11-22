@@ -521,6 +521,15 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
         let input = invite; invite = ""; inspection = .null; joinAcceptance = .null
         perform { [self] in inspection = try await client.native("inspectJoin", ["link": .string(input)]) }
     }
+    func pasteAndInspectInvitation() {
+        guard let pasted = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !pasted.isEmpty else {
+            error = productText("剪贴板中没有邀请内容。请先在管理电脑上点击“复制邀请”。", "Clipboard is empty. Copy the invitation from your main computer first.")
+            return
+        }
+        invite = pasted
+        inspectInvitation()
+    }
     func acceptInvitation() {
         guard inspection["preview"]["origin"].string != nil, inspection["preview"]["caSha256"].string != nil else { error = productText("需要核对证书", "Certificate confirmation required"); return }
         joinAcceptance = inspection["preview"]; joining = true; page = .capabilities; return

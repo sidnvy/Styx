@@ -292,7 +292,7 @@ class MainActivity : Activity() {
         step1Body.addView(fieldLabel("Device name"))
         step1Body.addView(labelInput, marginParams(top = 6, bottom = 16))
 
-        pairButton = primaryButton("Pair Phone") { onPairClicked(settings) }
+        pairButton = primaryButton("Pair Device") { onPairClicked(settings) }
         step1Body.addView(pairButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
 
         setupMessage = TextView(this).apply {
@@ -517,7 +517,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     busy = false
                     pairButton.isEnabled = true
-                    pairButton.text = "Pair Phone"
+                    pairButton.text = "Pair Device"
                     if (result.optBoolean("ok", false)) {
                         deviceValue.text = deviceLabel
                         gatewayValue.text = gatewayUrl
@@ -535,7 +535,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     busy = false
                     pairButton.isEnabled = true
-                    pairButton.text = "Pair Phone"
+                    pairButton.text = "Pair Device"
                     showSetupMessage("Pairing failed. Check the Gateway address and invitation state.", isError = true)
                 }
             }

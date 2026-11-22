@@ -63,6 +63,7 @@ pub struct DeviceStatus {
     pub capability_generation: String,
     pub host_generation: Option<HostGeneration>,
     pub grant_revision: Option<u64>,
+    pub host_version: Option<String>,
 }
 pub(crate) struct Command {
     pub call: Call,
@@ -76,6 +77,7 @@ pub(crate) struct Entry {
     pub host_connection: ConnectionGeneration,
     pub host_generation: HostGeneration,
     pub grant_revision: u64,
+    pub host_version: Option<String>,
     pub profile: GatewayExecProfile,
     pub tx: mpsc::Sender<Command>,
     pub stop: CancellationToken,
@@ -471,6 +473,7 @@ impl RelayHandle {
                 capability_generation: p.capability_generation,
                 host_generation: e.map(|e| e.host_generation.clone()),
                 grant_revision: e.map(|e| e.grant_revision),
+                host_version: e.and_then(|e| e.host_version.clone()),
             });
         }
         Ok(devices)

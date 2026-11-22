@@ -92,18 +92,32 @@ pub(super) async fn run(
         include_this_computer,
     }) = command
     else {
-        println!("LABEL  PLATFORM  DEVICE ID  STATUS  CONNECTIONS");
+        println!("LABEL  PLATFORM  VERSION  DEVICE ID  STATUS  CONNECTIONS");
         for row in visible(&rows, all) {
-            println!(
-                "{:?}  {}  {}  {}  commands={}, browser={}, computer={}",
-                row.label,
-                row.platform,
-                row.device_id.as_str(),
-                row.status,
-                connection(row.connections.exec),
-                connection(row.connections.browser),
-                connection(row.connections.computer)
-            );
+            let version = row.host_version.as_deref().unwrap_or("-");
+            if row.platform == "android" || row.connections.android == Some(true) {
+                println!(
+                    "{:?}  {}  {}  {}  {}  android={}",
+                    row.label,
+                    row.platform,
+                    version,
+                    row.device_id.as_str(),
+                    row.status,
+                    connection(row.connections.android)
+                );
+            } else {
+                println!(
+                    "{:?}  {}  {}  {}  {}  commands={}, browser={}, computer={}",
+                    row.label,
+                    row.platform,
+                    version,
+                    row.device_id.as_str(),
+                    row.status,
+                    connection(row.connections.exec),
+                    connection(row.connections.browser),
+                    connection(row.connections.computer)
+                );
+            }
         }
         return Ok(());
     };
@@ -148,7 +162,9 @@ mod tests {
                 exec: Some(false),
                 browser: None,
                 computer: None,
+                android: None,
             },
+            host_version: None,
         }
     }
     #[test]

@@ -907,6 +907,7 @@ impl<'a> HostProtocol<'a> {
                                     write: self.android.is_none() && cfg!(not(target_os = "android")) && (self.coordinator.exec_configured() || self.settings.is_some()), terminate: self.android.is_none() && cfg!(not(target_os = "android")) && (self.coordinator.exec_configured() || self.settings.is_some()), read_resume: false,
                                     owner_issuance: if self.paired { "gateway_authenticated" } else { "bootstrap_preverified_only" }.into(),
                                     grant_revision: self.paired.then(|| self.coordinator.grant_revision()),
+                                    host_version: self.paired.then(|| env!("CARGO_PKG_VERSION").to_owned()),
                                 }
                             }
                             _ => return Err(ProtocolError::NegotiationRejected),

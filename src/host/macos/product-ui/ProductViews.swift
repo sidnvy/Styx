@@ -90,8 +90,14 @@ struct ProductView: View {
     private var setupTunnelFields: some View {
         Group {
             Text(productText("连接 ChatGPT", "Connect ChatGPT")).font(.headline)
-            TextField("Tunnel ID", text: $model.setupTunnelID)
-            SecureField(productText("Tunnel 运行密钥", "Tunnel runtime API key"), text: $model.setupTunnelKey)
+            DisclosureGroup(productText("如何获取 Tunnel ID 与运行密钥", "Where to find Tunnel ID and runtime key")) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(productText("在 OpenAI Platform 的 Tunnels 页面创建或选择通道并关联 ChatGPT 工作区，复制 Tunnel ID，并创建一个具备通道权限的 Runtime API key。", "In OpenAI Platform Tunnels, create or select a tunnel associated with your ChatGPT workspace, copy its Tunnel ID, and create a Runtime API key with tunnel permission.")).font(.caption).foregroundStyle(.secondary)
+                    Button(productText("打开 OpenAI Platform Tunnels", "Open OpenAI Platform Tunnels")) { model.openOfficial("https://platform.openai.com/settings/organization/tunnels") }
+                }
+            }.font(.callout)
+            TextField("Tunnel ID (tunnel_…)", text: $model.setupTunnelID)
+            SecureField(productText("Tunnel 运行密钥 (sk-…)", "Tunnel runtime API key (sk-…)"), text: $model.setupTunnelKey)
         }.onDisappear { model.setupTunnelKey = "" }
     }
     private var resumeLocalSetup: some View {
@@ -179,7 +185,12 @@ struct ProductView: View {
                     Text(productText("请确认系统设置中开启的是“应用程序”里的 Styx，然后退出并重新打开 Styx，再点击“重新检查权限”。", "Confirm that System Settings grants access to Styx in Applications. Quit and reopen Styx, then select Check permissions again.")).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                 }
             }
-            Button(productText("重新检查权限", "Check permissions again")) { model.observePermissions() }
+            HStack {
+                Button(productText("重新检查权限", "Check permissions again")) { model.observePermissions() }
+                if (!model.axGranted || !model.screenGranted) && (model.permissionWasRequested(false) || model.permissionWasRequested(true)) {
+                    Button(productText("退出 Styx", "Quit Styx")) { NSApp.terminate(nil) }
+                }
+            }
             Button(productText("继续", "Continue")) { model.continueAfterPermissions() }.buttonStyle(.borderedProminent).disabled(!model.axGranted || !model.screenGranted)
         }
     }
@@ -202,7 +213,10 @@ struct ProductView: View {
         VStack(alignment: .leading, spacing: 20) {
             heading(productText("加入已有 Styx", "Join an existing Styx"), productText("在已经设置好 Styx 的电脑上打开“设置 → 电脑 → 添加电脑”，获取地址和配对码。", "On the computer where Styx is already set up, open Settings → Computers → Add computer to get the address and pairing code."))
             SecureField(productText("网关地址和配对码（也可粘贴邀请）", "Gateway address and code (or paste invitation)"), text: $model.invite)
-            Button(productText("检查邀请", "Inspect invitation")) { model.inspectInvitation() }.disabled(model.invite.isEmpty)
+            HStack {
+                Button(productText("粘贴并检查", "Paste & inspect")) { model.pasteAndInspectInvitation() }.buttonStyle(.borderedProminent).disabled(model.busy)
+                Button(productText("检查邀请", "Inspect invitation")) { model.inspectInvitation() }.disabled(model.invite.isEmpty || model.busy)
+            }
             if let origin = model.inspection["preview"]["origin"].string {
                 ProductPanel(title: productText("核对管理电脑身份", "Verify the main computer")) {
                     Text(origin).textSelection(.enabled)

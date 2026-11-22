@@ -933,6 +933,50 @@ fn deployment_host(session: &Session, origin: &str, ca_hash: &str) -> Value {
     }
     json!({"schema":1,"mode":"join-existing", "gateway":{"url":origin,"caFile":session.input("join-ca.pem"),"expectedCaSha256":ca_hash},"host":host,"runtimeSelectionFile":session.input("runtime-selection.json"),"invitationFile":session.input("invitation")})
 }
+fn linux_preflight_notes(answers: &Answers, foreground: bool) -> Vec<String> {
+    let mut notes = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        if answers.role != Role::Gateway {
+            if answers.computer {
+                let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+                let x11 = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
+                if wayland || x11 {
+                    let kind = if wayland { "Wayland" } else { "X11" };
+                    notes.push(format!("Desktop session detected ({kind})."));
+                } else {
+                    notes.push("No DISPLAY or WAYLAND_DISPLAY detected in this shell; Computer Use requires an active graphical login session.".into());
+                }
+            }
+            if answers.browser {
+                let candidates = [
+                    "/usr/bin/google-chrome-stable",
+                    "/usr/bin/google-chrome",
+                    "/opt/google/chrome/chrome",
+                    "/usr/bin/chromium",
+                    "/usr/bin/chromium-browser",
+                    "/usr/bin/microsoft-edge",
+                ];
+                if let Some(found) = candidates.iter().find(|p| Path::new(p).is_file()) {
+                    notes.push(format!("Browser binary detected: {found}."));
+                } else {
+                    notes.push("No system Chrome/Chromium/Edge binary found in standard paths; install Chrome/Chromium or Playwright browsers before using Browser Automation.".into());
+                }
+            }
+        }
+        if !foreground {
+            if let Ok(user) = std::env::var("USER") {
+                if !Path::new("/var/lib/systemd/linger").join(&user).is_file() {
+                    notes.push(format!("systemd user linger is not enabled for {user}; if this machine should stay online after logout, run `loginctl enable-linger {user}`."));
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (answers, foreground);
+    notes
+}
+
 fn plan_steps(answers: &Answers, foreground: bool, root: &Path) -> Vec<String> {
     let mut steps = vec![
         format!(
@@ -1000,7 +1044,7 @@ fn plan_steps(answers: &Answers, foreground: bool, root: &Path) -> Vec<String> {
         );
     }
     if let Some(plugin) = &answers.plugin {
-        steps.push(format!("Keep legacy ZIP settings for “{}” at {}. Only automated answers explicitly approving plugin export can write that ZIP; Custom MCP does not use it.", plugin.display_name, plugin.output.display()));
+        steps.push(format!("Keep plugin ZIP export settings for “{}” at {}. Only automated answers explicitly approving plugin export can write that ZIP; Custom MCP does not use it.", plugin.display_name, plugin.output.display()));
     }
     if answers.tunnel.is_some() {
         steps.push(format!("Save the Styx upload icon in {} and show the Custom MCP > Tunnel connection steps. Nothing is uploaded or installed automatically.", root.join("chatgpt/styx-icon.png").display()));
@@ -1689,7 +1733,7 @@ async fn connect_chatgpt(session: &mut Session, gateway: &Path) -> Result<()> {
         .as_u64()
         .unwrap_or(0);
     println!(
-        "\nConnect Styx in ChatGPT:\n1. Open https://chatgpt.com/plugins in the intended account/workspace. If this hub already has a working Custom MCP connection, reuse it. Do not delete an existing plugin.\n2. For a new connection choose Add > Add custom MCP server. Name: {name}. Use a distinct name if another Styx exists.\n3. Choose icon: {} (PNG, under 10 KB). Connection: Tunnel. Tunnel ID: {tunnel}\n4. Authentication: No authentication. Keep the tunnel runtime API key only in Styx; the tunnel client supplies Gateway authentication.\n5. Review the notice, choose Create as a plugin, then Connect. Refresh its installed detail page and check that the Styx logo remains.\n6. Choose Try in chat, or start a new chat with this connection selected. Send: List my Styx computers\nCustom MCP connects the tools; it does not install the ZIP's bundled skills.\nIf Add custom MCP server is unavailable, check Developer mode and account/workspace permissions.\nLocal setup and tunnel readiness do not prove a successful ChatGPT tool call.",
+        "\nConnect Styx in ChatGPT:\n1. Open https://chatgpt.com/plugins in the intended account/workspace. If this hub already has a working Custom MCP connection, reuse it. Do not delete an existing plugin.\n2. For a new connection choose Add > Add custom MCP server. Name: {name}. Use a distinct name if another Styx exists.\n3. Choose icon: {} (PNG, under 10 KB). Connection: Tunnel. Tunnel ID: {tunnel} (associated tunnels also appear as quick-select chips)\n4. Authentication: No authentication (switch from default OAuth). Keep the tunnel runtime API key only in Styx; the tunnel client supplies Gateway authentication.\n5. Review the notice, choose Create as a plugin, then Connect. Refresh its installed detail page and check that the Styx logo remains.\n6. Choose Try in chat, or start a new chat with this connection selected. Send: List my Styx computers\nCustom MCP connects the tools; it does not install the ZIP's bundled skills.\nIf Add custom MCP server is unavailable, check Developer mode and account/workspace permissions.\nLocal setup and tunnel readiness do not prove a successful ChatGPT tool call.",
         icon.display()
     );
     let wait = if session.automated {
@@ -1908,6 +1952,13 @@ async fn run_inner(
             .enumerate()
         {
             println!("{}. {step}", index + 1);
+        }
+        let notes = linux_preflight_notes(&session.answers, foreground);
+        if !notes.is_empty() {
+            prompt::info("Environment pre-flight:");
+            for note in notes {
+                println!("  - {note}");
+            }
         }
         if !prompt::confirm_default("Set up Styx now?", true)? {
             return Err("setup_cancelled".into());

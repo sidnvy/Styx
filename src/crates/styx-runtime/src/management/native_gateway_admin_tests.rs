@@ -325,4 +325,22 @@ fn computers_inventory_normalizes_platforms_and_refuses_unbounded_labels() {
     assert!(computers_body(&serde_json::to_vec(&rows).unwrap()).is_err());
     rows[0]["label"] = json!("terminal\u{001b}[2J");
     assert!(computers_body(&serde_json::to_vec(&rows).unwrap()).is_err());
+
+    let android_rows = json!([
+        {"device_id":"styx-android","label":"TB320FC","platform":"android","status":"approved",
+         "host_version":"0.8.1-rc.7",
+         "connections":{"exec":false,"browser":false,"computer":false,"android":true}},
+        {"device_id":"styx-badver","label":"Desk","platform":"linux","status":"approved",
+         "host_version":"0.8.1\n\u{001b}[2J",
+         "connections":{"exec":false,"browser":false,"computer":false,"android":false}}
+    ]);
+    let parsed_android = computers_body(&serde_json::to_vec(&android_rows).unwrap()).unwrap();
+    assert_eq!(parsed_android[0].platform, "android");
+    assert_eq!(parsed_android[0].connections.any_online(), Some(true));
+    assert_eq!(
+        parsed_android[0].host_version.as_deref(),
+        Some("0.8.1-rc.7")
+    );
+    assert_eq!(parsed_android[1].connections.any_online(), Some(false));
+    assert_eq!(parsed_android[1].host_version, None);
 }

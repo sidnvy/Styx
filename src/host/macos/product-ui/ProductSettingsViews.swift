@@ -171,8 +171,8 @@ struct ProductSettingsView: View {
             ForEach(model.devices.filter { !$0.isLocal }) { device in
                 GroupBox {
                     VStack(alignment: .leading, spacing: 12) {
-                        HStack { Label(device.label, systemImage: device.platform == "win32" ? "desktopcomputer" : "laptopcomputer"); Spacer(); ProductConnectionDot(state: device.indicator) }
-                        Text(device.indicator.label).font(.caption).foregroundStyle(.secondary)
+                        HStack { Label(device.label, systemImage: device.platformSymbol); Spacer(); ProductConnectionDot(state: device.indicator) }
+                        Text(device.version.map { device.indicator.label + " · v" + $0 } ?? device.indicator.label).font(.caption).foregroundStyle(.secondary)
                         HStack {
                             Spacer()
                             Button(productText("移除这台电脑", "Remove computer"), role: .destructive) { model.revokeDevice(device) }.disabled(model.busy)
@@ -195,16 +195,16 @@ struct ProductChatGPTConnectionSteps: View {
             Text(productText("一个 Gateway 只需添加一个 Styx 插件；Windows、Mac 和 Linux Host 加入同一 Gateway 后共用它。", "Add one Styx plugin for each Gateway. Windows, Mac and Linux Hosts that join it use that same connection.")).font(.callout).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 6) {
                 Text(productText("1. 打开 ChatGPT 插件页", "1. Open ChatGPT Plugins")).font(.headline)
-                Text(productText("使用目标账号和工作区。已有这个 Gateway 的 Styx 连接时直接复用；首次添加时，点 ＋ → Add custom MCP server。", "Use the intended account and workspace. Reuse this Gateway’s existing Styx connection, or select + → Add custom MCP server to add it for the first time."))
+                Text(productText("使用目标账号和工作区。已有这个 Gateway 的 Styx 连接时直接复用；首次添加时，点「添加 → 添加自定义 MCP 服务器」。", "Use the intended account and workspace. Reuse this Gateway’s existing Styx connection, or select Add → Add custom MCP server to add it for the first time."))
                 Button(productText("打开 ChatGPT Plugins", "Open ChatGPT Plugins")) { model.openOfficial("https://chatgpt.com/plugins") }
                     .accessibilityIdentifier(identifierPrefix + "-open")
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text(productText("2. 按下表填写", "2. Enter these values")).font(.headline)
-                LabeledContent("Name", value: "Styx")
-                LabeledContent("Connection", value: "Tunnel")
+                LabeledContent(productText("名称 (Name)", "Name"), value: "Styx")
+                LabeledContent(productText("连接 (Connection)", "Connection"), value: productText("隧道 (Tunnel)", "Tunnel"))
                 HStack {
-                    Text("Tunnel ID").foregroundStyle(.secondary)
+                    Text(productText("隧道 ID (Tunnel ID)", "Tunnel ID")).foregroundStyle(.secondary)
                     Spacer()
                     if model.connectionTunnelID.isEmpty {
                         Text(productText("先在管理电脑配置 Tunnel", "Configure the tunnel on the Gateway first")).font(.caption).foregroundStyle(.secondary)
@@ -213,8 +213,8 @@ struct ProductChatGPTConnectionSteps: View {
                         Button(productText("复制 Tunnel ID", "Copy Tunnel ID")) { model.copy(model.connectionTunnelID) }
                     }
                 }
-                LabeledContent("Authentication", value: "No authentication")
-                Text(productText("运行密钥（Runtime API key）只保存在管理电脑的 Styx 中，不要填入 ChatGPT。", "Keep the runtime API key in Styx on the Gateway; do not enter it in ChatGPT.")).font(.caption).foregroundStyle(.secondary)
+                LabeledContent(productText("身份验证 (Authentication)", "Authentication"), value: productText("无身份验证（从默认的 OAuth 切换）", "No authentication (switch from default OAuth)"))
+                Text(productText("运行密钥（Runtime API key）只保存在管理电脑的 Styx 中，不要填入 ChatGPT。页面下方也可以直接点选已关联的通道。", "Keep the runtime API key in Styx on the Gateway; do not enter it in ChatGPT. Associated tunnels also appear as quick-select chips below the Tunnel ID field.")).font(.caption).foregroundStyle(.secondary)
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text(productText("3. 保存并上传图标", "3. Save and upload the icon")).font(.headline)
