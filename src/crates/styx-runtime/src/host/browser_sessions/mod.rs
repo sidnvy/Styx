@@ -3,7 +3,7 @@
 pub(crate) mod operations;
 use crate::host::{coordinator::OwnerCleanupHandle, protocol::wire::*};
 use crate::providers::browser_contract::BrowserAction;
-use operations::BrowserPort;
+use operations::{BrowserCommand, BrowserPort, BrowserReply};
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Value, json};
 use std::{
@@ -85,12 +85,11 @@ fn failure(code: &str, unknown: bool) -> CallToolResult {
 fn success(value: Value) -> CallToolResult {
     CallToolResult::structured(value)
 }
-fn refusal(reply: &Reply) -> CallToolResult {
+fn refusal(reply: &BrowserReply) -> CallToolResult {
     match reply {
-        Reply::Error {
+        BrowserReply::Error {
             category,
             certainty,
-            ..
         } => {
             let code = serde_json::to_value(category).expect("fixed category");
             failure(
@@ -104,10 +103,10 @@ fn refusal(reply: &Reply) -> CallToolResult {
         _ => failure("outcome_unknown", true),
     }
 }
-fn not_dispatched(reply: &Reply) -> bool {
+fn not_dispatched(reply: &BrowserReply) -> bool {
     matches!(
         reply,
-        Reply::Error {
+        BrowserReply::Error {
             certainty: ExecutionCertainty::NotDispatched,
             ..
         }
@@ -499,7 +498,7 @@ impl Engine<'_> {
             }
         }
     }
-    async fn exchange(&self, s: &Session, command: BrowserCommand, timeout: u32) -> Reply {
+    async fn exchange(&self, s: &Session, command: BrowserCommand, timeout: u32) -> BrowserReply {
         self.port
             .handle_browser(
                 s.lease.clone(),
@@ -523,7 +522,7 @@ impl Engine<'_> {
                 )
                 .await;
             let target = match reply {
-                Reply::Prepared { snapshot }
+                BrowserReply::Prepared { snapshot }
                     if snapshot.state == OperationState::Reserved && snapshot.target.is_none() =>
                 {
                     ResourceTarget {
@@ -549,7 +548,7 @@ impl Engine<'_> {
                 )
                 .await
             {
-                Reply::Start { snapshot, dispatch }
+                BrowserReply::Start { snapshot, dispatch }
                     if dispatch == "started"
                         && snapshot.state == OperationState::Running
                         && snapshot.operation_id == target.operation_id
@@ -584,7 +583,7 @@ impl Engine<'_> {
             )
             .await;
         let action = match reply {
-            Reply::Prepared { snapshot }
+            BrowserReply::Prepared { snapshot }
                 if snapshot.state == OperationState::Reserved
                     && snapshot.target.as_ref() == Some(&target)
                     && snapshot.payload_digest == digest =>
@@ -610,7 +609,7 @@ impl Engine<'_> {
             )
             .await
         {
-            Reply::BrowserAction {
+            BrowserReply::Action {
                 snapshot,
                 dispatch,
                 result: Some(value),
@@ -633,7 +632,7 @@ impl Engine<'_> {
                     Err(_) => failure("outcome_unknown", true),
                 }
             }
-            Reply::BrowserAction {
+            BrowserReply::Action {
                 snapshot,
                 dispatch,
                 cause,
@@ -645,10 +644,9 @@ impl Engine<'_> {
                 && snapshot.target.as_ref() == Some(&target) =>
             {
                 s.phase = Phase::Ready;
-                refusal(&Reply::Error {
+                refusal(&BrowserReply::Error {
                     category: cause.unwrap_or(ErrorCategory::CapabilityUnsupported),
                     certainty: ExecutionCertainty::NotDispatched,
-                    cursor_may_be_consumed: false,
                 })
             }
             other => {

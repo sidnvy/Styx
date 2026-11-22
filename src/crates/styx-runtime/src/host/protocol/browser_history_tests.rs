@@ -1,6 +1,7 @@
 //! Direct production adapter regression using an already-owned native Browser.
 //! Owner registry installation is test-only trusted setup, not network auth.
 use super::*;
+use crate::host::browser_sessions::operations::{BrowserCommand, BrowserReply};
 use crate::providers::browser::OwnedBrowserConfig;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -76,9 +77,10 @@ pub(crate) async fn verify_original_dispatch_history(
                 cleanup: None,
             },
         );
-    let reply = protocol
+    let port = protocol.browser_port().unwrap();
+    let reply = port
         .handle_browser(
-            reference.clone(),
+            owner.clone(),
             host.grant_revision(),
             1_000,
             BrowserCommand::DispatchOpen {
@@ -90,15 +92,15 @@ pub(crate) async fn verify_original_dispatch_history(
         )
         .await;
     match reply {
-        Reply::Start { snapshot, dispatch } => {
+        BrowserReply::Start { snapshot, dispatch } => {
             assert_eq!(dispatch, "existing_no_replay");
             same_snapshot(&snapshot, opened);
         }
         _ => panic!("original Running open must remain existing history"),
     }
-    let reply = protocol
+    let reply = port
         .handle_browser(
-            reference,
+            owner.clone(),
             host.grant_revision(),
             1_000,
             BrowserCommand::DispatchAction {
@@ -110,7 +112,7 @@ pub(crate) async fn verify_original_dispatch_history(
         )
         .await;
     match reply {
-        Reply::BrowserAction {
+        BrowserReply::Action {
             snapshot,
             dispatch,
             result,

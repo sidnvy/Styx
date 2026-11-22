@@ -669,12 +669,10 @@ async fn gateway_lan_scenario_inner(
                             );
                             assert!(replacement.owner_ref() != old.owner_ref());
                             assert_ne!(replacement.host_generation(), old.host_generation());
-                            let old_frame = || wire::Call::PrepareStart {
+                            let old_frame = || wire::Call::ExecTask {
                                 owner: old.owner_ref(),
                                 grant_revision: old.grant_revision(),
-                                timeout_ms: 5000,
-                                spec: serde_json::value::RawValue::from_string("{}".into())
-                                    .unwrap(),
+                                command: wire::ExecTaskCommand::List,
                             };
                             assert!(matches!(
                                 relay.call(old, old_frame()).await,
@@ -697,12 +695,10 @@ async fn gateway_lan_scenario_inner(
                                 old_unknown.closed(),
                                 "superseded old-generation binding must be permanently fenced"
                             );
-                            let old_frame = || wire::Call::PrepareStart {
+                            let old_frame = || wire::Call::ExecTask {
                                 owner: old_unknown.owner_ref(),
                                 grant_revision: old_unknown.grant_revision(),
-                                timeout_ms: 5000,
-                                spec: serde_json::value::RawValue::from_string("{}".into())
-                                    .unwrap(),
+                                command: wire::ExecTaskCommand::List,
                             };
                             assert!(matches!(
                                 relay.call(old_unknown, old_frame()).await,

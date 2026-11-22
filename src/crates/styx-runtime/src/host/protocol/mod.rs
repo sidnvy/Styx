@@ -546,25 +546,6 @@ impl<'a> HostProtocol<'a> {
                     None => rejection(ErrorCategory::CapabilityUnsupported),
                 }
             }
-            Call::Browser {
-                owner,
-                grant_revision,
-                timeout_ms,
-                command,
-            } => {
-                #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-                {
-                    self.handle_browser(owner, grant_revision, timeout_ms, command)
-                        .await
-                }
-                #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-                {
-                    let _ = (owner, grant_revision, timeout_ms, command);
-                    Reply::Unsupported {
-                        feature: BROWSER_V1.into(),
-                    }
-                }
-            }
             Call::DesktopSession {
                 owner,
                 grant_revision,
@@ -758,7 +739,6 @@ impl<'a> HostProtocol<'a> {
         }
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         if self.paired && self.browser.is_some() {
-            features.push(BROWSER_V1.into());
             features.push(HOST_BROWSER_SESSIONS_V1.into());
         }
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -1007,7 +987,6 @@ fn call_owner(call: &Call) -> Option<&OwnerRef> {
         | Call::PrepareAction { owner, .. }
         | Call::DispatchAction { owner, .. }
         | Call::InspectAction { owner, .. }
-        | Call::Browser { owner, .. }
         | Call::DesktopSession { owner, .. } => Some(owner),
         _ => None,
     }

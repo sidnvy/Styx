@@ -4,7 +4,7 @@ mod drain;
 use crate::{
     enrollment::shared::SharedEnrollment,
     gateway::auth::VerifiedGatewayOwner,
-    host::protocol::wire::{BrowserCommand, Call, OwnerRef, Reply},
+    host::protocol::wire::{Call, OwnerRef, Reply},
 };
 pub(crate) use drain::{EntryDrain, cleanup_control};
 use std::{
@@ -15,7 +15,7 @@ use std::{
     },
     time::Duration,
 };
-use styx_contracts::{identity::*, operation::OperationId};
+use styx_contracts::identity::*;
 use styx_core::enrollment::{ConnectionLease, Lane};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -125,27 +125,6 @@ enum ToolRoute {
     Android,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TargetKind {
-    ExecResource,
-    ExecAction,
-    BrowserResource,
-    BrowserAction,
-}
-struct TargetRecord {
-    digest: Sha256Digest,
-    kind: TargetKind,
-    parent: Option<OperationId>,
-}
-fn retire_resource_targets(
-    targets: &mut BTreeMap<OperationId, TargetRecord>,
-    id: &OperationId,
-) -> usize {
-    let before = targets.len();
-    targets.retain(|key, record| key != id && record.parent.as_ref() != Some(id));
-    before - targets.len()
-}
-
 struct Binding {
     owner: VerifiedGatewayOwner,
     reference: OwnerRef,
@@ -153,7 +132,6 @@ struct Binding {
     entry: Arc<Entry>,
     route: Mutex<Arc<Entry>>,
     rebind: tokio::sync::Mutex<()>,
-    targets: Mutex<BTreeMap<OperationId, TargetRecord>>,
     revoked: Arc<Mutex<bool>>,
     // Local transport drain waits for an admitted call to consume its receipt.
     // Explicit owner/enrollment revocation never waits on this handoff.
@@ -795,7 +773,6 @@ impl RelayHandle {
             entry: entry.clone(),
             route: Mutex::new(entry.clone()),
             rebind: tokio::sync::Mutex::new(()),
-            targets: Mutex::new(BTreeMap::new()),
             revoked: Arc::new(Mutex::new(false)),
             receipts: tokio::sync::RwLock::new(()),
             ready: AtomicBool::new(false),
@@ -877,14 +854,6 @@ impl RelayHandle {
             .receipts
             .try_read()
             .map_err(|_| RelayError::Unauthorized)?;
-        let read_target = match &call {
-            Call::Read { target, .. } => Some(target.operation_id.clone()),
-            _ => None,
-        };
-        let start_target = match &call {
-            Call::DispatchStart { target, .. } => Some(target.operation_id.clone()),
-            _ => None,
-        };
         if self.is_fenced(&b.inner.owner)?
             || *b.inner.revoked.lock().map_err(|_| RelayError::Unknown)?
             || !b.inner.ready.load(Ordering::Acquire)
@@ -910,10 +879,8 @@ impl RelayHandle {
         } else {
             ToolRoute::Lane(Lane::Exec)
         };
-        // A denied lane cannot consume the shared routing-record allowance.
-        // exchange/actual-send/delivery still repeat the current authorization.
         let entry = self.route_binding(&b.inner, lane).await?;
-        let (owner, target, revision, new_record, record_kind) = match &call {
+        let (owner, grant_revision) = match &call {
             Call::Android {
                 owner,
                 grant_revision,
@@ -933,178 +900,15 @@ impl RelayHandle {
                 owner,
                 grant_revision,
                 ..
-            } => (
-                owner,
-                None,
-                Some(*grant_revision),
-                false,
-                TargetKind::ExecResource,
-            ),
-            Call::PrepareStart {
-                owner,
-                grant_revision,
-                ..
-            } => (
-                owner,
-                None,
-                Some(*grant_revision),
-                true,
-                TargetKind::ExecResource,
-            ),
-            Call::DispatchStart { owner, target } | Call::InspectStart { owner, target } => (
-                owner,
-                Some((
-                    target.operation_id.clone(),
-                    target.payload_digest,
-                    TargetKind::ExecResource,
-                )),
-                None,
-                false,
-                TargetKind::ExecResource,
-            ),
-            Call::Read {
-                owner,
-                target,
-                grant_revision,
-                ..
-            } => (
-                owner,
-                Some((
-                    target.operation_id.clone(),
-                    target.payload_digest,
-                    TargetKind::ExecResource,
-                )),
-                Some(*grant_revision),
-                false,
-                TargetKind::ExecResource,
-            ),
-            Call::PrepareAction {
-                owner,
-                target,
-                grant_revision,
-                ..
-            } => (
-                owner,
-                Some((
-                    target.operation_id.clone(),
-                    target.payload_digest,
-                    TargetKind::ExecResource,
-                )),
-                Some(*grant_revision),
-                true,
-                TargetKind::ExecAction,
-            ),
-            Call::DispatchAction { owner, action } | Call::InspectAction { owner, action } => (
-                owner,
-                Some((
-                    action.operation_id.clone(),
-                    action.payload_digest,
-                    TargetKind::ExecAction,
-                )),
-                None,
-                false,
-                TargetKind::ExecAction,
-            ),
-            Call::Browser {
-                owner,
-                grant_revision,
-                command,
-                ..
-            } => match command {
-                BrowserCommand::PrepareOpen => (
-                    owner,
-                    None,
-                    Some(*grant_revision),
-                    true,
-                    TargetKind::BrowserResource,
-                ),
-                BrowserCommand::DispatchOpen { target }
-                | BrowserCommand::InspectOpen { target } => (
-                    owner,
-                    Some((
-                        target.operation_id.clone(),
-                        target.payload_digest,
-                        TargetKind::BrowserResource,
-                    )),
-                    Some(*grant_revision),
-                    false,
-                    TargetKind::BrowserResource,
-                ),
-                BrowserCommand::PrepareAction { target, .. } => (
-                    owner,
-                    Some((
-                        target.operation_id.clone(),
-                        target.payload_digest,
-                        TargetKind::BrowserResource,
-                    )),
-                    Some(*grant_revision),
-                    true,
-                    TargetKind::BrowserAction,
-                ),
-                BrowserCommand::DispatchAction { action }
-                | BrowserCommand::InspectAction { action } => (
-                    owner,
-                    Some((
-                        action.operation_id.clone(),
-                        action.payload_digest,
-                        TargetKind::BrowserAction,
-                    )),
-                    Some(*grant_revision),
-                    false,
-                    TargetKind::BrowserAction,
-                ),
-            },
+            } => (owner, *grant_revision),
             _ => return Err(RelayError::Unsupported),
         };
-        if owner != &b.inner.reference || revision.is_some_and(|r| r != b.grant_revision()) {
+        if owner != &b.inner.reference || grant_revision != b.grant_revision() {
             return Err(RelayError::Unauthorized);
-        }
-        {
-            let targets = b.inner.targets.lock().map_err(|_| RelayError::Unknown)?;
-            if target.as_ref().is_some_and(|(id, d, kind)| {
-                !targets
-                    .get(id)
-                    .is_some_and(|r| r.digest == *d && r.kind == *kind)
-            }) {
-                return Err(RelayError::Unauthorized);
-            }
         }
         let reply = self
             .exchange(&entry, call, Some(b.inner.revoked.clone()))
             .await?;
-        let retired = match (&reply, read_target.as_ref(), start_target.as_ref()) {
-            (
-                Reply::Read {
-                    liveness: styx_contracts::operation::ExecutionLiveness::Exited,
-                    output_drain: styx_contracts::operation::OutputDrain::Drained,
-                    ..
-                },
-                Some(id),
-                _,
-            ) => Some(id),
-            (
-                Reply::Error {
-                    certainty: styx_contracts::error::ExecutionCertainty::NotDispatched,
-                    ..
-                },
-                _,
-                Some(id),
-            ) => Some(id),
-            (
-                Reply::BrowserAction {
-                    snapshot,
-                    cleanup_complete: Some(true),
-                    ..
-                },
-                _,
-                _,
-            ) => snapshot.target.as_ref().map(|target| &target.operation_id),
-            _ => None,
-        };
-        if let Some(id) = retired {
-            let mut targets = b.inner.targets.lock().map_err(|_| RelayError::Unknown)?;
-            retire_resource_targets(&mut targets, id);
-        }
         if self.is_fenced(&b.inner.owner)?
             || *b.inner.revoked.lock().map_err(|_| RelayError::Unknown)?
             || !b.inner.ready.load(Ordering::Acquire)
@@ -1112,31 +916,6 @@ impl RelayHandle {
             return Err(RelayError::Unauthorized);
         }
         self.authorize_route(&entry, lane).await?;
-        if let Reply::Prepared { snapshot }
-        | Reply::Start { snapshot, .. }
-        | Reply::Inspected { snapshot }
-        | Reply::Action { snapshot, .. }
-        | Reply::BrowserAction { snapshot, .. } = &reply
-        {
-            let mut targets = b.inner.targets.lock().map_err(|_| RelayError::Unknown)?;
-            if let Some(existing) = targets.get(&snapshot.operation_id) {
-                if existing.digest != snapshot.payload_digest || existing.kind != record_kind {
-                    return Err(RelayError::Unknown);
-                }
-            } else if new_record {
-                targets.insert(
-                    snapshot.operation_id.clone(),
-                    TargetRecord {
-                        digest: snapshot.payload_digest,
-                        kind: record_kind,
-                        parent: snapshot.target.as_ref().map(|t| t.operation_id.clone()),
-                    },
-                );
-            }
-        }
-        // Child action correlations remain available for reconciliation until
-        // their original resource has independently exited and drained. A
-        // transport-level reply alone does not prove Gateway result delivery.
         Ok(reply)
     }
     fn is_fenced(&self, owner: &VerifiedGatewayOwner) -> Result<bool, RelayError> {
@@ -1380,64 +1159,6 @@ mod command_queue_tests {
         drop(receiver.try_recv().unwrap());
         assert!(!queue.is_closed());
         assert!(matches!(exchange.await, Err(RelayError::Unknown)));
-    }
-}
-
-#[cfg(test)]
-mod settled_targets_tests {
-    use super::*;
-    #[test]
-    fn settled_exec_releases_only_its_resource_and_child_action_routes() {
-        let op = |n| OperationId {
-            host_generation: "target-fixture".try_into().unwrap(),
-            owner_epoch: "target-owner".try_into().unwrap(),
-            sequence: n,
-        };
-        let digest = Sha256Digest::of_bytes(b"owned-target");
-        let mut targets = BTreeMap::new();
-        targets.insert(
-            op(1),
-            TargetRecord {
-                digest,
-                kind: TargetKind::ExecResource,
-                parent: None,
-            },
-        );
-        targets.insert(
-            op(2),
-            TargetRecord {
-                digest,
-                kind: TargetKind::ExecAction,
-                parent: Some(op(1)),
-            },
-        );
-        targets.insert(
-            op(3),
-            TargetRecord {
-                digest,
-                kind: TargetKind::ExecResource,
-                parent: None,
-            },
-        );
-        assert_eq!(retire_resource_targets(&mut targets, &op(1)), 2);
-        assert!(targets.contains_key(&op(3)));
-        assert_eq!(retire_resource_targets(&mut targets, &op(1)), 0);
-        for n in 4..=1200 {
-            targets.insert(
-                op(n),
-                TargetRecord {
-                    digest,
-                    kind: TargetKind::ExecResource,
-                    parent: None,
-                },
-            );
-            assert_eq!(retire_resource_targets(&mut targets, &op(n)), 1);
-        }
-        assert_eq!(
-            targets.len(),
-            1,
-            "completed history must not exhaust routing capacity"
-        );
     }
 }
 

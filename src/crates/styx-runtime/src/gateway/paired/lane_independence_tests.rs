@@ -9,7 +9,7 @@ fn independent_feature_families_never_synthesize_exec_support() {
         "owner_cleanup".into(),
     ];
     let mut browser = control.clone();
-    browser.push(BROWSER_V1.into());
+    browser.push(HOST_BROWSER_SESSIONS_V1.into());
     assert!(!exec_negotiated(&browser, false, false, false));
     let mut android = control.clone();
     android.push(ANDROID_V1.into());
@@ -43,7 +43,7 @@ fn independent_feature_families_never_synthesize_exec_support() {
     incomplete.pop();
     assert!(!exec_negotiated(&incomplete, true, true, false));
     let mut combined = exec;
-    combined.push(BROWSER_V1.into());
+    combined.push(HOST_BROWSER_SESSIONS_V1.into());
     combined.push(COMPUTER_V3.into());
     assert!(exec_negotiated(&combined, true, true, false));
 }
