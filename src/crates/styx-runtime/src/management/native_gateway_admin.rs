@@ -115,9 +115,9 @@ pub struct ComputerConnections {
 impl ComputerConnections {
     pub fn any_online(&self) -> Option<bool> {
         let lanes = [self.exec, self.browser, self.computer, self.android];
-        if lanes.iter().any(|state| *state == Some(true)) {
+        if lanes.contains(&Some(true)) {
             Some(true)
-        } else if lanes.iter().any(|state| *state == Some(false)) {
+        } else if lanes.contains(&Some(false)) {
             Some(false)
         } else {
             None

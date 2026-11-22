@@ -964,12 +964,13 @@ fn linux_preflight_notes(answers: &Answers, foreground: bool) -> Vec<String> {
                 }
             }
         }
-        if !foreground {
-            if let Ok(user) = std::env::var("USER") {
-                if !Path::new("/var/lib/systemd/linger").join(&user).is_file() {
-                    notes.push(format!("systemd user linger is not enabled for {user}; if this machine should stay online after logout, run `loginctl enable-linger {user}`."));
-                }
-            }
+        if !foreground
+            && let Ok(user) = std::env::var("USER")
+            && !Path::new("/var/lib/systemd/linger").join(&user).is_file()
+        {
+            notes.push(format!(
+                "systemd user linger is not enabled for {user}; if this machine should stay online after logout, run `loginctl enable-linger {user}`."
+            ));
         }
     }
     #[cfg(not(target_os = "linux"))]
