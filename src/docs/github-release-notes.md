@@ -7,29 +7,30 @@ several conversations can use the same computer.
 
 ## Changes
 
-This release candidate fixes native Desktop actions returning
-`UNAUTHORIZED / not_dispatched` after another conversation reads the same Host.
-Each owned Desktop resource now retains its own latest accessibility observation
-inside its existing resource record. Reading, writing or closing one resource no
-longer replaces or consumes another resource's observed targets.
-Read-only metadata and screenshot calls also preserve the latest complete
-accessibility observation instead of discarding otherwise valid element tokens.
+This release candidate replaces Styx's hand-written 8-tool Desktop API with
+direct passthrough to each Host's native `cua-driver` (`0.47.24`) MCP server:
 
-The existing owner, target, permission and once-only dispatch checks remain in
-place. The Host does not retry a dispatched action or restore its consumed
-observation after an unknown result. Input freshness is checked before dispatch;
-an acknowledged click or type_text result is no longer discarded solely because
-the original observation expired while that operation was running.
-This change does not grant new permissions or alter native input delivery.
+- **Public MCP surface (38 tools)**: Replaces the 8 legacy `computer_*` Desktop
+  tools with `desktop_list_tools` and `desktop_call`. Styx handles
+  authentication, Host routing and runtime lifecycle while forwarding native
+  CUA tool catalogs, arguments, multimodal results (`image`, `structuredContent`)
+  and native refusals verbatim.
+- **Host-owned Desktop lifecycle**: Linux and Windows Hosts now manage a shared
+  `cua-driver serve` daemon with per-caller `cua-driver mcp --socket` proxies,
+  isolating caller sessions while preserving shared Desktop state. macOS uses
+  the App-owned CUA daemon directly without injecting synthetic session IDs.
+- **8 MiB Desktop framing**: Aligns Gateway, Host link and CUA transport frame
+  limits to 8 MiB so combined accessibility-tree + screenshot responses pass
+  through intact.
+- **Linux/Hyprland native CUA fixes**: Adds AT-SPI checkbox/radio role support
+  for radio buttons and routes Hyprland foreground `press_key` through Wayland
+  virtual keyboard without requiring the optional `hyprland_input` plugin.
+- **Gateway forwarding credential**: Admits the independent public MCP
+  forwarding credential alongside existing Bearer access.
 
-Linux/Hyprland `set_value` retains the replacement input support from
-0.8.1-rc.2, including empty values and Unicode. Native foreground delivery may
-bring the target window forward and focus its field; previous focus is not
-restored. The macOS and Windows setter implementations are unchanged.
-
-Update the affected Host to obtain the observation ownership fix. Public tool
-names, arguments and the Gateway protocol are unchanged. Existing profiles,
-identities, pairing and capability grants are preserved.
+Update both Gateway and desktop Hosts to `0.8.1-rc.4`, then refresh your
+ChatGPT Custom MCP connector so it rediscovers the updated 38-tool schema.
+Existing profiles, identities, pairing and capability grants are preserved.
 
 ### Android package availability
 
