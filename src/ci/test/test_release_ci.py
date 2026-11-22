@@ -88,18 +88,30 @@ class ReleaseTests(unittest.TestCase):
             ci.checksums(argparse.Namespace(output=self.root, version='1.2.3'))
         self.assertFalse((self.root / 'SHA256SUMS').exists())
 
-    def test_checksums_cover_all_four_assets(self):
+    def test_checksums_cover_all_five_assets(self):
         names = ['Styx-1.2.3-windows-x64.exe', 'Styx-1.2.3-macos-arm64.dmg',
                  'styx-1.2.3-linux-x86_64-desktop.tar.gz',
-                 'styx-1.2.3-linux-x86_64-gateway-only.tar.gz']
+                 'styx-1.2.3-linux-x86_64-gateway-only.tar.gz',
+                 'Styx-1.2.3-android-arm64.apk']
         for name in names:
             (self.root / name).write_bytes(name.encode())
         ci.checksums(argparse.Namespace(output=self.root, version='1.2.3'))
         rows = (self.root / 'SHA256SUMS').read_text().splitlines()
-        self.assertEqual(len(rows), 4)
+        self.assertEqual(len(rows), 5)
         for row in rows:
             digest, name = row.split('  ')
             self.assertEqual(digest, ci.digest(self.root / name))
+
+    def test_android_keystore_requires_secrets_and_cleans_up(self):
+        target = self.root / 'android-signing'
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ValueError, 'STYX_ANDROID_KEYSTORE_BASE64'):
+                ci.android_keystore(argparse.Namespace(directory=target))
+        self.assertFalse(target.exists())
+        target.mkdir(mode=0o700)
+        (target / 'release.jks').write_bytes(b'dummy')
+        ci.android_keystore_clean(argparse.Namespace(directory=target))
+        self.assertFalse(target.exists())
 
     def test_linux_assets_delegate_both_modes_to_the_distribution_producer(self):
         sealed = self.root / 'sealed'
@@ -255,6 +267,10 @@ class ReleaseSourcePolicyTests(unittest.TestCase):
         self.assertEqual(release.count('release-ci.py metadata'), 1)
         self.assertIn('  quality:\n    needs: source', release)
         self.assertIn('  dependencies:\n    needs: source', release)
+        self.assertIn('  android:\n    needs: [source, quality]', release)
+        android_section = release.split('  android:', 1)[1].split('  release:', 1)[0]
+        self.assertIn('environment: release', android_section)
+        self.assertIn('android-keystore-clean', android_section)
         source = release.split('  source:', 1)[1].split('  quality:', 1)[0]
         self.assertNotIn('environment: release', source)
         self.assertNotIn('secrets.', source)

@@ -28,14 +28,13 @@ hosts already running `0.8.1-rc.6` remain compatible. Update both Gateway and
 desktop Hosts together when upgrading from `0.8.1-rc.4` or earlier. Existing
 profiles, identities, pairing and capability grants are preserved.
 
-### Android package availability
+### Android signing & in-place upgrades
 
-The four downloads below update Gateway and desktop Hosts. A signed Android APK
-is not published in this Release because CI Android signing secrets are not yet
-configured; local fixed-key signed APKs can be built and verified via
-`src/ci/release-android.py` and upgraded in place when signed with the same
-keystore. Existing accepted Android Hosts continue working with the updated
-Gateway using the same pairing and permissions.
+`Styx-@VERSION@-android-arm64.apk` is signed with the fixed Styx Android release
+key (APK Signature Scheme v2/v3, 16 KiB ELF aligned, SHA-256 certificate
+fingerprint `a83c569e96981ce31d6ad50dace6094c1f644be7b0a09c3fe84addc74af4b7b3`).
+Devices already running a fixed-key release APK can upgrade in place without
+re-pairing or re-granting permissions.
 
 ## Choose your download
 
@@ -45,6 +44,7 @@ Gateway using the same pairing and permissions.
 | macOS Apple silicon | `Styx-@VERSION@-macos-arm64.dmg` | Host, with an optional local Gateway |
 | Linux x86_64 desktop | `styx-@VERSION@-linux-x86_64-desktop.tar.gz` | Host, with an optional local Gateway |
 | Linux x86_64 server | `styx-@VERSION@-linux-x86_64-gateway-only.tar.gz` | Gateway only |
+| Android arm64 | `Styx-@VERSION@-android-arm64.apk` | Host (phone) |
 
 ## Install and connect
 

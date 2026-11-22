@@ -471,8 +471,81 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'macos' }}
         run: python3 src/ci/release-ci.py mac-keychain-clean --directory "$RUNNER_TEMP/mac-signing"
 
+  android:
+    needs: [source, quality]
+    runs-on: ubuntu-24.04
+    environment: release
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: '1.97.1'
+          targets: aarch64-linux-android
+      - name: Configure Java 21 and Android SDK paths
+        run: |
+          echo "JAVA_HOME=${JAVA_HOME_21_X64}" >> "$GITHUB_ENV"
+          echo "${JAVA_HOME_21_X64}/bin" >> "$GITHUB_PATH"
+          echo "ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_JOBS=$(nproc)" >> "$GITHUB_ENV"
+          echo "STYX_ARTIFACT_ROOT=$RUNNER_TEMP/android-stage" >> "$GITHUB_ENV"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            target
+          key: release-android-arm64-rust1971-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'src/host/android/app/build.gradle.kts', 'src/host/android/gradle/wrapper/gradle-wrapper.properties') }}-${{ github.sha }}
+          restore-keys: |
+            release-android-arm64-rust1971-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'src/host/android/app/build.gradle.kts', 'src/host/android/gradle/wrapper/gradle-wrapper.properties') }}-
+            release-android-arm64-rust1971-
+      - name: Install pinned Android SDK 36, Build Tools 36.0.0 and NDK 29
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865"
+          cargo fetch --locked --target aarch64-linux-android
+      - name: Materialize and verify fixed Android release keystore
+        env:
+          STYX_ANDROID_KEYSTORE_BASE64: ${{ secrets.STYX_ANDROID_KEYSTORE_BASE64 }}
+          STYX_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.STYX_ANDROID_KEYSTORE_PASSWORD }}
+          STYX_ANDROID_KEY_ALIAS: ${{ secrets.STYX_ANDROID_KEY_ALIAS }}
+        run: python3 -I -B src/ci/release-ci.py android-keystore --directory "$RUNNER_TEMP/android-signing"
+      - name: Build, sign and verify Android arm64 APK
+        env:
+          STYX_ANDROID_KEYSTORE: ${{ runner.temp }}/android-signing/release.jks
+          STYX_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.STYX_ANDROID_KEYSTORE_PASSWORD }}
+          STYX_ANDROID_KEY_ALIAS: ${{ secrets.STYX_ANDROID_KEY_ALIAS }}
+          STYX_ANDROID_KEY_PASSWORD: ${{ secrets.STYX_ANDROID_KEY_PASSWORD }}
+        run: |
+          python3 -I -B src/ci/release-android.py \
+            --output "$RUNNER_TEMP/android-assets" \
+            --build-number "$((1200 + GITHUB_RUN_NUMBER))" \
+            --expected-signer-sha256 a83c569e96981ce31d6ad50dace6094c1f644be7b0a09c3fe84addc74af4b7b3
+      - name: Remove temporary Android signing keystore
+        if: always()
+        run: python3 -I -B src/ci/release-ci.py android-keystore-clean --directory "$RUNNER_TEMP/android-signing"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: assets-android
+          path: ${{ runner.temp }}/android-assets/Styx-${{ needs.quality.outputs.version }}-android-arm64.apk
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: android-receipt
+          path: ${{ runner.temp }}/android-assets/android-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+
   release:
-    needs: [quality, seal, package]
+    needs: [quality, seal, package, android]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -489,7 +562,7 @@ jobs:
           pattern: assets-*
           path: ${{ runner.temp }}/release
           merge-multiple: true
-      - name: Require all four assets and generate checksums
+      - name: Require all five assets and generate checksums
         run: python3 src/ci/release-ci.py checksums --version '${{ needs.quality.outputs.version }}' --output "$RUNNER_TEMP/release"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
