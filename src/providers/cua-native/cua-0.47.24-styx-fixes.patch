@@ -1,6 +1,15 @@
 diff --git a/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs b/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs
 --- a/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs
 +++ b/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs
+@@ -3430,7 +3430,7 @@
+ fn is_checkbox_role(role: &str) -> bool {
+     matches!(
+         role.trim().to_ascii_lowercase().as_str(),
+-        "check box" | "checkbox"
++        "check box" | "checkbox" | "radio button" | "radio menu item" | "check menu item"
+     )
+ }
+ 
 @@ -4189,6 +4189,50 @@
      )
  }
@@ -503,7 +512,7 @@ diff --git a/libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs b
 diff --git a/libs/cua-driver/rust/crates/platform-linux/src/wayland/mod.rs b/libs/cua-driver/rust/crates/platform-linux/src/wayland/mod.rs
 --- a/libs/cua-driver/rust/crates/platform-linux/src/wayland/mod.rs
 +++ b/libs/cua-driver/rust/crates/platform-linux/src/wayland/mod.rs
-@@ -2854,6 +2854,21 @@
+@@ -2854,6 +2854,26 @@
  /// the caller. This avoids re-resolving a title that can change mid-sequence
  /// (for example after opening a Chromium tab). Under niri, text goes out on
  /// niri's own keymap and stops if focus leaves the window that had it.
@@ -520,6 +529,11 @@ diff --git a/libs/cua-driver/rust/crates/platform-linux/src/wayland/mod.rs b/lib
 +    still_focused: impl FnMut(usize) -> anyhow::Result<()>,
 +) -> anyhow::Result<()> {
 +    virtual_keyboard::type_text(text, replace, still_focused)
++}
++
++/// One native virtual-keyboard key or modifier chord after exact window focus is confirmed.
++pub fn press_key_focused_once(modifiers: &[String], key: &str) -> anyhow::Result<()> {
++    virtual_keyboard::hotkey(modifiers, key)
 +}
 +
  pub fn type_text_focused(text: &str) -> anyhow::Result<()> {
@@ -1109,3 +1123,59 @@ diff --git a/libs/cua-driver/rust/crates/platform-linux/tests/set_value_outcome.
 +    assert_eq!(observed.effects, before.effects);
 +}
 
+
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/tools/press_key.rs b/libs/cua-driver/rust/crates/platform-linux/src/tools/press_key.rs
+--- a/libs/cua-driver/rust/crates/platform-linux/src/tools/press_key.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/tools/press_key.rs
+@@ -273,6 +273,51 @@
+             if xid_opt.is_none() {
+                 return foreground_hyprland_refusal("an exact window_id is required");
+             }
++            if !crate::wayland::hyprland_input::enabled() {
++                if !crate::wayland::keyboard_input_available() {
++                    return ToolResult::error("native Wayland virtual keyboard is unavailable")
++                        .with_structured(json!({"code":"keyboard_unavailable","effect":"none"}));
++                }
++                let object = token.as_ref().and_then(|t| t.object().ok().cloned());
++                let key_owned = key.clone();
++                let mods_owned = mods.clone();
++                let result = spawn_blocking_bounded(
++                    "foreground key",
++                    foreground_budget(1),
++                    move || {
++                        crate::wayland::hyprland::activate_exact(xid, pid)?;
++                        if let Some(obj) = object.as_ref() {
++                            let _ = crate::atspi::native::focus_element_ref(obj)?;
++                        }
++                        if !crate::wayland::hyprland::target_is_active(xid, Some(pid))? {
++                            anyhow::bail!("target lost compositor focus before key press");
++                        }
++                        crate::wayland::press_key_focused_once(&mods_owned, &key_owned)
++                    },
++                )
++                .await;
++                return match result {
++                    Ok(Ok(())) => {
++                        super::impl_::hyprland_input_result(Ok(json!({"ok": true})), true)
++                    }
++                    Ok(Err(error)) => {
++                        let detail: String = format!("{error:#}").chars().take(512).collect();
++                        ToolResult::error(format!(
++                            "foreground keyboard key outcome is unconfirmed: {detail}"
++                        ))
++                        .with_structured(json!({
++                            "code": "foreground_input_unknown",
++                            "effect": "unknown",
++                            "detail": detail,
++                        }))
++                    }
++                    Err(error) => ToolResult::error(format!("foreground key task: {error}"))
++                        .with_structured(json!({
++                            "code": "foreground_input_unknown",
++                            "effect": "unknown",
++                        })),
++                };
++            }
+             let action = match foreground_hyprland_key(key, mods) {
+                 Ok(action) => action,
+                 Err(error) => return error,

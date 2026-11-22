@@ -6,15 +6,15 @@
   "official_archive_sha256": "8a2b76c50cffd076b40c29c593e69d51b51c2563b6bf51dc1926d1dac9558cfe",
   "archive_root_mtime": 1794515309,
   "patch": "cua-0.47.24-styx-fixes.patch",
-  "patch_sha256": "d357e5db3a77b2156308db4a040ef7f3b4cd96d11aa6ee64a31c9fb5f89bcdaa",
+  "patch_sha256": "16b457265c55401ba502a244a8cfb2ecdde079a5ac091cc881d8f57ad4fbab9f",
   "files": [
     {
       "path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs",
       "original_sha256": "5df205dd3655ffb37980a3bef9e85328efd02be510621fca2297564c7cbef776",
       "original_git_blob_sha1": "bae6dee0c127c3528cf22944a11c48e4531df668",
-      "final_sha256": "9b2a7e1ab3bbd1a60eb9ff68c2019a4420917082e2332ac37916ae58e7b991d1",
+      "final_sha256": "65b877077effeb63cdb4d907c657d2acd7c8cf8cefa548c24dcdad966ae76024",
       "original_bytes": 372519,
-      "final_bytes": 374168
+      "final_bytes": 374225
     },
     {
       "path": "libs/cua-driver/rust/crates/platform-linux/src/tools/set_value.rs",
@@ -60,9 +60,9 @@
       "path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/mod.rs",
       "original_sha256": "78b37958274cbf1956712d78b6be1cfa4484f0fa3478e2dd1c08ed178161820d",
       "original_git_blob_sha1": "13c2d2278efd629e04238d7232e80d39efded4f7",
-      "final_sha256": "aac710943daafe8f400c9bb3b40a2794a3c11e42af8b38e1063e3022008e0809",
+      "final_sha256": "676e18c30f7701ba7bde5cc1e225beec48deaa43bd2165b68173f3a38adbc536",
       "original_bytes": 210680,
-      "final_bytes": 211250
+      "final_bytes": 211478
     },
     {
       "path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/virtual_keyboard.rs",
@@ -111,6 +111,14 @@
       "final_bytes": 8930,
       "final_sha256": "28d1ae691c61fe22f661ef9efbb2315a45e092674de587c4520c60cf08181367",
       "original_git_blob_sha1": null
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/tools/press_key.rs",
+      "original_sha256": "1e9dc37b557db363b62b553a31b11c594321d087987e2923b7ba6684adf64d1c",
+      "original_git_blob_sha1": "e68196651c1d3e48aec41f746e89d9a46947ac25",
+      "final_sha256": "9636ab48caa62d85ede7e39fc6c14e40d1490967abfa3344449e3eb4463b14dd",
+      "original_bytes": 22976,
+      "final_bytes": 25321
     }
   ],
   "rust_toolchain": "1.97.1",
@@ -135,7 +143,9 @@
     "typed Windows completed-click focus transition",
     "Hyprland observed-element foreground typing through the existing in-process Unicode virtual keyboard",
     "normal Linux set_value uses the existing Hyprland keyboard for whole-field replacement when no native value route exists",
-    "native setter errors propagate without post-attempt ordinal replay; explicit false behavior remains upstream"
+    "native setter errors propagate without post-attempt ordinal replay; explicit false behavior remains upstream",
+    "Linux AT-SPI click activation includes radio button / radio menu item / check menu item check/uncheck verbs",
+    "Hyprland foreground press_key uses the existing Wayland virtual keyboard without requiring the optional isolated-input plugin"
   ],
   "snapshot_and_session_implementation": "official upstream, no Styx replacement cache or private drain protocol",
   "strict_text_platforms": []
