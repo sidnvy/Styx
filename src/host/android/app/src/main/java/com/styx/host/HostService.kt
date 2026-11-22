@@ -50,7 +50,7 @@ class HostService : Service() {
         promoteForeground(notification("Connecting to your paired Gateway"))
         worker.execute {
             if (stopping.get()) return@execute
-            val label = getSharedPreferences("settings", MODE_PRIVATE).getString("device_label", Build.MODEL)
+            val label = getSharedPreferences("settings", MODE_PRIVATE).getString("device_label", Build.MODEL).orEmpty().ifBlank { Build.MODEL }
             val config = JSONObject().put("files_dir", filesDir.absolutePath).put("device_label", label)
             val result = NativeHost.start(config.toString(), platform)
             if (stopping.get()) return@execute
@@ -58,7 +58,7 @@ class HostService : Service() {
             val text = if (!response.optBoolean("ok", false)) {
                 "Connection needs attention — open Styx"
             } else {
-                "Host is running — open for connection status"
+                "Connected as $label"
             }
             getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(text))
         }
