@@ -170,6 +170,7 @@ fn environment_metadata_is_bounded_literal_text_and_platform_is_a_closed_display
         capability_generation: "original".into(),
         host_generation: None,
         grant_revision: None,
+        host_version: None,
     };
     let listed = environment_summary(&device);
     assert_eq!(listed["label"], device.label);

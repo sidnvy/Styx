@@ -1285,13 +1285,21 @@ pub(crate) fn project_connections(
                 let current = devices
                     .iter()
                     .find(|d| row["device_id"] == d.device_id.as_str());
-                if let Some(d) = current.filter(|d| d.host_settings) {
-                    row["connections"] = json!({"exec":d.online,"browser":d.browser_online,"computer":d.computer_online});
-                    row["online"] = json!(d.online);
+                if let Some(d) = current {
+                    if let Some(version) = &d.host_version {
+                        row["host_version"] = json!(version);
+                    }
+                    if d.host_settings {
+                        let any_online =
+                            d.online || d.browser_online || d.computer_online || d.android_online;
+                        row["connections"] = json!({"exec":d.online,"browser":d.browser_online,"computer":d.computer_online,"android":d.android_online});
+                        row["online"] = json!(any_online);
+                    }
                 }
             }
             None => {
-                row["connections"] = json!({"exec":null,"browser":null,"computer":null});
+                row["connections"] =
+                    json!({"exec":null,"browser":null,"computer":null,"android":null});
                 row["online"] = Value::Null;
             }
         }

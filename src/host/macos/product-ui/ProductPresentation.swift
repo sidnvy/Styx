@@ -197,7 +197,7 @@ struct ProductDailyPanel: View {
                 }
             } else {
                 ForEach(model.devices.filter { !$0.isLocal }) { device in
-                    ProductMenuRow(title: device.label, symbol: "desktopcomputer", state: device.indicator, disclosure: true) { showSettings(.computers) }
+                    ProductMenuRow(title: device.label, symbol: device.platformSymbol, state: device.indicator, disclosure: true) { showSettings(.computers) }
                 }
 
             }
@@ -234,7 +234,12 @@ struct ProductInvitationView: View {
                         Text(productText("在另一台电脑的 Styx 中选择“加入已有”，粘贴此邀请。", "In Styx on the other computer, choose Join an existing Styx and paste this invitation.")).font(.caption)
                         if model.createdInvitation["code"].string != nil { Text(value).font(.body.monospaced()).textSelection(.enabled) }
                         Button { model.copy(value, secret: true); model.invitationCopied = true } label: { Label(model.invitationCopied ? productText("邀请已复制", "Invitation copied") : productText("复制邀请", "Copy invitation"), systemImage: "doc.on.doc").frame(maxWidth: .infinity) }
-                        Text(productText("邀请有效期为 10 分钟", "Invitations expire after 10 minutes")).font(.caption2).foregroundStyle(.secondary)
+                        if let expiry = model.createdInvitation["expiresAt"].number {
+                            let remaining = max(0, Int((expiry - context.date.timeIntervalSince1970 * 1000) / 1000))
+                            Text(productText("邀请剩余有效时间：\(remaining / 60) 分 \(String(format: "%02d", remaining % 60)) 秒", "Expires in \(remaining / 60):\(String(format: "%02d", remaining % 60))")).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                        } else {
+                            Text(productText("邀请有效期为 10 分钟", "Invitations expire after 10 minutes")).font(.caption2).foregroundStyle(.secondary)
+                        }
                         Text(productText("等待另一台电脑加入", "Waiting for the other computer")).font(.caption).foregroundStyle(.secondary)
                         DisclosureGroup(productText("另一台电脑连不上？", "Can't connect from the other computer?")) {
                             Text(productText("如果 macOS 询问是否允许 styx 接受传入连接，请亲自选择。允许后，在另一台电脑继续加入；拒绝后，可以关闭邀请，稍后再试。", "If macOS asks whether styx can accept incoming connections, make your choice in that system alert. After allowing it, continue joining on the other computer. If you decline, close this invitation and try later.")).font(.caption).foregroundStyle(.secondary)

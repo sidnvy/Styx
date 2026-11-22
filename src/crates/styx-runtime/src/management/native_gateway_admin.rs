@@ -101,12 +101,28 @@ pub struct PairedComputer {
     pub platform: String,
     pub status: String,
     pub connections: ComputerConnections,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_version: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ComputerConnections {
     pub exec: Option<bool>,
     pub browser: Option<bool>,
     pub computer: Option<bool>,
+    #[serde(default)]
+    pub android: Option<bool>,
+}
+impl ComputerConnections {
+    pub fn any_online(&self) -> Option<bool> {
+        let lanes = [self.exec, self.browser, self.computer, self.android];
+        if lanes.contains(&Some(true)) {
+            Some(true)
+        } else if lanes.contains(&Some(false)) {
+            Some(false)
+        } else {
+            None
+        }
+    }
 }
 fn computers_body(raw: &[u8]) -> Result<Vec<PairedComputer>> {
     if raw.len() > LIMIT {
@@ -124,6 +140,9 @@ fn computers_body(raw: &[u8]) -> Result<Vec<PairedComputer>> {
         {
             return Err(refused("native_gateway_computers_invalid"));
         }
+        row.host_version = row.host_version.take().filter(|v| {
+            !v.is_empty() && v.len() <= 64 && v.bytes().all(|b| (0x21..=0x7e).contains(&b))
+        });
         row.platform = crate::gateway::paired::backend::display_platform(&row.platform).into();
     }
     Ok(rows)

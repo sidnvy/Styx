@@ -359,6 +359,7 @@ async fn independent_android_pairing_wss_images_reconnect_disable_and_revoke() {
         host_connection: original.host_connection.clone(),
         host_generation: original.host_generation.clone(),
         grant_revision: original.grant_revision,
+        host_version: original.host_version.clone(),
         profile: original.profile.clone(),
         tx: original.tx.clone(),
         stop: original.stop.clone(),

@@ -511,7 +511,7 @@ namespace StyxNative {
     return Task.FromResult(0);
    },false);
    StyxContext.Heading(content,"4. Fill in the connection fields");
-   Explain("Connection: Tunnel\nTunnel ID: the same Tunnel ID saved on your Gateway\nAuthentication: No authentication\nKeep the runtime API key in Styx only; do not paste it into ChatGPT.",120);
+   Explain("Connection: Tunnel\nTunnel ID: the same Tunnel ID saved on your Gateway (associated tunnels also appear as quick-select chips below the field)\nAuthentication: No authentication (switch from default OAuth)\nKeep the runtime API key in Styx only; do not paste it into ChatGPT.",135);
    StyxContext.Heading(content,"5. Connect and try Styx");
    Explain("Review the notice, choose Create as a plugin, then Connect. Choose Try in chat and send: List my Styx computers. Check that your Gateway and joined computers appear.",100);
    Explain("If Add custom MCP server is missing, check Developer mode and workspace permissions.",65);
@@ -520,8 +520,9 @@ namespace StyxNative {
    var response=await owner.Call("computers");ShowPage("overview");
    var rows=Json.Get(response,"devices") as object[]??new object[0];
    foreach(var row in rows){
-    string id=Json.Str(row,"device_id"),name=Json.Str(row,"label");
-    Explain(name+" · "+Json.Str(row,"platform")+" · "+(Json.Get(row,"online") is bool?(Json.Yes(row,"online")?"Connected":"Disconnected"):"Status unknown"),40);
+    string id=Json.Str(row,"device_id"),name=Json.Str(row,"label"),version=Json.Str(row,"version");
+    string status=Json.Get(row,"online") is bool?(Json.Yes(row,"online")?"Connected":"Disconnected"):"Status unknown";
+    Explain(name+" · "+Json.Str(row,"platform")+(String.IsNullOrEmpty(version)?"":" · v"+version)+" · "+status,40);
     if(!Json.Yes(row,"is_local"))Action("Remove "+name,async()=>{
      if(MessageBox.Show("Revoke access for "+name+"?\n"+id,"Remove computer",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;
      await owner.Call("revokeComputer",Json.Obj("authorize",true,"deviceId",id));await ShowNativeComputers();
@@ -595,6 +596,23 @@ namespace StyxNative {
      toggle.CheckedChanged+=async(sender,args)=>{toggle.Enabled=false;try{var result=await owner.Call("hostCapabilities",Json.Obj(selectedCapability,toggle.Checked));await owner.RefreshAfterMutation();if(!Json.Yes(result,"applied"))Feedback("Settings have not fully applied. Refresh to check their status.");}catch(Exception){Feedback("The setting result is unconfirmed. Refresh the status before trying again.");}finally{if(!toggle.IsDisposed)toggle.Enabled=true;}};
     }
   }
+  static int DetectInstalledBrowserIndex(){
+   string pf86=Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+   string pf=Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+   string local=Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+   if(File.Exists(Path.Combine(pf86,"Microsoft","Edge","Application","msedge.exe"))||File.Exists(Path.Combine(pf,"Microsoft","Edge","Application","msedge.exe")))return 1;
+   if(File.Exists(Path.Combine(pf,"Google","Chrome","Application","chrome.exe"))||File.Exists(Path.Combine(pf86,"Google","Chrome","Application","chrome.exe"))||File.Exists(Path.Combine(local,"Google","Chrome","Application","chrome.exe")))return 2;
+   return 0;
+  }
+  void WireBrowserChannelSelection(){
+   channel.Items[0]="Choose Microsoft Edge or Google Chrome";
+   if(browser.Checked&&channel.SelectedIndex==0){int detected=DetectInstalledBrowserIndex();if(detected>0)channel.SelectedIndex=detected;}
+   channel.Enabled=browser.Checked;
+   browser.CheckedChanged+=(s,e)=>{
+    channel.Enabled=browser.Checked;
+    if(browser.Checked&&channel.SelectedIndex==0){int detected=DetectInstalledBrowserIndex();if(detected>0)channel.SelectedIndex=detected;}
+   };
+  }
   void ShowRustPage(string name){
    if(name=="general"){
     StyxContext.Heading(content,"Connection settings");JoinGatewayAction();
@@ -621,9 +639,12 @@ namespace StyxNative {
     Action("Windows startup settings",()=>{Process.Start("ms-settings:startupapps");return Task.FromResult(0);},false);NativeAction("Check status","appLifecycle",ReadLogin);
    }else if(name=="create"){
     Capabilities();
-    channel.Items[0]="Choose Microsoft Edge or Google Chrome";channel.Enabled=browser.Checked;browser.CheckedChanged+=(s,e)=>channel.Enabled=browser.Checked;
+    WireBrowserChannelSelection();
     Explain("Styx sets up a local gateway and connects this computer. Computer Use is optional and controls only your signed-in desktop when it is available.",85);
     bool resuming=CanResumeLocal();
+    StyxContext.Heading(content,"Connect ChatGPT (OpenAI Platform Tunnel)");
+    Explain("Create or select a tunnel in OpenAI Platform Tunnels, associate your ChatGPT workspace, then paste the Tunnel ID and a Runtime API key with tunnel permission below.",85);
+    Action("Open OpenAI Platform Tunnels",()=>{Process.Start("https://platform.openai.com/settings/organization/tunnels");return Task.FromResult(0);},false);
     var setupTunnel=Input("Tunnel ID");
     var setupKey=Input("Tunnel runtime API key",true);
     bool detecting=false; CheckBox allowLan=null; TextBox lanAddress=null;
@@ -633,7 +654,7 @@ namespace StyxNative {
      var lanLabel=StyxContext.Text(content,"Network for other computers",22);
      var networks=new ComboBox {DropDownStyle=ComboBoxStyle.DropDownList,Width=490,AccessibleName="Network for other computers"};content.Controls.Add(networks);
      networks.Items.Add(new NetworkChoice {Name="Automatic",Address=""});networks.SelectedIndex=0;
-     var lanHint=StyxContext.Text(content,"Available LAN and VPN addresses are detected automatically. Other computers need access to the selected network.",65);
+     var lanHint=StyxContext.Text(content,"Available LAN and VPN addresses are detected automatically. Other computers need access to the selected network (allow TCP port 22022 in Windows Firewall if prompted).",75);
      var manual=new CheckBox {Text="Advanced: manual interface address",Width=490,Height=32};content.Controls.Add(manual);
      lanAddress=new TextBox {Text=localDraft.LanAddress,Width=490,AccessibleName="Manual interface IPv4 address",Margin=new Padding(0,0,0,12)};content.Controls.Add(lanAddress);
      Func<Task> discover=async()=>{
@@ -691,10 +712,27 @@ namespace StyxNative {
     Action("Return",()=>{ShowPage("welcome");return Task.FromResult(0);},false);
    }else if(name=="join"){
     Capabilities();
-    channel.Items[0]="Choose Microsoft Edge or Google Chrome";channel.Enabled=browser.Checked;browser.CheckedChanged+=(s,e)=>channel.Enabled=browser.Checked;
+    WireBrowserChannelSelection();
     Explain("Choose the features to enable on this computer. Browser and Computer Use need an available signed-in desktop.",85);
     joinOrigin="";joinCa="";link=Input("Gateway address and pairing code (or paste invitation)",true);
-    NativeAction("Review pairing link","inspectJoin",async()=>{joinOrigin="";joinCa="";string invitation=link.Text;link.Clear();var result=await owner.Call("inspectJoin",Json.Obj("link",invitation));if(String.IsNullOrEmpty(Json.Str(result,"inspectionId")))throw new IOException();joinOrigin=Json.Str(result,"preview","origin");joinCa=Json.Str(result,"preview","caSha256");Feedback("Gateway: "+joinOrigin+"\nCertificate SHA-256: "+(joinCa.Length>0?joinCa:"System trust is not supported in this slice")+"\nExpires: "+Convert.ToString(Json.Get(result,"preview","expiresAt"))+"\nConfirm this Gateway to join.");});
+    var joinSummary=new Label {Width=490,Height=0,ForeColor=Color.FromArgb(30,70,50),BackColor=Color.FromArgb(236,244,238),Padding=new Padding(8),Visible=false};content.Controls.Add(joinSummary);
+    Func<string,Task> inspectLink=async(string raw)=>{
+     joinOrigin="";joinCa="";joinSummary.Visible=false;
+     var result=await owner.Call("inspectJoin",Json.Obj("link",raw));
+     if(String.IsNullOrEmpty(Json.Str(result,"inspectionId")))throw new IOException();
+     joinOrigin=Json.Str(result,"preview","origin");joinCa=Json.Str(result,"preview","caSha256");
+     string summary="Gateway: "+joinOrigin+"\nCertificate SHA-256: "+(joinCa.Length>0?joinCa:"System trust is not supported in this slice")+"\nConfirm this Gateway matches your main computer, then select Trust this Gateway and send request.";
+     SetText(joinSummary,summary,80);joinSummary.Visible=true;
+     Feedback("Invitation verified. Review the Gateway identity above before submitting.");
+    };
+    if(owner.Supports("inspectJoin")){
+     Action("Paste invitation and review",async()=>{
+      string clip="";try{if(Clipboard.ContainsText())clip=Clipboard.GetText().Trim();}catch{}
+      if(String.IsNullOrEmpty(clip)){Feedback("Clipboard is empty. Copy the invitation on your main computer first.");return;}
+      link.Clear();await inspectLink(clip);
+     },true,"Reviewing invitation…");
+    }
+    NativeAction("Review pairing link","inspectJoin",async()=>{string invitation=link.Text;link.Clear();await inspectLink(invitation);});
     NativeAction("Trust this Gateway and send request","join",async()=>{if(String.IsNullOrEmpty(joinOrigin))throw new InvalidOperationException();if(String.IsNullOrEmpty(joinCa))throw new NativeOperationException("app_system_trust_not_supported");if(browser.Checked&&channel.SelectedIndex==0){Feedback("Choose Microsoft Edge or Google Chrome before requesting Browser Automation.");return;}var choice=Choice();if(!browser.Checked)choice["browserChannel"]=null;choice["approvedGatewayOrigin"]=joinOrigin;choice["approvedCaSha256"]=joinCa;joinOrigin="";joinCa="";var result=await owner.Call("join",choice);string joined=Json.Str(result,"status");if(joined!="ready_to_connect"&&joined!="awaiting_approval")throw new IOException();await owner.RefreshAfterMutation();ShowPage("overview");Feedback(joined=="ready_to_connect"?"This computer is paired.":"Waiting for approval of the original invitation.");},JoinRequestProgress);
     Action("Return",()=>{ShowPage("welcome");return Task.FromResult(0);},false);
    }else if(name=="overview"||name=="join-waiting"){
@@ -725,7 +763,7 @@ namespace StyxNative {
      Action("Open ChatGPT Plugins",()=>{Process.Start("https://chatgpt.com/plugins");return Task.FromResult(0);},false);
     }
    }
-   else{Explain("This operation is not implemented by the native Host App. Existing identities and configuration are retained.",80);Unavailable("Legacy operation");Action("Open this computer",ContinueJoiningView,false);}
+   else{Explain("This view is not available in the native Host App. Existing identities and configuration are retained.",80);Unavailable("Unsupported view");Action("Open this computer",ContinueJoiningView,false);}
    if(name=="overview"||name=="join-waiting"||name=="general")renderedRustOverviewKey=NativeOverviewKey(owner.CurrentStatus);
    Status("");content.Controls.Add(statusReadout);content.Controls.Add(observationError);content.Controls.Add(feedback);
   }

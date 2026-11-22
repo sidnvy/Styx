@@ -209,15 +209,16 @@ impl RelayHandle {
                                 r=tokio::time::timeout(Duration::from_secs(5),read_response(&mut source))=>r.map_err(|_|RelayError::Unknown)??,
                             };
                             if response.request_id!=request.request_id{return Err(RelayError::Invalid)}
-                            let(host_generation,host_connection,grant_revision,exec_feature,browser_feature,computer_feature,android_feature,drain_feature,host_settings)=match response.reply {
+                            let(host_generation,host_connection,grant_revision,host_version,exec_feature,browser_feature,computer_feature,android_feature,drain_feature,host_settings)=match response.reply {
                                 Reply::Negotiated{version:3,challenge:got,device_id,host_generation,connection_generation,grant_revision:Some(rev),owner_issuance,
-                                    features,write,terminate,read_resume,..}
+                                    features,write,terminate,read_resume,host_version,..}
                                     if ["owner_open","owner_revoke","owner_cleanup"].iter().all(|f|features.iter().any(|v|v==f))
                                         && got==challenge && device_id==device
                                         && connection_generation==response.connection_generation && owner_issuance=="gateway_authenticated" => {
                                             let exec=exec_negotiated(&features,write,terminate,read_resume);
                                             let browser=features.iter().any(|v|v==HOST_BROWSER_SESSIONS_V1);
-                                            (host_generation,connection_generation,rev,exec,browser,features.iter().any(|v|v==COMPUTER_V3),features.iter().any(|v|v==ANDROID_V1),features.iter().any(|v|v==TRANSPORT_DRAIN_V1),features.iter().any(|v|v==crate::host::settings::FEATURE))
+                                            let version=host_version.filter(|v| !v.is_empty() && v.len()<=64 && v.bytes().all(|b| (0x21..=0x7e).contains(&b)));
+                                            (host_generation,connection_generation,rev,version,exec,browser,features.iter().any(|v|v==COMPUTER_V3),features.iter().any(|v|v==ANDROID_V1),features.iter().any(|v|v==TRANSPORT_DRAIN_V1),features.iter().any(|v|v==crate::host::settings::FEATURE))
                                         },
                                 _=>return Err(RelayError::Unauthorized),
                             };
@@ -247,7 +248,7 @@ impl RelayHandle {
                             }
                             drop(upgrade_headers);
                             let(tx,mut rx)=mpsc::channel::<Command>(3);
-                            let e=Arc::new(Entry{host_settings,device:device.clone(),transport_generation:generation.clone(),host_connection,host_generation,grant_revision,profile,
+                            let e=Arc::new(Entry{host_settings,device:device.clone(),transport_generation:generation.clone(),host_connection,host_generation,grant_revision,host_version,profile,
                                 tx,stop:task_stop.clone(),live:AtomicBool::new(true),transport_ended:AtomicBool::new(false),admission:Mutex::new(false),drain:Mutex::new(None),drain_enabled,lease:tokio::sync::Mutex::new(lease.take()),
                                 bootstrap_lane:initial_lane,bootstrap_lease:tokio::sync::Mutex::new(bootstrap_lease.take()),exec_feature,browser_feature,computer_feature,android_feature,
                                 browser_lease:tokio::sync::Mutex::new(browser_lease.take()),computer_lease:tokio::sync::Mutex::new(computer_lease.take())});

@@ -56,9 +56,13 @@ impl HostApp {
                     .into_iter()
                     .filter(|r| r.status == "approved")
                     .map(|r| {
-                        json!({"device_id":r.device_id,"label":r.label,"platform":r.platform,
-                        "online":r.connections.exec,"connections":r.connections,
-                        "is_local":local == Some(r.device_id.as_str())})
+                        let mut item = json!({"device_id":r.device_id,"label":r.label,"platform":r.platform,
+                        "online":r.connections.any_online(),"connections":r.connections,
+                        "is_local":local == Some(r.device_id.as_str())});
+                        if let Some(version) = r.host_version {
+                            item["version"] = json!(version);
+                        }
+                        item
                     })
                     .collect();
                 Ok(json!({"devices":rows}))

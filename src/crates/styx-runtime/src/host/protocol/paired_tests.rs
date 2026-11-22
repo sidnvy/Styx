@@ -18,6 +18,7 @@ fn paired_wire_preserves_v2_bytes_and_typed_v3_contract() {
         read_resume: false,
         owner_issuance: "bootstrap_preverified_only".into(),
         grant_revision: None,
+        host_version: None,
     };
     let bytes = serde_json::to_string(&v2).unwrap();
     assert_eq!(
