@@ -7,36 +7,26 @@ several conversations can use the same computer.
 
 ## Changes
 
-This release candidate builds on `0.8.1-rc.5` (native `cua-driver` `0.47.24`
-passthrough, Host-owned `computer_v3` Desktop sessions, abrupt disconnect
-recovery, and Android multi-display / transition observation) with architecture
-convergence, Desktop freshness tuning, and Android Host hardening:
+This release candidate builds on `0.8.1-rc.6` (Phase 2A/2B/2C convergence,
+15s Desktop freshness / 30s TTL, Windows modularization, and Android Host
+branding/hardening) with two targeted fixes:
 
-- **Protocol & Gateway relay cleanup (Phase 2A)**: Removes retired legacy
-  `Call::Browser` / `Reply::BrowserAction` / `BROWSER_V1` wire paths, unused
-  `TargetKind` / `TargetRecord` relay tracking, and the `Call::Write {}`
-  transport workaround.
-- **Desktop freshness & evidence TTL tuning (Phase 2B)**: Adds a 15-second
-  `DesktopSource` freshness window on Linux & Windows (5-second re-probe /
-  15-second TTL on macOS) and raises `HostCoordinator` Desktop evidence TTL from
-  1s to 30s while keeping hard session fences immediate, reducing redundant
-  desktop-probe churn during rapid Computer Use calls.
-- **Android Host branding & production hardening**: Adds Styx brand Adaptive
-  Icons, monochrome themed icon, white notification status icon, fixed release
-  keystore signing (APK v2/v3 only) with `--expected-signer-sha256` pinning, R8
-  minification & resource shrinking, 16 KiB ELF page alignment, API 34+
-  `specialUse` foreground service declaration, battery optimization guidance,
-  and KeyStore alias cleanup on credential reset.
-- **Windows modularization & zero-warning Android build (Phase 2C)**: Splits
-  `src/host/windows/Styx.cs` into focused `NativeBootstrap.cs`, `CoreClient.cs`
-  and `LocalAppControl.cs` modules and eliminates all `aarch64-linux-android`
-  cross-compile warnings in `styx-runtime`.
+- **Desktop local Gateway + Host upgrade & reboot recovery**: Passes the
+  verified bundled App runtime candidate when inspecting the local Gateway
+  binding in `HostApp::open_native` (`inspect_gateway_binding_for_app_retained`),
+  preventing single-machine desktop hubs (`create_local` + `join_existing`) from
+  latching `unknown` after an App upgrade or a macOS APFS `st_dev` change on
+  reboot while keeping the exact same-publisher SPKI pin check.
+- **Android `MainActivity` `scrcpy` compatibility**: Replaces blanket
+  `FLAG_SECURE` with API 33+ `setRecentsScreenshotEnabled(false)` so live
+  `scrcpy` mirroring renders `MainActivity` normally without breaking fixed
+  release signing; the invitation short-code field remains password-masked and
+  is cleared immediately on submit.
 
-Update both Gateway and desktop Hosts together to `0.8.1-rc.6` when upgrading
-from `0.8.1-rc.4` or earlier (Desktop wire protocol is `computer_v3`), then
-refresh your ChatGPT Custom MCP connector if needed to discover the 39-tool
-schema. Existing profiles, identities, pairing and capability grants are
-preserved.
+Wire protocols are unchanged from `0.8.1-rc.6` (`computer_v3`, 39 MCP tools);
+hosts already running `0.8.1-rc.6` remain compatible. Update both Gateway and
+desktop Hosts together when upgrading from `0.8.1-rc.4` or earlier. Existing
+profiles, identities, pairing and capability grants are preserved.
 
 ### Android package availability
 
