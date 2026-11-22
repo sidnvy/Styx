@@ -28,10 +28,10 @@ source. Existing historical outputs and working profiles are not deleted.
    environment job runs. The shared gate, public dependencies, three native
    builds, existing signatures and four installers are then produced together.
 5. All platforms must succeed before publication. The immutable GitHub Release
-   contains Linux desktop, Linux Gateway, Windows and macOS packages, checksums
-   and public publisher material. Release notes identify the exact commit and
-   CI run. Existing releases are never overwritten. Actions artifacts are CI
-   intermediates, not a second distribution channel.
+   contains Linux desktop, Linux Gateway, Windows, macOS and Android arm64
+   packages, checksums and public publisher material. Release notes identify
+   the exact commit and CI run. Existing releases are never overwritten. Actions
+   artifacts are CI intermediates, not a second distribution channel.
 
 The `release` GitHub Environment accepts version tags (`v*`) only; it does not
 permit `develop` signing. Main ancestry is enforced by the existing metadata

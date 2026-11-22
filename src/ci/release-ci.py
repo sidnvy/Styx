@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PLATFORMS = {'linux': 'x86_64-unknown-linux-gnu', 'windows': 'x86_64-pc-windows-msvc',
              'macos': 'aarch64-apple-darwin'}
 PIN = json.loads((ROOT / 'src/release-publisher.json').read_text())['publisherSpkiSha256']
+ANDROID_SIGNER_PIN = 'a83c569e96981ce31d6ad50dace6094c1f644be7b0a09c3fe84addc74af4b7b3'
 
 
 def require(ok, message):
@@ -192,7 +193,8 @@ def bundle(args):
 def checksums(args):
     expected = [f'Styx-{args.version}-windows-x64.exe', f'Styx-{args.version}-macos-arm64.dmg',
                 f'styx-{args.version}-linux-x86_64-desktop.tar.gz',
-                f'styx-{args.version}-linux-x86_64-gateway-only.tar.gz']
+                f'styx-{args.version}-linux-x86_64-gateway-only.tar.gz',
+                f'Styx-{args.version}-android-arm64.apk']
     require(sorted(p.name for p in args.output.iterdir()) == sorted(expected), 'release assets missing or unexpected')
     (args.output / 'SHA256SUMS').write_text(''.join(f'{digest(args.output / name)}  {name}\n' for name in expected))
     shutil.copyfile(ROOT / 'src/release-publisher.pub', args.output / 'styx-publisher.pub')
@@ -312,6 +314,47 @@ def mac_keychain_clean(args):
         shutil.rmtree(args.directory)
 
 
+def android_keystore(args):
+    encoded = os.environ.pop('STYX_ANDROID_KEYSTORE_BASE64', '').strip()
+    store_pass = os.environ.pop('STYX_ANDROID_KEYSTORE_PASSWORD', '')
+    alias = os.environ.pop('STYX_ANDROID_KEY_ALIAS', '').strip()
+    require(encoded and store_pass and alias,
+            'configure STYX_ANDROID_KEYSTORE_BASE64, STYX_ANDROID_KEYSTORE_PASSWORD and STYX_ANDROID_KEY_ALIAS in the release environment')
+    resolved = args.directory.resolve()
+    require(not resolved.exists() and not resolved.is_relative_to(ROOT),
+            'fresh temporary Android signing directory outside the repository is required')
+    args.directory.mkdir(mode=0o700)
+    keystore = args.directory / 'release.jks'
+    try:
+        raw = base64.b64decode(re.sub(r'\s+', '', encoded), validate=True)
+        with open(keystore, 'xb', opener=lambda path, flags: os.open(path, flags, 0o600)) as stream:
+            stream.write(raw)
+        keytool = shutil.which('keytool') or (
+            str(Path(os.environ['JAVA_HOME']) / 'bin/keytool') if os.environ.get('JAVA_HOME') else None
+        )
+        require(keytool and Path(keytool).is_file(), 'keytool is required to verify the Android release keystore')
+        env = os.environ.copy()
+        env['STYX_KEYTOOL_STOREPASS'] = store_pass
+        result = subprocess.run(
+            [keytool, '-list', '-v', '-keystore', str(keystore), '-alias', alias,
+             '-storepass:env', 'STYX_KEYTOOL_STOREPASS'],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False,
+        )
+        require(result.returncode == 0, 'Android release keystore could not be verified')
+        match = re.search(r'SHA256:\s*([0-9A-Fa-f:]+)', result.stdout)
+        actual = match.group(1).replace(':', '').lower() if match else ''
+        require(actual == ANDROID_SIGNER_PIN,
+                'Android release keystore certificate fingerprint does not match compiled pin')
+    except BaseException:
+        shutil.rmtree(args.directory, ignore_errors=True)
+        raise
+
+
+def android_keystore_clean(args):
+    if args.directory.exists():
+        shutil.rmtree(args.directory)
+
+
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
@@ -335,7 +378,8 @@ def main():
     p.add_argument('--version', required=True); p.set_defaults(action=linux_assets)
     p = commands.add_parser('publisher-key'); p.add_argument('--output', type=Path, required=True)
     p.set_defaults(action=publisher_key)
-    for name, action in [('mac-keychain', mac_keychain), ('mac-keychain-clean', mac_keychain_clean)]:
+    for name, action in [('mac-keychain', mac_keychain), ('mac-keychain-clean', mac_keychain_clean),
+                         ('android-keystore', android_keystore), ('android-keystore-clean', android_keystore_clean)]:
         p = commands.add_parser(name); p.add_argument('--directory', type=Path, required=True)
         p.set_defaults(action=action)
     args = parser.parse_args(); args.action(args)
