@@ -688,11 +688,35 @@ async fn gateway_lan_scenario_inner(
                                 Some(relay.bind(&unknown_owner, &device).await.unwrap());
                         }
                         2 => {
-                            assert!(!unknown_binding.as_ref().unwrap().physically_settled());
+                            let old_unknown = unknown_binding.as_ref().unwrap();
                             assert!(
-                                relay.bind(&unknown_owner, &device).await.is_err(),
-                                "unknown old cleanup must not be replaced"
+                                !old_unknown.physically_settled(),
+                                "abrupt loss must not fabricate confirmed cleanup"
                             );
+                            assert!(
+                                old_unknown.closed(),
+                                "superseded old-generation binding must be permanently fenced"
+                            );
+                            let old_frame = || wire::Call::PrepareStart {
+                                owner: old_unknown.owner_ref(),
+                                grant_revision: old_unknown.grant_revision(),
+                                timeout_ms: 5000,
+                                spec: serde_json::value::RawValue::from_string("{}".into())
+                                    .unwrap(),
+                            };
+                            assert!(matches!(
+                                relay.call(old_unknown, old_frame()).await,
+                                Err(crate::gateway::paired::RelayError::Unauthorized)
+                            ));
+                            let recovered = relay.bind(&unknown_owner, &device).await.expect(
+                                "authorized owner must open a fresh binding after abrupt old Host loss",
+                            );
+                            assert!(recovered.owner_ref() != old_unknown.owner_ref());
+                            assert_ne!(recovered.host_generation(), old_unknown.host_generation());
+                            assert!(matches!(
+                                relay.call(&recovered, old_frame()).await,
+                                Err(crate::gateway::paired::RelayError::Unauthorized)
+                            ));
                         }
                         _ => unreachable!(),
                     }
