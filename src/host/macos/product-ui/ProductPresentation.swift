@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import SwiftUI
 
 enum ProductSettingsSection: String, CaseIterable, Identifiable {
@@ -219,8 +220,47 @@ struct ProductDailyPanel: View {
     }
 }
 
+private struct ProductQRCodeView: View {
+    let payload: String
+    private var image: NSImage? {
+        guard let data = payload.data(using: .utf8),
+              let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(data, forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let output = filter.outputImage else { return nil }
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: 6, y: 6))
+        let context = CIContext()
+        guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return nil }
+        return NSImage(cgImage: cgImage, size: NSSize(width: scaled.extent.width, height: scaled.extent.height))
+    }
+    var body: some View {
+        if let image = image {
+            Image(nsImage: image)
+                .interpolation(.none)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 140, height: 140)
+                .padding(8)
+                .background(Color.white, in: RoundedRectangle(cornerRadius: 8))
+                .accessibilityLabel(productText("手机扫码配对二维码", "Pairing QR code for mobile camera"))
+        }
+    }
+}
+
 struct ProductInvitationView: View {
     @ObservedObject var model: ProductModel
+    private var pairingQRPayload: String? {
+        guard let origin = model.createdInvitation["origin"].string, !origin.isEmpty,
+              let code = model.createdInvitation["code"].string, !code.isEmpty else { return nil }
+        var components = URLComponents()
+        components.scheme = "styx"
+        components.host = "pair"
+        components.queryItems = [
+            URLQueryItem(name: "origin", value: origin),
+            URLQueryItem(name: "code", value: code),
+        ]
+        return components.string
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if model.invitationInFlight {
@@ -234,6 +274,14 @@ struct ProductInvitationView: View {
                         Text(productText("在另一台电脑的 Styx 中选择“加入已有”，粘贴此邀请。", "In Styx on the other computer, choose Join an existing Styx and paste this invitation.")).font(.caption)
                         if model.createdInvitation["code"].string != nil { Text(value).font(.body.monospaced()).textSelection(.enabled) }
                         Button { model.copy(value, secret: true); model.invitationCopied = true } label: { Label(model.invitationCopied ? productText("邀请已复制", "Invitation copied") : productText("复制邀请", "Copy invitation"), systemImage: "doc.on.doc").frame(maxWidth: .infinity) }
+                        if let qrPayload = pairingQRPayload {
+                            VStack(spacing: 6) {
+                                ProductQRCodeView(payload: qrPayload)
+                                Text(productText("手机或平板用系统相机扫码即可预填邀请", "Scan with your phone or tablet camera to prefill this invitation")).font(.caption2).foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 4)
+                        }
                         if let expiry = model.createdInvitation["expiresAt"].number {
                             let remaining = max(0, Int((expiry - context.date.timeIntervalSince1970 * 1000) / 1000))
                             Text(productText("邀请剩余有效时间：\(remaining / 60) 分 \(String(format: "%02d", remaining % 60)) 秒", "Expires in \(remaining / 60):\(String(format: "%02d", remaining % 60))")).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
