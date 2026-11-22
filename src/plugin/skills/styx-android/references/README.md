@@ -8,6 +8,7 @@ execution backend or application-specific monkey patches.
 Load a reference only when its app, problem, or debugging topic is relevant:
 
 - [Community Android agent practices](external-android-agent-patterns.md)
+- [Compact observation validation: Xiaohongshu + Dianping](validation-xiaohongshu-dianping-20261122.md)
 - [Xiaohongshu / rednote](xiaohongshu.md), package `com.xingin.xhs`
 - [China Unicom crash investigation](china-unicom.md), package `com.sinovatech.unicom.ui`
 
