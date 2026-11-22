@@ -15,7 +15,9 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
+const FRESHNESS_WINDOW: Duration = Duration::from_secs(15);
 use styx_contracts::identity::AgentInstanceId;
 use styx_core::session::RegistrationFacts;
 use tokio::{
@@ -57,13 +59,32 @@ struct State {
     fenced: AtomicBool,
     epoch: AtomicU64,
     lease: Mutex<Option<LinuxAssociationLease>>,
+    verified_at: Mutex<Option<Instant>>,
 }
 impl State {
     fn fence(&self) {
         if !self.fenced.swap(true, Ordering::AcqRel) {
             // This source fences once and never restarts, so this cannot wrap.
             self.epoch.fetch_add(1, Ordering::AcqRel);
+            if let Ok(mut verified) = self.verified_at.lock() {
+                *verified = None;
+            }
         }
+    }
+    fn has_fresh_lease(&self) -> bool {
+        let before = self.epoch.load(Ordering::Acquire);
+        if self.fenced.load(Ordering::Acquire) {
+            return false;
+        }
+        let has_lease = self.lease.lock().is_ok_and(|held| held.is_some());
+        let fresh = self
+            .verified_at
+            .lock()
+            .is_ok_and(|at| at.is_some_and(|instant| instant.elapsed() < FRESHNESS_WINDOW));
+        has_lease
+            && fresh
+            && !self.fenced.load(Ordering::Acquire)
+            && before == self.epoch.load(Ordering::Acquire)
     }
     fn with_lease<T>(&self, f: impl FnOnce(&LinuxAssociationLease) -> Result<T>) -> Result<T> {
         let before = self.epoch.load(Ordering::Acquire);
@@ -114,6 +135,7 @@ impl DesktopSource {
             fenced: AtomicBool::new(false),
             epoch: AtomicU64::new(1),
             lease: Mutex::new(None),
+            verified_at: Mutex::new(None),
         });
         let cancel = CancellationToken::new();
         let mut guard = StartGuard(Some(cancel.clone()));
@@ -157,6 +179,15 @@ impl DesktopSource {
         self.inner.state.epoch.load(Ordering::Acquire)
     }
     pub(crate) async fn fresh(&self) -> Result<()> {
+        if self.fenced() {
+            return Err(DesktopSourceError::Fenced);
+        }
+        // The continuous logind watch worker fences immediately on session lock,
+        // switch, or logout; avoid spawning a redundant association subprocess
+        // on every Desktop call while the pinned lease is still within window.
+        if self.inner.state.has_fresh_lease() {
+            return Ok(());
+        }
         let first = self.fresh_once().await;
         // A revalidation probe is read-only: retry it once if the original
         // pinned source is still live. Never replay any native Cua action.
@@ -379,7 +410,13 @@ async fn supervise(
                 let result = match result {
                     Ok(Ok(fresh)) if !state.fenced.load(Ordering::Acquire) && pending.epoch == state.epoch.load(Ordering::Acquire) && owner.as_deref() == Some(fresh.login_unique_owner()) => {
                         match state.lease.lock() {
-                            Ok(mut held) if held.as_ref().is_none_or(|original| original.same_source(&fresh)) => { *held = Some(fresh); Ok(()) },
+                            Ok(mut held) if held.as_ref().is_none_or(|original| original.same_source(&fresh)) => {
+                                *held = Some(fresh);
+                                if let Ok(mut verified) = state.verified_at.lock() {
+                                    *verified = Some(Instant::now());
+                                }
+                                Ok(())
+                            },
                             _ => { source_fault("association_source_identity_changed"); state.fence(); Err(DesktopSourceError::Fenced) }
                         }
                     },
@@ -459,6 +496,7 @@ impl DesktopSource {
                     fenced: AtomicBool::new(false),
                     epoch: AtomicU64::new(1),
                     lease: Mutex::new(None),
+                    verified_at: Mutex::new(None),
                 }),
                 cancel: CancellationToken::new(),
                 requests,

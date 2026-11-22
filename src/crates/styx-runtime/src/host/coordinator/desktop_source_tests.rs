@@ -187,6 +187,7 @@ fn selected_source_never_falls_back_or_adopts_another_watch_generation() {
         fenced: AtomicBool::new(false),
         epoch: AtomicU64::new(1),
         lease: Mutex::new(None),
+        verified_at: Mutex::new(None),
     };
     state.fence();
     state.fence();
@@ -222,6 +223,7 @@ async fn cancelled_stop_waiter_retains_original_supervisor_join_handle() {
                 fenced: AtomicBool::new(false),
                 epoch: AtomicU64::new(1),
                 lease: Mutex::new(None),
+                verified_at: Mutex::new(None),
             }),
             cancel,
             requests,
@@ -245,4 +247,14 @@ async fn cancelled_stop_waiter_retains_original_supervisor_join_handle() {
     assert!(!report.child_reaped); // Synthetic job never attested an OS child.
     assert!(source.inner.job.lock().await.is_none());
     assert!(source.stop().await.is_ok());
+}
+
+#[tokio::test]
+async fn fence_immediately_invalidates_freshness_timestamp_and_blocks_fresh() {
+    let source = DesktopSource::for_tests();
+    *source.inner.state.verified_at.lock().unwrap() = Some(Instant::now());
+    assert!(!source.inner.state.has_fresh_lease());
+    source.inner.state.fence();
+    assert!(source.inner.state.verified_at.lock().unwrap().is_none());
+    assert_eq!(source.fresh().await, Err(DesktopSourceError::Fenced));
 }

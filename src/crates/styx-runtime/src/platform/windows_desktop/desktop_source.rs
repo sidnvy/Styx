@@ -4,10 +4,14 @@ use super::{
     windows_native_observation::{ObservationError, Result},
     windows_source::{SourceObservation, WindowsSource},
 };
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
 };
+const FRESHNESS_WINDOW: Duration = Duration::from_secs(15);
 use styx_contracts::identity::{AgentInstanceId, Sha256Digest};
 use styx_core::session::RegistrationFacts;
 use tokio::{
@@ -26,6 +30,7 @@ struct State {
     fenced: AtomicBool,
     epoch: AtomicU64,
     latest: Mutex<Option<SourceObservation>>,
+    verified_at: Mutex<Option<Instant>>,
     source_id: String,
     native_invalidated: Mutex<Option<CancellationToken>>,
 }
@@ -33,6 +38,9 @@ impl State {
     fn fence(&self) {
         if !self.fenced.swap(true, Ordering::AcqRel) {
             self.epoch.fetch_add(1, Ordering::AcqRel);
+            if let Ok(mut verified) = self.verified_at.lock() {
+                *verified = None;
+            }
         }
     }
 }
@@ -69,6 +77,7 @@ impl DesktopSource {
             fenced: AtomicBool::new(false),
             epoch: AtomicU64::new(1),
             latest: Mutex::new(None),
+            verified_at: Mutex::new(None),
             native_invalidated: Mutex::new(None),
             source_id: format!("windows-source-{}", uuid::Uuid::new_v4().simple()),
         });
@@ -119,8 +128,24 @@ impl DesktopSource {
         self.inner.state.epoch.load(Ordering::Acquire)
     }
     pub(crate) async fn fresh(&self) -> Result<()> {
+        let before = self.epoch();
         if self.fenced() {
             return Err(ObservationError::Fenced);
+        }
+        let has_fresh = self
+            .inner
+            .state
+            .latest
+            .lock()
+            .is_ok_and(|g| g.as_ref().is_some_and(|obs| obs.epoch == before))
+            && self
+                .inner
+                .state
+                .verified_at
+                .lock()
+                .is_ok_and(|t| t.is_some_and(|at| at.elapsed() < FRESHNESS_WINDOW));
+        if has_fresh && !self.fenced() && before == self.epoch() {
+            return Ok(());
         }
         let (answer, receive) = oneshot::channel();
         self.inner
@@ -223,6 +248,9 @@ fn install(state: &State, observed: SourceObservation) -> Result<()> {
         return Err(ObservationError::Fenced);
     }
     *state.latest.lock().map_err(|_| ObservationError::Fenced)? = Some(observed);
+    if let Ok(mut verified) = state.verified_at.lock() {
+        *verified = Some(Instant::now());
+    }
     Ok(())
 }
 async fn supervise(
@@ -330,6 +358,7 @@ mod tests {
                     fenced: AtomicBool::new(false),
                     epoch: AtomicU64::new(1),
                     latest: Mutex::new(None),
+                    verified_at: Mutex::new(None),
                     source_id: "fixture".into(),
                     native_invalidated: Mutex::new(None),
                 }),
