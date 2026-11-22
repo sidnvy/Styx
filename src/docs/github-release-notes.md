@@ -7,26 +7,45 @@ several conversations can use the same computer.
 
 ## Changes
 
-This release candidate builds on `0.8.1-rc.6` (Phase 2A/2B/2C convergence,
-15s Desktop freshness / 30s TTL, Windows modularization, and Android Host
-branding/hardening) with two targeted fixes:
+This release candidate builds on `0.8.1-rc.7` with native Public MCP OIDC/JWKS
+support, QR code pairing, full Android CI signing + UI polish, and live-tested
+multi-platform reliability fixes:
 
-- **Desktop local Gateway + Host upgrade & reboot recovery**: Passes the
-  verified bundled App runtime candidate when inspecting the local Gateway
-  binding in `HostApp::open_native` (`inspect_gateway_binding_for_app_retained`),
-  preventing single-machine desktop hubs (`create_local` + `join_existing`) from
-  latching `unknown` after an App upgrade or a macOS APFS `st_dev` change on
-  reboot while keeping the exact same-publisher SPKI pin check.
-- **Android `MainActivity` `scrcpy` compatibility**: Replaces blanket
-  `FLAG_SECURE` with API 33+ `setRecentsScreenshotEnabled(false)` so live
-  `scrcpy` mirroring renders `MainActivity` normally without breaking fixed
-  release signing; the invitation short-code field remains password-masked and
-  is cleared immediately on submit.
+- **Native Rust Gateway Public MCP (`styx gateway public-mcp`)**: Replaces the
+  external Python `mcp_bridge.py` with an in-process, loopback-only Rust
+  OIDC/JWKS ingress (`RS256` JWKS verification, `Origin` check, per-subject
+  conversation isolation, `server/discover` handling, and OAuth `tools/list`
+  annotations) exposing all 39 live Gateway MCP tools.
+- **Zero-dependency `styx://pair` QR code & deep-link pairing**: macOS
+  invitation panels render a CoreImage QR code alongside the copyable
+  invitation text; Android `Styx Host` registers the `styx://pair` `ACTION_VIEW`
+  intent filter and prefills Gateway URL and short code for user review (never
+  auto-submitting).
+- **Android Host CI release signing, guided onboarding & system overlays**:
+  - Integrates automated fixed-key Android release signing directly into
+    `.github/workflows/styx-release.yml` (producing `Styx-@VERSION@-android-arm64.apk`
+    alongside desktop packages).
+  - Adds a 3-step guided setup checklist with one-tap single-line invitation
+    paste, Restricted Settings App Info shortcut, and automatic collapse into a
+    minimal daily status view once ready.
+  - Fixes `StyxAccessibilityService` (`TYPE_SYSTEM` window observation and
+    `android_list_displays`) so notification shades, Quick Settings, and system
+    dialogs can be observed and navigated without `no_active_window` deadlocks.
+- **Reconnect conflict resilience**: Preserves HTTP `409 Conflict` on occupied
+  lane half-open reconnects instead of falling through to `403`, preventing
+  Android and desktop Hosts from falsely reporting `gateway_pairing_revoked`.
+- **Desktop onboarding polish, multi-lane online status & Host version visibility**:
+  - Surfaces `host_version` from paired Hosts in `styx computers`, status views,
+    and `/admin/devices`; fixes multi-lane online status so Android-only and
+    non-exec Hosts report online accurately.
+  - Aligns macOS, Windows, and Linux ChatGPT Custom MCP guidance with the live
+    ChatGPT UI (`Add → Add custom MCP server` + `No authentication`), adds
+    OpenAI Platform Tunnels links, Windows browser auto-detection, live macOS
+    invitation countdown, and Linux `styx setup` preflight diagnostics.
 
-Wire protocols are unchanged from `0.8.1-rc.6` (`computer_v3`, 39 MCP tools);
-hosts already running `0.8.1-rc.6` remain compatible. Update both Gateway and
-desktop Hosts together when upgrading from `0.8.1-rc.4` or earlier. Existing
-profiles, identities, pairing and capability grants are preserved.
+Wire protocols remain backward-compatible with `0.8.1-rc.6`/`0.8.1-rc.7`
+(`computer_v3`, 39 MCP tools); existing profiles, identities, pairing and
+capability grants are preserved across in-place upgrades.
 
 ### Android signing & in-place upgrades
 
@@ -89,7 +108,7 @@ its local tasks and connection. On Linux use `styx quit` and `styx start`;
 ## Package verification
 
 Runtime payloads use the existing Styx publisher signature. `SHA256SUMS` covers
-all four downloads; `styx-publisher.pub` contains the public publisher key.
+all five downloads; `styx-publisher.pub` contains the public publisher key.
 Packages contain no paired device profile or private key.
 
 The Windows installer is not Authenticode signed. The macOS App uses the
