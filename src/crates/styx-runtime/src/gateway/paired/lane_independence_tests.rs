@@ -16,7 +16,7 @@ fn independent_feature_families_never_synthesize_exec_support() {
     android.push(crate::host::settings::FEATURE.into());
     assert!(!exec_negotiated(&android, false, false, false));
     let mut computer = control;
-    computer.push(COMPUTER_V2.into());
+    computer.push(COMPUTER_V3.into());
     assert!(!exec_negotiated(&computer, true, true, false));
     let exec: Vec<String> = [
         crate::host::protocol::wire::HOST_EXEC_TASKS_V1,
@@ -44,7 +44,7 @@ fn independent_feature_families_never_synthesize_exec_support() {
     assert!(!exec_negotiated(&incomplete, true, true, false));
     let mut combined = exec;
     combined.push(BROWSER_V1.into());
-    combined.push(COMPUTER_V2.into());
+    combined.push(COMPUTER_V3.into());
     assert!(exec_negotiated(&combined, true, true, false));
 }
 #[test]

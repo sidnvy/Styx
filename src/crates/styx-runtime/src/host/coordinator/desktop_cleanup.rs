@@ -226,6 +226,17 @@ pub(super) async fn cleanup_selected(
         };
         let all_handles_finished = handles.keys().all(|id| finished.contains(id));
         if pending.is_empty() && all_handles_finished {
+            {
+                let mut state = inner.state.lock().expect("Host state mutex");
+                if let Some(lane) = state.desktop.as_mut() {
+                    if let Some(target_owner) = owner {
+                        lane.sessions
+                            .retain(|_, (existing, _)| existing != target_owner);
+                    } else {
+                        lane.sessions.clear();
+                    }
+                }
+            }
             if owner.is_none() {
                 let remaining = until.saturating_duration_since(tokio::time::Instant::now());
                 worker

@@ -1,8 +1,10 @@
 //! Presentation and schema controls; not a native Cua/permission attestation.
 use super::*;
+
 fn args(value: Value) -> Option<Map<String, Value>> {
     Some(value.as_object().unwrap().clone())
 }
+
 #[test]
 fn computer_routes_validate_native_arguments_and_preserve_typed_results() {
     let request = ComputerRequest::parse(
@@ -35,10 +37,11 @@ fn computer_routes_validate_native_arguments_and_preserve_typed_results() {
     // Cua result images retain the frozen MCP shape; the old Browser text-sized
     // 128KiB cap must not truncate/strip a valid within-frame Computer image.
     let data = "A".repeat(256 * 1024);
-    let output = result(
+    let parsed: CallToolResult = serde_json::from_value(
         json!({"content":[{"type":"image","mimeType":"image/png","data":data}],"isError":false}),
     )
     .unwrap();
+    let output = bounded_result(parsed).unwrap();
     let serialized = serde_json::to_value(output).unwrap();
     assert_eq!(serialized["content"][0]["type"], "image");
     assert_eq!(
@@ -55,10 +58,6 @@ fn computer_routes_validate_native_arguments_and_preserve_typed_results() {
     assert_eq!(denied["category"], "PERMISSION_DENIED");
     assert_eq!(denied["execution_certainty"], "not_dispatched");
     assert_eq!(denied["uncertain"], false);
-    assert!(Phase::Opening.blocks_dispatch());
-    assert!(!Phase::ActionUnknown.blocks_dispatch());
-    assert!(Phase::Unknown.blocks_dispatch());
-    assert!(!Phase::Ready.blocks_dispatch());
 }
 
 #[test]
@@ -71,169 +70,39 @@ fn pre_dispatch_capacity_is_known_and_retryable() {
 }
 
 #[test]
-fn typed_not_dispatched_open_refusal_is_not_permanent_context_poison() {
-    for category in [
-        ErrorCategory::SessionDisconnected,
-        ErrorCategory::Busy,
-        ErrorCategory::PermissionDenied,
-    ] {
-        let response = Reply::Error {
-            category,
-            certainty: ExecutionCertainty::NotDispatched,
-            cursor_may_be_consumed: false,
-        };
-        assert!(reusable_open_refusal(typed_error(&response).unwrap().1));
-    }
-    assert!(!reusable_open_refusal(ExecutionCertainty::Unknown));
-    assert!(!reusable_open_refusal(ExecutionCertainty::Completed));
-}
-
-#[test]
-fn inspecting_unknown_action_preserves_identity_and_original_outcome() {
-    use styx_contracts::{
-        identity::{HostGeneration, OwnerEpoch},
-        operation::OperationId,
-    };
-    let id = OperationId {
-        host_generation: HostGeneration::try_from("host").unwrap(),
-        owner_epoch: OwnerEpoch::try_from("owner").unwrap(),
-        sequence: 2,
-    };
-    let target = ResourceTarget {
-        operation_id: OperationId {
-            sequence: 1,
-            ..id.clone()
-        },
-        payload_digest: Sha256Digest::of_bytes(b"resource"),
-    };
-    let action = ActionRef {
-        operation_id: id.clone(),
-        payload_digest: Sha256Digest::of_bytes(b"click"),
-    };
-    let mut snapshot = Snapshot {
-        operation_id: id,
-        payload_digest: action.payload_digest,
-        target: Some(target.clone()),
-        state: OperationState::Unknown,
-        liveness: ExecutionLiveness::NotApplicable,
-        output_drain: OutputDrain::NotOpened,
-    };
-    assert!(same_action(&snapshot, &action, &target));
-    assert_eq!(snapshot.state, OperationState::Unknown);
-    snapshot.operation_id.sequence += 1;
-    assert!(!same_action(&snapshot, &action, &target));
-}
-
-#[test]
 fn computer_wire_preserves_explicit_timeout_and_has_no_default_response_budget() {
-    let call = Call::Computer {
+    let raw = RawValue::from_string(
+        serde_json::to_string(&CuaAction::list_tools(None).unwrap()).unwrap(),
+    )
+    .unwrap();
+    let call = Call::DesktopSession {
         owner: crate::host::protocol::wire::OwnerRef {
             owner_id: "computer-owner".try_into().unwrap(),
             owner_epoch: "computer-epoch".try_into().unwrap(),
         },
         grant_revision: 1,
-        timeout_ms: Some(90_000),
-        command: ComputerCommand::PrepareOpen,
+        timeout_ms: None,
+        action: raw.clone(),
     };
-    let mut value = serde_json::to_value(&call).unwrap();
-    assert_eq!(value["computer"]["timeout_ms"], 90_000);
+    assert!(call.is_computer());
     assert!(call.response_budget().is_none());
-    value["computer"]
-        .as_object_mut()
-        .unwrap()
-        .remove("timeout_ms");
-    let decoded: Call = serde_json::from_value(value).unwrap();
+    let wire = serde_json::to_value(&call).unwrap();
+    assert_eq!(wire["timeout_ms"], Value::Null);
+    let explicit: Call = serde_json::from_value(json!({
+        "desktop_session": {
+            "owner": {"owner_id": "computer-owner", "owner_epoch": "computer-epoch"},
+            "grant_revision": 1,
+            "timeout_ms": 12000,
+            "action": serde_json::from_str::<Value>(raw.get()).unwrap(),
+        }
+    }))
+    .unwrap();
     assert!(matches!(
-        decoded,
-        Call::Computer {
-            timeout_ms: None,
+        explicit,
+        Call::DesktopSession {
+            timeout_ms: Some(12000),
             ..
         }
     ));
-}
-
-#[test]
-fn open_recovery_requires_an_exact_running_inspection_and_a_read_route() {
-    let target = ResourceTarget {
-        operation_id: styx_contracts::operation::OperationId {
-            host_generation: "original-host".try_into().unwrap(),
-            owner_epoch: "original-owner".try_into().unwrap(),
-            sequence: 1,
-        },
-        payload_digest: Sha256Digest::of_bytes(b"original-open"),
-    };
-    let running = || Snapshot {
-        operation_id: target.operation_id.clone(),
-        payload_digest: target.payload_digest,
-        target: None,
-        state: OperationState::Running,
-        liveness: ExecutionLiveness::Running,
-        output_drain: OutputDrain::NotOpened,
-    };
-    let accepts = |snapshot| inspected_open_running(&Reply::Inspected { snapshot }, &target);
-    assert!(accepts(running()));
-    for state in [
-        OperationState::Reserved,
-        OperationState::Dispatched,
-        OperationState::Unknown,
-        OperationState::Cancelled,
-        OperationState::Failed,
-        OperationState::Succeeded,
-    ] {
-        assert!(!accepts(Snapshot { state, ..running() }));
-    }
-    let mut wrong = running();
-    wrong.operation_id.sequence += 1;
-    assert!(!accepts(wrong));
-    let mut wrong = running();
-    wrong.operation_id.host_generation = "different-host".try_into().unwrap();
-    assert!(!accepts(wrong));
-    let mut wrong = running();
-    wrong.operation_id.owner_epoch = "different-owner".try_into().unwrap();
-    assert!(!accepts(wrong));
-    let mut wrong = running();
-    wrong.payload_digest = Sha256Digest::of_bytes(b"different-open");
-    assert!(!accepts(wrong));
-    let mut wrong = running();
-    wrong.target = Some(target.clone());
-    assert!(
-        !accepts(wrong),
-        "an action snapshot is not an open resource"
-    );
-    for reply in [
-        Reply::Error {
-            category: ErrorCategory::TargetNotFound,
-            certainty: ExecutionCertainty::NotDispatched,
-            cursor_may_be_consumed: false,
-        },
-        Reply::Error {
-            category: ErrorCategory::ResultUnknown,
-            certainty: ExecutionCertainty::Unknown,
-            cursor_may_be_consumed: false,
-        },
-        Reply::Start {
-            snapshot: running(),
-            dispatch: "started".into(),
-        },
-    ] {
-        assert!(!inspected_open_running(&reply, &target));
-    }
-    assert!(is_computer_read(&CuaAction::list_tools(None).unwrap()));
-    for name in [
-        "list_apps",
-        "list_windows",
-        "get_window_state",
-        "get_desktop_state",
-        "verify_state",
-        "get_guide",
-    ] {
-        assert!(is_computer_read(
-            &CuaAction::call_tool(name.into(), Map::new()).unwrap()
-        ));
-    }
-    for name in ["click", "set_value", "press_key", "unrecognized"] {
-        assert!(!is_computer_read(
-            &CuaAction::call_tool(name.into(), Map::new()).unwrap()
-        ));
-    }
+    assert!(explicit.response_budget().is_none());
 }

@@ -22,6 +22,15 @@ pub(super) struct DesktopProfile {
     config: OwnedCuaConfig,
     payload: Vec<u8>,
 }
+pub(crate) enum DesktopSessionPhase {
+    New,
+    Opening,
+    Ready(ResourceTarget),
+    Unknown,
+}
+pub(crate) struct DesktopOwnerSession {
+    pub(crate) phase: DesktopSessionPhase,
+}
 pub(super) struct DesktopResource {
     pub(super) handle: CuaHandle,
 }
@@ -31,6 +40,8 @@ pub(super) struct DesktopLane {
     pub(super) binding: SessionBinding,
     pub(super) grants: BTreeMap<CapabilityId, DesktopGrant>,
     profiles: BTreeMap<OwnerId, DesktopProfile>,
+    pub(super) sessions:
+        BTreeMap<OwnerId, (OwnerLease, Arc<tokio::sync::Mutex<DesktopOwnerSession>>)>,
     pub(super) handles: BTreeMap<OperationId, DesktopResource>,
     #[cfg(all(test, target_os = "linux"))]
     open_history: Vec<(OwnerLease, ResourceTarget)>,
@@ -48,16 +59,15 @@ pub(crate) struct DesktopOpenCompletion {
 }
 pub(crate) enum DesktopOpenSubmission {
     Completed(DesktopOpenCompletion),
-    Existing(OperationSnapshot),
+    Existing,
 }
 #[derive(Debug)]
 pub(crate) struct DesktopActionCompletion {
-    pub(crate) snapshot: OperationSnapshot,
     pub(crate) receipt: CuaReceipt,
 }
 pub(crate) enum DesktopActionSubmission {
     Completed(DesktopActionCompletion),
-    Existing(OperationSnapshot),
+    Existing,
 }
 pub(super) fn desktop(state: &State) -> Result<&DesktopLane, CoordinatorError> {
     state
@@ -240,6 +250,7 @@ impl HostAuthority {
             binding: binding.clone(),
             grants,
             profiles: BTreeMap::new(),
+            sessions: BTreeMap::new(),
             handles: BTreeMap::new(),
             #[cfg(all(test, target_os = "linux"))]
             open_history: Vec::new(),
@@ -305,6 +316,30 @@ impl HostCoordinator {
             return Err(ErrorCategory::SessionDisconnected.into());
         }
         Ok(lane.binding.clone())
+    }
+    pub(crate) fn desktop_owner_session(
+        &self,
+        owner: &OwnerLease,
+    ) -> Result<Arc<tokio::sync::Mutex<DesktopOwnerSession>>, CoordinatorError> {
+        let mut state = self.inner.state.lock().expect("Host state mutex");
+        if state.shutting_down {
+            return Err(CoordinatorError::Busy);
+        }
+        state.ledger.validate_owner(owner)?;
+        let lane = state.desktop.as_mut().ok_or(CuaError::Unsupported)?;
+        if let Some((existing_owner, cell)) = lane.sessions.get(owner.owner_id()) {
+            return if existing_owner == owner {
+                Ok(cell.clone())
+            } else {
+                Err(ErrorCategory::Unauthorized.into())
+            };
+        }
+        let cell = Arc::new(tokio::sync::Mutex::new(DesktopOwnerSession {
+            phase: DesktopSessionPhase::New,
+        }));
+        lane.sessions
+            .insert(owner.owner_id().clone(), (owner.clone(), cell.clone()));
+        Ok(cell)
     }
     pub(crate) fn inspect_desktop(
         &self,
@@ -469,7 +504,7 @@ impl HostCoordinator {
     ) -> Result<DesktopOpenSubmission, CoordinatorError> {
         let snapshot = self.inspect_desktop(owner, id, digest, false)?;
         if snapshot.state != OperationState::Reserved {
-            return Ok(DesktopOpenSubmission::Existing(snapshot));
+            return Ok(DesktopOpenSubmission::Existing);
         }
         let admission = loop {
             // This refresh precedes dispatch and cannot have started a worker.
@@ -504,7 +539,7 @@ impl HostCoordinator {
                 return Err(ErrorCategory::StateConflict.into());
             }
             if snapshot.state != OperationState::Reserved {
-                return Ok(DesktopOpenSubmission::Existing(snapshot));
+                return Ok(DesktopOpenSubmission::Existing);
             }
             if state.shutting_down {
                 return Err(CoordinatorError::Busy);
@@ -523,8 +558,8 @@ impl HostCoordinator {
                             .ledger
                             .dispatch(owner, id, digest, &admission, self.now())?
                         {
-                            DispatchDisposition::Existing(s) => {
-                                return Ok(DesktopOpenSubmission::Existing(s));
+                            DispatchDisposition::Existing(_) => {
+                                return Ok(DesktopOpenSubmission::Existing);
                             }
                             DispatchDisposition::ExecuteOnce(p) => p,
                         };
@@ -546,7 +581,7 @@ impl HostCoordinator {
                 .ledger
                 .dispatch(owner, id, digest, &admission, self.now())?
             {
-                DispatchDisposition::Existing(s) => return Ok(DesktopOpenSubmission::Existing(s)),
+                DispatchDisposition::Existing(_) => return Ok(DesktopOpenSubmission::Existing),
                 DispatchDisposition::ExecuteOnce(p) => p,
             };
             let operation = id.clone();
@@ -654,7 +689,7 @@ impl HostCoordinator {
             validate_context(desktop(&state)?, &context)?;
             let snapshot = state.ledger.inspect(owner, id, digest)?;
             if snapshot.state != OperationState::Reserved {
-                return Ok(DesktopActionSubmission::Existing(snapshot));
+                return Ok(DesktopActionSubmission::Existing);
             }
             if state.shutting_down {
                 return Err(CoordinatorError::Busy);
@@ -671,8 +706,8 @@ impl HostCoordinator {
                 .ledger
                 .dispatch(owner, id, digest, &primary, self.now())?
             {
-                DispatchDisposition::Existing(s) => {
-                    return Ok(DesktopActionSubmission::Existing(s));
+                DispatchDisposition::Existing(_) => {
+                    return Ok(DesktopActionSubmission::Existing);
                 }
                 DispatchDisposition::ExecuteOnce(p) => p,
             };
@@ -736,11 +771,11 @@ impl HostCoordinator {
                     };
                     drop(state);
                     drop(guard);
-                    let response = result.map_err(CoordinatorError::from).and_then(|snapshot| {
+                    let response = result.map_err(CoordinatorError::from).and_then(|_| {
                         audit?;
                         delivery?;
                         Ok(DesktopActionSubmission::Completed(
-                            DesktopActionCompletion { snapshot, receipt },
+                            DesktopActionCompletion { receipt },
                         ))
                     });
                     let _ = tx.send(response);
@@ -775,6 +810,7 @@ pub(super) fn test_lane(binding: SessionBinding) -> DesktopLane {
             })
             .collect(),
         profiles: BTreeMap::new(),
+        sessions: BTreeMap::new(),
         handles: BTreeMap::new(),
         open_history: Vec::new(),
     }
@@ -834,67 +870,6 @@ impl HostCoordinator {
             .unwrap();
         state.desktop = Some(test_lane(binding.clone()));
         binding
-    }
-    /// Synthetic ledger evidence for the paired lost-reply regression only.
-    /// No native worker or successful desktop permission is claimed.
-    pub(crate) fn simulate_desktop_open_running(&self, owner_id: &OwnerId) -> ResourceTarget {
-        let mut state = self.inner.state.lock().unwrap();
-        let lane = state.desktop.as_ref().unwrap();
-        assert!(lane.worker.resources().unwrap().is_empty());
-        let (owner, target) = lane
-            .open_history
-            .iter()
-            .find(|(owner, _)| owner.owner_id() == owner_id)
-            .cloned()
-            .unwrap();
-        let admission = facts(&state, CapabilityId::DesktopWindowsRead).unwrap();
-        assert!(matches!(
-            state
-                .ledger
-                .dispatch(
-                    &owner,
-                    &target.operation_id,
-                    target.payload_digest,
-                    &admission,
-                    self.now()
-                )
-                .unwrap(),
-            DispatchDisposition::ExecuteOnce(_)
-        ));
-        state
-            .ledger
-            .record_executor_fact(&target.operation_id, ExecutorFact::Running, self.now())
-            .unwrap();
-        target
-    }
-    pub(crate) async fn finish_simulated_desktop_open(&self, target: &ResourceTarget) {
-        let _execution = self.inner.execution_gate.clone().write_owned().await;
-        let mut state = self.inner.state.lock().unwrap();
-        assert!(
-            state
-                .desktop
-                .as_ref()
-                .unwrap()
-                .worker
-                .resources()
-                .unwrap()
-                .is_empty()
-        );
-        // Settle only this synthetic record; there was no native resource to end.
-        for fact in [
-            ExecutorFact::Exited { successful: false },
-            ExecutorFact::OutputDrained,
-        ] {
-            state
-                .ledger
-                .record_executor_fact(&target.operation_id, fact, self.now())
-                .unwrap();
-        }
-        let permit = state.ledger.begin_resource_release(target).unwrap();
-        state
-            .ledger
-            .record_provider_release(permit.confirm_released())
-            .unwrap();
     }
     pub(crate) fn desktop_refusal_records(&self) -> (Vec<OperationSnapshot>, usize) {
         let state = self.inner.state.lock().unwrap();
