@@ -42,6 +42,12 @@ public class FixtureActivity extends Activity {
         });
         layout.addView(title); layout.addView(counter); layout.addView(edit); layout.addView(increment);
         layout.addView(secure); layout.addView(secureState);
+        Button transition = new Button(this);
+        transition.setId(android.R.id.button3);
+        transition.setText("Open next test screen");
+        transition.setOnClickListener(view ->
+            startActivity(new Intent(this, FixtureNextActivity.class)));
+        layout.addView(transition);
         layout.setFocusableInTouchMode(true);
         setContentView(layout);
         layout.requestFocus();
