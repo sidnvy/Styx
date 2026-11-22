@@ -439,7 +439,7 @@ async fn connect(
         LinkError::Tls(_) => ForegroundError("gateway_tls_handshake_rejected"),
         LinkError::UpgradeStatus(400) => ForegroundError("gateway_wss_request_rejected"),
         LinkError::UpgradeStatus(403) => ForegroundError("gateway_wss_admission_refused"),
-        LinkError::UpgradeStatus(503) => ForegroundError("gateway_wss_unavailable"),
+        LinkError::UpgradeStatus(409 | 503) => ForegroundError("gateway_wss_unavailable"),
         LinkError::UpgradeStatus(_) | LinkError::HandshakeRejected => {
             ForegroundError("gateway_wss_upgrade_rejected")
         }

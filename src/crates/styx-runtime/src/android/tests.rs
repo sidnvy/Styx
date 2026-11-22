@@ -717,3 +717,22 @@ async fn independent_android_pairing_wss_images_reconnect_disable_and_revoke() {
     assert!(!stopped.worker_failure_observed);
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn upgrade_conflict_409_is_retryable_and_not_revocation() {
+    let conflict = ConnectFailure::from(LinkError::UpgradeStatus(409));
+    assert!(conflict.retryable);
+    assert!(!conflict.revoked);
+    assert_eq!(conflict.code, "gateway_wss_unavailable");
+
+    let unavailable = ConnectFailure::from(LinkError::UpgradeStatus(503));
+    assert!(unavailable.retryable);
+    assert!(!unavailable.revoked);
+
+    for code in [401, 403] {
+        let auth = ConnectFailure::from(LinkError::UpgradeStatus(code));
+        assert!(!auth.retryable);
+        assert!(auth.revoked);
+        assert_eq!(auth.code, "gateway_pairing_revoked");
+    }
+}

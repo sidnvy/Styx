@@ -152,6 +152,10 @@ impl RelayHandle {
                 s.profile_is_current(&device, &profile.capability_generation)?;
                 // Each attempt is the same authenticated Core admission. A denied
                 // or occupied Exec lane cannot veto an independently granted lane.
+                // Preserve 409 Conflict (already-connected half-open socket) over
+                // ungranted-lane 403 Proof errors so reconnecting peers back off
+                // cleanly instead of misinterpreting an occupied slot as revocation.
+                let mut preferred_error = None;
                 let mut last_error = None;
                 for lane in [Lane::Exec, Lane::Browser, Lane::Computer] {
                     let admission = if lane == Lane::Exec {
@@ -161,15 +165,27 @@ impl RelayHandle {
                     };
                     match admission {
                         Ok(lease) => return Ok((lane, lease)),
-                        Err(error) => last_error = Some(error),
+                        Err(error) => {
+                            if error.status() == 409
+                                || (error.status() == 503 && preferred_error.is_none())
+                            {
+                                preferred_error = Some(error);
+                            }
+                            last_error = Some(error);
+                        }
                     }
                 }
-                Err(last_error.expect("capability lane admission attempts"))
+                Err(preferred_error
+                    .or(last_error)
+                    .expect("capability lane admission attempts"))
             })
             .await;
         let (initial_lane, lease) = match admitted {
             Ok(Ok(value)) => value,
-            _ => return reject(403),
+            Ok(Err(error)) if error.status() == 409 => return reject(409),
+            Ok(Err(error)) if error.status() == 503 => return reject(503),
+            Err(_) => return reject(503),
+            Ok(Err(_)) => return reject(403),
         };
         let upgrade_headers = req.headers().clone();
         let upgraded = hyper::upgrade::on(&mut req);
