@@ -1,8 +1,8 @@
 //! Owned Hyper upgrades. Registry routes; Core lease and owner gates authorize.
 use super::relay::{Command, Entry, RelayError, RelayHandle, cleanup_control};
 use crate::host::protocol::wire::{
-    ANDROID_V1, BROWSER_V1, COMPUTER_V3, Call, HostControl, Reply, Request as WireRequest,
-    Response as WireResponse, TRANSPORT_DRAIN_V1,
+    ANDROID_V1, COMPUTER_V3, Call, HOST_BROWSER_SESSIONS_V1, HostControl, Reply,
+    Request as WireRequest, Response as WireResponse, TRANSPORT_DRAIN_V1,
 };
 use bytes::Bytes;
 use futures_util::{Sink, SinkExt, StreamExt};
@@ -90,7 +90,8 @@ impl Drop for LiveFence {
     }
 }
 struct Pending {
-    command: Command,
+    result: tokio::sync::oneshot::Sender<Result<Reply, RelayError>>,
+    gate: Option<Arc<Mutex<bool>>>,
     control: bool,
     drain_fenced: bool,
     lane: Lane,
@@ -215,7 +216,7 @@ impl RelayHandle {
                                         && got==challenge && device_id==device
                                         && connection_generation==response.connection_generation && owner_issuance=="gateway_authenticated" => {
                                             let exec=exec_negotiated(&features,write,terminate,read_resume);
-                                            let browser=features.iter().any(|v|v==BROWSER_V1) && features.iter().any(|v|v==crate::host::protocol::wire::HOST_BROWSER_SESSIONS_V1);
+                                            let browser=features.iter().any(|v|v==HOST_BROWSER_SESSIONS_V1);
                                             (host_generation,connection_generation,rev,exec,browser,features.iter().any(|v|v==COMPUTER_V3),features.iter().any(|v|v==ANDROID_V1),features.iter().any(|v|v==TRANSPORT_DRAIN_V1),features.iter().any(|v|v==crate::host::settings::FEATURE))
                                         },
                                 _=>return Err(RelayError::Unauthorized),
@@ -299,12 +300,12 @@ impl RelayHandle {
                                         };
                                         let result=guarded_send(&relay,l,command.gate.as_deref(),drain_fenced.then_some(&e.admission),&mut sink,&request,&task_stop).await;
                                         drop(locked);
-                                        // Drop sensitive request payload after send, keep its exact lane.
-                                        let command=Command{call:Call::Write{},result:command.result,gate:command.gate};
+                                        // Drop sensitive request payload after send, keep only response channel & gate.
+                                        let Command { result: reply_tx, gate, .. } = command;
                                         match result {
-                                            Ok(())=>{pending.insert(request.request_id,Pending{command,control,drain_fenced,lane,deadline:response_budget.map(|budget| tokio::time::Instant::now()+budget)});},
+                                            Ok(())=>{pending.insert(request.request_id,Pending{result:reply_tx,gate,control,drain_fenced,lane,deadline:response_budget.map(|budget| tokio::time::Instant::now()+budget)});},
                                             Err(error)=>{
-                                                let _=command.result.send(Err(error));
+                                                let _=reply_tx.send(Err(error));
                                                 // Proven refusal before start_send is local to its lane. Actual
                                                 // socket/write uncertainty still invalidates the physical WS.
                                                 if known_pre_send_refusal(error){continue}
@@ -329,17 +330,17 @@ impl RelayHandle {
                                         let Some(p)=pending.remove(&response.request_id) else{return Err(RelayError::Invalid)};
                                         let locked=if p.control {e.control_lease_for(p.lane).await}else{e.lease_for(p.lane).await};
                                         let Some(l)=locked.as_ref() else {
-                                            let _=p.command.result.send(Err(if p.lane!=Lane::Exec{RelayError::Unauthorized}else{RelayError::Offline}));
+                                            let _=p.result.send(Err(if p.lane!=Lane::Exec{RelayError::Unauthorized}else{RelayError::Offline}));
                                             continue
                                         };
                                         relay.inner.shared.with(|s| {
                                             let allowed=s.authorize_host_frame(l).is_ok();
                                             let admission=p.drain_fenced.then(||e.admission.lock());
                                             let drain_allowed=match &admission {None=>true,Some(Ok(g))=>!**g,Some(Err(_))=>false};
-                                            let gate=p.command.gate.as_ref().map(|g|g.lock());
+                                            let gate=p.gate.as_ref().map(|g|g.lock());
                                             let gate_allowed=match &gate{None=>true,Some(Ok(g))=>!**g,Some(Err(_))=>false};
                                             let result=if allowed&&drain_allowed&&gate_allowed{Ok(response.reply)}else{Err(RelayError::Unauthorized)};
-                                            let _=p.command.result.send(result);
+                                            let _=p.result.send(result);
                                         }).await.map_err(|_|RelayError::Unknown)?;
                                     },
                                 }
@@ -573,7 +574,7 @@ mod capacity_tests {
         value["reply"] = if kind == "exec" {
             serde_json::json!({"status":"read","chunks":[{"stream":"stdout","text":""}],"liveness":"running","output_drain":"open","exit_code":null,"read_resume":false})
         } else {
-            serde_json::json!({"status":"browser_action","snapshot":{"operation_id":{"host_generation":"fixture-host","owner_epoch":"fixture-owner","sequence":1},"payload_digest":"0000000000000000000000000000000000000000000000000000000000000000","target":null,"state":"succeeded","liveness":"not_applicable","output_drain":"drained"},"dispatch":"completed","result":{"content":[if kind == "screenshot" {serde_json::json!({"type":"image","mimeType":"image/png","data":""})} else {serde_json::json!({"type":"text","text":""})}]},"cause":null,"cleanup_complete":null})
+            serde_json::json!({"status":"browser_session","result":{"content":[if kind == "screenshot" {serde_json::json!({"type":"image","mimeType":"image/png","data":""})} else {serde_json::json!({"type":"text","text":""})}]}})
         };
         let length = FRAME - serde_json::to_string(&value).unwrap().len();
         if kind == "exec" {

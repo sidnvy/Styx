@@ -316,12 +316,14 @@ async fn unknown_cleanup_retains_profile_record_until_inflight_preparation_and_r
         }),
         Some(Reply::OwnerOpened { .. })
     ));
-    let prepare = protocol.handle(Call::Browser {
-        owner: owner.clone(),
-        grant_revision: 1,
-        timeout_ms: 1000,
-        command: BrowserCommand::PrepareOpen,
-    });
+    let lease = protocol.owner(&owner).unwrap();
+    let port = protocol.browser_port().unwrap();
+    let prepare = port.handle_browser(
+        lease,
+        1,
+        1000,
+        crate::host::browser_sessions::operations::BrowserCommand::PrepareOpen,
+    );
     tokio::pin!(prepare);
     let wait = async {
         source.entered.notified().await;

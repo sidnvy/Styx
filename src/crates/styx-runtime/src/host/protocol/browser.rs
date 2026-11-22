@@ -35,22 +35,6 @@ impl HostProtocol<'_> {
             port.drain_browser_inputs().await;
         }
     }
-    pub(super) async fn handle_browser(
-        &self,
-        reference: OwnerRef,
-        revision: u64,
-        timeout: u32,
-        command: BrowserCommand,
-    ) -> Reply {
-        let owner = match self.owner(&reference) {
-            Ok(o) => o,
-            Err(e) => return rejection(e),
-        };
-        match self.browser_port() {
-            Some(port) => port.handle_browser(owner, revision, timeout, command).await,
-            None => rejection(ErrorCategory::CapabilityUnsupported),
-        }
-    }
 }
 #[cfg(all(test, target_os = "linux"))]
 #[path = "browser_history_tests.rs"]

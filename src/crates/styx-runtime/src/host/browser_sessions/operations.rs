@@ -3,7 +3,7 @@ use crate::host::coordinator::{
     BrowserActionSubmission, BrowserOpenSubmission, CoordinatorError, HostAuthority,
     HostCoordinator,
 };
-use crate::host::protocol::wire::{self, *};
+use crate::host::protocol::wire::{self, ActionRef, Reply, Snapshot};
 use crate::host::replies::{coordinator_error, invalid, rejection};
 use crate::providers::browser::{
     BrowserAction, BrowserActionEvidence, BrowserDescendants, BrowserError, OwnedBrowserConfig,
@@ -18,6 +18,58 @@ use styx_contracts::{
 use styx_core::operations::OwnerLease;
 use tokio_util::task::TaskTracker;
 const SPEC_LIMIT: usize = 128 * 1024;
+pub(crate) enum BrowserCommand {
+    PrepareOpen,
+    DispatchOpen {
+        target: ResourceTarget,
+    },
+    PrepareAction {
+        target: ResourceTarget,
+        action: Box<serde_json::value::RawValue>,
+    },
+    DispatchAction {
+        action: ActionRef,
+    },
+}
+pub(crate) enum BrowserReply {
+    Prepared {
+        snapshot: Snapshot,
+    },
+    Start {
+        snapshot: Snapshot,
+        dispatch: String,
+    },
+    Action {
+        snapshot: Snapshot,
+        dispatch: String,
+        result: Option<serde_json::Value>,
+        cause: Option<ErrorCategory>,
+        #[cfg_attr(not(test), allow(dead_code))]
+        cleanup_complete: Option<bool>,
+    },
+    Error {
+        category: ErrorCategory,
+        certainty: ExecutionCertainty,
+    },
+}
+impl From<Reply> for BrowserReply {
+    fn from(reply: Reply) -> Self {
+        match reply {
+            Reply::Error {
+                category,
+                certainty,
+                ..
+            } => Self::Error {
+                category,
+                certainty,
+            },
+            _ => Self::Error {
+                category: ErrorCategory::ResultUnknown,
+                certainty: ExecutionCertainty::Unknown,
+            },
+        }
+    }
+}
 pub(crate) trait BrowserBootstrap: Send + Sync {
     /// Saved local profiles, without caller identities or execution state.
     /// Adapters must explicitly forward discovery rather than hide saved logins.
@@ -114,7 +166,7 @@ impl BrowserPort<'_> {
         id: &OperationId,
         digest: Sha256Digest,
         action: bool,
-    ) -> Result<Option<Reply>, CoordinatorError> {
+    ) -> Result<Option<BrowserReply>, CoordinatorError> {
         let snapshot = self
             .coordinator
             .inspect_browser(owner, id, digest, action)?;
@@ -122,7 +174,7 @@ impl BrowserPort<'_> {
             return Ok(None);
         }
         Ok(Some(if action {
-            Reply::BrowserAction {
+            BrowserReply::Action {
                 snapshot: snapshot.into(),
                 dispatch: "existing_no_replay".into(),
                 result: None,
@@ -130,7 +182,7 @@ impl BrowserPort<'_> {
                 cleanup_complete: None,
             }
         } else {
-            Reply::Start {
+            BrowserReply::Start {
                 snapshot: snapshot.into(),
                 dispatch: "existing_no_replay".into(),
             }
@@ -143,10 +195,10 @@ impl BrowserPort<'_> {
         digest: Sha256Digest,
         action: bool,
         error: CoordinatorError,
-    ) -> Reply {
+    ) -> BrowserReply {
         match self.existing_browser_dispatch(owner, id, digest, action) {
             Ok(Some(reply)) => reply,
-            _ => coordinator_error(error, false),
+            _ => coordinator_error(error, false).into(),
         }
     }
     async fn validate_browser_dispatch(
@@ -155,13 +207,13 @@ impl BrowserPort<'_> {
         id: &OperationId,
         digest: Sha256Digest,
         action: bool,
-    ) -> Result<(), Reply> {
+    ) -> Result<(), BrowserReply> {
         // Local input validation must never downgrade an original dispatched
         // operation's history to NotDispatched after a file/permission change.
         match self.existing_browser_dispatch(owner, id, digest, action) {
             Ok(Some(reply)) => return Err(reply),
             Ok(None) => {}
-            Err(e) => return Err(uncertain(coordinator_error(e, false))),
+            Err(e) => return Err(uncertain(coordinator_error(e, false).into())),
         }
         let validation = self
             .browser_input(move |source| {
@@ -179,7 +231,7 @@ impl BrowserPort<'_> {
                     // Another request may have consumed this original token while
                     // the blocking validator ran. A local refusal is not proof of
                     // its historical outcome, and never authorizes replay.
-                    _ => uncertain(rejection(category)),
+                    _ => uncertain(rejection(category).into()),
                 },
             );
         }
@@ -191,15 +243,15 @@ impl BrowserPort<'_> {
         revision: u64,
         timeout: u32,
         command: BrowserCommand,
-    ) -> Reply {
+    ) -> BrowserReply {
         if timeout > wire::BROWSER_WAIT_PREPARE_TIMEOUT_MS {
-            return rejection(ErrorCategory::InvalidRequest);
+            return rejection(ErrorCategory::InvalidRequest).into();
         }
         // Exec's ten-second admission bound remains unchanged. Only this
         // independently authorized Browser context may admit a native wait.
         let mut context = match self.context(revision, timeout.min(10_000)) {
             Ok(v) => v,
-            Err(e) => return rejection(e),
+            Err(e) => return rejection(e).into(),
         };
         context.capability = CapabilityId::Browser;
         context.deadline = Some(MonotonicMillis(
@@ -219,21 +271,21 @@ impl BrowserPort<'_> {
                     .await
                 {
                     Ok(v) => v,
-                    Err(e) => return rejection(e),
+                    Err(e) => return rejection(e).into(),
                 };
                 // Blocking input work grants no authority; Core rechecks this
                 // original owner after it returns, including an in-flight revoke.
                 if !self.coordinator.owner_is_active(&owner) {
-                    return rejection(ErrorCategory::Unauthorized);
+                    return rejection(ErrorCategory::Unauthorized).into();
                 }
                 if let Err(e) = self.authority.register_browser_profile(&owner, config) {
-                    return coordinator_error(e, false);
+                    return coordinator_error(e, false).into();
                 }
                 match self.coordinator.prepare_browser_open(&owner, context) {
-                    Ok(snapshot) => Reply::Prepared {
+                    Ok(snapshot) => BrowserReply::Prepared {
                         snapshot: snapshot.into(),
                     },
-                    Err(e) => coordinator_error(e, false),
+                    Err(e) => coordinator_error(e, false).into(),
                 }
             }
             BrowserCommand::DispatchOpen { target } => {
@@ -253,7 +305,7 @@ impl BrowserPort<'_> {
                     .dispatch_browser_open(&owner, &target.operation_id, target.payload_digest)
                     .await
                 {
-                    Ok(BrowserOpenSubmission::Existing(snapshot)) => Reply::Start {
+                    Ok(BrowserOpenSubmission::Existing(snapshot)) => BrowserReply::Start {
                         snapshot: snapshot.into(),
                         dispatch: "existing_no_replay".into(),
                     },
@@ -270,8 +322,9 @@ impl BrowserPort<'_> {
                                     .map(category)
                                     .unwrap_or(ErrorCategory::CapabilityUnsupported),
                             )
+                            .into()
                         }
-                        Ok(done) => Reply::Start {
+                        Ok(done) => BrowserReply::Start {
                             snapshot: done.snapshot.into(),
                             dispatch: match done.evidence {
                                 BrowserActionEvidence::Acknowledged => "started",
@@ -280,7 +333,7 @@ impl BrowserPort<'_> {
                             }
                             .into(),
                         },
-                        Err(e) => coordinator_error(e, false),
+                        Err(e) => coordinator_error(e, false).into(),
                     },
                     Err(e) => self.browser_dispatch_error(
                         &owner,
@@ -291,36 +344,25 @@ impl BrowserPort<'_> {
                     ),
                 }
             }
-            BrowserCommand::InspectOpen { target } => match self.coordinator.inspect_browser(
-                &owner,
-                &target.operation_id,
-                target.payload_digest,
-                false,
-            ) {
-                Ok(snapshot) => Reply::Inspected {
-                    snapshot: snapshot.into(),
-                },
-                Err(e) => coordinator_error(e, false),
-            },
             BrowserCommand::PrepareAction { target, action } => {
                 if action.get().len() > SPEC_LIMIT {
-                    return invalid();
+                    return invalid().into();
                 }
                 let action: BrowserAction = match serde_json::from_str(action.get()) {
                     Ok(v) => v,
-                    Err(_) => return invalid(),
+                    Err(_) => return invalid().into(),
                 };
                 if let Err(e) = self.browser_input(|source| source.validate_control()).await {
-                    return rejection(e);
+                    return rejection(e).into();
                 }
                 match self
                     .coordinator
                     .prepare_browser_action(&owner, target, context, &action)
                 {
-                    Ok(snapshot) => Reply::Prepared {
+                    Ok(snapshot) => BrowserReply::Prepared {
                         snapshot: snapshot.into(),
                     },
-                    Err(e) => coordinator_error(e, false),
+                    Err(e) => coordinator_error(e, false).into(),
                 }
             }
             BrowserCommand::DispatchAction { action } => {
@@ -340,7 +382,7 @@ impl BrowserPort<'_> {
                     .dispatch_browser_action(&owner, &action.operation_id, action.payload_digest)
                     .await
                 {
-                    Ok(BrowserActionSubmission::Existing(snapshot)) => Reply::BrowserAction {
+                    Ok(BrowserActionSubmission::Existing(snapshot)) => BrowserReply::Action {
                         snapshot: snapshot.into(),
                         dispatch: "existing_no_replay".into(),
                         result: None,
@@ -368,7 +410,7 @@ impl BrowserPort<'_> {
                                     .await
                                     .ok();
                             }
-                            Reply::BrowserAction {
+                            BrowserReply::Action {
                                 snapshot: done.snapshot.into(),
                                 dispatch: match done.receipt.evidence {
                                     BrowserActionEvidence::Acknowledged => "acknowledged",
@@ -381,7 +423,7 @@ impl BrowserPort<'_> {
                                 cleanup_complete,
                             }
                         }
-                        Err(e) => coordinator_error(e, false),
+                        Err(e) => coordinator_error(e, false).into(),
                     },
                     Err(e) => self.browser_dispatch_error(
                         &owner,
@@ -392,17 +434,6 @@ impl BrowserPort<'_> {
                     ),
                 }
             }
-            BrowserCommand::InspectAction { action } => match self.coordinator.inspect_browser(
-                &owner,
-                &action.operation_id,
-                action.payload_digest,
-                true,
-            ) {
-                Ok(snapshot) => Reply::Inspected {
-                    snapshot: snapshot.into(),
-                },
-                Err(e) => coordinator_error(e, false),
-            },
         }
     }
 }
@@ -421,8 +452,8 @@ fn category(error: BrowserError) -> ErrorCategory {
     }
 }
 
-fn uncertain(mut reply: Reply) -> Reply {
-    if let Reply::Error { certainty, .. } = &mut reply {
+fn uncertain(mut reply: BrowserReply) -> BrowserReply {
+    if let BrowserReply::Error { certainty, .. } = &mut reply {
         *certainty = ExecutionCertainty::Unknown;
     }
     reply
