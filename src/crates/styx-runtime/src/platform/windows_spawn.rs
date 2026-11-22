@@ -410,13 +410,55 @@ pub(crate) fn spawn_browser_suspended(
         Entry::Browser { worker, config },
     )
 }
-/// Fixed original Cua entry. Never accepts caller argv or a daemon locator.
-pub(crate) fn spawn_cua_suspended(
+fn valid_cua_pipe(socket: &str) -> bool {
+    socket.len() <= 128
+        && socket
+            .strip_prefix(r"\\.\pipe\styx-cua-")
+            .is_some_and(|tail| {
+                !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            })
+}
+/// Fixed Host-owned shared Cua daemon entry (`cua-driver serve --socket <pipe> --pid-file <path>`).
+pub(crate) fn spawn_cua_serve_suspended(
     image: Arc<PinnedExecutable>,
     cwd: PathBuf,
     env: BTreeMap<OsString, OsString>,
+    socket: String,
+    pid_file: PathBuf,
 ) -> Result<SuspendedChild, SpawnFailure> {
-    spawn_fixed(image, None, cwd, env, Entry::Cua)
+    if !valid_cua_pipe(&socket) || !pid_file.is_absolute() {
+        return Err(refused("invalid_cua_serve_input"));
+    }
+    spawn_fixed(
+        image,
+        None,
+        cwd,
+        env,
+        Entry::CuaServe {
+            socket: OsString::from(socket),
+            pid_file,
+        },
+    )
+}
+/// Fixed per-caller Cua MCP proxy entry (`cua-driver mcp --socket <pipe>`).
+pub(crate) fn spawn_cua_proxy_suspended(
+    image: Arc<PinnedExecutable>,
+    cwd: PathBuf,
+    env: BTreeMap<OsString, OsString>,
+    socket: String,
+) -> Result<SuspendedChild, SpawnFailure> {
+    if !valid_cua_pipe(&socket) {
+        return Err(refused("invalid_cua_proxy_input"));
+    }
+    spawn_fixed(
+        image,
+        None,
+        cwd,
+        env,
+        Entry::CuaProxy {
+            socket: OsString::from(socket),
+        },
+    )
 }
 /// Secure MCP Tunnel entry, constructed only by the trusted Gateway adapter.
 /// Reuses the same suspended-image verification, Job ownership and final wait.
@@ -438,7 +480,8 @@ pub(crate) fn spawn_tunnel_suspended(
 enum Entry {
     Tunnel(crate::foreground::tunnel::Arguments),
     Exec,
-    Cua,
+    CuaServe { socket: OsString, pid_file: PathBuf },
+    CuaProxy { socket: OsString },
     Browser { worker: PathBuf, config: PathBuf },
 }
 // Microsoft CRT quoting, applied only to trusted fixed-entry arguments. The
@@ -490,7 +533,18 @@ fn command_line(path: &OsStr, entry: &Entry) -> io::Result<Vec<u16>> {
             OsStr::new("--listen"),
             OsStr::new("stdio://"),
         ],
-        Entry::Cua => vec![OsStr::new("mcp"), OsStr::new("--direct")],
+        Entry::CuaServe { socket, pid_file } => vec![
+            OsStr::new("serve"),
+            OsStr::new("--socket"),
+            socket.as_os_str(),
+            OsStr::new("--pid-file"),
+            pid_file.as_os_str(),
+        ],
+        Entry::CuaProxy { socket } => vec![
+            OsStr::new("mcp"),
+            OsStr::new("--socket"),
+            socket.as_os_str(),
+        ],
         Entry::Browser { worker, config } => vec![
             worker.as_os_str(),
             OsStr::new("--config"),

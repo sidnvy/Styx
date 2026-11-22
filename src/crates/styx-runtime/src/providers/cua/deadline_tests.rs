@@ -83,11 +83,7 @@ async fn native_read_options_arrive_unchanged_without_styx_defaults_or_caps() {
             .unwrap()
             .clone();
         args.extend(supplied.as_object().unwrap().clone());
-        let action = public_contract::decode("get_window_state", args).unwrap();
-        assert!(matches!(
-            action.desktop_read_request().unwrap(),
-            Some(ax_target::DesktopReadRequest::Accessibility(_))
-        ));
+        let action = CuaAction::call_tool("get_window_state".into(), args).unwrap();
         let payload = action.to_operation_payload().unwrap();
         let action: CuaAction = serde_json::from_slice(&payload).unwrap();
         let (evidence, _, _) = driver.call(&action).await;

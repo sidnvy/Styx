@@ -126,8 +126,7 @@ pub(super) async fn cleanup_selected(
     budget: Duration,
 ) -> Option<DesktopLaneCleanup> {
     let worker = {
-        let mut state = inner.state.lock().expect("Host state mutex");
-        super::desktop_observation::invalidate(state.desktop.as_mut(), owner);
+        let state = inner.state.lock().expect("Host state mutex");
         state.desktop.as_ref().map(|lane| lane.worker.clone())
     }?;
     let until = tokio::time::Instant::now() + budget.min(Duration::from_secs(30));
@@ -227,6 +226,12 @@ pub(super) async fn cleanup_selected(
         };
         let all_handles_finished = handles.keys().all(|id| finished.contains(id));
         if pending.is_empty() && all_handles_finished {
+            if owner.is_none() {
+                let remaining = until.saturating_duration_since(tokio::time::Instant::now());
+                worker
+                    .stop_shared_daemon(remaining.max(Duration::from_secs(2)))
+                    .await;
+            }
             break;
         }
         if tokio::time::Instant::now() >= until {

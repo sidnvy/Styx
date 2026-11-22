@@ -2,6 +2,7 @@
 use super::*;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
+#[allow(dead_code)]
 pub(crate) struct FakeDriver {
     pub(crate) peer: rmcp::Peer<RoleClient>,
     pub(crate) calls: Arc<Mutex<Vec<Value>>>,
@@ -37,7 +38,17 @@ impl FakeDriver {
                     "initialize" => {
                         serde_json::json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"cua-driver","version":"0.47.24"}})
                     }
-                    "tools/list" => serde_json::json!({"tools":[]}),
+                    "tools/list" => serde_json::json!({
+                        "tools": [{
+                            "name": "click",
+                            "description": "Click a native desktop element.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": { "pid": { "type": "integer" } },
+                                "required": ["pid"]
+                            }
+                        }]
+                    }),
                     "tools/call" => {
                         seen.lock().unwrap().push(request["params"].clone());
                         tokio::time::sleep(delay).await;
@@ -79,6 +90,7 @@ impl FakeDriver {
     /// Bind the existing duplex client to a real provider resource for Host
     /// ownership tests. The pinned image is never executed; no GUI is touched.
     #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
     pub(crate) fn bind_resource(
         &mut self,
         worker: &CuaWorker,
@@ -135,9 +147,6 @@ impl FakeDriver {
                 cleanup: None,
                 uncertain: false,
                 io_failed: false,
-                ax_once_available: false,
-                permissions_available: false,
-                permissions: None,
                 exit_success: None,
                 actions: BTreeMap::new(),
             })),
@@ -160,14 +169,27 @@ impl FakeDriver {
         &self,
         action: &CuaAction,
     ) -> (CuaEvidence, Option<CallToolResult>, Option<CuaError>) {
-        driver_result::invoke(
-            &self.peer,
-            CallToolRequestParams::new(action.name.clone())
-                .with_arguments(action.arguments.clone()),
-            &CancellationToken::new(),
-            Some(Instant::now() + Duration::from_secs(2)),
-        )
-        .await
+        let until = Some(Instant::now() + Duration::from_secs(2));
+        match action {
+            CuaAction::ListTools { names } => {
+                driver_result::invoke_list_tools(
+                    &self.peer,
+                    names.as_deref(),
+                    &CancellationToken::new(),
+                    until,
+                )
+                .await
+            }
+            CuaAction::CallTool { name, arguments } => {
+                driver_result::invoke(
+                    &self.peer,
+                    CallToolRequestParams::new(name.clone()).with_arguments(arguments.clone()),
+                    &CancellationToken::new(),
+                    until,
+                )
+                .await
+            }
+        }
     }
     pub(crate) async fn close(mut self) {
         drop(self.peer);

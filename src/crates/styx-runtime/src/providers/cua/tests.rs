@@ -1,4 +1,4 @@
-//! Real Core permits, static schema/certainty boundaries; NO Cua/GUI spawned.
+//! Real Core permits, native MCP action boundaries; NO Cua/GUI spawned.
 use super::*;
 use styx_contracts::{
     capability::*, error::Recovery, identity::*, operation::*, session::SessionState,
@@ -60,157 +60,39 @@ fn authority() -> (
     };
     (ledger, owner, other, facts, context)
 }
-#[cfg(target_os = "linux")]
+
 #[test]
-fn fixed_public_tools_and_native_inventory_cannot_become_arbitrary_rpc() {
-    let native: Value = serde_json::from_str(NATIVE_CATALOG).unwrap();
-    assert_eq!(native.as_object().unwrap().len(), 10);
-    assert!(native.get("run_script").is_none());
-    assert!(native.get("run_steps").is_none());
-    let schemas = public_schemas().unwrap();
-    assert_eq!(schemas.len(), 10);
-    for name in schemas.keys() {
-        assert!(capability(name).is_ok());
-        assert!(native.get(name).is_some());
-    }
+fn native_cua_action_forwards_arbitrary_native_tools_and_bounds_invalid_inputs() {
+    assert!(CuaAction::list_tools(None).is_ok());
+    assert!(CuaAction::list_tools(Some(vec!["click".into(), "run_steps".into()])).is_ok());
+    assert!(CuaAction::list_tools(Some(vec!["".into()])).is_err());
+
     for name in [
-        "run_script",
+        "list_apps",
+        "list_windows",
+        "get_window_state",
+        "click",
+        "set_value",
+        "type_text",
+        "press_key",
+        "scroll",
         "run_steps",
-        "launch_app",
-        "kill_app",
-        "start_session",
-        "future_tool",
+        "run_script",
+        "get_guide",
+        "browser_click",
     ] {
-        assert!(matches!(
-            CuaAction::new(name.into(), Map::new()),
-            Err(CuaError::Unsupported)
-        ));
-    }
-    assert!(CuaAction::new("list_apps".into(), Map::new()).is_ok());
-    for args in [
-        serde_json::json!({"_meta":{}}),
-        serde_json::json!({"environment_id":"forged"}),
-        serde_json::json!({"owner":"forged"}),
-        serde_json::json!({"session":"x".repeat(REQUEST_BYTES)}),
-    ] {
-        assert!(CuaAction::new("list_apps".into(), args.as_object().unwrap().clone()).is_err());
-    }
-    // A capture grant is not an arbitrary current-user file overwrite grant.
-    for name in ["get_window_state", "get_desktop_state"] {
-        let args = serde_json::json!({"pid":123,"screenshot_out_file":"/tmp/unowned-output.png"});
-        assert!(matches!(
-            CuaAction::new(name.into(), args.as_object().unwrap().clone()),
-            Err(CuaError::InvalidRequest)
-        ));
-    }
-    assert!(bounded_bytes(&"x".repeat(FRAME_BYTES), FRAME_BYTES).is_err());
-}
-// Source-derived projections are compatibility evidence, not device acceptance.
-#[test]
-fn portable_catalogs_require_ten_tools_and_only_optional_strict_boolean() {
-    for schemas_json in [
-        include_str!("linux-catalog.json"),
-        include_str!("macos_catalog.json"),
-        include_str!("windows-catalog.json"),
-    ] {
-        let contract = FixedNativeCatalog { schemas_json };
-        let expected: BTreeMap<String, Value> = serde_json::from_str(schemas_json).unwrap();
-        let tools: Vec<rmcp::model::Tool> = expected
-            .into_iter()
-            .map(|(name, schema)| {
-                serde_json::from_value(serde_json::json!({"name":name,"inputSchema":schema}))
-                    .unwrap()
-            })
-            .collect();
-        assert_eq!(tools.len(), 10);
-        assert!(!validate_native_catalog(&tools, contract).unwrap());
-        let mut duplicate = tools.clone();
-        duplicate.push(tools[0].clone());
-        assert!(validate_native_catalog(&duplicate, contract).is_err());
-        for index in 0..tools.len() {
-            let mut missing = tools.clone();
-            missing.remove(index);
-            assert!(validate_native_catalog(&missing, contract).is_err());
-        }
-        let mut altered = tools.clone();
-        altered[0].input_schema = Arc::new(
-            serde_json::json!({"type":"object"})
-                .as_object()
-                .unwrap()
-                .clone(),
+        let action = CuaAction::call_tool(name.into(), Map::new()).unwrap();
+        assert_eq!(
+            action.capability().unwrap(),
+            CapabilityId::DesktopWindowsRead
         );
-        assert!(validate_native_catalog(&altered, contract).is_err());
-        let mut documented = tools.clone();
-        for tool in &mut documented {
-            let mut schema = (*tool.input_schema).clone();
-            schema.insert(
-                "description".into(),
-                Value::String("updated upstream documentation".into()),
-            );
-            if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
-                for value in properties.values_mut() {
-                    if let Some(object) = value.as_object_mut() {
-                        object.insert(
-                            "description".into(),
-                            Value::String("updated field wording".into()),
-                        );
-                    }
-                }
-            }
-            tool.input_schema = Arc::new(schema);
-        }
-        assert!(!validate_native_catalog(&documented, contract).unwrap());
-        let mut strict = tools.clone();
-        let write = strict
-            .iter_mut()
-            .find(|tool| tool.name == "set_value")
-            .unwrap();
-        let mut schema = (*write.input_schema).clone();
-        schema
-            .get_mut("properties")
-            .unwrap()
-            .as_object_mut()
-            .unwrap()
-            .insert(
-                "styx_strict_text".into(),
-                serde_json::json!({"type":"boolean"}),
-            );
-        write.input_schema = Arc::new(schema);
-        assert!(validate_native_catalog(&strict, contract).unwrap());
-        for flag_schema in [
-            serde_json::json!({"type":"string"}),
-            serde_json::json!({"type":"boolean","const":false}),
-            serde_json::json!({"type":"boolean","enum":[false]}),
-        ] {
-            let mut bad = strict.clone();
-            let write = bad
-                .iter_mut()
-                .find(|tool| tool.name == "set_value")
-                .unwrap();
-            let mut schema = (*write.input_schema).clone();
-            schema
-                .get_mut("properties")
-                .unwrap()
-                .as_object_mut()
-                .unwrap()
-                .insert("styx_strict_text".into(), flag_schema);
-            write.input_schema = Arc::new(schema);
-            assert!(validate_native_catalog(&bad, contract).is_err());
-        }
-        strict.push(
-            serde_json::from_value(
-                serde_json::json!({"name":"run_script","inputSchema":{"type":"object"}}),
-            )
-            .unwrap(),
-        );
-        assert!(validate_native_catalog(&strict, contract).unwrap());
-        assert!(matches!(
-            CuaAction::new("run_script".into(), Map::new()),
-            Err(CuaError::Unsupported)
-        ));
-        let public = serde_json::json!({"pid":42,"window_id":7,"element_token":"s00000001:2","value":"test","styx_strict_text":true});
-        assert!(CuaAction::new("set_value".into(), public.as_object().unwrap().clone()).is_err());
+        let payload = action.to_operation_payload().unwrap();
+        let roundtrip: CuaAction = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(roundtrip, action);
     }
+    assert!(CuaAction::call_tool("".into(), Map::new()).is_err());
+    assert!(CuaAction::call_tool("bad\nname".into(), Map::new()).is_err());
+    assert_eq!(FRAME_BYTES, styx_contracts::DESKTOP_BROWSER_FRAME_BYTES);
 }
 
 #[tokio::test]
@@ -244,7 +126,7 @@ async fn exact_core_target_owner_and_session_are_required_without_exclusive_io_c
         operation_id: open.id,
         payload_digest: open.payload_digest,
     };
-    let action = CuaAction::new("list_apps".into(), Map::new()).unwrap();
+    let action = CuaAction::call_tool("list_apps".into(), Map::new()).unwrap();
     let pending = ledger
         .prepare_targeted(
             &owner,
@@ -348,4 +230,49 @@ async fn caller_deadline_is_optional_and_never_replaced_by_provider_budget() {
         _ = stop.cancelled() => {},
         _ = within(None, std::future::pending::<()>()) => panic!("unbounded wait completed"),
     }
+}
+
+#[tokio::test]
+async fn list_tools_and_large_multimodal_result_over_old_1mib_limit_pass_through_verbatim() {
+    use super::fake_driver::FakeDriver;
+    let large_payload = "A".repeat(1_500_000);
+    let reply =
+        CallToolResult::success(vec![rmcp::model::ContentBlock::text(large_payload.clone())]);
+    let driver = FakeDriver::start_delayed(
+        serde_json::json!({"click": {"type": "object", "properties": {"pid": {"type": "integer"}}}}),
+        reply,
+        Duration::ZERO,
+    )
+    .await;
+
+    // 1. Compact list_tools
+    let (ev, res, err) = driver.call(&CuaAction::list_tools(None).unwrap()).await;
+    assert_eq!(ev, CuaEvidence::Acknowledged);
+    assert!(err.is_none());
+    let structured = res.unwrap().structured_content.unwrap();
+    assert!(structured["tool_count"].as_u64().unwrap() >= 1);
+
+    // 2. Named list_tools returns full verbatim schema + unavailable_tools
+    let (ev, res, err) = driver
+        .call(
+            &CuaAction::list_tools(Some(vec!["click".into(), "nonexistent_tool".into()])).unwrap(),
+        )
+        .await;
+    assert_eq!(ev, CuaEvidence::Acknowledged);
+    assert!(err.is_none());
+    let structured = res.unwrap().structured_content.unwrap();
+    assert_eq!(
+        structured["unavailable_tools"],
+        serde_json::json!(["nonexistent_tool"])
+    );
+
+    // 3. >1 MiB native tool result passes cleanly through AdmittedTransport (8 MiB ceiling)
+    let (ev, res, err) = driver
+        .call(&CuaAction::call_tool("get_window_state".into(), Map::new()).unwrap())
+        .await;
+    assert_eq!(ev, CuaEvidence::Acknowledged);
+    assert!(err.is_none());
+    let text = res.unwrap().content[0].as_text().unwrap().text.clone();
+    assert_eq!(text.len(), 1_500_000);
+    driver.close().await;
 }

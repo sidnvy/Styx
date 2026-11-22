@@ -957,10 +957,11 @@ impl<'a> HostProtocol<'a> {
                 connection_generation: generation.clone(),
                 reply,
             };
-            let limit = if matches!(&response.reply, Reply::Android { .. }) {
+            let limit = if matches!(
+                &response.reply,
+                Reply::Android { .. } | Reply::ComputerAction { .. }
+            ) {
                 super::link::MAX_MESSAGE
-            } else if matches!(&response.reply, Reply::ComputerAction { .. }) {
-                1024 * 1024 + 64 * 1024
             } else {
                 RESPONSE_LIMIT
             };
