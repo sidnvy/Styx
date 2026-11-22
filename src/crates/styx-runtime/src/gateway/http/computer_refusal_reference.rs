@@ -100,8 +100,8 @@ impl ComputerBootstrap for Factory {
     }
 }
 fn params(name: &'static str, device: &DeviceId) -> rmcp::model::CallToolRequestParams {
-    rmcp::model::CallToolRequestParams::new(name).with_arguments(
-        json!({"environment_id":device.as_str()})
+    rmcp::model::CallToolRequestParams::new("desktop_call").with_arguments(
+        json!({"environment_id": device.as_str(), "tool": name, "arguments": {}})
             .as_object()
             .unwrap()
             .clone(),
