@@ -210,17 +210,6 @@ impl HostSessions {
             .registry
             .record_observation(&value.control, binding, capability, now)?)
     }
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    pub(crate) fn observe_accessibility_read(
-        &mut self,
-        binding: &SessionBinding,
-    ) -> Result<ObservationId, HostSessionError> {
-        let now = self.now();
-        let value = self.enabled_mut()?;
-        Ok(value
-            .registry
-            .record_accessibility_read_observation(&value.control, binding, now)?)
-    }
     pub(crate) fn select(
         &self,
         selection: Selection<'_>,

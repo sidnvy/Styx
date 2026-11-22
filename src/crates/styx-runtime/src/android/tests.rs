@@ -363,6 +363,7 @@ async fn independent_android_pairing_wss_images_reconnect_disable_and_revoke() {
         tx: original.tx.clone(),
         stop: original.stop.clone(),
         live: AtomicBool::new(true),
+        transport_ended: AtomicBool::new(false),
         admission: Mutex::new(false),
         drain: Mutex::new(None),
         drain_enabled: original.drain_enabled,

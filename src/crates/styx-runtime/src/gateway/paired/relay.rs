@@ -80,6 +80,7 @@ pub(crate) struct Entry {
     pub tx: mpsc::Sender<Command>,
     pub stop: CancellationToken,
     pub live: AtomicBool,
+    pub transport_ended: AtomicBool,
     pub admission: Mutex<bool>,
     pub drain: Mutex<Option<EntryDrain>>,
     pub drain_enabled: bool,
@@ -164,15 +165,21 @@ struct Binding {
     cleanup_changed: tokio::sync::Notify,
 }
 impl Binding {
-    // Retain the original binding and its receipts; only its exact completed
-    // transport drain permits a separate owner on a new Host incarnation.
+    // Retain the original binding and its receipts until its exact transport
+    // ends (clean drain or abrupt peer loss) and a new Host incarnation takes
+    // over. Never fabricate confirmed cleanup/physically_settled facts.
     fn retired_for(&self, entry: &Entry) -> bool {
         self.entry.host_generation != entry.host_generation
             && self.revoked.lock().is_ok_and(|revoked| *revoked)
-            && self
+            && (self
                 .cleanup
                 .lock()
                 .is_ok_and(|cleanup| cleanup.result == Some(true) && cleanup.transport_joined)
+                || (self.entry.transport_ended.load(Ordering::Acquire)
+                    && self
+                        .route
+                        .lock()
+                        .is_ok_and(|route| route.transport_ended.load(Ordering::Acquire))))
     }
 }
 #[derive(Clone)]
@@ -302,6 +309,35 @@ impl RelayHandle {
     /// It does not count three capability lanes as three computers.
     pub fn connection_count(&self) -> usize {
         self.inner.links.active.load(Ordering::Acquire)
+    }
+    /// Fence bindings from an ended previous Host incarnation once a new
+    /// authenticated Host incarnation takes over the device slot. Preserves
+    /// `cleanup.result` so unconfirmed abrupt exits remain not physically settled.
+    pub(crate) fn retire_superseded_bindings(&self, entry: &Entry) {
+        let Ok(mut bindings) = self.inner.bindings.lock() else {
+            return;
+        };
+        bindings.retain(|binding| {
+            if binding.entry.device != entry.device
+                || binding.entry.host_generation == entry.host_generation
+            {
+                return true;
+            }
+            let ended = binding.entry.transport_ended.load(Ordering::Acquire)
+                && binding
+                    .route
+                    .lock()
+                    .is_ok_and(|route| route.transport_ended.load(Ordering::Acquire));
+            if !ended {
+                return true;
+            }
+            if let Ok(mut revoked) = binding.revoked.lock() {
+                *revoked = true;
+            }
+            // Drop from the active registry only once no background cleanup
+            // JoinHandle remains attached; retain otherwise for shutdown join.
+            !binding.cleanup.lock().is_ok_and(|c| c.job.is_none())
+        });
     }
     pub(crate) async fn authorize(&self, e: &Entry) -> Result<(), RelayError> {
         self.authorize_for(e, Lane::Exec).await
@@ -1501,3 +1537,7 @@ mod connection_capacity_tests {
         assert_eq!(links.active.load(Ordering::Acquire), 0);
     }
 }
+
+#[cfg(test)]
+#[path = "abrupt_rebind_tests.rs"]
+mod abrupt_rebind_tests;

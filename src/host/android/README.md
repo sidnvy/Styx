@@ -98,6 +98,9 @@ Node actions use Accessibility `performAction`, Unicode text uses `ACTION_SET_TE
 and explicit coordinate actions use `dispatchGesture`. There are no implicit
 clipboard, coordinate or shell fallbacks. Batches stop at the first failed step
 and report completed steps. `observe_after` returns a fresh tree, without an image.
+After the last navigation-style action, the Host briefly waits for Accessibility
+window/content events before returning the tree (900 ms maximum); this is not a
+guarantee that an application's network-loaded content is ready.
 Cancellation clears the relevant observations so remaining steps cannot execute;
 a gesture already dispatched may finish, be cancelled by Android, or have an
 unknown outcome. No unknown action is replayed.

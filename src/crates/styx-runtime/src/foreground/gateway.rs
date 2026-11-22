@@ -355,20 +355,28 @@ mod platform {
     #[cfg(all(test, unix))]
     #[test]
     fn public_mcp_forwarder_file_is_optional_and_private() {
-        use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt};
-        let root = tempfile::tempdir().expect("private state");
-        assert!(public_mcp_ingress(root.path()).unwrap().is_none());
+        use std::{
+            fs::{self, OpenOptions, Permissions},
+            io::Write,
+            os::unix::fs::{OpenOptionsExt, PermissionsExt},
+        };
+        let root = tempfile::tempdir().expect("private parent");
+        fs::set_permissions(root.path(), Permissions::from_mode(0o700)).unwrap();
+        let state = root.path().join("state");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, Permissions::from_mode(0o700)).unwrap();
+        assert!(public_mcp_ingress(&state).unwrap().is_none());
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(root.path().join("public-mcp-forwarder.token"))
+            .open(state.join("public-mcp-forwarder.token"))
             .unwrap();
         file.write_all(&[b'a'; 48]).unwrap();
         file.sync_all().unwrap();
         drop(file);
         assert_eq!(
-            public_mcp_ingress(root.path()).unwrap().unwrap().as_slice(),
+            public_mcp_ingress(&state).unwrap().unwrap().as_slice(),
             &[b'a'; 48]
         );
     }

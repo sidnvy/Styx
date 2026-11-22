@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 use std::{
     collections::BTreeMap,
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use styx_contracts::{
@@ -38,25 +38,13 @@ mod macos_source_hint;
 pub(crate) mod probe_diagnostic;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{MacProxySource, TrustedCuaLaunch};
-mod admission;
 #[cfg(test)]
 mod deadline_tests;
 mod driver_result;
-mod element_input;
 #[cfg(test)]
 pub(crate) mod fake_driver;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-pub(crate) mod permissions;
-pub(crate) mod public_contract;
-pub(crate) use element_input::ElementInputRequest;
-pub(crate) mod ax_snapshot;
-mod ax_target;
-mod ax_write;
-pub(crate) use ax_target::{DesktopReadRequest, DesktopReadTarget};
-pub(crate) use ax_write::{AxWriteGate, AxWriteRequest};
 mod retention;
 mod transport;
-pub(crate) mod window_capture;
 #[cfg(target_os = "windows")]
 use crate::platform::windows_spawn::RunningChild as Child;
 #[cfg(target_os = "linux")]
@@ -71,8 +59,8 @@ use tokio_util::sync::CancellationToken;
 mod windows;
 #[cfg(target_os = "windows")]
 mod windows_config;
-const FRAME_BYTES: usize = 1024 * 1024;
-const REQUEST_BYTES: usize = 64 * 1024;
+const FRAME_BYTES: usize = styx_contracts::DESKTOP_BROWSER_FRAME_BYTES;
+const REQUEST_BYTES: usize = 256 * 1024;
 type Result<T> = std::result::Result<T, CuaError>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum CuaError {
@@ -219,16 +207,27 @@ impl CuaOpenSpec {
         bounded_bytes(self, REQUEST_BYTES)
     }
 }
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CuaAction {
-    name: String,
-    arguments: Map<String, Value>,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CuaAction {
+    ListTools {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        names: Option<Vec<String>>,
+    },
+    CallTool {
+        name: String,
+        #[serde(default)]
+        arguments: Map<String, Value>,
+    },
 }
 impl CuaAction {
-    pub fn new(name: String, mut arguments: Map<String, Value>) -> Result<Self> {
-        public_contract::canonicalize(&name, &mut arguments);
-        let value = Self { name, arguments };
+    pub fn list_tools(names: Option<Vec<String>>) -> Result<Self> {
+        let value = Self::ListTools { names };
+        value.validate()?;
+        Ok(value)
+    }
+    pub fn call_tool(name: String, arguments: Map<String, Value>) -> Result<Self> {
+        let value = Self::CallTool { name, arguments };
         value.validate()?;
         Ok(value)
     }
@@ -238,96 +237,31 @@ impl CuaAction {
     }
     fn validate(&self) -> Result<()> {
         bounded_bytes(self, REQUEST_BYTES)?;
-        let schemas = public_schemas()?;
-        let schema = schemas.get(&self.name).ok_or(CuaError::Unsupported)?;
-        // Native Cua writes this optional path directly, including overwrite.
-        // Until an owned output-file port exists, capture may return image data
-        // but cannot inherit arbitrary current-user filesystem write authority.
-        if self.arguments.contains_key("screenshot_out_file")
-            || reserved(&Value::Object(self.arguments.clone()))
-            || !schema.is_valid(&Value::Object(self.arguments.clone()))
-        {
-            return Err(CuaError::InvalidRequest);
+        match self {
+            Self::ListTools { names } => {
+                if let Some(names) = names
+                    && (names.len() > 256
+                        || names.iter().any(|name| {
+                            name.is_empty()
+                                || name.len() > 128
+                                || name.chars().any(char::is_control)
+                        }))
+                {
+                    return Err(CuaError::InvalidRequest);
+                }
+            }
+            Self::CallTool { name, .. } => {
+                if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
+                    return Err(CuaError::InvalidRequest);
+                }
+            }
         }
         Ok(())
     }
     pub fn capability(&self) -> Result<CapabilityId> {
-        self.required_capabilities()?
-            .first()
-            .copied()
-            .ok_or(CuaError::Unsupported)
-    }
-    pub(crate) fn required_capabilities(&self) -> Result<Vec<CapabilityId>> {
         self.validate()?;
-        admission::required(&self.name, &self.arguments)
+        Ok(CapabilityId::DesktopWindowsRead)
     }
-    pub(crate) fn requires_observed_target(&self) -> Result<bool> {
-        self.validate()?;
-        Ok(admission::classify(&self.name, &self.arguments)?.requires_observed_target)
-    }
-    /// Fixed read-only native branch; never selected by a serialized purpose flag.
-    pub(crate) fn desktop_read_request(&self) -> Result<Option<DesktopReadRequest>> {
-        self.validate()?;
-        if let Some(value) = ax_target::AxReadRequest::classify(&self.name, &self.arguments)? {
-            return Ok(Some(DesktopReadRequest::Accessibility(value)));
-        }
-        Ok(
-            window_capture::WindowCaptureRequest::classify(&self.name, &self.arguments)?
-                .map(DesktopReadRequest::WindowCapture),
-        )
-    }
-    pub(crate) fn mutates(&self) -> bool {
-        admission::classify(&self.name, &self.arguments).map_or(true, |r| r.side_effecting)
-    }
-}
-fn capability(name: &str) -> Result<CapabilityId> {
-    Ok(match name {
-        "list_apps" | "list_windows" => CapabilityId::DesktopWindowsRead,
-        "get_window_state" | "get_desktop_state" => CapabilityId::DesktopCapture,
-        "click" | "scroll" => CapabilityId::DesktopPointer,
-        "type_text" | "press_key" => CapabilityId::DesktopKeyboard,
-        "set_value" | "verify_state" => CapabilityId::DesktopAccessibility,
-        _ => return Err(CuaError::Unsupported),
-    })
-}
-fn reserved(value: &Value) -> bool {
-    match value {
-        Value::Object(m) => m
-            .iter()
-            .any(|(k, v)| matches!(k.as_str(), "environment_id" | "_meta") || reserved(v)),
-        Value::Array(a) => a.iter().any(reserved),
-        _ => false,
-    }
-}
-fn public_schemas() -> Result<&'static BTreeMap<String, jsonschema::Validator>> {
-    static VALUE: OnceLock<std::result::Result<BTreeMap<String, jsonschema::Validator>, CuaError>> =
-        OnceLock::new();
-    VALUE
-        .get_or_init(|| {
-            let value: Value = serde_json::from_str(include_str!(
-                "../../../../../gateway/cua-portable-0.36.0.json"
-            ))
-            .map_err(|_| CuaError::ProtocolMismatch)?;
-            let tools = value["tools"]
-                .as_array()
-                .ok_or(CuaError::ProtocolMismatch)?;
-            let mut schemas = BTreeMap::new();
-            for tool in tools {
-                let name = tool["name"].as_str().ok_or(CuaError::ProtocolMismatch)?;
-                capability(name)?;
-                let validator = jsonschema::validator_for(&tool["inputSchema"])
-                    .map_err(|_| CuaError::ProtocolMismatch)?;
-                if schemas.insert(name.into(), validator).is_some() {
-                    return Err(CuaError::ProtocolMismatch);
-                }
-            }
-            if schemas.len() != 10 {
-                return Err(CuaError::ProtocolMismatch);
-            }
-            Ok(schemas)
-        })
-        .as_ref()
-        .map_err(|e| *e)
 }
 fn bounded_bytes(value: &impl Serialize, limit: usize) -> Result<Vec<u8>> {
     struct Bound {
@@ -412,32 +346,24 @@ impl CuaCleanup {
         self.worker_exited && self.io_joined && self.physical_settlement_confirmed()
     }
 }
-pub(crate) fn trace_write_settlement(
-    evidence: CuaEvidence,
-    ledger: bool,
-    audit: bool,
-    delivery: bool,
-) {
-    if std::env::var_os("STYX_CUA_DIAGNOSTICS").as_deref() != Some(std::ffi::OsStr::new("1")) {
-        return;
-    }
-    use std::io::Write as _;
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "{}",
-        serde_json::json!({
-            "event":"styx_cua_write_settlement", "native_acknowledged":matches!(evidence,CuaEvidence::Acknowledged),
-            "native_unknown":matches!(evidence,CuaEvidence::Unknown), "ledger_recorded":ledger,"audit_recorded":audit,"delivery_admitted":delivery
-        })
-    );
-}
 #[derive(Clone)]
 pub struct CuaWorker {
     inner: Arc<Inner>,
 }
+#[cfg(target_os = "linux")]
+struct SharedLinuxDaemon {
+    scope: LinuxOwnedScope,
+    child: Child,
+    socket: PathBuf,
+    stderr: Option<JoinHandle<std::io::Result<u64>>>,
+}
 struct Inner {
     resources: Mutex<BTreeMap<OperationId, Arc<Resource>>>,
     stop: CancellationToken,
+    #[cfg(target_os = "linux")]
+    shared_daemon: tokio::sync::Mutex<Option<SharedLinuxDaemon>>,
+    #[cfg(target_os = "windows")]
+    shared_daemon: tokio::sync::Mutex<Option<windows::SharedWindowsDaemon>>,
 }
 struct Resource {
     owner: OwnerLease,
@@ -462,12 +388,6 @@ struct Live {
     mac_proxy: Option<macos::ProxyWorker>,
     #[cfg(target_os = "macos")]
     mac_probe: Option<JoinHandle<Result<()>>>,
-    #[cfg(target_os = "macos")]
-    mac_session: Option<String>,
-    #[cfg(target_os = "macos")]
-    mac_session_end: Option<JoinHandle<macos_cleanup::EndSessionOutcome>>,
-    #[cfg(target_os = "macos")]
-    mac_session_end_finished: bool,
     identity: Option<ProcessIdentity>,
     client: Option<RunningService<RoleClient, CuaClient>>,
     close_job: Option<JoinHandle<bool>>,
@@ -477,11 +397,6 @@ struct Live {
     cleanup: Option<CuaCleanup>,
     uncertain: bool,
     io_failed: bool,
-    ax_once_available: bool,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    permissions_available: bool,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    permissions: Option<permissions::DriverPermissions>,
     exit_success: Option<bool>,
     actions: BTreeMap<OperationId, (Sha256Digest, CuaEvidence, Option<CuaError>, CapabilityId)>,
 }
@@ -555,7 +470,112 @@ impl CuaWorker {
             inner: Arc::new(Inner {
                 resources: Mutex::new(BTreeMap::new()),
                 stop: CancellationToken::new(),
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                shared_daemon: tokio::sync::Mutex::new(None),
             }),
+        }
+    }
+    #[cfg(target_os = "linux")]
+    async fn ensure_linux_daemon(
+        &self,
+        config: &OwnedCuaConfig,
+        until: Option<Instant>,
+    ) -> Result<PathBuf> {
+        let mut guard = self.inner.shared_daemon.lock().await;
+        if let Some(daemon) = guard.as_mut() {
+            let alive = daemon.child.try_wait().ok().flatten().is_none();
+            if alive
+                && tokio::net::UnixStream::connect(&daemon.socket)
+                    .await
+                    .is_ok()
+            {
+                return Ok(daemon.socket.clone());
+            }
+            if let Some(mut dead) = guard.take() {
+                let _ = dead
+                    .scope
+                    .stop_and_confirm(&mut dead.child, Duration::from_secs(2))
+                    .await;
+                if let Some(stderr) = dead.stderr.take() {
+                    let _ = tokio::time::timeout(Duration::from_secs(1), stderr).await;
+                }
+            }
+        }
+        let path = config
+            .driver
+            .launch_path()
+            .map_err(|_| CuaError::PermissionDenied)?;
+        let launch = ScopeCommand::cua_serve(
+            path,
+            config.workspace.clone(),
+            config.home.clone(),
+            config.launch.wayland_display.clone(),
+            config.launch.hyprland_instance.clone(),
+            config.launch.compositor_peer,
+            until,
+        )
+        .await
+        .map_err(CuaError::from)?;
+        let (mut cmd, mut scope) = LinuxOwnedScope::command(launch).map_err(CuaError::from)?;
+        let socket = scope.cua_socket_path();
+        let mut child = cmd.spawn().map_err(|_| CuaError::Unknown)?;
+        let stderr = child.stderr.take().map(|mut stderr| {
+            tokio::spawn(async move { tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await })
+        });
+        if let Err(err) = scope.attest_started(until).await {
+            let _ = scope
+                .stop_and_confirm(&mut child, Duration::from_secs(2))
+                .await;
+            return Err(CuaError::from(err));
+        }
+        let ready_deadline = until.unwrap_or_else(|| Instant::now() + Duration::from_secs(10));
+        loop {
+            if self.inner.stop.is_cancelled() {
+                let _ = scope
+                    .stop_and_confirm(&mut child, Duration::from_secs(2))
+                    .await;
+                return Err(CuaError::Unknown);
+            }
+            if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+                break;
+            }
+            if child.try_wait().ok().flatten().is_some() || Instant::now() >= ready_deadline {
+                let _ = scope
+                    .stop_and_confirm(&mut child, Duration::from_secs(2))
+                    .await;
+                return Err(CuaError::Unknown);
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        *guard = Some(SharedLinuxDaemon {
+            scope,
+            child,
+            socket: socket.clone(),
+            stderr,
+        });
+        Ok(socket)
+    }
+    pub(crate) async fn stop_shared_daemon(&self, budget: Duration) {
+        #[cfg(target_os = "linux")]
+        {
+            let mut guard = self.inner.shared_daemon.lock().await;
+            if let Some(mut daemon) = guard.take() {
+                let _ = daemon
+                    .scope
+                    .stop_and_confirm(&mut daemon.child, budget)
+                    .await;
+                if let Some(stderr) = daemon.stderr.take() {
+                    let _ = tokio::time::timeout(Duration::from_secs(1), stderr).await;
+                }
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            windows::stop_daemon(&self.inner.shared_daemon, budget).await;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = budget;
         }
     }
     pub fn try_reserve_open(&self) -> Result<CuaOpenSlot> {
@@ -727,12 +747,6 @@ impl CuaOpenSlot {
                 mac_proxy: None,
                 #[cfg(target_os = "macos")]
                 mac_probe: None,
-                #[cfg(target_os = "macos")]
-                mac_session: None,
-                #[cfg(target_os = "macos")]
-                mac_session_end: None,
-                #[cfg(target_os = "macos")]
-                mac_session_end_finished: false,
                 identity: None,
                 client: None,
                 close_job: None,
@@ -742,11 +756,6 @@ impl CuaOpenSlot {
                 cleanup: None,
                 uncertain: false,
                 io_failed: false,
-                ax_once_available: false,
-                #[cfg(any(target_os = "linux", target_os = "windows"))]
-                permissions_available: false,
-                #[cfg(any(target_os = "linux", target_os = "windows"))]
-                permissions: None,
                 exit_success: None,
                 actions: BTreeMap::new(),
             })),
@@ -801,17 +810,19 @@ impl CuaOpenSlot {
             }
             #[cfg(target_os = "linux")]
             let (stdin, stdout, mut stderr) = {
+                let socket = self.worker.ensure_linux_daemon(&config, until).await?;
                 let path = config
                     .driver
                     .launch_path()
                     .map_err(|_| CuaError::PermissionDenied)?;
-                let launch = ScopeCommand::cua(
+                let launch = ScopeCommand::cua_proxy(
                     path,
                     config.workspace.clone(),
                     config.home.clone(),
                     config.launch.wayland_display.clone(),
                     config.launch.hyprland_instance.clone(),
                     config.launch.compositor_peer,
+                    socket,
                     until,
                 )
                 .await
@@ -845,7 +856,14 @@ impl CuaOpenSlot {
             let (stdin, stdout, mut stderr) = macos::start_proxy(&mut live, &config, until).await?;
             #[cfg(target_os = "windows")]
             let (stdin, stdout, mut stderr) = {
-                windows::start(&mut live, &config).await?;
+                let socket = windows::ensure_daemon(
+                    &self.worker.inner.shared_daemon,
+                    &self.worker.inner.stop,
+                    &config,
+                    until,
+                )
+                .await?;
+                windows::start(&mut live, &config, socket).await?;
                 let child = live.child.as_mut().ok_or(CuaError::Unknown)?;
                 (
                     child.take_stdin().ok_or(CuaError::Unknown)?,
@@ -879,44 +897,8 @@ impl CuaOpenSlot {
                 return Err(CuaError::ProtocolMismatch);
             }
             let catalog = tokio::select! {_=resource.stop.cancelled()=>return Err(CuaError::Unknown),v=within(until,peer.list_tools(None))=>v.map_err(|_|CuaError::Unknown)?.map_err(|_|CuaError::ProtocolMismatch)?};
-            if catalog.next_cursor.is_some() {
+            if catalog.next_cursor.is_some() || catalog.tools.is_empty() {
                 return Err(CuaError::Unsupported);
-            }
-            live.ax_once_available = validate_catalog(&catalog.tools)?;
-            #[cfg(target_os = "macos")]
-            {
-                let session = format!("styx-{}", uuid::Uuid::new_v4());
-                live.mac_session = Some(session.clone());
-                live.mac_proxy
-                    .as_mut()
-                    .ok_or(CuaError::ProtocolMismatch)?
-                    .mark_session_started();
-                let arguments = serde_json::json!({"session":session})
-                    .as_object()
-                    .ok_or(CuaError::ProtocolMismatch)?
-                    .clone();
-                let request = CallToolRequestParams::new("start_session").with_arguments(arguments);
-                let reply = tokio::select! {
-                    _=resource.stop.cancelled()=>return Err(CuaError::Unknown),
-                    value=within(until,peer.call_tool(request))=>value.map_err(|_|CuaError::Unknown)?.map_err(|_|CuaError::Unknown)?
-                };
-                if reply.is_error == Some(true)
-                    || !reply.structured_content.as_ref().is_some_and(|value| {
-                        value.get("active").and_then(Value::as_bool) == Some(true)
-                            && value.get("session").and_then(Value::as_str)
-                                == Some(session.as_str())
-                    })
-                {
-                    return Err(CuaError::ProtocolMismatch);
-                }
-            }
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
-            {
-                live.permissions_available = catalog
-                    .tools
-                    .iter()
-                    .any(|tool| tool.name == "check_permissions");
-                permissions::query(&mut live, &resource.stop, until).await?;
             }
             Ok(())
         };
@@ -968,142 +950,16 @@ impl CuaOpenSlot {
         }
     }
 }
-/// Immutable platform source contract, not selected by a request/descriptor.
-#[derive(Clone, Copy)]
-struct FixedNativeCatalog {
-    schemas_json: &'static str,
-}
-#[cfg(target_os = "macos")]
-#[path = "macos_catalog.rs"]
-mod platform_catalog;
-fn selected_native_catalog() -> Result<FixedNativeCatalog> {
-    #[cfg(target_os = "linux")]
-    {
-        Ok(FixedNativeCatalog {
-            schemas_json: NATIVE_CATALOG,
-        })
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Ok(platform_catalog::FROZEN_MACOS_CATALOG)
-    }
-    #[cfg(target_os = "windows")]
-    {
-        Ok(FixedNativeCatalog {
-            schemas_json: include_str!("windows-catalog.json"),
-        })
-    }
-}
-fn validate_catalog(tools: &[rmcp::model::Tool]) -> Result<bool> {
-    // Only the consumed platform schemas are checked. Strict text writes require
-    // the internal native flag; Core still owns grants and one-use dispatch.
-    validate_native_catalog(tools, selected_native_catalog()?)
-}
-// Descriptive wording is upstream documentation, not executable compatibility.
-fn schema_contract(value: Value) -> Value {
-    match value {
-        Value::Object(values) => Value::Object(
-            values
-                .into_iter()
-                .filter(|(key, _)| {
-                    !matches!(
-                        key.as_str(),
-                        "description" | "title" | "$comment" | "examples"
-                    )
-                })
-                .map(|(key, value)| (key, schema_contract(value)))
-                .collect(),
-        ),
-        Value::Array(values) => Value::Array(values.into_iter().map(schema_contract).collect()),
-        value => value,
-    }
-}
-fn validate_native_catalog(
-    tools: &[rmcp::model::Tool],
-    contract: FixedNativeCatalog,
-) -> Result<bool> {
-    if !(10..=128).contains(&tools.len()) {
-        return Err(CuaError::Unsupported);
-    }
-    let expected: Value =
-        serde_json::from_str(contract.schemas_json).map_err(|_| CuaError::ProtocolMismatch)?;
-    let mut actual = Map::new();
-    for tool in tools {
-        let value = serde_json::to_value(tool).map_err(|_| CuaError::ProtocolMismatch)?;
-        if actual
-            .insert(tool.name.to_string(), value["inputSchema"].clone())
-            .is_some()
-        {
-            return Err(CuaError::ProtocolMismatch);
-        }
-    }
-    // This optional internal flag is the only retained native extension.
-    // It is never accepted in Styx's public CuaAction schema.
-    let strict = actual
-        .get_mut("set_value")
-        .and_then(|schema| schema.get_mut("properties"))
-        .and_then(Value::as_object_mut)
-        .and_then(|properties| properties.remove("styx_strict_text"));
-    if strict.as_ref().is_some_and(|schema| {
-        schema_contract(schema.clone()) != serde_json::json!({"type":"boolean"})
-    }) {
-        return Err(CuaError::Unsupported);
-    }
-    // This projection does not expose any additional native tool. Every
-    // public portable tool must match its pinned native input structure;
-    // upstream descriptive wording and unrelated tools do not change it.
-    let names = expected.as_object().ok_or(CuaError::ProtocolMismatch)?;
-    if names.len() != 10
-        || names.keys().any(|name| {
-            !matches!(
-                name.as_str(),
-                "list_apps"
-                    | "list_windows"
-                    | "get_window_state"
-                    | "get_desktop_state"
-                    | "click"
-                    | "scroll"
-                    | "type_text"
-                    | "press_key"
-                    | "set_value"
-                    | "verify_state"
-            )
-        })
-    {
-        return Err(CuaError::ProtocolMismatch);
-    }
-    actual.retain(|name, _| names.contains_key(name));
-    if schema_contract(Value::Object(actual)) != schema_contract(expected) {
-        return Err(CuaError::Unsupported);
-    }
-    Ok(strict.is_some())
-}
 impl CuaActionSlot {
     pub(crate) async fn call_once_until(
         self,
         permit: DispatchPermit,
         until: Option<Instant>,
     ) -> CuaReceipt {
-        self.call_owned(permit, until, None).await
-    }
-    pub(crate) async fn call_once_until_with_write_gate(
-        self,
-        permit: DispatchPermit,
-        until: Option<Instant>,
-        gate: AxWriteGate,
-    ) -> CuaReceipt {
-        self.call_owned(permit, until, Some(gate)).await
-    }
-    async fn call_owned(
-        self,
-        permit: DispatchPermit,
-        until: Option<Instant>,
-        write_gate: Option<AxWriteGate>,
-    ) -> CuaReceipt {
         let operation = permit.id().clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let _ = tx.send(self.call_inner(permit, until, write_gate).await);
+            let _ = tx.send(self.call_inner(permit, until).await);
         });
         rx.await.unwrap_or(CuaReceipt {
             operation,
@@ -1112,37 +968,32 @@ impl CuaActionSlot {
             cause: Some(CuaError::Unknown),
         })
     }
-    async fn call_inner(
-        mut self,
-        permit: DispatchPermit,
-        until: Option<Instant>,
-        write_gate: Option<AxWriteGate>,
-    ) -> CuaReceipt {
+    async fn call_inner(mut self, permit: DispatchPermit, until: Option<Instant>) -> CuaReceipt {
         let operation = permit.id().clone();
-        let refused = |stage, cause: CuaError| {
-            ax_write::diagnostic(stage, cause.code());
-            CuaReceipt {
-                operation: operation.clone(),
-                evidence: CuaEvidence::NotDispatched,
-                result: None,
-                cause: Some(cause),
-            }
+        let refused = |cause: CuaError| CuaReceipt {
+            operation: operation.clone(),
+            evidence: CuaEvidence::NotDispatched,
+            result: None,
+            cause: Some(cause),
         };
         let action: CuaAction = match serde_json::from_slice(permit.payload()) {
             Ok(v) => v,
-            Err(_) => return refused("permit_payload", CuaError::InvalidRequest),
+            Err(_) => return refused(CuaError::InvalidRequest),
         };
         #[cfg(target_os = "windows")]
         if self.live.config.launch.source.fenced() {
-            return refused("desktop_source_fenced", CuaError::StaleObservation);
+            return refused(CuaError::StaleObservation);
         }
         if let Err(e) = action.validate() {
-            return refused("action_validation", e);
+            return refused(e);
         }
         let capability = match action.capability() {
             Ok(v) => v,
-            Err(e) => return refused("action_capability", e),
+            Err(e) => return refused(e),
         };
+        if permit.purpose() != OperationPurpose::Execute {
+            return refused(CuaError::PermissionDenied);
+        }
         if let Err(e) = permit_binding(
             &permit,
             &self.resource.owner,
@@ -1150,41 +1001,12 @@ impl CuaActionSlot {
             &self.resource.session,
             capability,
         ) {
-            return refused("permit_binding", e);
-        }
-        let click = match action.element_input_request() {
-            Ok(value) => value.is_some(),
-            Err(error) => return refused("element_input_request", error),
-        };
-        if click && write_gate.is_none() {
-            return refused("click_gate_missing", CuaError::PermissionDenied);
-        }
-        let write_request = match action.accessibility_write_request() {
-            Ok(value) => value,
-            Err(error) => return refused("write_request", error),
-        };
-        let write_attempt = permit.purpose() == OperationPurpose::DesktopAccessibilityWriteAttempt;
-        if write_attempt != write_request.is_some() || (write_attempt && write_gate.is_none()) {
-            return refused("write_contract", CuaError::PermissionDenied);
-        }
-        if write_attempt && !cfg!(target_os = "linux") && !self.live.ax_once_available {
-            // macOS/Windows retain their existing strict setter extension.
-            // Linux uses standard native set_value after the same Host gate.
-            return refused("write_extension_missing", CuaError::Unsupported);
-        }
-        if permit.purpose() != OperationPurpose::Execute
-            && !write_attempt
-            && !matches!(action.desktop_read_request(), Ok(Some(request)) if request.purpose() == permit.purpose())
-        {
-            return refused("operation_purpose", CuaError::PermissionDenied);
-        }
-        if action.mutates() && permit.context().observation.is_none() {
-            return refused("missing_observation", CuaError::PermissionDenied);
+            return refused(e);
         }
         let digest = Sha256Digest::of_bytes(permit.payload());
         if let Some((old, evidence, cause, old_capability)) = self.live.actions.get(&operation) {
             if old != &digest || old_capability != &capability {
-                return refused("operation_binding", CuaError::PermissionDenied);
+                return refused(CuaError::PermissionDenied);
             }
             return CuaReceipt {
                 operation,
@@ -1198,10 +1020,10 @@ impl CuaActionSlot {
             || self.live.uncertain
             || self.resource.stop.is_cancelled()
         {
-            return refused("worker_unavailable", CuaError::Unknown);
+            return refused(CuaError::Unknown);
         }
         if self.live.config.validate().is_err() {
-            return refused("configuration_revalidation", CuaError::PermissionDenied);
+            return refused(CuaError::PermissionDenied);
         }
         #[cfg(target_os = "macos")]
         if let Err(error) = {
@@ -1211,61 +1033,50 @@ impl CuaActionSlot {
                 result = macos::preflight(&mut self.live, &config, until) => result,
             }
         } {
-            return refused("native_preflight", error);
+            return refused(error);
         }
         let Some(client) = self.live.client.as_ref() else {
-            return refused("native_client_missing", CuaError::ProtocolMismatch);
+            return refused(CuaError::ProtocolMismatch);
         };
         let peer = client.peer().clone();
-        #[cfg(target_os = "macos")]
-        let native_session = self.live.mac_session.clone();
-        #[cfg(not(target_os = "macos"))]
-        let native_session: Option<String> = None;
-        let mut arguments = action.arguments;
-        if let Some(session) = native_session.as_ref() {
-            arguments.insert("session".into(), Value::String(session.clone()));
-        }
-        let params = CallToolRequestParams::new(action.name).with_arguments(arguments);
-        if bounded_bytes(&params, REQUEST_BYTES - 1024).is_err() {
-            return refused("request_bound", CuaError::InvalidRequest);
-        }
-        self.live.actions.insert(
-            operation.clone(),
-            (
-                digest,
-                CuaEvidence::Unknown,
-                Some(CuaError::Unknown),
-                capability,
-            ),
-        );
-        let mut write_gate = write_gate;
-        if click && let Err(error) = write_gate.take().expect("checked click gate")().await {
-            self.live.actions.insert(
-                operation.clone(),
-                (digest, CuaEvidence::NotDispatched, Some(error), capability),
-            );
-            return refused("click_gate", error);
-        }
-        let (evidence, result, cause) = if let Some(request) = write_request {
-            let stop = self.resource.stop.clone();
-            ax_write::invoke(
-                &stop,
-                &mut self.live.uncertain,
-                &peer,
-                request,
-                until,
-                write_gate.expect("checked write gate"),
-                native_session.as_deref(),
-            )
-            .await
-        } else {
-            driver_result::invoke(&peer, params, &self.resource.stop, until).await
+        let (evidence, result, cause) = match action {
+            CuaAction::ListTools { names } => {
+                self.live.actions.insert(
+                    operation.clone(),
+                    (
+                        digest,
+                        CuaEvidence::Unknown,
+                        Some(CuaError::Unknown),
+                        capability,
+                    ),
+                );
+                driver_result::invoke_list_tools(
+                    &peer,
+                    names.as_deref(),
+                    &self.resource.stop,
+                    until,
+                )
+                .await
+            }
+            CuaAction::CallTool { name, arguments } => {
+                let params = CallToolRequestParams::new(name).with_arguments(arguments);
+                if bounded_bytes(&params, REQUEST_BYTES - 1024).is_err() {
+                    return refused(CuaError::InvalidRequest);
+                }
+                self.live.actions.insert(
+                    operation.clone(),
+                    (
+                        digest,
+                        CuaEvidence::Unknown,
+                        Some(CuaError::Unknown),
+                        capability,
+                    ),
+                );
+                driver_result::invoke(&peer, params, &self.resource.stop, until).await
+            }
         };
-        // A complete native reply can report an unknown effect without making
-        // the correlated MCP connection unusable. Retain the original action
-        // outcome, but do not poison independent fresh observations.
         if evidence == CuaEvidence::Unknown && result.is_none() {
-            self.live.uncertain = true
+            self.live.uncertain = true;
         }
         self.live
             .actions
@@ -1377,9 +1188,6 @@ async fn cleanup(live: &mut Live, budget: Duration) -> CuaCleanup {
     }
     facts
 }
-// The ten consumed schemas from the official 0.47.24 Linux binary.
-#[cfg(target_os = "linux")]
-const NATIVE_CATALOG: &str = include_str!("linux-catalog.json");
 #[cfg(all(test, target_os = "linux"))]
 #[path = "tests.rs"]
 mod tests;
@@ -1387,66 +1195,10 @@ mod tests;
 #[cfg(target_os = "macos")]
 async fn cleanup(live: &mut Live, budget: Duration) -> CuaCleanup {
     let until = Instant::now() + budget;
-    let daemon_exited = live
+    let _daemon_exited = live
         .mac_proxy
         .as_mut()
         .is_some_and(|proxy| proxy.observe_original_daemon_exit().unwrap_or(false));
-    if daemon_exited
-        && live.close_job.is_none()
-        && let Some(mut client) = live.client.take()
-    {
-        // Stop and JOIN the original local MCP transport. This also releases
-        // any already queued end_session waiter; never abort/detach that job.
-        live.close_job = Some(tokio::spawn(async move { client.close().await.is_ok() }));
-    }
-    if !daemon_exited && !live.mac_session_end_finished && live.mac_session_end.is_none() {
-        if let (Some(session), Some(client)) = (live.mac_session.clone(), live.client.as_ref()) {
-            let peer = client.peer().clone();
-            live.mac_session_end = Some(tokio::spawn(macos_cleanup::end_session(peer, session)));
-        } else {
-            live.mac_session_end_finished = true;
-        }
-    }
-    if let Some(job) = live.mac_session_end.as_mut() {
-        match timeout_at(until, job).await {
-            Ok(result) => {
-                live.mac_session_end.take();
-                match result {
-                    Ok(macos_cleanup::EndSessionOutcome::Ended) => {
-                        live.mac_session_end_finished = true;
-                        if let Some(proxy) = live.mac_proxy.as_mut() {
-                            proxy.mark_session_ended();
-                        }
-                    }
-                    Ok(macos_cleanup::EndSessionOutcome::RetryKnown) if !daemon_exited => {
-                        // The official same-session cleanup explicitly remains
-                        // unfinished. Keep its original client for the next
-                        // bounded supervisor turn; never replay a native action.
-                        return CuaCleanup {
-                            worker_exited: false,
-                            worker_exit_success: live.exit_success,
-                            io_joined: false,
-                            descendants_confirmed: false,
-                            native_settlement: CuaNativeSettlement::MacAppTransport {
-                                drained: false,
-                            },
-                        };
-                    }
-                    _ => live.mac_session_end_finished = true,
-                }
-            }
-            Err(_) => {
-                // Do not resend end_session or drop a task still owning native work.
-                return CuaCleanup {
-                    worker_exited: false,
-                    worker_exit_success: live.exit_success,
-                    io_joined: false,
-                    descendants_confirmed: false,
-                    native_settlement: CuaNativeSettlement::MacAppTransport { drained: false },
-                };
-            }
-        }
-    }
     if live.close_job.is_none()
         && let Some(mut client) = live.client.take()
     {
@@ -1533,11 +1285,5 @@ pub(crate) async fn within<T>(
     match until {
         Some(until) => timeout_at(until, future).await,
         None => Ok(future.await),
-    }
-}
-pub(crate) async fn deadline_elapsed(until: Option<Instant>) {
-    match until {
-        Some(until) => tokio::time::sleep_until(until).await,
-        None => std::future::pending().await,
     }
 }

@@ -5,8 +5,8 @@ fn args(v: Value) -> Option<Map<String, Value>> {
 }
 #[test]
 fn frozen_tools_and_exec_arguments_preserve_legacy_edges() {
-    assert_eq!(PUBLIC.len(), 45);
-    for name in ["press_key", "scroll"] {
+    assert_eq!(PUBLIC.len(), 39);
+    for name in ["list_apps", "list_windows", "click", "press_key", "scroll"] {
         assert!(!PUBLIC.iter().any(|tool| tool.name == name));
     }
     assert_eq!(PUBLIC[0].name, "exec_command");
@@ -63,50 +63,32 @@ fn frozen_tools_and_exec_arguments_preserve_legacy_edges() {
 }
 #[test]
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-fn advertised_foreground_typing_has_a_public_keyboard_route() {
-    use crate::providers::cua::public_contract;
-    use styx_contracts::capability::CapabilityId::{
-        DesktopAccessibility, DesktopKeyboard, DesktopWindowsControl,
-    };
-
-    // PUBLIC is returned by tools/list. Check its advertised schema against the
-    // normal computer route and decoder; this is not native dispatch evidence.
-    let advertised: Vec<_> = PUBLIC
-        .iter()
-        .filter(|tool| tool.name == "type_text")
-        .collect();
-    assert_eq!(advertised.len(), 1);
-    let tool = serde_json::to_value(advertised[0]).unwrap();
-    let schema = jsonschema::validator_for(&tool["inputSchema"]).unwrap();
-    let arguments = json!({
-        "pid": 42, "window_id": 43, "element_token": "s00000001:1",
-        "text": "public typing probe", "delivery_mode": "foreground"
-    });
-    assert!(schema.is_valid(&arguments));
-    assert_eq!(tool["annotations"]["readOnlyHint"], false);
-    assert_eq!(tool["annotations"]["idempotentHint"], false);
-    assert!(computer::is_public_computer_tool("type_text"));
-
-    let action =
-        public_contract::decode("type_text", arguments.as_object().unwrap().clone()).unwrap();
-    assert_eq!(action.capability().unwrap(), DesktopKeyboard);
-    assert_eq!(
-        action.required_capabilities().unwrap(),
-        vec![DesktopKeyboard, DesktopAccessibility, DesktopWindowsControl]
-    );
-    assert!(action.requires_observed_target().unwrap());
-    let payload: Value = serde_json::from_slice(&action.to_operation_payload().unwrap()).unwrap();
-    assert_eq!(
-        payload,
-        json!({"name": "type_text", "arguments": arguments})
-    );
-
-    let mut implicit = arguments.clone();
-    implicit.as_object_mut().unwrap().remove("delivery_mode");
-    assert!(!schema.is_valid(&implicit));
-    let mut background = arguments;
-    background["delivery_mode"] = json!("background");
-    assert!(!schema.is_valid(&background));
+fn advertised_native_desktop_mcp_entries_replace_legacy_eight_tools() {
+    for legacy in [
+        "list_apps",
+        "list_windows",
+        "get_window_state",
+        "get_desktop_state",
+        "click",
+        "set_value",
+        "type_text",
+        "verify_state",
+    ] {
+        assert!(!PUBLIC.iter().any(|tool| tool.name == legacy), "{legacy}");
+        assert!(!computer::is_public_computer_tool(legacy), "{legacy}");
+    }
+    for native in ["desktop_list_tools", "desktop_call"] {
+        assert_eq!(PUBLIC.iter().filter(|tool| tool.name == native).count(), 1);
+        assert!(computer::is_public_computer_tool(native));
+    }
+    let call_tool = PUBLIC.iter().find(|t| t.name == "desktop_call").unwrap();
+    let schema =
+        jsonschema::validator_for(&serde_json::to_value(call_tool).unwrap()["inputSchema"])
+            .unwrap();
+    assert!(schema.is_valid(&json!({
+        "tool": "type_text",
+        "arguments": {"pid": 42, "window_id": 43, "element_token": "s00000001:1", "text": "hi"}
+    })));
 }
 
 #[test]

@@ -3,15 +3,15 @@
 use super::*;
 use crate::{
     host::protocol::wire::{ComputerCommand, Snapshot},
-    providers::cua::{CuaAction, public_contract},
+    providers::cua::CuaAction,
 };
 use styx_contracts::error::{ErrorCategory, ExecutionCertainty};
 const MAX_COMPUTER_RESULT_BYTES: usize = styx_contracts::DESKTOP_BROWSER_FRAME_BYTES;
 
-/// Route only the supported Styx surface. The wider pinned native catalog is
-/// compatibility evidence and never creates an additional public input route.
+/// Route the native Desktop MCP entry points (`desktop_list_tools`, `desktop_call`).
 pub(super) fn is_public_computer_tool(name: &str) -> bool {
-    public_contract::route(name).is_some() && PUBLIC.iter().any(|tool| tool.name == name)
+    matches!(name, "desktop_list_tools" | "desktop_call")
+        && PUBLIC.iter().any(|tool| tool.name == name)
 }
 struct ComputerRequest {
     environment_id: Option<String>,
@@ -28,18 +28,51 @@ impl ComputerRequest {
             Some(Value::String(value)) if !value.is_empty() && value.len() <= 128 => Some(value),
             _ => return Err("invalid_arguments"),
         };
+        let action = match name {
+            "desktop_list_tools" => {
+                let names = match arguments.remove("names") {
+                    None => None,
+                    Some(Value::Array(items)) => {
+                        let mut out = Vec::with_capacity(items.len());
+                        for item in items {
+                            let Value::String(s) = item else {
+                                return Err("invalid_arguments");
+                            };
+                            out.push(s);
+                        }
+                        Some(out)
+                    }
+                    _ => return Err("invalid_arguments"),
+                };
+                if !arguments.is_empty() {
+                    return Err("invalid_arguments");
+                }
+                CuaAction::list_tools(names).map_err(|_| "invalid_arguments")?
+            }
+            "desktop_call" => {
+                let Some(Value::String(tool)) = arguments.remove("tool") else {
+                    return Err("invalid_arguments");
+                };
+                let native_args = match arguments.remove("arguments") {
+                    None => Map::new(),
+                    Some(Value::Object(map)) => map,
+                    _ => return Err("invalid_arguments"),
+                };
+                if !arguments.is_empty() {
+                    return Err("invalid_arguments");
+                }
+                CuaAction::call_tool(tool, native_args).map_err(|_| "invalid_arguments")?
+            }
+            _ => return Err("unsupported"),
+        };
         let value = Self {
             environment_id,
-            action: public_contract::decode(name, arguments)
-                .map_err(|_| "unsupported_or_invalid_computer_arguments")?,
+            action,
         };
-        // The Styx public schema and exact request shape already passed; retain
-        // the independent native operation/payload boundary before dispatch.
-        // No public argument can supply a session authority or native path.
         value
             .action
             .to_operation_payload()
-            .map_err(|_| "unsupported_or_invalid_computer_arguments")?;
+            .map_err(|_| "invalid_arguments")?;
         Ok(value)
     }
 }
@@ -77,10 +110,10 @@ impl ComputerContexts {
     pub(super) fn collect_settled(&mut self) {
         self.entries.retain(|_, entry| {
             !entry.resource.try_lock().is_ok_and(|resource| {
-                resource
-                    .binding
-                    .as_ref()
-                    .is_some_and(BoundOwner::physically_settled)
+                resource.binding.as_ref().is_some_and(|binding| {
+                    binding.physically_settled()
+                        || (resource.phase == Phase::Ready && binding.closed())
+                })
             })
         });
     }
@@ -90,16 +123,29 @@ impl ComputerContexts {
         });
     }
 }
-fn is_computer_read(name: &str) -> bool {
-    matches!(
-        public_contract::route(name),
-        Some(
-            public_contract::PublicComputerRoute::Metadata
-                | public_contract::PublicComputerRoute::WindowRead
-                | public_contract::PublicComputerRoute::DesktopRead
-                | public_contract::PublicComputerRoute::VerifyRead
-        )
-    )
+fn is_computer_read(action: &CuaAction) -> bool {
+    match action {
+        CuaAction::ListTools { .. } => true,
+        CuaAction::CallTool { name, .. } => matches!(
+            name.as_str(),
+            "list_apps"
+                | "list_windows"
+                | "get_window_state"
+                | "get_desktop_state"
+                | "get_screen_size"
+                | "get_cursor_position"
+                | "check_permissions"
+                | "health_report"
+                | "get_config"
+                | "get_accessibility_tree"
+                | "get_browser_state"
+                | "get_guide"
+                | "list_sessions"
+                | "get_session"
+                | "get_session_state"
+                | "verify_state"
+        ),
+    }
 }
 fn inspected_open_running(reply: &Reply, target: &ResourceTarget) -> bool {
     matches!(reply, Reply::Inspected { snapshot }
@@ -278,7 +324,7 @@ impl PairedGatewayBackend {
         if !self.active(owner) {
             return failure("permission_denied", None, false);
         }
-        if record.phase == Phase::Opening && is_computer_read(name) {
+        if record.phase == Phase::Opening && is_computer_read(&request.action) {
             // A lost open reply does not prove the original worker failed.
             // Inspect only that resource; never reopen it or replay an action.
             if let (Some(binding), Some(target)) = (record.binding.as_ref(), record.target.as_ref())
@@ -301,7 +347,7 @@ impl PairedGatewayBackend {
         if record.phase == Phase::ActionUnknown {
             // Inspect the original action; never dispatch it again. Its outcome
             // belongs to the Host ledger, not to this new read request.
-            if !is_computer_read(name) {
+            if !is_computer_read(&request.action) {
                 return failure("fresh_observation_required", None, false);
             }
             let (Some(binding), Some(target), Some(action)) = (
@@ -556,31 +602,54 @@ impl PairedGatewayBackend {
 mod tests;
 
 #[cfg(test)]
-mod public_contract_regressions {
+mod native_desktop_regressions {
     use super::*;
 
     #[test]
-    fn public_contract_gateway_request_uses_published_window_branches_before_context_creation() {
-        for branch in ["include_screenshot", "include_accessibility_tree"] {
-            let mut arguments = json!({"pid":42,"window_id":43,"environment_id":"selected-host"})
+    fn desktop_list_tools_and_desktop_call_strip_environment_id_and_forward_verbatim() {
+        let list = ComputerRequest::parse(
+            "desktop_list_tools",
+            Some(
+                json!({"environment_id": "selected-host", "names": ["click", "run_steps"]})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(list.environment_id.as_deref(), Some("selected-host"));
+        assert_eq!(
+            list.action,
+            CuaAction::ListTools {
+                names: Some(vec!["click".into(), "run_steps".into()])
+            }
+        );
+
+        let call = ComputerRequest::parse(
+            "desktop_call",
+            Some(
+                json!({
+                    "environment_id": "selected-host",
+                    "tool": "get_window_state",
+                    "arguments": {"pid": 42, "window_id": 43, "full_output": true}
+                })
                 .as_object()
                 .unwrap()
-                .clone();
-            arguments.insert(branch.into(), Value::Bool(false));
-            let request =
-                ComputerRequest::parse("get_window_state", Some(arguments.clone())).unwrap();
-            assert_eq!(request.environment_id.as_deref(), Some("selected-host"));
-            assert!(request.action.desktop_read_request().unwrap().is_some());
-            let payload: Value =
-                serde_json::from_slice(&request.action.to_operation_payload().unwrap()).unwrap();
-            assert!(payload["arguments"].get("environment_id").is_none());
+                .clone(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(call.environment_id.as_deref(), Some("selected-host"));
+        let payload: Value =
+            serde_json::from_slice(&call.action.to_operation_payload().unwrap()).unwrap();
+        assert_eq!(payload["kind"], "call_tool");
+        assert_eq!(payload["name"], "get_window_state");
+        assert_eq!(payload["arguments"]["full_output"], true);
+        assert!(payload["arguments"].get("environment_id").is_none());
 
-            arguments.insert("full_output".into(), Value::Bool(true));
-            assert!(ComputerRequest::parse("get_window_state", Some(arguments)).is_err());
-        }
-        for name in ["press_key", "scroll"] {
-            assert!(!is_public_computer_tool(name));
-            assert!(ComputerRequest::parse(name, None).is_err());
+        for legacy in ["get_window_state", "click", "press_key", "scroll"] {
+            assert!(!is_public_computer_tool(legacy));
+            assert!(ComputerRequest::parse(legacy, None).is_err());
         }
     }
 }
