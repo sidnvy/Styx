@@ -179,16 +179,20 @@ off with Keyguard still false is not a locked-screen pass. On a device whose
 current settings do not produce Keyguard, record that coverage limitation and
 restore the ordinary awake state without changing the user's security setup.
 
-## Release APK producer
+## Release APK producer & fixed signing key
 
 `src/ci/release-android.py` uses the same SDK, NDK, JDK, Cargo target and Gradle
 cache as the development build. It builds the real Rust JNI library with Cargo's
-release profile and assembles a non-debuggable arm64 APK. The version name comes
-from the root `Cargo.toml`; `--build-number` supplies Android's increasing
-`versionCode` (the existing release source job already produces this number).
-The Gradle inputs are `STYX_ANDROID_VERSION_NAME` and
+release profile (16 KiB ELF page alignment for Android 15+/16/17), enables R8
+shrinking/obfuscation with `app/proguard-rules.pro`, bundles the Styx brand
+adaptive/monochrome/status-bar icons (`render-icons.py` from
+`src/assets/brand/styx-logo.png`), and assembles a non-debuggable arm64 APK.
+The version name comes from the root `Cargo.toml`; `--build-number` supplies
+Android's increasing `versionCode` (the existing release source job already
+produces this number). The Gradle inputs are `STYX_ANDROID_VERSION_NAME` and
 `STYX_ANDROID_VERSION_CODE`. The ordinary debug build keeps its development
-suffix and still uses Android's debug identity.
+suffix and still uses Android's debug identity (or an optional fixed
+`STYX_ANDROID_DEBUG_KEYSTORE`).
 
 For an unsigned packaging check on the workstation:
 
@@ -201,22 +205,44 @@ python3 -I -B src/ci/release-android.py --offline --unsigned \
 ```
 
 The output name ends in `-android-arm64-unsigned.apk`. Its receipt identifies the
-source revision, dirty-source status, versionCode, actual JNI library and APK
-hashes, and `signing: UNSIGNED`. This checks packaging; it is not a published
-or installable release and does not establish device acceptance.
+source revision, dirty-source status, versionCode, 16 KiB ELF page alignment,
+actual JNI library and APK hashes, and `signing: UNSIGNED`. This checks
+packaging; it is not a published or installable release and does not establish
+device acceptance.
 
-A signed build omits `--unsigned` and requires these environment inputs on the
-existing signing machine:
+A signed build omits `--unsigned`, enforces APK Signature Scheme v2/v3 only
+(`minSdk=30`), and reads the fixed release key from EITHER:
 
-- `STYX_ANDROID_KEYSTORE`: path to the established Android release keystore.
-- `STYX_ANDROID_KEYSTORE_PASSWORD`: that keystore's password.
-- `STYX_ANDROID_KEY_ALIAS`: the established release key alias.
-- `STYX_ANDROID_KEY_PASSWORD`: the key password.
+1. A mode-`0600` external properties file outside Git referenced by
+   `STYX_ANDROID_SIGNING_PROPERTIES` (for example
+   `~/.config/styx/android-signing.properties` containing `storeFile`,
+   `storePassword`, `keyAlias`, and `keyPassword`), OR
+2. The four environment variables on the signing machine / CI `release`
+   environment:
+   - `STYX_ANDROID_KEYSTORE`: path to the established Android release keystore.
+   - `STYX_ANDROID_KEYSTORE_PASSWORD`: that keystore's password.
+   - `STYX_ANDROID_KEY_ALIAS`: the established release key alias.
+   - `STYX_ANDROID_KEY_PASSWORD`: the key password.
+
+Optionally pass `--expected-signer-sha256` (or set
+`STYX_ANDROID_EXPECTED_SIGNER_SHA256`) so the producer fails closed if the
+signer certificate SHA-256 fingerprint differs from the pinned release key.
 
 The producer neither creates nor transfers a private key and does not update
-GitHub secrets. It verifies the signed APK, records the public certificate
+GitHub secrets. It verifies v2/v3 signatures, records the public certificate
 fingerprint and rejects the Android debug identity for publication. Passwords
-are environment inputs, not command arguments or receipt fields.
+are environment/file inputs, not command arguments or receipt fields.
+
+To create a one-time fixed release keystore locally (outside Git, mode `0600`):
+
+```bash
+mkdir -p ~/.config/styx && chmod 700 ~/.config/styx
+keytool -genkeypair -v -keystore ~/.config/styx/android-release.jks \
+  -storetype PKCS12 -alias styx-android-release \
+  -keyalg RSA -keysize 4096 -validity 10000 \
+  -dname "CN=Styx Android Release, O=Styx"
+chmod 600 ~/.config/styx/android-release.jks
+```
 
 **Current publication gap:** the existing phone build uses the local Android
 debug certificate; a formal Android release signing identity and its CI signing
