@@ -3,12 +3,14 @@ package com.styx.host
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -39,16 +41,32 @@ class MainActivity : Activity() {
     private lateinit var statusPill: TextView
     private lateinit var headerSubtitle: TextView
 
-    // Unpaired setup card
-    private lateinit var setupCard: LinearLayout
+    // Guided onboarding section (shown until paired + all permissions ready)
+    private lateinit var onboardingSection: LinearLayout
+    private lateinit var onboardingProgress: TextView
+    private lateinit var step1Body: LinearLayout
+    private lateinit var step1Badge: TextView
+    private lateinit var pasteButton: Button
     private lateinit var gatewayInput: EditText
     private lateinit var codeInput: EditText
     private lateinit var labelInput: EditText
     private lateinit var pairButton: Button
     private lateinit var setupMessage: TextView
 
-    // Paired status & controls
-    private lateinit var pairedSection: LinearLayout
+    private lateinit var step2Body: LinearLayout
+    private lateinit var step2Badge: TextView
+
+    private lateinit var step3Body: LinearLayout
+    private lateinit var step3Badge: TextView
+    private lateinit var notifRow: LinearLayout
+    private lateinit var notifDivider: View
+    private lateinit var notifBadge: TextView
+    private lateinit var notifAction: Button
+    private lateinit var setupBatBadge: TextView
+    private lateinit var setupBatAction: Button
+
+    // Connection card (shown whenever paired)
+    private lateinit var connectionCard: LinearLayout
     private lateinit var gatewayValue: TextView
     private lateinit var deviceValue: TextView
     private lateinit var envIdRow: LinearLayout
@@ -56,11 +74,13 @@ class MainActivity : Activity() {
     private lateinit var issueBanner: TextView
     private lateinit var toggleHostButton: Button
 
-    // Permissions checklist
+    // Daily permissions summary card (shown when fully onboarded)
+    private lateinit var dailyPermCard: LinearLayout
     private lateinit var accessibilityBadge: TextView
     private lateinit var accessibilityAction: Button
     private lateinit var batteryBadge: TextView
     private lateinit var batteryAction: Button
+
     private lateinit var forgetButton: Button
 
     private var darkMode = false
@@ -99,10 +119,28 @@ class MainActivity : Activity() {
         }
 
         root.addView(buildHeader())
-        setupCard = buildSetupCard(settings)
-        root.addView(setupCard, marginParams(top = 20))
-        pairedSection = buildPairedSection(settings)
-        root.addView(pairedSection, marginParams(top = 20))
+
+        connectionCard = buildConnectionCard(settings)
+        root.addView(connectionCard, marginParams(top = 20))
+
+        onboardingSection = buildOnboardingSection(settings)
+        root.addView(onboardingSection, marginParams(top = 16))
+
+        dailyPermCard = buildDailyPermCard()
+        root.addView(dailyPermCard, marginParams(top = 14))
+
+        forgetButton = Button(this).apply {
+            text = "Forget Pairing"
+            isAllCaps = false
+            textSize = 14f
+            setTextColor(redText)
+            background = roundedRect(Color.TRANSPARENT, 0, dp(10))
+            stateListAnimator = null
+            setOnClickListener { confirmForgetPairing() }
+        }
+        root.addView(forgetButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)).apply {
+            topMargin = dp(16)
+        })
 
         val scroll = ScrollView(this).apply {
             setBackgroundColor(bgColor)
@@ -134,6 +172,11 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         worker.shutdown()
         super.onDestroy()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        refreshStatus()
     }
 
     private fun initPalette() {
@@ -206,44 +249,128 @@ class MainActivity : Activity() {
         return row
     }
 
-    private fun buildSetupCard(settings: android.content.SharedPreferences): LinearLayout {
-        val card = cardContainer()
-        card.addView(sectionTitle("Pair with Gateway"))
-        card.addView(TextView(this).apply {
-            text = "Enter your Gateway address and one-time invitation short code."
-            textSize = 14f
+    private fun buildOnboardingSection(settings: android.content.SharedPreferences): LinearLayout {
+        val section = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        onboardingProgress = TextView(this).apply {
+            text = "Setup Checklist"
+            textSize = 13f
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             setTextColor(textSecondary)
-            setPadding(0, dp(4), 0, dp(16))
-        })
+            setPadding(dp(4), 0, dp(4), dp(10))
+        }
+        section.addView(onboardingProgress)
+
+        // Step 1: Pair with Gateway
+        val card1 = cardContainer()
+        val head1 = stepHeader("1. Pair with Gateway")
+        step1Badge = head1.second
+        card1.addView(head1.first)
+
+        step1Body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val descRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        descRow.addView(TextView(this).apply {
+            text = "Paste your Gateway invitation or enter the address and short code."
+            textSize = 13f
+            setTextColor(textSecondary)
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(10) })
+        pasteButton = compactOutlineButton("Paste") { pasteInvitationFromClipboard() }
+        descRow.addView(pasteButton)
+        step1Body.addView(descRow, marginParams(top = 8, bottom = 14))
 
         gatewayInput = styledInput("https://your-gateway:port", settings.getString("gateway_url", "") ?: "", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI)
         codeInput = styledInput("Invitation short code", "", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
         labelInput = styledInput("Device name", settings.getString("device_label", Build.MODEL) ?: Build.MODEL, InputType.TYPE_CLASS_TEXT)
 
-        card.addView(fieldLabel("Gateway URL"))
-        card.addView(gatewayInput, marginParams(top = 6, bottom = 14))
-        card.addView(fieldLabel("Invitation code"))
-        card.addView(codeInput, marginParams(top = 6, bottom = 14))
-        card.addView(fieldLabel("Device name"))
-        card.addView(labelInput, marginParams(top = 6, bottom = 18))
+        step1Body.addView(fieldLabel("Gateway URL"))
+        step1Body.addView(gatewayInput, marginParams(top = 6, bottom = 12))
+        step1Body.addView(fieldLabel("Invitation code"))
+        step1Body.addView(codeInput, marginParams(top = 6, bottom = 12))
+        step1Body.addView(fieldLabel("Device name"))
+        step1Body.addView(labelInput, marginParams(top = 6, bottom = 16))
 
         pairButton = primaryButton("Pair Phone") { onPairClicked(settings) }
-        card.addView(pairButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
+        step1Body.addView(pairButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
 
         setupMessage = TextView(this).apply {
             textSize = 13f
             setTextColor(redText)
             visibility = View.GONE
-            setPadding(0, dp(12), 0, 0)
+            setPadding(0, dp(10), 0, 0)
         }
-        card.addView(setupMessage)
-        return card
+        step1Body.addView(setupMessage)
+        card1.addView(step1Body)
+        section.addView(card1)
+
+        // Step 2: Allow Restricted Settings & Enable Android Control
+        val card2 = cardContainer()
+        val head2 = stepHeader("2. Enable Android Control")
+        step2Badge = head2.second
+        card2.addView(head2.first)
+
+        step2Body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        step2Body.addView(TextView(this).apply {
+            text = "Installed outside Google Play? First open App Info → tap ⋮ (top right) → Allow restricted settings. Then turn on Styx in Accessibility."
+            textSize = 13f
+            setTextColor(textSecondary)
+            setPadding(0, dp(8), 0, dp(14))
+        })
+        val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val appInfoBtn = outlineButton("App Info") { openAppInfo() }
+        val accBtn = primaryButton("Accessibility") {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+        btnRow.addView(appInfoBtn, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(10) })
+        btnRow.addView(accBtn, LinearLayout.LayoutParams(0, dp(44), 1.3f))
+        step2Body.addView(btnRow)
+        card2.addView(step2Body)
+        section.addView(card2, marginParams(top = 12))
+
+        // Step 3: Notifications & Background Reliability
+        val card3 = cardContainer()
+        val head3 = stepHeader("3. Background & Notifications")
+        step3Badge = head3.second
+        card3.addView(head3.first)
+
+        step3Body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        step3Body.addView(TextView(this).apply {
+            text = "Keep the Host connected reliably in the background."
+            textSize = 13f
+            setTextColor(textSecondary)
+            setPadding(0, dp(6), 0, dp(14))
+        })
+
+        val nRow = permissionRow("Notifications", "Allow") { requestNotificationPermission() }
+        notifRow = nRow.first
+        notifBadge = nRow.second
+        notifAction = nRow.third
+        step3Body.addView(notifRow)
+
+        notifDivider = divider()
+        step3Body.addView(notifDivider, dividerParams())
+
+        val bRow = permissionRow("Unrestricted Battery", "Allow") {
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        }
+        setupBatBadge = bRow.second
+        setupBatAction = bRow.third
+        step3Body.addView(bRow.first)
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            notifRow.visibility = View.GONE
+            notifDivider.visibility = View.GONE
+        }
+
+        card3.addView(step3Body)
+        section.addView(card3, marginParams(top = 12))
+
+        return section
     }
 
-    private fun buildPairedSection(settings: android.content.SharedPreferences): LinearLayout {
-        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-
-        // 1. Host Connection Card
+    private fun buildConnectionCard(settings: android.content.SharedPreferences): LinearLayout {
         val hostCard = cardContainer()
         hostCard.addView(sectionTitle("Connection"))
         val deviceRow = infoRow("Device", settings.getString("device_label", Build.MODEL) ?: Build.MODEL)
@@ -280,9 +407,10 @@ class MainActivity : Activity() {
         hostCard.addView(toggleHostButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)).apply {
             topMargin = dp(18)
         })
-        container.addView(hostCard)
+        return hostCard
+    }
 
-        // 2. Permissions Card
+    private fun buildDailyPermCard(): LinearLayout {
         val permCard = cardContainer()
         permCard.addView(sectionTitle("Permissions"))
         permCard.addView(TextView(this).apply {
@@ -299,10 +427,7 @@ class MainActivity : Activity() {
         accessibilityAction = accRow.third
         permCard.addView(accRow.first)
 
-        permCard.addView(divider(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)).apply {
-            topMargin = dp(12)
-            bottomMargin = dp(12)
-        })
+        permCard.addView(divider(), dividerParams())
 
         val batRow = permissionRow("Background Activity", "Allow") {
             startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
@@ -310,32 +435,74 @@ class MainActivity : Activity() {
         batteryBadge = batRow.second
         batteryAction = batRow.third
         permCard.addView(batRow.first)
-        container.addView(permCard, marginParams(top = 14))
+        return permCard
+    }
 
-        // 3. Footer Forget Action
-        forgetButton = Button(this).apply {
-            text = "Forget Pairing"
-            isAllCaps = false
-            textSize = 14f
-            setTextColor(redText)
-            background = roundedRect(Color.TRANSPARENT, 0, dp(10))
-            stateListAnimator = null
-            setOnClickListener { confirmForgetPairing() }
+    /** Parse Gateway's standard "https://host:port CODE" or single-token clipboard text. */
+    private fun parseInvitation(raw: String): Pair<String?, String?> {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null to null
+        val tokens = trimmed.split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (tokens.size >= 2) {
+            val urlToken = tokens.firstOrNull { it.startsWith("https://", true) || it.startsWith("http://", true) }
+            if (urlToken != null) {
+                val codeToken = tokens.firstOrNull { it != urlToken }
+                return urlToken to codeToken
+            }
         }
-        container.addView(forgetButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)).apply {
-            topMargin = dp(16)
-        })
-        return container
+        return if (trimmed.startsWith("https://", true) || trimmed.startsWith("http://", true)) {
+            trimmed to null
+        } else {
+            null to trimmed
+        }
+    }
+
+    private fun pasteInvitationFromClipboard() {
+        val clip = getSystemService(ClipboardManager::class.java)?.primaryClip
+        val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
+        if (text.isBlank()) {
+            showSetupMessage("Clipboard is empty.", isError = true)
+            return
+        }
+        val (url, code) = parseInvitation(text)
+        if (url != null) gatewayInput.setText(url)
+        if (code != null) codeInput.setText(code)
+        when {
+            url != null && code != null -> showSetupMessage("Filled Gateway URL and invitation code from clipboard.", isError = false)
+            url != null -> showSetupMessage("Filled Gateway URL. Enter the invitation code.", isError = false)
+            code != null -> showSetupMessage("Filled invitation code from clipboard.", isError = false)
+            else -> showSetupMessage("Could not recognize a Gateway URL or code in clipboard.", isError = true)
+        }
+    }
+
+    private fun showSetupMessage(message: String, isError: Boolean) {
+        setupMessage.text = message
+        setupMessage.setTextColor(if (isError) redText else greenText)
+        setupMessage.visibility = View.VISIBLE
     }
 
     private fun onPairClicked(settings: android.content.SharedPreferences) {
-        val gatewayUrl = gatewayInput.text.toString().trim()
-        val invitationCode = codeInput.text.toString().trim()
+        var gatewayUrl = gatewayInput.text.toString().trim()
+        var invitationCode = codeInput.text.toString().trim()
+        // Allow users who pasted "https://host:port CODE" directly into either input.
+        if (invitationCode.isBlank()) {
+            val (u, c) = parseInvitation(gatewayUrl)
+            if (u != null && c != null) {
+                gatewayUrl = u
+                invitationCode = c
+                gatewayInput.setText(u)
+            }
+        } else if (gatewayUrl.isBlank()) {
+            val (u, c) = parseInvitation(invitationCode)
+            if (u != null && c != null) {
+                gatewayUrl = u
+                invitationCode = c
+                gatewayInput.setText(u)
+            }
+        }
         val deviceLabel = labelInput.text.toString().trim().ifEmpty { Build.MODEL }
         if (gatewayUrl.isBlank() || invitationCode.isBlank()) {
-            setupMessage.text = "Enter your Gateway URL and invitation short code."
-            setupMessage.setTextColor(redText)
-            setupMessage.visibility = View.VISIBLE
+            showSetupMessage("Enter your Gateway URL and invitation short code.", isError = true)
             return
         }
         codeInput.text.clear()
@@ -357,9 +524,10 @@ class MainActivity : Activity() {
                         startHost()
                     } else {
                         val code = result.optJSONObject("error")?.optString("code")?.takeIf { it.isNotBlank() }
-                        setupMessage.text = if (code != null) "Pairing failed ($code)." else "Pairing failed. Check the Gateway address and invitation code."
-                        setupMessage.setTextColor(redText)
-                        setupMessage.visibility = View.VISIBLE
+                        showSetupMessage(
+                            if (code != null) "Pairing failed ($code)." else "Pairing failed. Check the Gateway address and invitation code.",
+                            isError = true
+                        )
                     }
                     refreshStatus()
                 }
@@ -368,11 +536,25 @@ class MainActivity : Activity() {
                     busy = false
                     pairButton.isEnabled = true
                     pairButton.text = "Pair Phone"
-                    setupMessage.text = "Pairing failed. Check the Gateway address and invitation state."
-                    setupMessage.setTextColor(redText)
-                    setupMessage.visibility = View.VISIBLE
+                    showSetupMessage("Pairing failed. Check the Gateway address and invitation state.", isError = true)
                 }
             }
+        }
+    }
+
+    private fun openAppInfo() {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
+        startActivity(intent)
+    }
+
+    private fun hasNotificationPermission(): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasNotificationPermission()) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
     }
 
@@ -402,9 +584,7 @@ class MainActivity : Activity() {
     }
 
     private fun startHost() {
-        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
-        }
+        requestNotificationPermission()
         startForegroundService(Intent(this, HostService::class.java))
         refreshStatus()
     }
@@ -439,6 +619,9 @@ class MainActivity : Activity() {
         val perms = state?.optJSONObject("permissions")
         val accReady = perms?.optBoolean("accessibility", false) ?: false
         val batReady = perms?.optBoolean("ignoring_battery_optimizations", false) ?: false
+        val notifReady = hasNotificationPermission()
+        val bgReady = batReady && notifReady
+        val allSetupComplete = paired && accReady && bgReady
 
         val settings = getSharedPreferences("settings", MODE_PRIVATE)
         val savedGateway = settings.getString("gateway_url", "").orEmpty()
@@ -446,14 +629,33 @@ class MainActivity : Activity() {
         deviceValue.text = savedLabel
         gatewayValue.text = savedGateway.ifBlank { "Configured" }
 
-        setupCard.visibility = if (paired) View.GONE else View.VISIBLE
-        pairedSection.visibility = if (paired) View.VISIBLE else View.GONE
+        connectionCard.visibility = if (paired) View.VISIBLE else View.GONE
+        forgetButton.visibility = if (paired) View.VISIBLE else View.GONE
+        onboardingSection.visibility = if (allSetupComplete) View.GONE else View.VISIBLE
+        dailyPermCard.visibility = if (allSetupComplete) View.VISIBLE else View.GONE
+
+        val completedSteps = listOf(paired, accReady, bgReady).count { it }
+        onboardingProgress.text = "Setup · $completedSteps of 3 ready"
+
+        // Step 1 collapse/badge
+        step1Body.visibility = if (paired) View.GONE else View.VISIBLE
+        applyPill(step1Badge, if (paired) "Paired" else "Required", if (paired) greenBg else neutralBg, if (paired) greenText else neutralText)
+
+        // Step 2 collapse/badge
+        step2Body.visibility = if (accReady) View.GONE else View.VISIBLE
+        applyPill(step2Badge, if (accReady) "Enabled" else "Required", if (accReady) greenBg else amberBg, if (accReady) greenText else amberText)
+
+        // Step 3 collapse/badge
+        step3Body.visibility = if (bgReady) View.GONE else View.VISIBLE
+        applyPill(step3Badge, if (bgReady) "Ready" else "Recommended", if (bgReady) greenBg else neutralBg, if (bgReady) greenText else neutralText)
+        updatePermRow(notifReady, "Allowed", notifBadge, notifAction)
+        updatePermRow(batReady, "Unrestricted", setupBatBadge, setupBatAction)
 
         hostActive = paired && rawState in setOf("connected", "starting", "running", "connecting", "reconnecting")
 
         // Header status pill
         when {
-            !paired -> applyPill(statusPill, "Not Paired", neutralBg, neutralText)
+            !paired -> applyPill(statusPill, "Setup", neutralBg, neutralText)
             rawState == "connected" -> applyPill(statusPill, "Connected", greenBg, greenText)
             rawState in setOf("starting", "running", "connecting", "reconnecting") -> applyPill(statusPill, "Connecting", amberBg, amberText)
             rawState in setOf("revoked", "failed") -> applyPill(statusPill, "Attention", redBg, redText)
@@ -487,22 +689,19 @@ class MainActivity : Activity() {
         }
         toggleHostButton.isEnabled = !busy
 
-        // Permissions checklist
-        if (accReady) {
-            applyPill(accessibilityBadge, "Enabled", greenBg, greenText)
-            accessibilityBadge.visibility = View.VISIBLE
-            accessibilityAction.visibility = View.GONE
+        // Daily Permissions summary card
+        updatePermRow(accReady, "Enabled", accessibilityBadge, accessibilityAction)
+        updatePermRow(batReady, "Unrestricted", batteryBadge, batteryAction)
+    }
+
+    private fun updatePermRow(ready: Boolean, readyLabel: String, badge: TextView, action: Button) {
+        if (ready) {
+            applyPill(badge, readyLabel, greenBg, greenText)
+            badge.visibility = View.VISIBLE
+            action.visibility = View.GONE
         } else {
-            accessibilityBadge.visibility = View.GONE
-            accessibilityAction.visibility = View.VISIBLE
-        }
-        if (batReady) {
-            applyPill(batteryBadge, "Unrestricted", greenBg, greenText)
-            batteryBadge.visibility = View.VISIBLE
-            batteryAction.visibility = View.GONE
-        } else {
-            batteryBadge.visibility = View.GONE
-            batteryAction.visibility = View.VISIBLE
+            badge.visibility = View.GONE
+            action.visibility = View.VISIBLE
         }
     }
 
@@ -512,6 +711,20 @@ class MainActivity : Activity() {
         orientation = LinearLayout.VERTICAL
         background = roundedRect(cardBg, cardBorder, dp(16))
         setPadding(dp(18), dp(18), dp(18), dp(18))
+    }
+
+    private fun stepHeader(title: String): Pair<LinearLayout, TextView> {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val titleView = sectionTitle(title)
+        row.addView(titleView, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginEnd = dp(10)
+        })
+        val badge = pill("Required", neutralBg, neutralText)
+        row.addView(badge)
+        return row to badge
     }
 
     private fun sectionTitle(title: String) = TextView(this).apply {
@@ -549,6 +762,33 @@ class MainActivity : Activity() {
         setTextColor(accentText)
         background = roundedRect(accentBg, 0, dp(12))
         stateListAnimator = null
+        setOnClickListener { action() }
+    }
+
+    private fun outlineButton(label: String, action: () -> Unit) = Button(this).apply {
+        text = label
+        isAllCaps = false
+        textSize = 14f
+        typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        setTextColor(textPrimary)
+        background = roundedRect(Color.TRANSPARENT, cardBorder, dp(12))
+        stateListAnimator = null
+        setOnClickListener { action() }
+    }
+
+    private fun compactOutlineButton(label: String, action: () -> Unit) = Button(this).apply {
+        text = label
+        isAllCaps = false
+        textSize = 13f
+        typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        setTextColor(textPrimary)
+        background = roundedRect(Color.TRANSPARENT, cardBorder, dp(18))
+        stateListAnimator = null
+        minHeight = 0
+        minimumHeight = 0
+        minWidth = 0
+        minimumWidth = 0
+        setPadding(dp(14), dp(6), dp(14), dp(6))
         setOnClickListener { action() }
     }
 
@@ -628,7 +868,11 @@ class MainActivity : Activity() {
 
     private fun divider() = View(this).apply {
         setBackgroundColor(cardBorder)
-        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
+    }
+
+    private fun dividerParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)).apply {
+        topMargin = dp(12)
+        bottomMargin = dp(12)
     }
 
     private fun roundedRect(fill: Int, stroke: Int, radiusPx: Int) = GradientDrawable().apply {
