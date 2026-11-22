@@ -12,7 +12,6 @@ import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
 import android.view.View
-import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -36,8 +35,11 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Pairing fields must not be captured by remote screen tools or the recent-apps preview.
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        // Hide recent-apps thumbnails without blacking out live scrcpy mirroring;
+        // the invitation short code input remains password-masked and cleared on submit.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            setRecentsScreenshotEnabled(false)
+        }
         val settings = getSharedPreferences("settings", MODE_PRIVATE)
         val pad = (20 * resources.displayMetrics.density).toInt()
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad, pad, pad) }
