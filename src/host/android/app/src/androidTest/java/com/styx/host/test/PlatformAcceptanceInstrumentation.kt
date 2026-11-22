@@ -81,6 +81,26 @@ class PlatformAcceptanceInstrumentation : Instrumentation() {
                 requireOk(act(callerA, first, nodeAction("click", node(first, "android:id/button1"))))
                 assertCounter(1)
             }
+            checkCase("display_list_and_explicit_default") {
+                val inventory = call("android_list_displays", callerA, JSONObject())
+                requireOk(inventory)
+                val displays = inventory.getJSONArray("displays")
+                check((0 until displays.length()).any { displays.getJSONObject(it).getInt("display_id") == 0 })
+                val explicit = call("android_observe", callerA, JSONObject().put("display_id", 0))
+                requireOk(explicit)
+                check(explicit.getInt("display_id") == 0)
+                check(explicit.getJSONObject("display").getInt("width") > 0)
+                val wrongDisplay = call("android_act", callerA, JSONObject()
+                    .put("observation_id", explicit.getString("observation_id"))
+                    .put("display_id", 42)
+                    .put("action", JSONObject().put("type", "home")))
+                check(errorCode(wrongDisplay) == "stale_observation")
+                val missing = call("android_observe", callerA, JSONObject().put("display_id", 2147483647))
+                check(errorCode(missing) == "display_not_found")
+                val old = call("android_observe", callerA, JSONObject().put("display_id", 0))
+                requireOk(old)
+                check(errorCode(act(callerA, explicit, JSONObject().put("type", "home"))) == "stale_observation")
+            }
             checkCase("old_observation_rejected") {
                 val old = observe(callerA)
                 observe(callerA)

@@ -406,6 +406,7 @@ impl AndroidCommand {
     pub fn capability(&self) -> Result<styx_contracts::capability::CapabilityId, ErrorCategory> {
         use styx_contracts::capability::CapabilityId;
         match self.name.as_str() {
+            "android_list_displays" => Ok(CapabilityId::AndroidObserve),
             "android_observe" => Ok(CapabilityId::AndroidObserve),
             "android_act" => Ok(CapabilityId::AndroidAct),
             "android_run_steps" => Ok(CapabilityId::AndroidRunSteps),

@@ -3,6 +3,8 @@ package com.styx.host
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.app.KeyguardManager
+import android.hardware.display.DisplayManager
+import android.graphics.Point
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
@@ -12,10 +14,11 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Base64
+import android.util.DisplayMetrics
 import android.view.Display
-import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -31,7 +34,8 @@ import kotlin.math.roundToInt
 /** A platform adapter only: no socket, pairing key, Gateway session, or alternate authorization. */
 class StyxAccessibilityService : AccessibilityService() {
     private val main = Handler(Looper.getMainLooper())
-    private val observations = ConcurrentHashMap<String, Observation>()
+    private data class ObservationKey(val caller: String, val displayId: Int)
+    private val observations = ConcurrentHashMap<ObservationKey, Observation>()
     private val screenEvents = java.lang.Object()
     private var screenEventSequence = 0L
     private var lastScreenEventAt = 0L
@@ -40,7 +44,7 @@ class StyxAccessibilityService : AccessibilityService() {
     // its references; recycling a copy could race an action that still references it.
     private data class Target(val path: List<Int>, val viewId: String?, val className: String?,
                               val text: String?, val description: String?, val identity: AccessibilityNodeInfo)
-    private data class Observation(val id: String, val windowId: Int, val packageName: String?,
+    private data class Observation(val id: String, val displayId: Int, val windowId: Int, val packageName: String?,
                                    val width: Int, val height: Int, val targets: Map<String, Target>)
 
     override fun onServiceConnected() { instance = this }
@@ -81,7 +85,27 @@ class StyxAccessibilityService : AccessibilityService() {
     override fun onInterrupt() { clearObservation() }
     override fun onDestroy() { instance = null; clearObservation(); super.onDestroy() }
     fun clearObservation() { observations.clear() }
-    fun releaseCaller(caller: String) { observations.remove(caller) }
+    fun releaseCaller(caller: String) { observations.keys.removeIf { it.caller == caller } }
+
+    private fun observation(caller: String, id: String): Observation? =
+        observations.entries.firstOrNull { it.key.caller == caller && it.value.id == id }?.value
+
+    private fun display(displayId: Int): Display? =
+        getSystemService(DisplayManager::class.java).getDisplay(displayId)
+
+    private fun displaySize(target: Display): Point = Point().also { target.getRealSize(it) }
+
+    // Windows belong to their own displays. rootInActiveWindow may point at a different
+    // display after a remote agent switches focus, so it is not safe for display routing.
+    private fun rootOnDisplay(displayId: Int): AccessibilityNodeInfo? {
+        val windows = windowsOnAllDisplays[displayId] ?: return null
+        for (window in windows) {
+            if (window.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
+                window.root?.let { return it }
+            }
+        }
+        return null
+    }
 
     fun execute(method: String, params: JSONObject): JSONObject {
         check(Looper.myLooper() != Looper.getMainLooper()) { "Platform requests must run off the main thread" }
@@ -89,11 +113,42 @@ class StyxAccessibilityService : AccessibilityService() {
         val caller = params.getString("__caller_id")
         if (method == "release_caller") { releaseCaller(caller); return ok() }
         return when (method) {
+            "android_list_displays" -> listDisplays()
             "android_observe" -> observe(caller, params)
-            "android_act" -> act(caller, params.getString("observation_id"), params.getJSONObject("action"))
+            "android_act" -> act(caller, params.getString("observation_id"), params.getJSONObject("action"),
+                if (params.has("display_id")) params.getInt("display_id") else null)
             "android_run_steps" -> runSteps(caller, params)
             else -> fail("unsupported_method", "Unknown Android operation.")
         }
+    }
+
+    private fun listDisplays(): JSONObject {
+        if (getSystemService(KeyguardManager::class.java).isKeyguardLocked)
+            return fail("device_locked", "Unlock the phone before inspecting its displays.")
+        val displays = JSONArray()
+        val allWindows = windowsOnAllDisplays
+        for (target in getSystemService(DisplayManager::class.java).displays) {
+            val size = displaySize(target)
+            val metrics = DisplayMetrics().also { target.getRealMetrics(it) }
+            val windows = JSONArray()
+            for (window in allWindows[target.displayId].orEmpty()) {
+                if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
+                val root = window.root
+                val packageName = try { root?.packageName?.toString() } finally { root?.recycle() }
+                val bounds = Rect().also { window.getBoundsInScreen(it) }
+                windows.put(JSONObject().put("window_id", window.id)
+                    .put("bounds", JSONArray(listOf(bounds.left, bounds.top, bounds.right, bounds.bottom)))
+                    .put("package_name", packageName ?: JSONObject.NULL)
+                    .put("title", window.title?.toString() ?: JSONObject.NULL)
+                    .put("focused", window.isFocused).put("active", window.isActive))
+            }
+            displays.put(JSONObject().put("display_id", target.displayId)
+                .put("name", target.name)
+                .put("width", size.x).put("height", size.y)
+                .put("density", metrics.density)
+                .put("windows", windows))
+        }
+        return ok().put("displays", displays)
     }
 
     private fun observe(caller: String, params: JSONObject): JSONObject {
@@ -103,6 +158,10 @@ class StyxAccessibilityService : AccessibilityService() {
             releaseCaller(caller)
             return fail("device_locked", "Unlock the phone before observing or controlling its apps.").put("permission_state", readiness)
         }
+        val displayId = params.optInt("display_id", Display.DEFAULT_DISPLAY)
+        if (displayId < 0) return fail("invalid_arguments", "display_id must be nonnegative.")
+        val targetDisplay = display(displayId)
+            ?: return fail("display_not_found", "The selected Android display no longer exists.")
         val maxNodes = params.optInt("max_nodes", 500)
         val maxDimension = params.optInt("max_dimension", 1280)
         if (maxNodes < 1 || maxDimension < 1) return fail("invalid_arguments", "max_nodes and max_dimension must be positive.")
@@ -110,8 +169,9 @@ class StyxAccessibilityService : AccessibilityService() {
         // from current views instead of reusing the previous tree's cached nodes.
         val refreshNodes = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
         if (!refreshNodes) clearCache()
-        val root = rootInActiveWindow ?: return fail("no_active_window", "Android has no accessible active window.")
-        val size = getSystemService(WindowManager::class.java).currentWindowMetrics.bounds
+        val root = rootOnDisplay(displayId) ?: return fail("no_active_window", "The selected display has no accessible app window.")
+        val size = displaySize(targetDisplay)
+        val metrics = DisplayMetrics().also { targetDisplay.getRealMetrics(it) }
         val id = UUID.randomUUID().toString()
         val targets = linkedMapOf<String, Target>()
         val nodes = JSONArray()
@@ -146,35 +206,46 @@ class StyxAccessibilityService : AccessibilityService() {
                 }
             } finally { node.recycle() }
         }
-        val current = Observation(id, windowId, packageName, size.width(), size.height(), targets)
-        observations[caller] = current
-        val result = ok().put("observation_id", id).put("package_name", packageName ?: JSONObject.NULL)
+        val current = Observation(id, displayId, windowId, packageName, size.x, size.y, targets)
+        observations[ObservationKey(caller, displayId)] = current
+        val result = ok().put("observation_id", id).put("display_id", displayId).put("package_name", packageName ?: JSONObject.NULL)
             .put("window_id", windowId).put("permission_state", readiness)
-            .put("display", JSONObject().put("width", size.width()).put("height", size.height())
-                .put("density", resources.displayMetrics.density))
+            .put("display", JSONObject().put("width", size.x).put("height", size.y)
+                .put("density", metrics.density))
             .put("truncated", truncated)
         if (params.optBoolean("include_tree", true)) result.put("nodes", nodes)
         if (params.optBoolean("screenshot", false)) {
-            val capture = screenshot(maxDimension)
+            val capture = screenshot(displayId, maxDimension)
             if (capture.optBoolean("ok", false)) result.put("screenshot", capture.getJSONObject("screenshot"))
             else result.put("screenshot_error", capture.getJSONObject("error"))
         }
         return result.put("duration_ms", SystemClock.elapsedRealtime() - started)
     }
 
-    private fun act(caller: String, observationId: String, action: JSONObject): JSONObject {
+    private fun act(caller: String, observationId: String, action: JSONObject, requestedDisplayId: Int? = null): JSONObject {
         if (getSystemService(KeyguardManager::class.java).isKeyguardLocked) return fail("device_locked", "Unlock the phone before controlling its apps.")
-        val observed = observations[caller]?.takeIf { it.id == observationId }
+        val observed = observation(caller, observationId)
             ?: return fail("stale_observation", "Observe the current screen before acting.")
-        val root = rootInActiveWindow ?: return fail("no_active_window", "Android has no accessible active window.")
+        if (requestedDisplayId != null && requestedDisplayId != observed.displayId)
+            return fail("stale_observation", "The observation belongs to a different display.")
+        val root = rootOnDisplay(observed.displayId)
+            ?: return fail("no_active_window", "The observed display has no accessible app window.")
         try {
             if (root.windowId != observed.windowId || root.packageName?.toString() != observed.packageName) {
                 return fail("stale_observation", "The active window changed; observe it before acting.")
             }
             return when (action.getString("type")) {
-                "back" -> globalAction(GLOBAL_ACTION_BACK)
-                "home" -> globalAction(GLOBAL_ACTION_HOME)
-                "recents" -> globalAction(GLOBAL_ACTION_RECENTS)
+                "back", "home", "recents" -> {
+                    // performGlobalAction has no display target: never accidentally navigate
+                    // the physical screen when a secondary display was requested.
+                    if (observed.displayId != Display.DEFAULT_DISPLAY)
+                        fail("unsupported_action", "Global navigation is only supported on the default display.")
+                    else when (action.getString("type")) {
+                        "back" -> globalAction(GLOBAL_ACTION_BACK)
+                        "home" -> globalAction(GLOBAL_ACTION_HOME)
+                        else -> globalAction(GLOBAL_ACTION_RECENTS)
+                    }
+                }
                 "tap", "swipe" -> gesture(caller, observed, action)
                 "click", "long_click", "set_text", "scroll_forward", "scroll_backward" -> nodeAction(root, observed, action)
                 else -> fail("unsupported_action", "Unknown Android action.")
@@ -221,8 +292,8 @@ class StyxAccessibilityService : AccessibilityService() {
         else fail("action_not_performed", "Android did not perform the navigation action.")
 
     private fun gesture(caller: String, observed: Observation, action: JSONObject): JSONObject {
-        val size = getSystemService(WindowManager::class.java).currentWindowMetrics.bounds
-        if (size.width() != observed.width || size.height() != observed.height) {
+        val size = display(observed.displayId)?.let(::displaySize)
+        if (size == null || size.x != observed.width || size.y != observed.height) {
             return fail("stale_observation", "The display dimensions changed; observe before tapping.")
         }
         val x = action.getDouble("x").toFloat()
@@ -238,11 +309,12 @@ class StyxAccessibilityService : AccessibilityService() {
         val duration = action.optLong("duration_ms", if (swipe) 300 else 50)
         if (duration <= 0 || duration > GestureDescription.getMaxGestureDuration()) return fail("invalid_arguments", "Unsupported gesture duration.")
         val path = Path().apply { moveTo(x, y); if (swipe) lineTo(endX, endY) }
-        val gesture = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, duration)).build()
+        val gesture = GestureDescription.Builder().setDisplayId(observed.displayId)
+            .addStroke(GestureDescription.StrokeDescription(path, 0, duration)).build()
         val done = CountDownLatch(1)
         var result: JSONObject? = null
         main.post {
-            if (observations[caller]?.id != observed.id) {
+            if (observations[ObservationKey(caller, observed.displayId)]?.id != observed.id) {
                 result = fail("stale_observation", "The observation was released before gesture dispatch.")
                 done.countDown()
                 return@post
@@ -257,10 +329,10 @@ class StyxAccessibilityService : AccessibilityService() {
             else fail("operation_timeout", "The gesture outcome is unknown; observe before continuing.", true)
     }
 
-    private fun screenshot(maxDimension: Int): JSONObject {
+    private fun screenshot(displayId: Int, maxDimension: Int): JSONObject {
         val done = CountDownLatch(1)
         var result: JSONObject? = null
-        takeScreenshot(Display.DEFAULT_DISPLAY, { runnable -> runnable.run() }, object : TakeScreenshotCallback {
+        takeScreenshot(displayId, { runnable -> runnable.run() }, object : TakeScreenshotCallback {
             override fun onSuccess(screenshot: ScreenshotResult) {
                 val buffer = screenshot.hardwareBuffer
                 try {
@@ -295,6 +367,11 @@ class StyxAccessibilityService : AccessibilityService() {
 
     private fun runSteps(caller: String, params: JSONObject): JSONObject {
         val id = params.getString("observation_id")
+        val observed = observation(caller, id)
+            ?: return fail("stale_observation", "Observe the current screen before acting.")
+        val displayId = if (params.has("display_id")) params.getInt("display_id") else observed.displayId
+        if (displayId != observed.displayId)
+            return fail("stale_observation", "The observation belongs to a different display.")
         val steps = params.getJSONArray("steps")
         val observeAfter = params.optBoolean("observe_after", false)
         val results = JSONArray()
@@ -308,7 +385,7 @@ class StyxAccessibilityService : AccessibilityService() {
                     step.optString("type") in setOf("click", "long_click", "back", "home", "recents")) {
                     lastActionEventSequence = synchronized(screenEvents) { screenEventSequence }
                 }
-                act(caller, id, step)
+                act(caller, id, step, displayId)
             } catch (error: JSONException) {
                 fail("invalid_arguments", "Invalid Android step.")
             } catch (error: InterruptedException) {
@@ -325,7 +402,7 @@ class StyxAccessibilityService : AccessibilityService() {
         if (failure != null) response.put("error", failure).put("failed_step", completed)
         if (observeAfter) {
             if (failure == null) lastActionEventSequence?.let(::awaitScreenUpdate)
-            response.put("observation", observe(caller, JSONObject()))
+            response.put("observation", observe(caller, JSONObject().put("display_id", displayId)))
         }
         return response
     }
