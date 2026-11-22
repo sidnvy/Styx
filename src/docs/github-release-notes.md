@@ -7,45 +7,45 @@ several conversations can use the same computer.
 
 ## Changes
 
-This release candidate converges Desktop session ownership into the Host, fixes
-Gateway owner rebinding after abrupt Host disconnects, and adds Android
-multi-display & transition-observation support on top of native `cua-driver`
-(`0.47.24`) passthrough:
+This release candidate builds on `0.8.1-rc.5` (native `cua-driver` `0.47.24`
+passthrough, Host-owned `computer_v3` Desktop sessions, abrupt disconnect
+recovery, and Android multi-display / transition observation) with architecture
+convergence, Desktop freshness tuning, and Android Host hardening:
 
-- **Host-owned Desktop sessions & stateless Gateway routing (`computer_v3`)**:
-  Moves Desktop session lifecycle, `OperationLedger` once-only dispatch and
-  caller state fully into the Host; Gateway becomes a stateless authenticated
-  router for Desktop just like Exec, Browser and Android. Removes dead
-  pre-passthrough Desktop policies and legacy artifacts.
-- **Abrupt Host disconnect recovery**: Retires superseded old-generation owner
-  bindings cleanly when a Host reconnects with a new generation after an abrupt
-  crash, power loss or kernel panic, without replaying prior operations,
-  fabricating cleanup completion or weakening authorization.
-- **Public MCP surface (39 tools)**: Adds `android_list_displays` and per-display
-  routing (`display_id`) for `android_observe`, `android_act` and
-  `android_run_steps`, alongside `desktop_list_tools` and `desktop_call` native
-  CUA passthrough (8 MiB framing, verbatim multimodal results and refusals).
-- **Android transition observation & multi-display isolation**: Waits for
-  post-action UI transitions with independent `(caller, display_id)`
-  observations so concurrent callers or multiple virtual displays do not
-  contaminate each other.
-- **Linux/Hyprland native CUA & Gateway forwarding**: Retains AT-SPI
-  checkbox/radio support, Wayland virtual keyboard routing, Desktop source
-  refresh hardening and independent public MCP forwarding credential support.
+- **Protocol & Gateway relay cleanup (Phase 2A)**: Removes retired legacy
+  `Call::Browser` / `Reply::BrowserAction` / `BROWSER_V1` wire paths, unused
+  `TargetKind` / `TargetRecord` relay tracking, and the `Call::Write {}`
+  transport workaround.
+- **Desktop freshness & evidence TTL tuning (Phase 2B)**: Adds a 15-second
+  `DesktopSource` freshness window on Linux & Windows (5-second re-probe /
+  15-second TTL on macOS) and raises `HostCoordinator` Desktop evidence TTL from
+  1s to 30s while keeping hard session fences immediate, reducing redundant
+  desktop-probe churn during rapid Computer Use calls.
+- **Android Host branding & production hardening**: Adds Styx brand Adaptive
+  Icons, monochrome themed icon, white notification status icon, fixed release
+  keystore signing (APK v2/v3 only) with `--expected-signer-sha256` pinning, R8
+  minification & resource shrinking, 16 KiB ELF page alignment, API 34+
+  `specialUse` foreground service declaration, battery optimization guidance,
+  and KeyStore alias cleanup on credential reset.
+- **Windows modularization & zero-warning Android build (Phase 2C)**: Splits
+  `src/host/windows/Styx.cs` into focused `NativeBootstrap.cs`, `CoreClient.cs`
+  and `LocalAppControl.cs` modules and eliminates all `aarch64-linux-android`
+  cross-compile warnings in `styx-runtime`.
 
-Update both Gateway and desktop Hosts together to `0.8.1-rc.5` (Desktop wire
-protocol updated to `computer_v3`), then refresh your ChatGPT Custom MCP
-connector so it rediscovers the updated 39-tool schema. Existing profiles,
-identities, pairing and capability grants are preserved.
+Update both Gateway and desktop Hosts together to `0.8.1-rc.6` when upgrading
+from `0.8.1-rc.4` or earlier (Desktop wire protocol is `computer_v3`), then
+refresh your ChatGPT Custom MCP connector if needed to discover the 39-tool
+schema. Existing profiles, identities, pairing and capability grants are
+preserved.
 
 ### Android package availability
 
 The four downloads below update Gateway and desktop Hosts. A signed Android APK
-is not published in this Release. The release APK build and verification path
-is now available, but an approved Android signing identity and CI distribution
-are not yet configured. The existing accepted Android Host APK can continue using the updated
-Gateway with the same pairing and permissions. No phone reinstall is needed for
-this Gateway/desktop update.
+is not published in this Release because CI Android signing secrets are not yet
+configured; local fixed-key signed APKs can be built and verified via
+`src/ci/release-android.py` and upgraded in place when signed with the same
+keystore. Existing accepted Android Hosts continue working with the updated
+Gateway using the same pairing and permissions.
 
 ## Choose your download
 
