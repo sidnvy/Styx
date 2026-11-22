@@ -247,7 +247,7 @@ impl RelayHandle {
                             drop(upgrade_headers);
                             let(tx,mut rx)=mpsc::channel::<Command>(3);
                             let e=Arc::new(Entry{host_settings,device:device.clone(),transport_generation:generation.clone(),host_connection,host_generation,grant_revision,profile,
-                                tx,stop:task_stop.clone(),live:AtomicBool::new(true),admission:Mutex::new(false),drain:Mutex::new(None),drain_enabled,lease:tokio::sync::Mutex::new(lease.take()),
+                                tx,stop:task_stop.clone(),live:AtomicBool::new(true),transport_ended:AtomicBool::new(false),admission:Mutex::new(false),drain:Mutex::new(None),drain_enabled,lease:tokio::sync::Mutex::new(lease.take()),
                                 bootstrap_lane:initial_lane,bootstrap_lease:tokio::sync::Mutex::new(bootstrap_lease.take()),exec_feature,browser_feature,computer_feature,android_feature,
                                 browser_lease:tokio::sync::Mutex::new(browser_lease.take()),computer_lease:tokio::sync::Mutex::new(computer_lease.take())});
                             entry=Some(e.clone());let _fence=LiveFence(e.clone());
@@ -256,6 +256,7 @@ impl RelayHandle {
                                 if state.closing||state.entries.contains_key(&device){return Err(RelayError::Busy)}
                                 state.entries.insert(device.clone(),e.clone());
                             }
+                            relay.retire_superseded_bindings(&e);
                             let mut pending:BTreeMap<RequestId,Pending>=BTreeMap::new();
                             let mut heartbeat = Heartbeat::new(tokio::time::Instant::now());
                             loop {
@@ -349,6 +350,7 @@ impl RelayHandle {
                             e.live.store(false, Ordering::Release);
                             e.stop.cancel();
                             relay.join_transport_drain(&e).await;
+                            e.transport_ended.store(true, Ordering::Release);
                             if let Ok(mut state) = relay.inner.state.lock()
                                 && state
                                     .entries

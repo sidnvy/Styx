@@ -110,10 +110,10 @@ impl ComputerContexts {
     pub(super) fn collect_settled(&mut self) {
         self.entries.retain(|_, entry| {
             !entry.resource.try_lock().is_ok_and(|resource| {
-                resource
-                    .binding
-                    .as_ref()
-                    .is_some_and(BoundOwner::physically_settled)
+                resource.binding.as_ref().is_some_and(|binding| {
+                    binding.physically_settled()
+                        || (resource.phase == Phase::Ready && binding.closed())
+                })
             })
         });
     }
