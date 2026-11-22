@@ -565,22 +565,22 @@ impl<'a> HostProtocol<'a> {
                     }
                 }
             }
-            Call::Computer {
+            Call::DesktopSession {
                 owner,
                 grant_revision,
                 timeout_ms,
-                command,
+                action,
             } => {
                 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
                 {
-                    self.handle_computer(owner, grant_revision, timeout_ms, command)
+                    self.handle_desktop_session(owner, grant_revision, timeout_ms, action)
                         .await
                 }
                 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
                 {
-                    let _ = (owner, grant_revision, timeout_ms, command);
+                    let _ = (owner, grant_revision, timeout_ms, action);
                     Reply::Unsupported {
-                        feature: COMPUTER_V2.into(),
+                        feature: COMPUTER_V3.into(),
                     }
                 }
             }
@@ -763,7 +763,7 @@ impl<'a> HostProtocol<'a> {
         }
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         if self.paired && self.computer.is_some() {
-            features.push(COMPUTER_V2.into());
+            features.push(COMPUTER_V3.into());
         }
         if self.paired && self.android.is_some() {
             features.push(ANDROID_V1.into());
@@ -959,7 +959,7 @@ impl<'a> HostProtocol<'a> {
             };
             let limit = if matches!(
                 &response.reply,
-                Reply::Android { .. } | Reply::ComputerAction { .. }
+                Reply::Android { .. } | Reply::DesktopSession { .. }
             ) {
                 super::link::MAX_MESSAGE
             } else {
@@ -1008,7 +1008,7 @@ fn call_owner(call: &Call) -> Option<&OwnerRef> {
         | Call::DispatchAction { owner, .. }
         | Call::InspectAction { owner, .. }
         | Call::Browser { owner, .. }
-        | Call::Computer { owner, .. } => Some(owner),
+        | Call::DesktopSession { owner, .. } => Some(owner),
         _ => None,
     }
 }

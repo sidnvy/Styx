@@ -86,12 +86,12 @@ pub enum Call {
         timeout_ms: u32,
         command: BrowserCommand,
     },
-    Computer {
+    DesktopSession {
         owner: OwnerRef,
         grant_revision: u64,
         #[serde(default)]
         timeout_ms: Option<u32>,
-        command: ComputerCommand,
+        action: Box<serde_json::value::RawValue>,
     },
     /// Same authenticated connection only; the Host first advertises support.
     EnableTransportDrain,
@@ -158,7 +158,7 @@ pub struct ExecTaskResult {
     pub value: serde_json::Value,
     pub is_error: bool,
 }
-pub const COMPUTER_V2: &str = "computer_v2";
+pub const COMPUTER_V3: &str = "computer_v3";
 pub const TRANSPORT_DRAIN_V1: &str = "transport_drain_v1";
 /// Private negotiated total stop budget, not a business-operation deadline.
 pub(crate) const TRANSPORT_DRAIN_TIMEOUT_MS: u32 = 15_000;
@@ -208,7 +208,7 @@ impl Call {
         matches!(self, Self::Browser { .. } | Self::BrowserSession { .. })
     }
     pub(crate) fn is_computer(&self) -> bool {
-        matches!(self, Self::Computer { .. })
+        matches!(self, Self::DesktopSession { .. })
     }
 }
 /// Additive private v3 feature. No paths, credentials or native profile choices
@@ -216,27 +216,6 @@ impl Call {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum BrowserCommand {
-    PrepareOpen,
-    DispatchOpen {
-        target: ResourceTarget,
-    },
-    InspectOpen {
-        target: ResourceTarget,
-    },
-    PrepareAction {
-        target: ResourceTarget,
-        action: Box<serde_json::value::RawValue>,
-    },
-    DispatchAction {
-        action: ActionRef,
-    },
-    InspectAction {
-        action: ActionRef,
-    },
-}
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum ComputerCommand {
     PrepareOpen,
     DispatchOpen {
         target: ResourceTarget,
@@ -290,6 +269,9 @@ pub enum Reply {
     BrowserSession {
         result: rmcp::model::CallToolResult,
     },
+    DesktopSession {
+        result: rmcp::model::CallToolResult,
+    },
     ExecTask {
         result: ExecTaskResult,
     },
@@ -330,12 +312,6 @@ pub enum Reply {
     Prepared {
         snapshot: Snapshot,
     },
-    /// Host/Core may translate a presentation alias into a private native token.
-    /// Bind the original request independently from the canonical Core payload.
-    ComputerPrepared {
-        request_digest: Sha256Digest,
-        snapshot: Snapshot,
-    },
     Start {
         snapshot: Snapshot,
         dispatch: String,
@@ -357,13 +333,6 @@ pub enum Reply {
         write_id: Option<String>,
     },
     BrowserAction {
-        snapshot: Snapshot,
-        dispatch: String,
-        result: Option<serde_json::Value>,
-        cause: Option<ErrorCategory>,
-        cleanup_complete: Option<bool>,
-    },
-    ComputerAction {
         snapshot: Snapshot,
         dispatch: String,
         result: Option<serde_json::Value>,

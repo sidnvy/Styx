@@ -4,7 +4,7 @@ mod drain;
 use crate::{
     enrollment::shared::SharedEnrollment,
     gateway::auth::VerifiedGatewayOwner,
-    host::protocol::wire::{BrowserCommand, Call, ComputerCommand, OwnerRef, Reply},
+    host::protocol::wire::{BrowserCommand, Call, OwnerRef, Reply},
 };
 pub(crate) use drain::{EntryDrain, cleanup_control};
 use std::{
@@ -131,8 +131,6 @@ enum TargetKind {
     ExecAction,
     BrowserResource,
     BrowserAction,
-    ComputerResource,
-    ComputerAction,
 }
 struct TargetRecord {
     digest: Sha256Digest,
@@ -187,6 +185,7 @@ pub struct BoundOwner {
     inner: Arc<Binding>,
 }
 impl BoundOwner {
+    #[cfg(test)]
     pub(crate) fn physically_settled(&self) -> bool {
         self.inner
             .cleanup
@@ -925,6 +924,11 @@ impl RelayHandle {
                 grant_revision,
                 ..
             }
+            | Call::DesktopSession {
+                owner,
+                grant_revision,
+                ..
+            }
             | Call::ExecTask {
                 owner,
                 grant_revision,
@@ -1050,55 +1054,6 @@ impl RelayHandle {
                     TargetKind::BrowserAction,
                 ),
             },
-            Call::Computer {
-                owner,
-                grant_revision,
-                command,
-                ..
-            } => match command {
-                ComputerCommand::PrepareOpen => (
-                    owner,
-                    None,
-                    Some(*grant_revision),
-                    true,
-                    TargetKind::ComputerResource,
-                ),
-                ComputerCommand::DispatchOpen { target }
-                | ComputerCommand::InspectOpen { target } => (
-                    owner,
-                    Some((
-                        target.operation_id.clone(),
-                        target.payload_digest,
-                        TargetKind::ComputerResource,
-                    )),
-                    Some(*grant_revision),
-                    false,
-                    TargetKind::ComputerResource,
-                ),
-                ComputerCommand::PrepareAction { target, .. } => (
-                    owner,
-                    Some((
-                        target.operation_id.clone(),
-                        target.payload_digest,
-                        TargetKind::ComputerResource,
-                    )),
-                    Some(*grant_revision),
-                    true,
-                    TargetKind::ComputerAction,
-                ),
-                ComputerCommand::DispatchAction { action }
-                | ComputerCommand::InspectAction { action } => (
-                    owner,
-                    Some((
-                        action.operation_id.clone(),
-                        action.payload_digest,
-                        TargetKind::ComputerAction,
-                    )),
-                    Some(*grant_revision),
-                    false,
-                    TargetKind::ComputerAction,
-                ),
-            },
             _ => return Err(RelayError::Unsupported),
         };
         if owner != &b.inner.reference || revision.is_some_and(|r| r != b.grant_revision()) {
@@ -1158,12 +1113,10 @@ impl RelayHandle {
         }
         self.authorize_route(&entry, lane).await?;
         if let Reply::Prepared { snapshot }
-        | Reply::ComputerPrepared { snapshot, .. }
         | Reply::Start { snapshot, .. }
         | Reply::Inspected { snapshot }
         | Reply::Action { snapshot, .. }
-        | Reply::BrowserAction { snapshot, .. }
-        | Reply::ComputerAction { snapshot, .. } = &reply
+        | Reply::BrowserAction { snapshot, .. } = &reply
         {
             let mut targets = b.inner.targets.lock().map_err(|_| RelayError::Unknown)?;
             if let Some(existing) = targets.get(&snapshot.operation_id) {

@@ -37,79 +37,6 @@ pub fn check_admission(
     facts: &AdmissionFacts,
     now: MonotonicMillis,
 ) -> Result<(), ErrorCategory> {
-    check_admission_inner(context, facts, now, AdmissionMode::Ordinary)
-}
-
-/// A single explicitly prepared AX read may obtain evidence while OS permission
-/// is still unknown. This never authorizes AX mutation, capture or native input,
-/// and never changes any descriptor to Granted. Runtime must additionally prove
-/// the immutable payload is the fixed, screenshot-free native AX read route.
-pub fn check_desktop_read_acquisition(
-    context: &PreparedContext,
-    facts: &AdmissionFacts,
-    now: MonotonicMillis,
-) -> Result<(), ErrorCategory> {
-    if context.capability != CapabilityId::DesktopAccessibility
-        || context.session.is_none()
-        || context.observation.is_some()
-        || facts.descriptor.scope != Scope::Session
-    {
-        return Err(ErrorCategory::StateConflict);
-    }
-    check_admission_inner(context, facts, now, AdmissionMode::ReadAcquisition)
-}
-
-/// A fixed exact-window screenshot attempt has the same acquisition boundary
-/// as AX reading, but never grants AX, pointer or keyboard authorization.
-pub fn check_desktop_window_capture_acquisition(
-    context: &PreparedContext,
-    facts: &AdmissionFacts,
-    now: MonotonicMillis,
-) -> Result<(), ErrorCategory> {
-    if context.capability != CapabilityId::DesktopCapture
-        || context.session.is_none()
-        || context.observation.is_some()
-        || facts.descriptor.scope != Scope::Session
-    {
-        return Err(ErrorCategory::StateConflict);
-    }
-    check_admission_inner(context, facts, now, AdmissionMode::ReadAcquisition)
-}
-
-/// Only the dedicated target-bound EditableText write-attempt port may use
-/// this policy. Unknown OS permission remains Unknown: the protected OS call
-/// performs final authorization, and a lost/negative write reply is not replayed.
-/// Runtime must prove the original owner/resource/native snapshot/object and
-/// select only the signed once-write provider; ordinary input remains closed.
-pub fn check_desktop_accessibility_write_attempt(
-    context: &PreparedContext,
-    facts: &AdmissionFacts,
-    now: MonotonicMillis,
-) -> Result<(), ErrorCategory> {
-    if context.capability != CapabilityId::DesktopAccessibility
-        || context.session.is_none()
-        || context.observation.is_none()
-        || facts.current_observation != context.observation
-        || facts.descriptor.scope != Scope::Session
-    {
-        return Err(ErrorCategory::StaleObservation);
-    }
-    check_admission_inner(context, facts, now, AdmissionMode::TargetBoundWriteAttempt)
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AdmissionMode {
-    Ordinary,
-    ReadAcquisition,
-    TargetBoundWriteAttempt,
-}
-
-fn check_admission_inner(
-    context: &PreparedContext,
-    facts: &AdmissionFacts,
-    now: MonotonicMillis,
-    mode: AdmissionMode,
-) -> Result<(), ErrorCategory> {
     let d = &facts.descriptor;
     if deadline_expired(context, now)? {
         return Err(ErrorCategory::OperationTimeout);
@@ -127,18 +54,14 @@ fn check_admission_inner(
     }
     match d.authorization {
         Authorization::Granted => {}
-        Authorization::Required | Authorization::Unknown
-            if mode == AdmissionMode::ReadAcquisition => {}
-        Authorization::Unknown if mode == AdmissionMode::TargetBoundWriteAttempt => {}
-        Authorization::Required => return Err(ErrorCategory::PermissionRequired),
+        Authorization::Required | Authorization::Unknown => {
+            return Err(ErrorCategory::PermissionRequired);
+        }
         Authorization::Denied | Authorization::Revoked => {
             return Err(ErrorCategory::PermissionDenied);
         }
-        Authorization::Unknown => return Err(ErrorCategory::PermissionRequired),
     }
-    if d.availability != Availability::Available
-        && !(mode == AdmissionMode::ReadAcquisition && d.availability == Availability::Unavailable)
-    {
+    if d.availability != Availability::Available {
         return Err(d.reason.unwrap_or(ErrorCategory::CapabilityUnsupported));
     }
     if context.capability.requires_session() {

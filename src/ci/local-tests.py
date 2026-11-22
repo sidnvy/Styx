@@ -10,8 +10,8 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACTS = (
-    "providers::cua::public_contract::tests::branch_only_tool_projection_preserves_bound_targets_and_environment",
-    "providers::cua::public_contract::tests::complete_branch_declarations_keep_the_existing_schema_admission",
+    "gateway::paired::backend::computer::native_desktop_regressions::desktop_list_tools_and_desktop_call_strip_environment_id_and_forward_verbatim",
+    "gateway::paired::backend::tests::advertised_native_desktop_mcp_entries_replace_legacy_eight_tools",
     "enrollment::client_http::transport_tests::local_rejection_admits_fixed_authenticated_request_over_tls",
     "enrollment::client_http::transport_tests::local_rejection_does_not_admit_anonymous_or_generic_admin_requests",
 )

@@ -324,16 +324,9 @@ fn success(value: Value) -> CallToolResult {
 
 use super::{BoundOwner, RelayHandle};
 use crate::gateway::http::lifecycle::{GatewayOwnerLifecycle, OwnerCleanup, OwnerFenceError};
-use crate::host::protocol::wire::{ActionRef, Call, ExecTaskCommand, Reply};
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
-use styx_contracts::{
-    identity::{OwnerId, Sha256Digest},
-    operation::{ExecutionLiveness, OperationState, OutputDrain, ResourceTarget},
-};
-use tokio::sync::Mutex as AsyncMutex;
+use crate::host::protocol::wire::{Call, ExecTaskCommand, Reply};
+use std::{sync::Mutex, time::Duration};
+use styx_contracts::identity::{OwnerId, Sha256Digest};
 
 struct OwnerState {
     principal: Sha256Digest,
@@ -342,14 +335,6 @@ struct OwnerState {
 struct State {
     capability_generations: BTreeMap<DeviceId, [u64; 4]>,
     owners: BTreeMap<OwnerId, OwnerState>,
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    computers: computer::ComputerContexts,
-}
-impl State {
-    fn collect_settled(&mut self) {
-        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-        self.computers.collect_settled();
-    }
 }
 /// No raw executor or network authority is exposed to the public tool adapter.
 pub struct PairedGatewayBackend {
@@ -367,8 +352,6 @@ impl PairedGatewayBackend {
             state: Mutex::new(State {
                 capability_generations: BTreeMap::new(),
                 owners: BTreeMap::new(),
-                #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-                computers: computer::ComputerContexts::default(),
             }),
         }
     }
@@ -399,14 +382,9 @@ impl PairedGatewayBackend {
             Err(error) => return Err(error.code()),
         };
         let mut state = self.state.lock().map_err(|_| "state_unavailable")?;
-        let previous = state
+        state
             .capability_generations
-            .insert(device.clone(), report.generations)
-            .unwrap_or([0; 4]);
-        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-        if previous[2] != report.generations[2] {
-            state.computers.clear_device(device);
-        }
+            .insert(device.clone(), report.generations);
         Ok(())
     }
     fn active(&self, owner: &VerifiedGatewayOwner) -> bool {
@@ -724,8 +702,6 @@ impl GatewayOwnerLifecycle for PairedGatewayBackend {
                     .fetch_add(1, std::sync::atomic::Ordering::Release);
                 let mut state = self.state.lock().expect("paired state");
                 state.owners.remove(owner.owner_id());
-                #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-                state.computers.clear_owner(owner);
                 owner.cleanup_complete();
                 OwnerCleanup::Complete
             }
