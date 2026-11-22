@@ -2110,6 +2110,28 @@
       }
     },
     {
+      "name": "android_list_displays",
+      "description": "List the selected Android Host's physical and virtual displays and accessible app windows, including display_id, size, and focused window. The Host must have its Android capability and AccessibilityService enabled.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "environment_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. An offline selected Host never falls back to another device."
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
       "name": "android_observe",
       "description": "Read the selected Android Host screen and permission state. Return an accessibility tree with observation_id and node_id values; optionally return a screenshot directly as MCP image content. Use fresh observations for actions. The Host must have its Android capability and AccessibilityService enabled.",
       "inputSchema": {
@@ -2119,6 +2141,11 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. An offline selected Host never falls back to another device."
+          },
+          "display_id": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Android display ID (default 0 for observe; for actions, optional but must match observation_id)."
           },
           "include_tree": {
             "type": "boolean",
@@ -2157,6 +2184,11 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. An offline selected Host never falls back to another device."
+          },
+          "display_id": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Android display ID (default 0 for observe; for actions, optional but must match observation_id)."
           },
           "observation_id": {
             "type": "string",
@@ -2231,6 +2263,11 @@
             "type": "string",
             "minLength": 1,
             "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. An offline selected Host never falls back to another device."
+          },
+          "display_id": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Android display ID (default 0 for observe; for actions, optional but must match observation_id)."
           },
           "observation_id": {
             "type": "string",

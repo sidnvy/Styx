@@ -5,6 +5,24 @@ The app runs the shared Rust enrollment and Host protocol through JNI. Kotlin ow
 Android service lifetime, protected credential storage and Accessibility APIs.
 There is no Android HTTP server, Exec service, Browser runtime, Root or ADB runtime dependency.
 
+## Multi-display control
+
+`android_list_displays` returns the physical and accessible virtual displays,
+with `display_id`, dimensions, and application windows. Pass the returned
+`display_id` to `android_observe` to read that screen (including optional
+screenshot), then use its `observation_id` with `android_act` or
+`android_run_steps`. Actions may also specify `display_id`; if supplied it must
+match the observation. A caller can retain a fresh observation per display,
+without invalidating the others. Omitting `display_id` continues to target 0.
+
+Node actions and touch gestures are routed to the observed display. Global
+navigation (`back`, `home`, `recents`) remains limited to display 0 because
+Android's accessibility global-action API has no display selector. A missing
+virtual display invalidates its observation. Screenshots use the platform
+Accessibility screenshot API, and can return `screenshot_error` if Android
+blocks capture. Virtual displays are provisioned externally (for example by
+scrcpy); the app itself requires no ADB or Root permission.
+
 ## Development build
 
 Use the existing Android SDK (API 36), NDK 29.0.14206865, JDK 21 and Rust

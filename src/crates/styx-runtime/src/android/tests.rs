@@ -97,6 +97,9 @@ impl AndroidPlatform for FakeAndroid {
                 Ok(json!({"ok":true}))
             }
             "release_caller" => Ok(json!({"ok":true})),
+            "android_list_displays" => Ok(
+                json!({"ok":true,"displays":[{"display_id":0,"width":1080,"height":2340},{"display_id":7,"width":1080,"height":1920}]}),
+            ),
             "android_observe" => {
                 assert!(
                     arguments["__caller_id"]
@@ -104,7 +107,7 @@ impl AndroidPlatform for FakeAndroid {
                         .is_some_and(|id| !id.is_empty())
                 );
                 let n = self.observations.fetch_add(1, Ordering::SeqCst) + 1;
-                let mut result = json!({"ok":true,"observation_id":format!("observation-{n}"),"nodes":[{"node_id":"node-1","text":"Synthetic test target"}]});
+                let mut result = json!({"ok":true,"observation_id":format!("observation-{n}"),"display_id":arguments.get("display_id").and_then(Value::as_u64).unwrap_or(0),"nodes":[{"node_id":"node-1","text":"Synthetic test target"}]});
                 if arguments["screenshot"] == true {
                     result["screenshot"] = json!({
                         "mime_type":"image/png",
@@ -453,6 +456,24 @@ async fn independent_android_pairing_wss_images_reconnect_disable_and_revoke() {
     );
     assert_eq!(status["exec"]["configured"], false);
     assert_eq!(status["android"]["readiness"], "ready");
+    let displays = data(
+        mcp.call_tool(call(
+            "android_list_displays",
+            json!({"environment_id":device}),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert_eq!(displays["displays"][1]["display_id"], 7);
+    let secondary = data(
+        mcp.call_tool(call(
+            "android_observe",
+            json!({"environment_id":device,"display_id":7}),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert_eq!(secondary["display_id"], 7);
 
     let observed = mcp
         .call_tool(call(

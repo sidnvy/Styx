@@ -5,13 +5,35 @@ fn args(v: Value) -> Option<Map<String, Value>> {
 }
 #[test]
 fn frozen_tools_and_exec_arguments_preserve_legacy_edges() {
-    assert_eq!(PUBLIC.len(), 44);
+    assert_eq!(PUBLIC.len(), 45);
     for name in ["press_key", "scroll"] {
         assert!(!PUBLIC.iter().any(|tool| tool.name == name));
     }
     assert_eq!(PUBLIC[0].name, "exec_command");
     assert_eq!(PUBLIC[1].name, "write_stdin");
     assert_eq!(PUBLIC.last().unwrap().name, "android_run_steps");
+    let display_tools: Vec<_> = PUBLIC
+        .iter()
+        .filter(|tool| tool.name.starts_with("android_"))
+        .collect();
+    assert_eq!(display_tools.len(), 4);
+    let list = display_tools
+        .iter()
+        .find(|tool| tool.name == "android_list_displays")
+        .unwrap();
+    let list_schema = serde_json::to_value(list).unwrap();
+    assert!(
+        jsonschema::validator_for(&list_schema["inputSchema"])
+            .unwrap()
+            .is_valid(&json!({"environment_id":"pixel"}))
+    );
+    for name in ["android_observe", "android_act", "android_run_steps"] {
+        let tool = display_tools.iter().find(|tool| tool.name == name).unwrap();
+        let schema = serde_json::to_value(tool).unwrap();
+        let props = &schema["inputSchema"]["properties"];
+        assert_eq!(props["display_id"]["minimum"], 0);
+    }
+
     assert!(ExecArgs::parse(args(json!({"cmd":"printf x","login":false,"tty":false,"yield_time_ms":0.0,"max_output_tokens":1.0}))).is_ok());
     for v in [
         json!({"cmd":"x","login":null}),
