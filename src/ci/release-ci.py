@@ -177,7 +177,9 @@ def bundle(args):
     manifest = args.source / 'worker-release/manifest.json'
     if manifest.is_file():
         executables.update('worker-release/' + row['path'] for row in json.loads(manifest.read_text())['files'] if row['executable'])
-    with tarfile.open(args.output, 'w:gz') as tar:
+    # Internal CI handoff archive between workflow jobs; fast compression avoids
+    # burning minutes on single-threaded level-9 zlib before upload-artifact.
+    with tarfile.open(args.output, 'w:gz', compresslevel=1) as tar:
         for file in sorted(args.source.rglob('*')):
             require(not file.is_symlink(), 'artifact links refused')
             if file.is_file():
