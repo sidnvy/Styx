@@ -7,25 +7,32 @@ several conversations can use the same computer.
 
 ## Changes
 
-This release candidate builds on `0.8.1-rc.8` with a focused cross-platform
-Browser/CUA reliability update:
+This release candidate builds on `0.8.1-rc.9` with Public MCP compatibility
+for Google Gemini and standard MCP OAuth clients plus release CI caching
+improvements:
 
-- **Existing Chrome profiles**: The trusted native Cua worker on Linux, Windows
-  and macOS receives the explicit `existing-profile` capability grant when
-  started by Styx, allowing Cua's standard existing-browser attachment path
-  to operate without an extra privileged desktop compatibility layer.
-- **Hyprland + Chrome tab groups**: Correctly correlate Chromium accessibility
-  frames whose titles contain `- Part of group ...` with the native Chrome
-  window. Retain exact-match/ambiguity refusals for unrelated windows.
-- **Browser session recovery**: Recognize a confirmed worker exit or closed
-  context, reclaim its resources and retain the saved browser profile for the
-  valid operator. Do not automatically replay uncertain browser input after
-  dispatch.
+- **Public MCP handshake & streaming SSE framing (`styx gateway public-mcp`)**:
+  Return direct `application/json` responses for synchronous handshake and
+  discovery requests (`initialize`, `tools/list`, `ping`, `prompts/list`,
+  `resources/list`, `resources/templates/list`) and non-SSE clients, removing
+  upstream `rmcp` SEP-1699 empty priming events that caused Google Gemini Web's
+  MCP client to abort after `initialize`. Streaming `tools/call` SSE responses
+  drop empty priming events and ensure `event: message` framing while preserving
+  session lifetime guards.
+- **Public MCP principal & discovery compatibility**: Route standard MCP
+  discovery probes (`prompts/list`, `resources/list`, `resources/templates/list`)
+  and `notifications/roots/list_changed` cleanly through `GatewayHttp`, and
+  distinguish `PrincipalDomain::PublicMcp` so `tools/call` preserves OpenAI
+  `_meta` `TunnelConversation` correlation for ChatGPT while falling back to
+  isolated per-session `McpSession` ownership for Gemini and standard MCP
+  clients.
+- **CI & Release caching optimization**: Shared `main`-scoped release dependency
+  warm caches (`styx-cache-warm.yml`), external-crate-only `Cargo.lock` cache
+  keys (`cache-key.py`), pruned target caching, full-CPU release builds, and
+  faster internal CI bundle staging.
 
-All existing Gateway MCP tools, Host identities, device pairings, browser
-profiles and wire protocols remain unchanged. Existing-profile attachment is
-subject to the trusted Host's browser capability and Cua session controls;
-no Cloudflare Access or Gemini OAuth settings are changed by this release.
+All existing Gateway MCP tool names, Host identities, device pairings, browser
+profiles, and Android/Windows/macOS release signing identities remain unchanged.
 
 ### Android signing & in-place upgrades
 
