@@ -215,6 +215,33 @@ impl HostCoordinator {
         Ok(())
     }
 
+    pub(crate) fn browser_session_exited(
+        &self,
+        owner: &OwnerLease,
+        target: &ResourceTarget,
+    ) -> bool {
+        let state = self.inner.state.lock().expect("Host state mutex");
+        let Ok(browser) = lane(&state) else {
+            return false;
+        };
+        let Ok(bound) = handle(browser, owner, target) else {
+            return false;
+        };
+        bound.worker_exited_or_closed()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_browser_context_closed_for_test(
+        &self,
+        owner: &OwnerLease,
+        target: &ResourceTarget,
+    ) {
+        let state = self.inner.state.lock().expect("Host state mutex");
+        let bound = handle(lane(&state).expect("browser lane"), owner, target)
+            .expect("registered test browser");
+        bound.mark_context_closed_for_test();
+    }
+
     /// Local paired transport lifecycle, not a caller-provided generation or
     /// operation cancellation. Contexts/owners/native work remain unchanged.
     pub(crate) fn invalidate_browser_link_references(&self) {

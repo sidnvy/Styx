@@ -95,7 +95,7 @@ func makeEmbeddedDaemon(driver: URL, socketPath: String, pidFile: String) -> (Pr
     let child = Process(), lifetime = Pipe()
     child.executableURL = driver
     child.arguments = ["serve", "--embedded", "--parent-liveness-stdio",
-        "--socket", socketPath, "--pid-file", pidFile]
+        "--grant", "existing-profile", "--socket", socketPath, "--pid-file", pidFile]
     child.environment = ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory(),
         "TMPDIR": NSTemporaryDirectory(), "CUA_DRIVER_EMBEDDED": "1",
         "CUA_DRIVER_HOST_BUNDLE_ID": bundleID, "CUA_DRIVER_PERMISSION_MODE": "standard",

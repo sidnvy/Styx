@@ -535,6 +535,8 @@ fn command_line(path: &OsStr, entry: &Entry) -> io::Result<Vec<u16>> {
         ],
         Entry::CuaServe { socket, pid_file } => vec![
             OsStr::new("serve"),
+            OsStr::new("--grant"),
+            OsStr::new("existing-profile"),
             OsStr::new("--socket"),
             socket.as_os_str(),
             OsStr::new("--pid-file"),

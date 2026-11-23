@@ -1,3 +1,4 @@
+use super::operations::BrowserBootstrap;
 use super::*;
 use crate::host::coordinator::HostCoordinator;
 use crate::providers::browser::OwnedBrowserConfig;
@@ -522,4 +523,96 @@ async fn caller_closed_during_profile_discovery_cannot_reclaim_a_saved_profile()
         true
     );
     assert_eq!(engine.resolve(&b, None, true).unwrap().0, id);
+}
+
+#[tokio::test]
+async fn closed_or_exited_browser_context_recovers_to_saved_profile_on_next_request() {
+    let root = std::env::temp_dir().join(format!("styx-browser-recover-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for name in ["workspace", "profile", "output"] {
+        let dir = root.join(name);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let source = Arc::new(Bootstrap {
+        root,
+        prepared: AtomicUsize::new(0),
+    });
+    let (host, authority) = HostCoordinator::new_without_executor(
+        OperationLedger::new("browser-recover-generation".try_into().unwrap()),
+        facts(CapabilityId::ExecRun),
+    )
+    .unwrap();
+    authority
+        .configure_browser(facts(CapabilityId::Browser))
+        .unwrap();
+    let inputs = host.browser_sessions().inputs(source.clone());
+    let engine = Engine {
+        port: BrowserPort {
+            coordinator: &host,
+            authority: &authority,
+            inputs: &inputs,
+        },
+    };
+    let a = named_caller("recover-after-exit");
+    register_caller(&host, &authority, &a);
+
+    let (resolved_id, cell) = engine.resolve(&a, None, true).unwrap();
+    assert_ne!(resolved_id, id);
+
+    // Prepare an open operation on the session's lease, then simulate an open
+    // resource whose worker has exited before the next action is dispatched.
+    let old_lease = {
+        let mut session = cell.lock().await;
+        let lease = session.lease.clone();
+        let config = source.prepare_profile(&lease).unwrap();
+        authority.register_browser_profile(&lease, config).unwrap();
+        let context = PreparedContext {
+            device_id: host.bootstrap_identity().0.clone(),
+            grant_revision: host.grant_revision(),
+            session: None,
+            observation: None,
+            capability: CapabilityId::Browser,
+            deadline: Some(MonotonicMillis(host.now().0 + 5_000)),
+            disconnect_policy: DisconnectPolicy::RetainForOwner,
+        };
+        let snapshot = host.prepare_browser_open(&lease, context).unwrap();
+        let target = ResourceTarget {
+            operation_id: snapshot.id.clone(),
+            payload_digest: snapshot.payload_digest,
+        };
+        // The fixture refuses browser startup without launching a browser.
+        // Then simulate the provider's explicit context-closed observation,
+        // so the session recovery path can be exercised independently of GUI.
+        match host
+            .dispatch_browser_open(&lease, &target.operation_id, target.payload_digest)
+            .await
+            .unwrap()
+        {
+            crate::host::coordinator::BrowserOpenSubmission::Submitted(ticket) => {
+                let _ = ticket.wait().await.unwrap();
+            }
+            _ => panic!("expected submission"),
+        }
+        assert!(!host.browser_session_exited(&lease, &target));
+        host.mark_browser_context_closed_for_test(&lease, &target);
+        assert!(host.browser_session_exited(&lease, &target));
+        session.target = Some(target);
+        session.phase = Phase::Ready;
+        lease
+    };
+
+    let outcome = engine
+        .handle(a.clone(), tabs(Some(resolved_id.clone())))
+        .await;
+    assert_eq!(error(&outcome)["error"], "capability_unsupported");
+    assert_eq!(error(&outcome)["uncertain"], false);
+
+    let session = cell.lock().await;
+    assert!(session.operator.as_ref() == Some(&a));
+    assert!(session.target.is_none());
+    assert!(session.cleanup.is_none());
+    assert_ne!(session.lease, old_lease);
 }
