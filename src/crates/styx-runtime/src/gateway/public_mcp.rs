@@ -1084,7 +1084,7 @@ mod tests {
         // 5. Real initialize -> 200 with Mcp-Session-Id (including external Host header!)
         let init = client
             .post(&url)
-            .header("Host", "styx-mcp-bench.sidnvy.com")
+            .header("Host", "styx.example.test")
             .header("Cf-Access-Jwt-Assertion", &jwt)
             .header(CONTENT_TYPE, "application/json")
             .header("Accept", "application/json, text/event-stream")
@@ -1116,7 +1116,7 @@ mod tests {
         // 6. Real tools/list -> 200 with desktop_list_tools AND oauth2 securitySchemes!
         let list = client
             .post(&url)
-            .header("Host", "styx-mcp-bench.sidnvy.com")
+            .header("Host", "styx.example.test")
             .header("Cf-Access-Jwt-Assertion", &jwt)
             .header("Mcp-Session-Id", &sid)
             .header(CONTENT_TYPE, "application/json")

@@ -2,18 +2,18 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "styx-native",
   "version": "0.1.1",
-  "description": "Connect an independent Styx Gateway to explicitly enrolled native devices.",
+  "description": "Connect ChatGPT to your paired macOS, Windows, Linux, and Android devices through your self-hosted Styx Gateway.",
   "author": {"name": "Styx contributors"},
   "extensions": {
     "com.openai": {
       "interface": {
         "displayName": "Styx",
-        "shortDescription": "Native device execution",
-        "longDescription": "Onboard a native Styx device with publisher-verified runtime, explicit owner approval, and independently connected native execution and computer tools.",
+        "shortDescription": "Control your paired devices",
+        "longDescription": "Connect ChatGPT to your paired macOS, Windows, Linux, and Android devices through your self-hosted Styx Gateway for CLI, Browser, Desktop, and Android control.",
         "developerName": "Styx contributors",
         "category": "Developer Tools",
         "capabilities": [],
-        "defaultPrompt": "Help me onboard a new native device to my independent Styx Gateway."
+        "defaultPrompt": "List my connected Styx devices."
       }
     }
   }
