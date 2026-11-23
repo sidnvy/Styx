@@ -1,9 +1,10 @@
 # Styx @VERSION@
 
-Styx connects ChatGPT to your Windows, macOS and Linux computers through one
-Gateway. Each computer decides locally whether to enable commands, Browser
-Automation and Computer Use. One conversation can use several computers;
-several conversations can use the same computer.
+Styx connects ChatGPT, Gemini, and other MCP OAuth clients to your Windows,
+macOS, Linux, and Android devices through one Gateway. Each computer decides
+locally whether to enable commands, Browser Automation and Computer Use. One
+conversation can use several computers; several conversations can use the same
+computer.
 
 ## Changes
 

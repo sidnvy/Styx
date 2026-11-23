@@ -511,7 +511,7 @@ enum GatewayPublicMcpCommand {
         /// HTTP header carrying the JWT (default: cf-access-jwt-assertion; also supports authorization).
         #[arg(long)]
         jwt_header: Option<String>,
-        /// Allowed browser Origin URLs (repeatable; default: https://chatgpt.com).
+        /// Allowed browser Origin URLs (repeatable; default: https://chatgpt.com, https://gemini.google.com).
         #[arg(long = "allowed-origin")]
         allowed_origin: Vec<String>,
         /// Enable the native Public MCP loopback listener when Gateway starts.

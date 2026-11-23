@@ -49,7 +49,10 @@ fn default_jwt_header() -> String {
     "cf-access-jwt-assertion".into()
 }
 fn default_allowed_origins() -> Vec<String> {
-    vec!["https://chatgpt.com".into()]
+    vec![
+        "https://chatgpt.com".into(),
+        "https://gemini.google.com".into(),
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -615,9 +618,20 @@ fn extract_sse_json_payload(bytes: &[u8]) -> Option<Bytes> {
     None
 }
 
-fn sanitize_sse_chunk(chunk: Bytes) -> Option<Bytes> {
-    let Ok(text) = std::str::from_utf8(&chunk) else {
-        return Some(chunk);
+fn find_sse_event_end(buf: &[u8]) -> Option<usize> {
+    let lf = buf.windows(2).position(|w| w == b"\n\n").map(|i| i + 2);
+    let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
+    match (lf, crlf) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+fn sanitize_sse_event(event: Bytes) -> Option<Bytes> {
+    let Ok(text) = std::str::from_utf8(&event) else {
+        return Some(event);
     };
     let mut has_data = false;
     let mut has_non_empty_data = false;
@@ -633,27 +647,38 @@ fn sanitize_sse_chunk(chunk: Bytes) -> Option<Bytes> {
         }
     }
     if !has_data {
-        return Some(chunk);
+        return Some(event);
     }
     if !has_non_empty_data {
         return None;
     }
     if has_event {
-        return Some(chunk);
+        return Some(event);
     }
-    let mut out = String::with_capacity("event: message\n".len() + text.len());
-    out.push_str("event: message\n");
+    let prefix = if text.contains("\r\n") {
+        "event: message\r\n"
+    } else {
+        "event: message\n"
+    };
+    let mut out = String::with_capacity(prefix.len() + text.len());
+    out.push_str(prefix);
     out.push_str(text);
     Some(Bytes::from(out))
 }
 
 struct SanitizedSseBody {
     inner: HeldBody,
+    buf: Vec<u8>,
+    eof: bool,
 }
 
 impl SanitizedSseBody {
     fn new(inner: HeldBody) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            buf: Vec::new(),
+            eof: false,
+        }
     }
 }
 
@@ -666,16 +691,44 @@ impl Body for SanitizedSseBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
         loop {
+            if let Some(end) = find_sse_event_end(&self.buf) {
+                let tail = self.buf.split_off(end);
+                let event = Bytes::from(std::mem::replace(&mut self.buf, tail));
+                if let Some(out) = sanitize_sse_event(event) {
+                    return Poll::Ready(Some(Ok(Frame::data(out))));
+                }
+                continue;
+            }
+            if self.eof {
+                if self.buf.is_empty() {
+                    return Poll::Ready(None);
+                }
+                let event = Bytes::from(std::mem::take(&mut self.buf));
+                if let Some(out) = sanitize_sse_event(event) {
+                    return Poll::Ready(Some(Ok(Frame::data(out))));
+                }
+                return Poll::Ready(None);
+            }
             match Pin::new(&mut self.inner).poll_frame(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(None) => {
+                    self.eof = true;
+                }
                 Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
                     Ok(chunk) => {
-                        if let Some(out) = sanitize_sse_chunk(chunk) {
-                            return Poll::Ready(Some(Ok(Frame::data(out))));
-                        }
+                        self.buf.extend_from_slice(&chunk);
                     }
-                    Err(other) => return Poll::Ready(Some(Ok(other))),
+                    Err(other) => {
+                        if !self.buf.is_empty() {
+                            let event = Bytes::from(std::mem::take(&mut self.buf));
+                            if let Some(out) = sanitize_sse_event(event) {
+                                // Only reachable if a non-data frame (trailers) arrives after data;
+                                // we don't drop trailers either way, just emit buffered data first.
+                                return Poll::Ready(Some(Ok(Frame::data(out))));
+                            }
+                        }
+                        return Poll::Ready(Some(Ok(other)));
+                    }
                 },
                 Poll::Ready(Some(Err(err))) => match err {},
             }
@@ -683,7 +736,7 @@ impl Body for SanitizedSseBody {
     }
 
     fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
+        self.eof && self.buf.is_empty()
     }
 
     fn size_hint(&self) -> SizeHint {
@@ -1038,6 +1091,11 @@ mod tests {
         assert!(verifier.origin_allowed(&headers));
         headers.insert(ORIGIN, HeaderValue::from_static("https://chatgpt.com"));
         assert!(verifier.origin_allowed(&headers));
+        headers.insert(
+            ORIGIN,
+            HeaderValue::from_static("https://gemini.google.com"),
+        );
+        assert!(verifier.origin_allowed(&headers));
         headers.insert(ORIGIN, HeaderValue::from_static("https://evil.example"));
         assert!(!verifier.origin_allowed(&headers));
     }
@@ -1327,18 +1385,75 @@ mod tests {
         assert!(extract_sse_json_payload(b"data: \nid: 0\nretry: 3000\n\n").is_none());
 
         assert!(
-            sanitize_sse_chunk(Bytes::from_static(b"data: \nid: 0\nretry: 3000\n\n")).is_none()
+            sanitize_sse_event(Bytes::from_static(b"data: \nid: 0\nretry: 3000\n\n")).is_none()
         );
         assert_eq!(
-            sanitize_sse_chunk(Bytes::from_static(b":\n\n")),
+            sanitize_sse_event(Bytes::from_static(b":\n\n")),
             Some(Bytes::from_static(b":\n\n"))
         );
         let bare =
             Bytes::from_static(b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\nid: 0/0\n\n");
-        let sanitized = sanitize_sse_chunk(bare).expect("sanitized data event");
+        let sanitized = sanitize_sse_event(bare).expect("sanitized data event");
         assert!(sanitized.starts_with(b"event: message\ndata: "));
         let with_event = Bytes::from_static(b"event: message\ndata: {\"ok\":true}\n\n");
-        assert_eq!(sanitize_sse_chunk(with_event.clone()), Some(with_event));
+        assert_eq!(sanitize_sse_event(with_event.clone()), Some(with_event));
+    }
+
+    struct ChunkedTestBody(std::collections::VecDeque<Bytes>);
+
+    impl Body for ChunkedTestBody {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
+            Poll::Ready(self.0.pop_front().map(|chunk| Ok(Frame::data(chunk))))
+        }
+    }
+
+    #[tokio::test]
+    async fn sanitized_sse_body_frames_coalesced_split_utf8_and_crlf_events() {
+        async fn run(chunks: Vec<&[u8]>) -> String {
+            let queue = chunks
+                .into_iter()
+                .map(Bytes::copy_from_slice)
+                .collect::<std::collections::VecDeque<_>>();
+            let held = HeldBody::new(ChunkedTestBody(queue).boxed(), None);
+            let collected = SanitizedSseBody::new(held).collect().await.unwrap();
+            String::from_utf8(collected.to_bytes().to_vec()).expect("valid utf8")
+        }
+
+        // 1. Coalesced priming + data event in a single chunk.
+        let coalesced = run(vec![
+            b"data: \nid: 0\nretry: 3000\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\nid: 1/0\n\n",
+        ])
+        .await;
+        assert_eq!(
+            coalesced,
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\nid: 1/0\n\n"
+        );
+
+        // 2. Single event split mid-UTF-8 multibyte character across chunks.
+        let full = "data: {\"text\":\"中文结果\"}\nid: 2/0\n\n".as_bytes();
+        let split_pos = full
+            .windows(2)
+            .position(|w| w == &"中".as_bytes()[..2])
+            .unwrap()
+            + 1;
+        let split = run(vec![&full[..split_pos], &full[split_pos..]]).await;
+        assert_eq!(
+            split,
+            "event: message\ndata: {\"text\":\"中文结果\"}\nid: 2/0\n\n"
+        );
+
+        // 3. CRLF-delimited priming + real event.
+        let crlf = run(vec![
+            b"data: \r\nid: 0\r\nretry: 3000\r\n\r\ndata: {\"ok\":true}\r\n\r\n",
+        ])
+        .await;
+        assert_eq!(crlf, "event: message\r\ndata: {\"ok\":true}\r\n\r\n");
     }
 
     #[tokio::test]

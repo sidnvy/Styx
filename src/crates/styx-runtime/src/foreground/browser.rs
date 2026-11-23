@@ -85,6 +85,51 @@ fn first_browser(paths: &[&str]) -> Result<PathBuf> {
         .ok_or(ErrorCategory::CapabilityUnsupported)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn channel_candidates(channel: &str) -> Result<&'static [&'static str]> {
+    #[cfg(target_os = "linux")]
+    {
+        match channel {
+            "chrome" => Ok(&[
+                "/opt/google/chrome/chrome",
+                "/usr/bin/google-chrome-stable",
+                "/usr/bin/google-chrome",
+            ]),
+            "msedge" => Ok(&["/opt/microsoft/msedge/msedge", "/usr/bin/microsoft-edge"]),
+            "chromium" => Ok(&[
+                "/usr/lib/chromium/chromium",
+                "/usr/bin/chromium",
+                "/usr/bin/chromium-browser",
+            ]),
+            "auto" => Ok(&[
+                "/opt/google/chrome/chrome",
+                "/usr/bin/google-chrome-stable",
+                "/usr/bin/google-chrome",
+                "/opt/microsoft/msedge/msedge",
+                "/usr/bin/microsoft-edge",
+                "/usr/lib/chromium/chromium",
+                "/usr/bin/chromium",
+                "/usr/bin/chromium-browser",
+            ]),
+            _ => Err(ErrorCategory::CapabilityUnsupported),
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        match channel {
+            "chrome" => Ok(&["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]),
+            "msedge" => Ok(&["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]),
+            "chromium" => Ok(&["/Applications/Chromium.app/Contents/MacOS/Chromium"]),
+            "auto" => Ok(&[
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            ]),
+            _ => Err(ErrorCategory::CapabilityUnsupported),
+        }
+    }
+}
+
 fn selected(profile: &LoadedProfile) -> Result<Option<PathBuf>> {
     let source = profile.browser_source();
     let (deployment, host) = (source.deployment, source.host);
@@ -108,27 +153,15 @@ fn selected(profile: &LoadedProfile) -> Result<Option<PathBuf>> {
         || d.executable != h.executable
         || d.channel
             .as_deref()
-            .is_some_and(|v| !["auto", "chrome", "msedge"].contains(&v))
+            .is_some_and(|v| !["auto", "chrome", "msedge", "chromium"].contains(&v))
     {
         return Err(ErrorCategory::CapabilityUnsupported);
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let path = match d.executable {
             Some(path) => path,
-            None => {
-                let paths: &[&str] = match d.channel.as_deref().unwrap_or("auto") {
-                    "chrome" => &["/opt/google/chrome/chrome"],
-                    "msedge" => &["/opt/microsoft/msedge/msedge"],
-                    "auto" => &[
-                        "/opt/google/chrome/chrome",
-                        "/opt/microsoft/msedge/msedge",
-                        "/usr/lib/chromium/chromium",
-                    ],
-                    _ => return Err(ErrorCategory::CapabilityUnsupported),
-                };
-                first_browser(paths)?
-            }
+            None => first_browser(channel_candidates(d.channel.as_deref().unwrap_or("auto"))?)?,
         };
         Ok(Some(resolve_browser(&path)?))
     }
@@ -138,25 +171,6 @@ fn selected(profile: &LoadedProfile) -> Result<Option<PathBuf>> {
             Some(path) => path,
             None => windows::selected_channel(d.channel.as_deref().unwrap_or("auto"))?,
         }))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let path = match d.executable {
-            Some(path) => path,
-            None => {
-                let paths: &[&str] = match d.channel.as_deref().unwrap_or("auto") {
-                    "chrome" => &["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"],
-                    "msedge" => &["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"],
-                    "auto" => &[
-                        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-                    ],
-                    _ => return Err(ErrorCategory::CapabilityUnsupported),
-                };
-                first_browser(paths)?
-            }
-        };
-        Ok(Some(resolve_browser(&path)?))
     }
 }
 
@@ -567,5 +581,23 @@ mod selection_tests {
             None
         );
         assert_eq!(persistent_profile_id("host-browser-old-incarnation"), None);
+    }
+
+    #[test]
+    fn channel_candidates_include_chromium_and_reject_unknown() {
+        let chrome = channel_candidates("chrome").unwrap();
+        let edge = channel_candidates("msedge").unwrap();
+        let chromium = channel_candidates("chromium").unwrap();
+        let auto = channel_candidates("auto").unwrap();
+        assert!(!chrome.is_empty());
+        assert!(!edge.is_empty());
+        assert!(!chromium.is_empty());
+        for path in chrome.iter().chain(edge.iter()).chain(chromium.iter()) {
+            assert!(auto.contains(path), "{path} missing from auto");
+        }
+        assert!(matches!(
+            channel_candidates("firefox"),
+            Err(ErrorCategory::CapabilityUnsupported)
+        ));
     }
 }
