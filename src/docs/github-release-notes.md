@@ -7,45 +7,25 @@ several conversations can use the same computer.
 
 ## Changes
 
-This release candidate builds on `0.8.1-rc.7` with native Public MCP OIDC/JWKS
-support, QR code pairing, full Android CI signing + UI polish, and live-tested
-multi-platform reliability fixes:
+This release candidate builds on `0.8.1-rc.8` with a focused cross-platform
+Browser/CUA reliability update:
 
-- **Native Rust Gateway Public MCP (`styx gateway public-mcp`)**: Replaces the
-  external Python `mcp_bridge.py` with an in-process, loopback-only Rust
-  OIDC/JWKS ingress (`RS256` JWKS verification, `Origin` check, per-subject
-  conversation isolation, `server/discover` handling, and OAuth `tools/list`
-  annotations) exposing all 39 live Gateway MCP tools.
-- **Zero-dependency `styx://pair` QR code & deep-link pairing**: macOS
-  invitation panels render a CoreImage QR code alongside the copyable
-  invitation text; Android `Styx Host` registers the `styx://pair` `ACTION_VIEW`
-  intent filter and prefills Gateway URL and short code for user review (never
-  auto-submitting).
-- **Android Host CI release signing, guided onboarding & system overlays**:
-  - Integrates automated fixed-key Android release signing directly into
-    `.github/workflows/styx-release.yml` (producing `Styx-@VERSION@-android-arm64.apk`
-    alongside desktop packages).
-  - Adds a 3-step guided setup checklist with one-tap single-line invitation
-    paste, Restricted Settings App Info shortcut, and automatic collapse into a
-    minimal daily status view once ready.
-  - Fixes `StyxAccessibilityService` (`TYPE_SYSTEM` window observation and
-    `android_list_displays`) so notification shades, Quick Settings, and system
-    dialogs can be observed and navigated without `no_active_window` deadlocks.
-- **Reconnect conflict resilience**: Preserves HTTP `409 Conflict` on occupied
-  lane half-open reconnects instead of falling through to `403`, preventing
-  Android and desktop Hosts from falsely reporting `gateway_pairing_revoked`.
-- **Desktop onboarding polish, multi-lane online status & Host version visibility**:
-  - Surfaces `host_version` from paired Hosts in `styx computers`, status views,
-    and `/admin/devices`; fixes multi-lane online status so Android-only and
-    non-exec Hosts report online accurately.
-  - Aligns macOS, Windows, and Linux ChatGPT Custom MCP guidance with the live
-    ChatGPT UI (`Add → Add custom MCP server` + `No authentication`), adds
-    OpenAI Platform Tunnels links, Windows browser auto-detection, live macOS
-    invitation countdown, and Linux `styx setup` preflight diagnostics.
+- **Existing Chrome profiles**: The trusted native Cua worker on Linux, Windows
+  and macOS receives the explicit `existing-profile` capability grant when
+  started by Styx, allowing Cua's standard existing-browser attachment path
+  to operate without an extra privileged desktop compatibility layer.
+- **Hyprland + Chrome tab groups**: Correctly correlate Chromium accessibility
+  frames whose titles contain `- Part of group ...` with the native Chrome
+  window. Retain exact-match/ambiguity refusals for unrelated windows.
+- **Browser session recovery**: Recognize a confirmed worker exit or closed
+  context, reclaim its resources and retain the saved browser profile for the
+  valid operator. Do not automatically replay uncertain browser input after
+  dispatch.
 
-Wire protocols remain backward-compatible with `0.8.1-rc.6`/`0.8.1-rc.7`
-(`computer_v3`, 39 MCP tools); existing profiles, identities, pairing and
-capability grants are preserved across in-place upgrades.
+All existing Gateway MCP tools, Host identities, device pairings, browser
+profiles and wire protocols remain unchanged. Existing-profile attachment is
+subject to the trusted Host's browser capability and Cua session controls;
+no Cloudflare Access or Gemini OAuth settings are changed by this release.
 
 ### Android signing & in-place upgrades
 
