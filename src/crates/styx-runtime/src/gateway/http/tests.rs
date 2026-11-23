@@ -216,7 +216,15 @@ async fn official_sdk_tcp_auth_sessions_limits_and_pending_close() {
             }
             let pending = if index==4 {
                 let before=backend.calls.lock().unwrap().len();
-                let unknown=raw.post(&uri).bearer_auth(&token).header(SID,&sid).header(VERSION,*version).header(http::header::ACCEPT,"application/json, text/event-stream").json(&serde_json::json!({"jsonrpc":"2.0","id":77,"method":"resources/list"})).send().await.unwrap();
+                for discovery_method in ["resources/list","resources/templates/list","prompts/list"] {
+                    let probe=raw.post(&uri).bearer_auth(&token).header(SID,&sid).header(VERSION,*version).header(http::header::ACCEPT,"application/json, text/event-stream").json(&serde_json::json!({"jsonrpc":"2.0","id":77,"method":discovery_method})).send().await.unwrap();
+                    assert_eq!(probe.status(),StatusCode::OK);
+                    let body=probe.text().await.unwrap();
+                    assert!(body.contains("-32601"),"expected JSON-RPC MethodNotFound for {discovery_method}: {body}");
+                }
+                let roots_changed=raw.post(&uri).bearer_auth(&token).header(SID,&sid).header(VERSION,*version).header(http::header::ACCEPT,"application/json, text/event-stream").json(&serde_json::json!({"jsonrpc":"2.0","method":"notifications/roots/list_changed"})).send().await.unwrap();
+                assert_eq!(roots_changed.status(),StatusCode::ACCEPTED);
+                let unknown=raw.post(&uri).bearer_auth(&token).header(SID,&sid).header(VERSION,*version).header(http::header::ACCEPT,"application/json, text/event-stream").json(&serde_json::json!({"jsonrpc":"2.0","id":78,"method":"resources/read","params":{"uri":"file:///etc/passwd"}})).send().await.unwrap();
                 assert_eq!(unknown.status(),StatusCode::BAD_REQUEST);assert_eq!(backend.calls.lock().unwrap().len(),before);
                 let too_large=raw.post(&uri).bearer_auth(&token).header(SID,&sid).body("x".repeat(MESSAGE_BYTES+1)).send().await.unwrap();assert_eq!(too_large.status(),StatusCode::PAYLOAD_TOO_LARGE);
                 let peer=client.peer().clone();let pending=tokio::spawn(async move {peer.call_tool(serde_json::from_value(serde_json::json!({"name":"exec_command","arguments":{"cmd":"pending-counter-effect"}})).unwrap()).await});
