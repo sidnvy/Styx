@@ -337,49 +337,6 @@ mod platform {
     fn error(code: &'static str) -> ForegroundError {
         ForegroundError(code)
     }
-    // Public MCP gets its own protected forwarding credential; no Tunnel process
-    // or ordinary model bearer is required for conversation-scoped Gateway ownership.
-    fn public_mcp_ingress(
-        path: &Path,
-    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, ForegroundError> {
-        let root = PrivateRoot::open(path).map_err(|_| error("gateway_protected_read"))?;
-        const FILE: &str = "public-mcp-forwarder.token";
-        if root.ensure_absent(FILE).is_ok() {
-            return Ok(None);
-        }
-        let secret = root
-            .read_raw(FILE, 4096)
-            .map_err(|_| error("gateway_public_ingress_invalid"))?;
-        Ok(Some(zeroize::Zeroizing::new(secret.bytes().to_vec())))
-    }
-    #[cfg(all(test, unix))]
-    #[test]
-    fn public_mcp_forwarder_file_is_optional_and_private() {
-        use std::{
-            fs::{self, OpenOptions, Permissions},
-            io::Write,
-            os::unix::fs::{OpenOptionsExt, PermissionsExt},
-        };
-        let root = tempfile::tempdir().expect("private parent");
-        fs::set_permissions(root.path(), Permissions::from_mode(0o700)).unwrap();
-        let state = root.path().join("state");
-        fs::create_dir(&state).unwrap();
-        fs::set_permissions(&state, Permissions::from_mode(0o700)).unwrap();
-        assert!(public_mcp_ingress(&state).unwrap().is_none());
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(state.join("public-mcp-forwarder.token"))
-            .unwrap();
-        file.write_all(&[b'a'; 48]).unwrap();
-        file.sync_all().unwrap();
-        drop(file);
-        assert_eq!(
-            public_mcp_ingress(&state).unwrap().unwrap().as_slice(),
-            &[b'a'; 48]
-        );
-    }
     struct Loaded {
         admitted: Arc<Admitted>,
         service: EnrollmentService,
@@ -744,21 +701,7 @@ mod platform {
         })
         .await
         .map_err(|_| error("gateway_reader_failed"))??;
-        // One authenticated forwarding domain at a time. When the old Tunnel
-        // is disabled, the independent Public MCP file admits the same
-        // TunnelConversation lifecycle without starting its client process.
-        let public_ingress = if tunnel_ingress.is_none() {
-            let state = tunnel_state.clone();
-            tokio::task::spawn_blocking(move || public_mcp_ingress(&state))
-                .await
-                .map_err(|_| error("gateway_reader_failed"))??
-        } else {
-            None
-        };
-        let forwarding = tunnel_ingress
-            .as_ref()
-            .map(|key| key.token().as_bytes())
-            .or_else(|| public_ingress.as_ref().map(|key| key.as_slice()));
+        let forwarding = tunnel_ingress.as_ref().map(|key| key.token().as_bytes());
         let policy = if let Some(token) = forwarding {
             Arc::new(
                 Arc::try_unwrap(policy)
