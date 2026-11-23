@@ -2,9 +2,9 @@ name: Styx release workflow checks
 on:
   push:
     branches: [main]
-    paths: ['.github/workflows/*.yml', 'src/ci/release-*', 'src/ci/test/test_release*.py', 'src/tools/release/build-native-binary.py']
+    paths: ['.github/workflows/*.yml', 'src/ci/release-*', 'src/ci/cache-key.py', 'src/ci/test/test_release*.py', 'src/tools/release/build-native-binary.py']
   pull_request:
-    paths: ['.github/workflows/*.yml', 'src/ci/release-*', 'src/ci/test/test_release*.py', 'src/tools/release/build-native-binary.py']
+    paths: ['.github/workflows/*.yml', 'src/ci/release-*', 'src/ci/cache-key.py', 'src/ci/test/test_release*.py', 'src/tools/release/build-native-binary.py']
   workflow_dispatch:
 permissions:
   contents: read
