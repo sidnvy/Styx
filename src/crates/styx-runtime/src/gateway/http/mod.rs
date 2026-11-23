@@ -396,9 +396,14 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
                         initialize_version = Some(r.params.protocol_version.as_str().to_owned())
                     }
                     ClientRequest::CallToolRequest(_) => {
-                        if principal.is_tunnel() {
+                        if principal.requires_tunnel_conversation() {
                             conversation_context =
                                 Some(rmcp::model::GetMeta::get_meta(&r.request).clone());
+                        } else if principal.allows_tunnel_conversation() {
+                            let meta = rmcp::model::GetMeta::get_meta(&r.request);
+                            if conversation::has_any_openai_correlation_key(meta) {
+                                conversation_context = Some(meta.clone());
+                            }
                         }
                         // Only a tool call shows ChatGPT used Styx: the tunnel
                         // client's own startup probe sends initialize/tools/list

@@ -22,11 +22,20 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> Clone for AuthorizedCall<B> 
         }
     }
 }
+const OPENAI_CORRELATION_KEYS: [&str; 3] =
+    ["openai/organization", "openai/subject", "openai/session"];
+
+pub(super) fn has_any_openai_correlation_key(meta: &RequestMetaObject) -> bool {
+    OPENAI_CORRELATION_KEYS
+        .iter()
+        .any(|name| meta.get(*name).is_some())
+}
+
 fn correlation(meta: &RequestMetaObject, principal: Sha256Digest) -> Result<[u8; 32], StatusCode> {
     let mut values = Vec::with_capacity(4);
     let principal = principal.to_hex();
     values.push(principal.as_str());
-    for name in ["openai/organization", "openai/subject", "openai/session"] {
+    for name in OPENAI_CORRELATION_KEYS {
         let value = meta
             .get(name)
             .and_then(serde_json::Value::as_str)
@@ -47,7 +56,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
         principal: &AuthenticatedGatewayPrincipal,
         meta: &RequestMetaObject,
     ) -> Result<AuthorizedCall<B>, StatusCode> {
-        if !principal.is_tunnel() || self.stop.is_cancelled() {
+        if !principal.allows_tunnel_conversation() || self.stop.is_cancelled() {
             return Err(StatusCode::FORBIDDEN);
         }
         let key = correlation(meta, principal.fingerprint())?;
