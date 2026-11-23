@@ -6,15 +6,15 @@
   "official_archive_sha256": "8a2b76c50cffd076b40c29c593e69d51b51c2563b6bf51dc1926d1dac9558cfe",
   "archive_root_mtime": 1794515309,
   "patch": "cua-0.47.24-styx-fixes.patch",
-  "patch_sha256": "16b457265c55401ba502a244a8cfb2ecdde079a5ac091cc881d8f57ad4fbab9f",
+  "patch_sha256": "82390ab9c73db62b93848c08784bf22a82251115cea7de7794eabf1eeb978e64",
   "files": [
     {
       "path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs",
       "original_sha256": "5df205dd3655ffb37980a3bef9e85328efd02be510621fca2297564c7cbef776",
       "original_git_blob_sha1": "bae6dee0c127c3528cf22944a11c48e4531df668",
-      "final_sha256": "65b877077effeb63cdb4d907c657d2acd7c8cf8cefa548c24dcdad966ae76024",
+      "final_sha256": "09cd164e5c6b8dedda1800a1e3e928d19f5ed8cd87a0453b7cfb1bf9942657e9",
       "original_bytes": 372519,
-      "final_bytes": 374225
+      "final_bytes": 375485
     },
     {
       "path": "libs/cua-driver/rust/crates/platform-linux/src/tools/set_value.rs",
@@ -145,7 +145,8 @@
     "normal Linux set_value uses the existing Hyprland keyboard for whole-field replacement when no native value route exists",
     "native setter errors propagate without post-attempt ordinal replay; explicit false behavior remains upstream",
     "Linux AT-SPI click activation includes radio button / radio menu item / check menu item check/uncheck verbs",
-    "Hyprland foreground press_key uses the existing Wayland virtual keyboard without requiring the optional isolated-input plugin"
+    "Hyprland foreground press_key uses the existing Wayland virtual keyboard without requiring the optional isolated-input plugin",
+    "Hyprland Chromium window correlation matches accessible frame titles with Chrome tab groups (- Part of group ...)"
   ],
   "snapshot_and_session_implementation": "official upstream, no Styx replacement cache or private drain protocol",
   "strict_text_platforms": []

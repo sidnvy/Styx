@@ -1,7 +1,72 @@
 diff --git a/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs b/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs
 --- a/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs
 +++ b/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs
-@@ -3430,7 +3430,7 @@
+@@ -1043,13 +1043,32 @@
+     if native.is_empty() {
+         return false;
+     }
+-    accessible == native
+-        || accessible
+-            .strip_prefix(native)
+-            .and_then(|suffix| suffix.strip_prefix(" - "))
+-            .is_some_and(|profile| {
+-                !profile.trim().is_empty() && !profile.chars().any(char::is_control)
+-            })
++    let valid_segment =
++        |segment: &str| !segment.trim().is_empty() && !segment.chars().any(char::is_control);
++    let matches_with_optional_profile = |expected: &str| {
++        accessible == expected
++            || accessible
++                .strip_prefix(expected)
++                .and_then(|suffix| suffix.strip_prefix(" - "))
++                .is_some_and(valid_segment)
++    };
++    if matches_with_optional_profile(native) {
++        return true;
++    }
++    let Some((page, app)) = native.rsplit_once(" - ") else {
++        return false;
++    };
++    let Some(rest) = accessible
++        .strip_prefix(page)
++        .and_then(|s| s.strip_prefix(" - Part of group "))
++    else {
++        return false;
++    };
++    let tail_sep = format!(" - {app}");
++    let Some((group, tail)) = rest.split_once(&tail_sep) else {
++        return false;
++    };
++    valid_segment(group) && (tail.is_empty() || tail.strip_prefix(" - ").is_some_and(valid_segment))
+ }
+ 
+ fn correlate_hyprland_frame(
+@@ -1143,6 +1162,24 @@
+             ),
+             Some(7)
+         );
++        assert_eq!(
++            correlate_hyprland_frame(
++                &[frame(
++                    "Tunnels | Cloudflare - Part of group 🔎 Styx HTTPS 验收 - Google Chrome - Sid"
++                )],
++                &[("Tunnels | Cloudflare - Google Chrome", 800, 600)],
++                0,
++            ),
++            Some(7)
++        );
++        assert_eq!(
++            correlate_hyprland_frame(
++                &[frame("Page - Part of group Work - Google Chrome")],
++                &[("Page - Google Chrome", 800, 600)],
++                0,
++            ),
++            Some(7)
++        );
+     }
+ 
+     #[test]
+@@ -3430,7 +3465,7 @@
  fn is_checkbox_role(role: &str) -> bool {
      matches!(
          role.trim().to_ascii_lowercase().as_str(),
@@ -10,7 +75,7 @@ diff --git a/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs b/li
      )
  }
  
-@@ -4189,6 +4189,50 @@
+@@ -4189,6 +4224,50 @@
      )
  }
  
@@ -61,7 +126,7 @@ diff --git a/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs b/li
  /// [`focus_element`] on a snapshot-cached element identity.
  pub fn focus_element_ref(object_ref: &ObjectRef) -> Result<bool> {
      bounded_for(
-@@ -5822,7 +5866,7 @@
+@@ -5822,7 +5901,7 @@
      if let Ok(et) = proxies.editable_text().await {
          // Replace whole contents (parity with the Windows/macOS set_value,
          // which overwrite rather than insert at the caret).
@@ -70,7 +135,7 @@ diff --git a/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs b/li
              commit_editable_write(&proxies).await;
              return Ok(());
          }
-@@ -5833,7 +5877,7 @@
+@@ -5833,7 +5912,7 @@
              Err(_) => 0,
          };
          match editable_insert_length_for(value, toolkit_of(acc)).await {

@@ -508,7 +508,7 @@ impl LinuxOwnedScope {
                     CuaLaunchMode::Serve => {
                         command
                             .arg(&input.executable)
-                            .args(["serve", "--socket"])
+                            .args(["serve", "--grant", "existing-profile", "--socket"])
                             .arg(private_tmp.join("cua.sock"))
                             .arg("--pid-file")
                             .arg(private_tmp.join("cua.pid"));

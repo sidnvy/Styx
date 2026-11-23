@@ -215,6 +215,31 @@ impl BrowserHandle {
         Ok(())
     }
 
+    pub(crate) fn worker_exited_or_closed(&self) -> bool {
+        let Ok(mut live) = self.resource.state.try_lock() else {
+            return false;
+        };
+        if live.context_closed || live.retired {
+            return true;
+        }
+        live.child.as_mut().is_some_and(|child| {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let observed = child.try_wait();
+            #[cfg(target_os = "windows")]
+            let observed = child.observed_exit();
+            matches!(observed, Ok(Some(_)))
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_context_closed_for_test(&self) {
+        self.resource
+            .state
+            .try_lock()
+            .expect("test browser state must be unlocked")
+            .context_closed = true;
+    }
+
     pub fn operation(&self) -> &OperationId {
         &self.resource.operation
     }
@@ -1002,6 +1027,7 @@ impl BrowserActionSlot {
         }
         if observed_state.closed {
             self.state.references.invalidate();
+            self.state.context_closed = true;
             self.state.uncertain = true;
             return refuse(BrowserError::StaleObservation);
         }

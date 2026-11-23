@@ -343,19 +343,31 @@ impl Engine<'_> {
                 && s.target.as_ref().is_some_and(|target| {
                     self.port
                         .coordinator
-                        .inspect_browser(
-                            &s.lease,
-                            &target.operation_id,
-                            target.payload_digest,
-                            false,
-                        )
-                        .is_ok_and(|snap| {
-                            snap.liveness == ExecutionLiveness::Exited
-                                && snap.output_drain == OutputDrain::Drained
-                        })
+                        .browser_session_exited(&s.lease, target)
+                        || self
+                            .port
+                            .coordinator
+                            .inspect_browser(
+                                &s.lease,
+                                &target.operation_id,
+                                target.payload_digest,
+                                false,
+                            )
+                            .is_ok_and(|snap| {
+                                snap.liveness == ExecutionLiveness::Exited
+                                    && snap.output_drain == OutputDrain::Drained
+                            })
                 })
             {
+                let operator = s.operator.clone();
                 let _ = self.close(&id, &mut s).await;
+                if s.phase == Phase::Saved
+                    && operator
+                        .as_ref()
+                        .is_some_and(|op| self.active_caller(op).is_ok())
+                {
+                    s.operator = operator;
+                }
             }
         }
     }
@@ -488,8 +500,45 @@ impl Engine<'_> {
                 let mut result = if close {
                     self.close(&id, &mut session).await
                 } else {
+                    if session.cleanup.is_none()
+                        && session.target.as_ref().is_some_and(|target| {
+                            self.port
+                                .coordinator
+                                .browser_session_exited(&session.lease, target)
+                        })
+                    {
+                        let operator = session.operator.clone();
+                        let _ = self.close(&id, &mut session).await;
+                        if session.phase == Phase::Saved
+                            && operator
+                                .as_ref()
+                                .is_some_and(|op| self.active_caller(op).is_ok())
+                        {
+                            session.operator = operator;
+                        }
+                    }
                     self.execute(&mut session, action, &name).await
                 };
+                if !close
+                    && session.cleanup.is_none()
+                    && session.target.as_ref().is_some_and(|target| {
+                        self.port
+                            .coordinator
+                            .browser_session_exited(&session.lease, target)
+                    })
+                {
+                    let operator = session.operator.clone();
+                    let _ = self.close(&id, &mut session).await;
+                    if session.phase == Phase::Saved
+                        && operator
+                            .as_ref()
+                            .is_some_and(|op| self.active_caller(op).is_ok())
+                    {
+                        // Keep the first outcome. An action may have taken effect
+                        // before its worker exited; repeating it is not safe.
+                        session.operator = operator;
+                    }
+                }
                 let metadata = result.structured_content.get_or_insert_with(|| json!({}));
                 if metadata.is_object() {
                     metadata["browser_session_id"] = json!(id);

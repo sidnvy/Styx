@@ -29,7 +29,7 @@ pub enum BrowserError {
     StaleObservation,
 }
 type Result<T> = std::result::Result<T, BrowserError>;
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BrowserAction {
     Navigate {
