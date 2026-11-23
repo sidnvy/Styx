@@ -16,6 +16,7 @@ use http::{
     HeaderMap, HeaderValue, Method, Request, Response, StatusCode,
     header::{CACHE_CONTROL, CONTENT_TYPE, HeaderName, ORIGIN},
 };
+use http_body::{Body, Frame, SizeHint};
 use http_body_util::{BodyExt, Full};
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -27,7 +28,9 @@ use std::{
     fs,
     net::{Ipv4Addr, SocketAddr},
     path::Path,
+    pin::Pin,
     sync::Arc,
+    task::{Context, Poll},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{net::TcpListener, sync::RwLock, task::JoinSet};
@@ -583,6 +586,111 @@ pub(crate) fn annotate_oauth_tools_body(content_type: &str, bytes: Bytes) -> Byt
     bytes
 }
 
+fn extract_sse_json_payload(bytes: &[u8]) -> Option<Bytes> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let normalized = if text.contains('\r') {
+        std::borrow::Cow::Owned(text.replace("\r\n", "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    };
+    for block in normalized.split("\n\n") {
+        let mut data_lines = Vec::new();
+        for line in block.lines() {
+            if let Some(rest) = line.strip_prefix("data:") {
+                data_lines.push(rest.strip_prefix(' ').unwrap_or(rest));
+            }
+        }
+        if data_lines.is_empty() {
+            continue;
+        }
+        let payload = data_lines.join("\n");
+        let trimmed = payload.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if serde_json::from_str::<Value>(trimmed).is_ok() {
+            return Some(Bytes::copy_from_slice(trimmed.as_bytes()));
+        }
+    }
+    None
+}
+
+fn sanitize_sse_chunk(chunk: Bytes) -> Option<Bytes> {
+    let Ok(text) = std::str::from_utf8(&chunk) else {
+        return Some(chunk);
+    };
+    let mut has_data = false;
+    let mut has_non_empty_data = false;
+    let mut has_event = false;
+    for line in text.lines() {
+        if line.starts_with("event:") {
+            has_event = true;
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            has_data = true;
+            if !rest.trim().is_empty() {
+                has_non_empty_data = true;
+            }
+        }
+    }
+    if !has_data {
+        return Some(chunk);
+    }
+    if !has_non_empty_data {
+        return None;
+    }
+    if has_event {
+        return Some(chunk);
+    }
+    let mut out = String::with_capacity("event: message\n".len() + text.len());
+    out.push_str("event: message\n");
+    out.push_str(text);
+    Some(Bytes::from(out))
+}
+
+struct SanitizedSseBody {
+    inner: HeldBody,
+}
+
+impl SanitizedSseBody {
+    fn new(inner: HeldBody) -> Self {
+        Self { inner }
+    }
+}
+
+impl Body for SanitizedSseBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
+        loop {
+            match Pin::new(&mut self.inner).poll_frame(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
+                    Ok(chunk) => {
+                        if let Some(out) = sanitize_sse_chunk(chunk) {
+                            return Poll::Ready(Some(Ok(Frame::data(out))));
+                        }
+                    }
+                    Err(other) => return Poll::Ready(Some(Ok(other))),
+                },
+                Poll::Ready(Some(Err(err))) => match err {},
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::default()
+    }
+}
+
 async fn handle_request<B: GatewayToolBackend + GatewayOwnerLifecycle>(
     verifier: Arc<JwksVerifier>,
     mcp: Arc<GatewayHttp<B>>,
@@ -614,6 +722,11 @@ async fn handle_request<B: GatewayToolBackend + GatewayOwnerLifecycle>(
         .insert(http::header::HOST, HeaderValue::from_static("127.0.0.1"));
     parts.headers.remove(ORIGIN);
     parts.headers.remove("x-styx-tunnel-context");
+    let client_accepts_sse = parts
+        .headers
+        .get(http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains("text/event-stream"));
     if parts.method == Method::POST {
         let has_both = parts
             .headers
@@ -629,6 +742,7 @@ async fn handle_request<B: GatewayToolBackend + GatewayOwnerLifecycle>(
     }
 
     let mut is_tools_list = false;
+    let mut method: Option<String> = None;
     let body_bytes = if parts.method == Method::POST {
         match tokio::time::timeout(
             Duration::from_secs(5),
@@ -647,7 +761,11 @@ async fn handle_request<B: GatewayToolBackend + GatewayOwnerLifecycle>(
     if parts.method == Method::POST
         && let Ok(parsed) = serde_json::from_slice::<Value>(&body_bytes)
     {
-        if parsed.get("method").and_then(Value::as_str) == Some("server/discover") {
+        method = parsed
+            .get("method")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        if method.as_deref() == Some("server/discover") {
             let err = json!({
                 "jsonrpc": "2.0",
                 "id": parsed.get("id").cloned().unwrap_or(Value::Null),
@@ -658,8 +776,19 @@ async fn handle_request<B: GatewayToolBackend + GatewayOwnerLifecycle>(
                 Bytes::from(err.to_string()),
             ));
         }
-        is_tools_list = parsed.get("method").and_then(Value::as_str) == Some("tools/list");
+        is_tools_list = method.as_deref() == Some("tools/list");
     }
+    let prefer_json_response = matches!(
+        method.as_deref(),
+        Some(
+            "initialize"
+                | "tools/list"
+                | "ping"
+                | "prompts/list"
+                | "resources/list"
+                | "resources/templates/list"
+        )
+    ) || !client_accepts_sse;
 
     let forwarded = Request::from_parts(parts, Full::new(body_bytes));
     let mut response = mcp.handle_authorized(principal, forwarded).await;
@@ -672,21 +801,62 @@ async fn handle_request<B: GatewayToolBackend + GatewayOwnerLifecycle>(
         HeaderValue::from_static("nosniff"),
     );
 
-    if is_tools_list && response.status() == StatusCode::OK {
+    if response.status() == StatusCode::OK {
         let content_type = response
             .headers()
             .get(CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("application/json")
             .to_owned();
-        let (mut resp_parts, resp_body) = response.into_parts();
-        let Ok(collected) = resp_body.collect().await;
-        let rewritten = annotate_oauth_tools_body(&content_type, collected.to_bytes());
-        resp_parts.headers.remove(http::header::CONTENT_LENGTH);
-        response = Response::from_parts(
-            resp_parts,
-            HeldBody::new(Full::new(rewritten).boxed(), None),
-        );
+        if content_type.contains("text/event-stream") {
+            let (mut resp_parts, resp_body) = response.into_parts();
+            resp_parts.headers.remove(http::header::CONTENT_LENGTH);
+            if prefer_json_response {
+                let Ok(collected) = resp_body.collect().await;
+                let raw_bytes = collected.to_bytes();
+                if let Some(json_payload) = extract_sse_json_payload(&raw_bytes) {
+                    let final_bytes = if is_tools_list {
+                        annotate_oauth_tools_body("application/json", json_payload)
+                    } else {
+                        json_payload
+                    };
+                    resp_parts
+                        .headers
+                        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                    resp_parts
+                        .headers
+                        .remove(HeaderName::from_static("x-accel-buffering"));
+                    response = Response::from_parts(
+                        resp_parts,
+                        HeldBody::new(Full::new(final_bytes).boxed(), None),
+                    );
+                } else {
+                    let fallback = if is_tools_list {
+                        annotate_oauth_tools_body(&content_type, raw_bytes)
+                    } else {
+                        raw_bytes
+                    };
+                    response = Response::from_parts(
+                        resp_parts,
+                        HeldBody::new(Full::new(fallback).boxed(), None),
+                    );
+                }
+            } else {
+                response = Response::from_parts(
+                    resp_parts,
+                    HeldBody::new(SanitizedSseBody::new(resp_body).boxed(), None),
+                );
+            }
+        } else if is_tools_list {
+            let (mut resp_parts, resp_body) = response.into_parts();
+            let Ok(collected) = resp_body.collect().await;
+            let rewritten = annotate_oauth_tools_body(&content_type, collected.to_bytes());
+            resp_parts.headers.remove(http::header::CONTENT_LENGTH);
+            response = Response::from_parts(
+                resp_parts,
+                HeldBody::new(Full::new(rewritten).boxed(), None),
+            );
+        }
     }
     Ok(response)
 }
@@ -1113,7 +1283,7 @@ mod tests {
             .unwrap()
             .to_owned();
 
-        // 6. Real tools/list -> 200 with desktop_list_tools AND oauth2 securitySchemes!
+        // 6. Real tools/list -> 200 JSON with desktop_list_tools AND oauth2 securitySchemes!
         let list = client
             .post(&url)
             .header("Host", "styx.example.test")
@@ -1126,10 +1296,299 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(list.status(), 200);
-        let list_body = list.text().await.unwrap();
-        assert!(list_body.contains("desktop_list_tools"), "{list_body}");
-        assert!(list_body.contains("securitySchemes"), "{list_body}");
-        assert!(list_body.contains("oauth2"), "{list_body}");
+        assert_eq!(list.headers()[CONTENT_TYPE], "application/json");
+        let list_json: Value = list.json().await.unwrap();
+        assert_eq!(
+            list_json["result"]["tools"][0]["name"],
+            "desktop_list_tools"
+        );
+        assert_eq!(
+            list_json["result"]["tools"][0]["securitySchemes"],
+            json!([{"type":"oauth2","scopes":[]}])
+        );
+
+        stop.cancel();
+        server.await.unwrap().unwrap();
+        let shutdown = mcp
+            .paired_shutdown_handle()
+            .shutdown(Duration::from_secs(5))
+            .await;
+        assert!(shutdown.connections_joined);
+    }
+
+    #[test]
+    fn extract_and_sanitize_sse_drop_priming_and_preserve_keepalive() {
+        let sse = b"data: \nid: 0\nretry: 3000\n\n: keep-alive\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":\"a724de6b-0\",\"result\":{\"protocolVersion\":\"2025-11-25\"}}\n\n";
+        let extracted = extract_sse_json_payload(sse).expect("json payload extracted");
+        let parsed: Value = serde_json::from_slice(&extracted).unwrap();
+        assert_eq!(parsed["id"], "a724de6b-0");
+        assert_eq!(parsed["result"]["protocolVersion"], "2025-11-25");
+
+        assert!(extract_sse_json_payload(b"data: \nid: 0\nretry: 3000\n\n").is_none());
+
+        assert!(
+            sanitize_sse_chunk(Bytes::from_static(b"data: \nid: 0\nretry: 3000\n\n")).is_none()
+        );
+        assert_eq!(
+            sanitize_sse_chunk(Bytes::from_static(b":\n\n")),
+            Some(Bytes::from_static(b":\n\n"))
+        );
+        let bare =
+            Bytes::from_static(b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\nid: 0/0\n\n");
+        let sanitized = sanitize_sse_chunk(bare).expect("sanitized data event");
+        assert!(sanitized.starts_with(b"event: message\ndata: "));
+        let with_event = Bytes::from_static(b"event: message\ndata: {\"ok\":true}\n\n");
+        assert_eq!(sanitize_sse_chunk(with_event.clone()), Some(with_event));
+    }
+
+    #[tokio::test]
+    async fn serve_prefers_json_for_handshake_and_sanitizes_sse_calls_over_tcp() {
+        let (kp, jwk) = test_rsa_keypair();
+        let mut keys = BTreeMap::new();
+        keys.insert("kid-google".into(), jwk);
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut cfg = sample_config();
+        cfg.listen_port = addr.port();
+        let verifier = Arc::new(JwksVerifier::with_static_keys(cfg, keys).unwrap());
+        let policy = Arc::new(
+            crate::gateway::auth::GatewayBearerPolicy::new(
+                b"ordinary_bearer_token_for_fixture_0123456789",
+                vec!["127.0.0.1".into()],
+                vec![],
+            )
+            .unwrap(),
+        );
+        let mcp = GatewayHttp::new(policy, Arc::new(StubBackend));
+        let stop = CancellationToken::new();
+        let server = tokio::spawn(serve(listener, verifier, mcp.clone(), stop.clone()));
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let jwt = sign_jwt(
+            &kp,
+            &json!({"alg": "RS256", "kid": "kid-google", "typ": "JWT"}),
+            &json!({
+                "iss": "https://team.cloudflareaccess.com",
+                "aud": ["aud-123456"],
+                "sub": "sidnvy@gmail.com",
+                "iat": now - 5,
+                "exp": now + 300
+            }),
+        );
+        let url = format!("http://{addr}/mcp");
+        let client = reqwest::Client::new();
+
+        // 1. Google-style initialize (2025-11-25, charset utf-8, string uuid id) -> JSON directly.
+        let init = client
+            .post(&url)
+            .header("Host", "styx.example.test")
+            .header("Cf-Access-Jwt-Assertion", &jwt)
+            .header(CONTENT_TYPE, "application/json; charset=utf-8")
+            .header("Accept", "application/json, text/event-stream")
+            .header("Mcp-Protocol-Version", "2025-11-25")
+            .body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "initialize",
+                    "id": "a724de6b-0",
+                    "params": {
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {"roots": {"listChanged": true}, "sampling": {}},
+                        "clientInfo": {"name": "mcp", "version": "0.1.0"}
+                    }
+                })
+                .to_string(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(init.status(), 200);
+        assert_eq!(init.headers()[CONTENT_TYPE], "application/json");
+        let sid = init.headers()["mcp-session-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let init_json: Value = init.json().await.unwrap();
+        assert_eq!(init_json["id"], "a724de6b-0");
+        assert_eq!(init_json["result"]["protocolVersion"], "2025-11-25");
+
+        // 2. notifications/initialized -> 202 Accepted
+        let initialized = client
+            .post(&url)
+            .header("Cf-Access-Jwt-Assertion", &jwt)
+            .header("Mcp-Session-Id", &sid)
+            .header("Mcp-Protocol-Version", "2025-11-25")
+            .header(CONTENT_TYPE, "application/json; charset=utf-8")
+            .header("Accept", "application/json, text/event-stream")
+            .body(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(initialized.status(), 202);
+
+        // 3. tools/list -> direct JSON with securitySchemes
+        let list = client
+            .post(&url)
+            .header("Cf-Access-Jwt-Assertion", &jwt)
+            .header("Mcp-Session-Id", &sid)
+            .header("Mcp-Protocol-Version", "2025-11-25")
+            .header(CONTENT_TYPE, "application/json; charset=utf-8")
+            .header("Accept", "application/json, text/event-stream")
+            .body(
+                json!({"jsonrpc": "2.0", "id": "list-1", "method": "tools/list", "params": {}})
+                    .to_string(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(list.status(), 200);
+        assert_eq!(list.headers()[CONTENT_TYPE], "application/json");
+        let list_json: Value = list.json().await.unwrap();
+        assert_eq!(list_json["id"], "list-1");
+        assert_eq!(
+            list_json["result"]["tools"][0]["securitySchemes"],
+            json!([{"type":"oauth2","scopes":[]}])
+        );
+
+        // 4. prompts/list -> direct JSON JSON-RPC -32601
+        let prompts = client
+            .post(&url)
+            .header("Cf-Access-Jwt-Assertion", &jwt)
+            .header("Mcp-Session-Id", &sid)
+            .header("Mcp-Protocol-Version", "2025-11-25")
+            .header(CONTENT_TYPE, "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(
+                json!({"jsonrpc": "2.0", "id": "prompts-1", "method": "prompts/list"}).to_string(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(prompts.status(), 200);
+        assert_eq!(prompts.headers()[CONTENT_TYPE], "application/json");
+        let prompts_json: Value = prompts.json().await.unwrap();
+        assert_eq!(prompts_json["error"]["code"], -32601);
+
+        // 5. tools/call with Accept: application/json, text/event-stream -> sanitized SSE (no priming, has event: message)
+        let call_sse = client
+            .post(&url)
+            .header("Cf-Access-Jwt-Assertion", &jwt)
+            .header("Mcp-Session-Id", &sid)
+            .header("Mcp-Protocol-Version", "2025-11-25")
+            .header(CONTENT_TYPE, "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "call-sse",
+                    "method": "tools/call",
+                    "params": {"name": "desktop_list_tools", "arguments": {}}
+                })
+                .to_string(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(call_sse.status(), 200);
+        assert!(
+            call_sse.headers()[CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .contains("text/event-stream")
+        );
+        let sse_text = call_sse.text().await.unwrap();
+        assert!(!sse_text.contains("data: \n"), "{sse_text}");
+        assert!(!sse_text.contains("retry:"), "{sse_text}");
+        assert!(sse_text.contains("event: message\ndata: "), "{sse_text}");
+        assert!(sse_text.contains("\"ok\""), "{sse_text}");
+
+        // 6. tools/call with Accept: application/json only -> direct JSON
+        let call_json_resp = client
+            .post(&url)
+            .header("Cf-Access-Jwt-Assertion", &jwt)
+            .header("Mcp-Session-Id", &sid)
+            .header("Mcp-Protocol-Version", "2025-11-25")
+            .header(CONTENT_TYPE, "application/json")
+            .header("Accept", "application/json")
+            .body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "call-json",
+                    "method": "tools/call",
+                    "params": {"name": "desktop_list_tools", "arguments": {}}
+                })
+                .to_string(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(call_json_resp.status(), 200);
+        assert_eq!(call_json_resp.headers()[CONTENT_TYPE], "application/json");
+        let call_json: Value = call_json_resp.json().await.unwrap();
+        assert_eq!(call_json["id"], "call-json");
+        assert_eq!(call_json["result"]["content"][0]["text"], "ok");
+
+        // 7. tools/call WITH complete OpenAI _meta -> 200 OK (preserves TunnelConversation isolation)
+        let call_openai_resp = client
+            .post(&url)
+            .header("Cf-Access-Jwt-Assertion", &jwt)
+            .header("Mcp-Session-Id", &sid)
+            .header("Mcp-Protocol-Version", "2025-11-25")
+            .header(CONTENT_TYPE, "application/json")
+            .header("Accept", "application/json")
+            .body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "call-openai",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "desktop_list_tools",
+                        "arguments": {},
+                        "_meta": {
+                            "openai/organization": "org-1",
+                            "openai/subject": "sub-1",
+                            "openai/session": "chat-1"
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(call_openai_resp.status(), 200);
+        let call_openai_json: Value = call_openai_resp.json().await.unwrap();
+        assert_eq!(call_openai_json["id"], "call-openai");
+        assert_eq!(call_openai_json["result"]["content"][0]["text"], "ok");
+
+        // 8. tools/call WITH partial OpenAI _meta -> 400 Bad Request before dispatch
+        let call_partial_resp = client
+            .post(&url)
+            .header("Cf-Access-Jwt-Assertion", &jwt)
+            .header("Mcp-Session-Id", &sid)
+            .header("Mcp-Protocol-Version", "2025-11-25")
+            .header(CONTENT_TYPE, "application/json")
+            .header("Accept", "application/json")
+            .body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "call-partial",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "desktop_list_tools",
+                        "arguments": {},
+                        "_meta": {"openai/session": "chat-1"}
+                    }
+                })
+                .to_string(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(call_partial_resp.status(), 400);
 
         stop.cancel();
         server.await.unwrap().unwrap();

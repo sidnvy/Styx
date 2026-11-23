@@ -64,11 +64,13 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> BackendBridge<B> {
         let transport = self.life.clone();
         let context_valid = authorized.as_ref().is_some_and(|call| {
             call.conversation.life.owner.principal_fingerprint() == owner.principal_fingerprint()
-                && call.conversation.life.owner.is_tunnel()
+                && call.conversation.life.owner.allows_tunnel_conversation()
         });
         let admitted = self.admitted(owner)
-            && (if owner.is_tunnel() {
+            && (if owner.requires_tunnel_conversation() {
                 context_valid
+            } else if owner.allows_tunnel_conversation() {
+                authorized.is_none() || context_valid
             } else {
                 authorized.is_none()
             });

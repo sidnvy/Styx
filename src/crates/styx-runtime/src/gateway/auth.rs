@@ -90,11 +90,17 @@ impl std::fmt::Debug for GatewayBearerPolicy {
             .finish()
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrincipalDomain {
+    Ordinary,
+    Tunnel,
+    PublicMcp,
+}
 #[derive(Clone)]
 pub struct AuthenticatedGatewayPrincipal {
     owners: Arc<Mutex<Owners>>,
     digest: Sha256Digest,
-    tunnel: bool,
+    domain: PrincipalDomain,
 }
 impl std::fmt::Debug for AuthenticatedGatewayPrincipal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -109,7 +115,7 @@ pub struct VerifiedGatewayOwner {
     sequence: u64,
     owner_id: OwnerId,
     principal: Sha256Digest,
-    tunnel: bool,
+    domain: PrincipalDomain,
 }
 impl std::fmt::Debug for VerifiedGatewayOwner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -119,8 +125,18 @@ impl std::fmt::Debug for VerifiedGatewayOwner {
     }
 }
 impl VerifiedGatewayOwner {
+    #[cfg(test)]
     pub(super) fn is_tunnel(&self) -> bool {
-        self.tunnel
+        self.domain == PrincipalDomain::Tunnel
+    }
+    pub(super) fn requires_tunnel_conversation(&self) -> bool {
+        self.domain == PrincipalDomain::Tunnel
+    }
+    pub(super) fn allows_tunnel_conversation(&self) -> bool {
+        matches!(
+            self.domain,
+            PrincipalDomain::Tunnel | PrincipalDomain::PublicMcp
+        )
     }
     pub(crate) fn is_fenced(&self) -> bool {
         self.owners.lock().map_or(true, |o| o.fenced(self.sequence))
@@ -164,13 +180,19 @@ impl AuthenticatedGatewayPrincipal {
     pub(super) fn new_mcp_session_owner(&self) -> Result<VerifiedGatewayOwner, GatewayAuthError> {
         self.new_owner("mcp-session")
     }
-    pub(super) fn is_tunnel(&self) -> bool {
-        self.tunnel
+    pub(super) fn requires_tunnel_conversation(&self) -> bool {
+        self.domain == PrincipalDomain::Tunnel
+    }
+    pub(super) fn allows_tunnel_conversation(&self) -> bool {
+        matches!(
+            self.domain,
+            PrincipalDomain::Tunnel | PrincipalDomain::PublicMcp
+        )
     }
     pub(super) fn new_tunnel_conversation_owner(
         &self,
     ) -> Result<VerifiedGatewayOwner, GatewayAuthError> {
-        if !self.tunnel {
+        if !self.allows_tunnel_conversation() {
             return Err(GatewayAuthError::Forbidden);
         }
         self.new_owner("tunnel-conversation")
@@ -189,7 +211,7 @@ impl AuthenticatedGatewayPrincipal {
                 .try_into()
                 .expect("fixed UUID owner syntax"),
             principal: self.digest,
-            tunnel: self.tunnel,
+            domain: self.domain,
         })
     }
 }
@@ -318,11 +340,17 @@ impl GatewayBearerPolicy {
         Ok(AuthenticatedGatewayPrincipal {
             owners: self.owners.clone(),
             digest,
-            tunnel,
+            domain: if tunnel {
+                PrincipalDomain::Tunnel
+            } else {
+                PrincipalDomain::Ordinary
+            },
         })
     }
     /// Public MCP OIDC/JWKS admission after cryptographic JWT verification.
-    /// Mints a dedicated TunnelConversation principal isolated per (issuer, subject).
+    /// Isolates principals per `(issuer, subject)`, supports `TunnelConversation`
+    /// when OpenAI correlation metadata is present, and falls back to per-session
+    /// `McpSession` ownership otherwise.
     pub(crate) fn authorize_public_mcp_subject(
         &self,
         issuer: &str,
@@ -336,7 +364,7 @@ impl GatewayBearerPolicy {
         AuthenticatedGatewayPrincipal {
             owners: self.owners.clone(),
             digest: Sha256Digest::of_bytes(&material),
-            tunnel: true,
+            domain: PrincipalDomain::PublicMcp,
         }
     }
 }
