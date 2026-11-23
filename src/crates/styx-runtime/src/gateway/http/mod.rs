@@ -414,11 +414,16 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
                             observation.record(marker.as_bytes(), sid.as_deref(), &r.request);
                         }
                     }
-                    ClientRequest::PingRequest(_) | ClientRequest::ListToolsRequest(_) => {}
+                    ClientRequest::PingRequest(_)
+                    | ClientRequest::ListToolsRequest(_)
+                    | ClientRequest::ListPromptsRequest(_)
+                    | ClientRequest::ListResourcesRequest(_)
+                    | ClientRequest::ListResourceTemplatesRequest(_) => {}
                     _ => return plain(StatusCode::BAD_REQUEST),
                 },
                 ClientJsonRpcMessage::Notification(n) => match &n.notification {
-                    ClientNotification::InitializedNotification(_) => {}
+                    ClientNotification::InitializedNotification(_)
+                    | ClientNotification::RootsListChangedNotification(_) => {}
                     ClientNotification::CancelledNotification(_) => cancel = true,
                     _ => return plain(StatusCode::BAD_REQUEST),
                 },
