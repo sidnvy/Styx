@@ -90,15 +90,11 @@ live runtime data and process-referenced paths; Git does not recover all of thos
 
 ## Task context
 
-- Current delivery exits and verified evidence: current checklist in
+- Current delivery status:
   [END-TO-END-DELIVERY-PLAN.md](src/docs/rust-core-rewrite/END-TO-END-DELIVERY-PLAN.md).
-  Stable remains NO-GO until explicit release gates close.
 - Architecture and scope: [Rust baseline](src/docs/rust-core-rewrite/README.md).
 - Workspace migration receipts and exceptions:
   /home/sid/Developer/Artifacts/Styx/workspace-consolidation-20261111.
-- Earlier workspace snapshots, paths and retirement records:
-  [historical workspace](src/docs/rust-core-rewrite/WORKSPACE-HISTORY-20261112.md).
-  Consult it only for an old path/receipt; its dated commands and status are not current instructions.
 
 ## Distribution
 

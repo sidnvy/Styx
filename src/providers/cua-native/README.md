@@ -55,9 +55,7 @@ parallelism. No candidate-specific cache or extra Windows source producer is
 required.
 
 Actual compilation, installed native effects and release acceptance are separate
-claims. The upstream comparison and original Linux activation counterexample
-are recorded in `src/docs/rust-core-rewrite/CUA-UPSTREAM-REUSE-AUDIT-20261113.md`;
-new-platform results must be bound to the current patch before a release claim.
+claims; new-platform results must be bound to the current patch before a release claim.
 
 Hyprland on Linux also exposes explicit foreground element typing through the
 existing Cua `type_text` route. Activation uses the current Lua dispatcher API,
