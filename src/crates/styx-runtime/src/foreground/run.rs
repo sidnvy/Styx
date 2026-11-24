@@ -1234,27 +1234,44 @@ async fn run_owned(
     // Retain the original owner until its executor, I/O and local jobs end.
     // A Linux service can then return missing command receipts unchanged:
     // systemd owns final descendant cleanup and the external stop observes it.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    let service_shutdown_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut last_cleanup_reason = "cleanup_incomplete";
     loop {
-        if let Ok(cleanup) = host.shutdown_owned(Duration::from_secs(10)).await {
-            if let Some(native) = &cleanup.native {
-                for (process, evidence) in &native.processes {
-                    record_process_exit(&mut process_exits, process.operation().clone(), *evidence);
+        let mut desktop_cleanup_complete = true;
+        let mut browser_cleanup_complete = true;
+        let mut exec_io_joined = true;
+        match host.shutdown_owned(Duration::from_secs(10)).await {
+            Ok(cleanup) => {
+                if let Some(native) = &cleanup.native {
+                    for (process, evidence) in &native.processes {
+                        record_process_exit(
+                            &mut process_exits,
+                            process.operation().clone(),
+                            *evidence,
+                        );
+                    }
+                    outcome.executor_exited |= native.executor_exited;
+                    exec_io_joined = native.reader_task_reaped && native.stderr_task_reaped;
                 }
+                #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+                {
+                    browser_cleanup_complete =
+                        cleanup.browser.as_ref().is_none_or(|facts| facts.complete);
+                    desktop_cleanup_complete =
+                        cleanup.desktop.as_ref().is_none_or(|facts| facts.complete);
+                }
+                outcome.processes_exited = process_exits.values().all(|exited| *exited)
+                    && cleanup.ancillary_providers_settled();
+                outcome.io_tasks_joined = exec_io_joined && cleanup.ancillary_providers_settled();
+                outcome.supervised_jobs_joined = cleanup.supervised_jobs_joined;
             }
-            outcome.processes_exited = process_exits.values().all(|exited| *exited)
-                && cleanup.ancillary_providers_settled();
-            if let Some(native) = &cleanup.native {
-                outcome.executor_exited |= native.executor_exited;
+            Err(_) => {
+                last_cleanup_reason = "shutdown_lock_busy";
             }
-            outcome.io_tasks_joined = cleanup
-                .native
-                .as_ref()
-                .is_none_or(|native| native.reader_task_reaped && native.stderr_task_reaped)
-                && cleanup.ancillary_providers_settled();
-            outcome.supervised_jobs_joined = cleanup.supervised_jobs_joined;
         }
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-        {
+        let computer_settle_complete = {
             // Exec shutdown happens independently, while desktop initialization
             // and its original source stay retained until real join/stop facts.
             let complete = computer
@@ -1263,15 +1280,38 @@ async fn run_owned(
             outcome.supervised_jobs_joined &= complete;
             outcome.processes_exited &= complete;
             outcome.io_tasks_joined &= complete;
-        }
+            complete
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        let computer_settle_complete = true;
         if outcome.local_stop_complete() {
             break;
         }
-        event(&events, &cancel, "cleanup_unknown", &device, None);
+        let reason = cleanup_unknown_reason(
+            &outcome,
+            exec_io_joined,
+            browser_cleanup_complete,
+            desktop_cleanup_complete,
+            computer_settle_complete,
+            last_cleanup_reason,
+        );
+        event_with_reason(
+            &events,
+            &cancel,
+            "cleanup_unknown",
+            &device,
+            None,
+            Some(reason),
+        );
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        if admitted.service_scope.is_some() && outcome.local_runtime_joined() {
+        if service_shutdown_should_break(
+            admitted.service_scope.is_some(),
+            &outcome,
+            tokio::time::Instant::now() >= service_shutdown_deadline,
+        ) {
             // RPC is already closed. Waiting again cannot recover a lost task
-            // exit receipt, and keeps systemd from finishing the same cgroup.
+            // exit receipt or unrecoverable join failure, and keeps systemd from
+            // finishing the same cgroup under TimeoutStopSec=infinity.
             break;
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1287,6 +1327,45 @@ async fn run_owned(
     // Preserve the actual local cleanup even when admission or transport ended
     // the runtime. Callers report stop_reason separately from cleanup evidence.
     Ok(outcome)
+}
+
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), test))]
+fn service_shutdown_should_break(
+    has_service_scope: bool,
+    outcome: &ForegroundOutcome,
+    deadline_reached: bool,
+) -> bool {
+    has_service_scope && (outcome.local_runtime_joined() || deadline_reached)
+}
+
+/// Classify the unsettled cleanup cause as a fixed category without dynamic details.
+fn cleanup_unknown_reason(
+    outcome: &ForegroundOutcome,
+    exec_io_joined: bool,
+    browser_cleanup_complete: bool,
+    desktop_cleanup_complete: bool,
+    computer_settle_complete: bool,
+    fallback: &'static str,
+) -> &'static str {
+    if outcome.executor_started && !outcome.executor_exited {
+        "executor_running"
+    } else if !exec_io_joined {
+        "exec_io_unjoined"
+    } else if !browser_cleanup_complete {
+        "browser_cleanup_incomplete"
+    } else if !desktop_cleanup_complete {
+        "desktop_cleanup_incomplete"
+    } else if !computer_settle_complete {
+        "computer_startup_incomplete"
+    } else if !outcome.supervised_jobs_joined {
+        "supervised_jobs_running"
+    } else if !outcome.io_tasks_joined {
+        "io_tasks_unjoined"
+    } else if !outcome.processes_exited {
+        "processes_remaining"
+    } else {
+        fallback
+    }
 }
 
 /// Keep original resource identities even if a later cleanup inventory is empty.
@@ -1359,6 +1438,39 @@ mod tests {
             outcome.is_complete(),
             "independently known exit is monotonic, not operation success"
         );
+    }
+    #[test]
+    fn cleanup_unknown_reason_classifies_unsettled_lanes_and_bounds_service_shutdown() {
+        let mut outcome = empty_outcome();
+        outcome.executor_started = true;
+        assert_eq!(
+            cleanup_unknown_reason(&outcome, true, true, true, true, "fallback"),
+            "executor_running"
+        );
+        assert!(!service_shutdown_should_break(true, &outcome, false));
+        assert!(service_shutdown_should_break(true, &outcome, true));
+        assert!(!service_shutdown_should_break(false, &outcome, true));
+
+        outcome.executor_exited = true;
+        assert_eq!(
+            cleanup_unknown_reason(&outcome, false, true, true, true, "fallback"),
+            "exec_io_unjoined"
+        );
+        assert_eq!(
+            cleanup_unknown_reason(&outcome, true, false, true, true, "fallback"),
+            "browser_cleanup_incomplete"
+        );
+        assert_eq!(
+            cleanup_unknown_reason(&outcome, true, true, false, true, "fallback"),
+            "desktop_cleanup_incomplete"
+        );
+        assert_eq!(
+            cleanup_unknown_reason(&outcome, true, true, true, false, "fallback"),
+            "computer_startup_incomplete"
+        );
+        outcome.io_tasks_joined = false;
+        assert!(service_shutdown_should_break(true, &outcome, true));
+        assert!(!outcome.local_runtime_joined());
     }
 }
 

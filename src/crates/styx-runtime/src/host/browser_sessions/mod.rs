@@ -126,11 +126,13 @@ fn not_dispatched(reply: &BrowserReply) -> bool {
         }
     )
 }
-fn action_timeout(name: &str) -> u32 {
-    if matches!(
-        name,
-        "browser_navigate" | "browser_navigate_back" | "browser_wait_for"
-    ) {
+fn action_timeout(name: &str, mode: SessionMode) -> u32 {
+    if mode == SessionMode::Cdp
+        || matches!(
+            name,
+            "browser_navigate" | "browser_navigate_back" | "browser_wait_for"
+        )
+    {
         BROWSER_WAIT_PREPARE_TIMEOUT_MS
     } else {
         5_000
@@ -876,7 +878,7 @@ impl Engine<'_> {
                     target: target.clone(),
                     action: raw,
                 },
-                action_timeout(name),
+                action_timeout(name, s.mode),
             )
             .await;
         let action = match reply {
@@ -902,7 +904,7 @@ impl Engine<'_> {
             .exchange(
                 s,
                 BrowserCommand::DispatchAction { action },
-                action_timeout(name),
+                action_timeout(name, s.mode),
             )
             .await
         {
