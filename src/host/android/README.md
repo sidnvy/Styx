@@ -29,13 +29,13 @@ Use the existing Android SDK (API 36), NDK 29.0.14206865, JDK 21 and Rust
 `aarch64-linux-android` target. From the repository root on the Linux workstation:
 
 ```bash
-ANDROID_HOME=/home/sid/remote-mic-arch/android-sdk \
+ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}" \
 JAVA_HOME=/usr/lib/jvm/java-21-openjdk \
 src/host/android/build.sh
 ```
 
 The script reuses the repository Cargo target and Gradle cache. Its debug APK is
-copied to `~/Developer/Artifacts/Styx/android-host/styx-android-debug.apk`.
+copied to `$HOME/Developer/Artifacts/Styx/android-host/styx-android-debug.apk`.
 This is a development/acceptance APK, not a published Styx release.
 For Kotlin-only checks, use `gradlew -p src/host/android --offline :app:compileDebugKotlin`.
 APK assembly requires the actual Rust `libstyx_android.so`; it never bundles a stub.
@@ -197,11 +197,11 @@ suffix and still uses Android's debug identity (or an optional fixed
 For an unsigned packaging check on the workstation:
 
 ```bash
-ANDROID_HOME=/home/sid/remote-mic-arch/android-sdk \
+ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}" \
 JAVA_HOME=/usr/lib/jvm/java-21-openjdk \
 python3 -I -B src/ci/release-android.py --offline --unsigned \
   --build-number 1174 \
-  --output /home/sid/Developer/Artifacts/Styx/android-host/release-check
+  --output "$HOME/Developer/Artifacts/Styx/android-host/release-check"
 ```
 
 The output name ends in `-android-arm64-unsigned.apk`. Its receipt identifies the
