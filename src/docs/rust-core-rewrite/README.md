@@ -8,5 +8,5 @@ Rust owns Gateway, Host, Core state/policy, and CLI entry points under `src/`. B
 | Confirmed product behavior and role ownership | [REFACTOR-PLAN.md](REFACTOR-PLAN.md) |
 | Current delivery status and post-v1 backlog | [END-TO-END-DELIVERY-PLAN.md](END-TO-END-DELIVERY-PLAN.md) |
 | Product scope cuts and deferred post-v1 items | [REDUCED-SCOPE.md](REDUCED-SCOPE.md) |
-| MCP and wire contracts | [CONTRACT-V1.json](CONTRACT-V1.json), [FEATURE-INVENTORY-V1.json](FEATURE-INVENTORY-V1.json), [PUBLIC-MCP-V1.json](PUBLIC-MCP-V1.json), [LEGACY-WIRE-VECTORS-V1.json](LEGACY-WIRE-VECTORS-V1.json) |
+| Public MCP tool schema | [PUBLIC-MCP-V1.json](PUBLIC-MCP-V1.json) |
 | Release and deployment verification rules | [RELEASING.md](../RELEASING.md) |

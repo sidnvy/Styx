@@ -1,4 +1,4 @@
-//! Exact legacy enrollment signing bytes; validation occurs before encoding.
+//! Exact enrollment signing wire bytes; validation occurs before encoding.
 //! Field order and absent-versus-false semantics are authentication contracts.
 use crate::identity::{DeviceId, Sha256Digest};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -119,44 +119,101 @@ impl PairingComparison {
 mod tests {
     use super::*;
     #[test]
-    fn legacy_generated_public_vectors_match_exact_bytes() {
-        let corpus: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../docs/rust-core-rewrite/LEGACY-WIRE-VECTORS-V1.json"
-        ))
-        .unwrap();
-        for vector in corpus["vectors"].as_array().unwrap() {
-            let input = vector["input"].clone();
-            match vector["kind"].as_str().unwrap() {
-                "join" => assert_eq!(
-                    serde_json::from_value::<JoinPayload>(input)
-                        .unwrap()
-                        .signing_bytes()
-                        .unwrap(),
-                    vector["payload"].as_str().unwrap().as_bytes(),
-                    "{}",
-                    vector["id"]
-                ),
-                "capability" => assert_eq!(
-                    serde_json::from_value::<CapabilityPayload>(input)
-                        .unwrap()
-                        .signing_bytes()
-                        .unwrap(),
-                    vector["payload"].as_str().unwrap().as_bytes(),
-                    "{}",
-                    vector["id"]
-                ),
-                "comparison" => assert_eq!(
-                    serde_json::from_value::<PairingComparison>(input)
-                        .unwrap()
-                        .comparison_code()
-                        .unwrap(),
-                    vector["value"].as_str().unwrap(),
-                    "{}",
-                    vector["id"]
-                ),
-                other => panic!("unreviewed vector kind: {other}"),
-            }
-        }
+    fn enrollment_wire_vectors_match_exact_bytes() {
+        let base_join = serde_json::json!({
+            "invitation": "synthetic-invitation",
+            "device_id": "fixture-device-1",
+            "label": "Styx 合同 🧪",
+            "platform": "linux",
+            "cwd": "/tmp/styx-fixture",
+            "shell": "/bin/sh",
+            "computer_requested": false,
+            "public_key_pem": "SYNTHETIC PUBLIC KEY"
+        });
+        assert_eq!(
+            serde_json::from_value::<JoinPayload>(base_join.clone())
+                .unwrap()
+                .signing_bytes()
+                .unwrap(),
+            b"{\"invitation\":\"synthetic-invitation\",\"device_id\":\"fixture-device-1\",\"label\":\"Styx \xE5\x90\x88\xE5\x90\x8C \xF0\x9F\xA7\xAA\",\"platform\":\"linux\",\"cwd\":\"/tmp/styx-fixture\",\"shell\":\"/bin/sh\",\"computer_requested\":false,\"public_key_pem\":\"SYNTHETIC PUBLIC KEY\"}",
+            "join-v1-browser-absent"
+        );
+        let mut join_false = base_join.clone();
+        join_false["browser_requested"] = serde_json::json!(false);
+        assert_eq!(
+            serde_json::from_value::<JoinPayload>(join_false)
+                .unwrap()
+                .signing_bytes()
+                .unwrap(),
+            b"{\"invitation\":\"synthetic-invitation\",\"device_id\":\"fixture-device-1\",\"label\":\"Styx \xE5\x90\x88\xE5\x90\x8C \xF0\x9F\xA7\xAA\",\"platform\":\"linux\",\"cwd\":\"/tmp/styx-fixture\",\"shell\":\"/bin/sh\",\"computer_requested\":false,\"public_key_pem\":\"SYNTHETIC PUBLIC KEY\",\"browser_requested\":false}",
+            "join-v1-browser-false"
+        );
+        let mut join_true = base_join;
+        join_true["browser_requested"] = serde_json::json!(true);
+        assert_eq!(
+            serde_json::from_value::<JoinPayload>(join_true)
+                .unwrap()
+                .signing_bytes()
+                .unwrap(),
+            b"{\"invitation\":\"synthetic-invitation\",\"device_id\":\"fixture-device-1\",\"label\":\"Styx \xE5\x90\x88\xE5\x90\x8C \xF0\x9F\xA7\xAA\",\"platform\":\"linux\",\"cwd\":\"/tmp/styx-fixture\",\"shell\":\"/bin/sh\",\"computer_requested\":false,\"public_key_pem\":\"SYNTHETIC PUBLIC KEY\",\"browser_requested\":true}",
+            "join-v1-browser-true"
+        );
+
+        let fingerprint = "a".repeat(64);
+        assert_eq!(
+            serde_json::from_value::<CapabilityPayload>(serde_json::json!({
+                "device_id": "fixture-device-1",
+                "fingerprint": fingerprint,
+                "generation": "fixture-generation",
+                "enable_computer": false
+            }))
+            .unwrap()
+            .signing_bytes()
+            .unwrap(),
+            b"[\"styx-device-capabilities-v1\",\"fixture-device-1\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"fixture-generation\",false]",
+            "capability-v1"
+        );
+        assert_eq!(
+            serde_json::from_value::<CapabilityPayload>(serde_json::json!({
+                "device_id": "fixture-device-1",
+                "fingerprint": fingerprint,
+                "generation": "fixture-generation",
+                "enable_computer": false,
+                "enable_browser": true
+            }))
+            .unwrap()
+            .signing_bytes()
+            .unwrap(),
+            b"[\"styx-device-capabilities-v2\",\"fixture-device-1\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"fixture-generation\",{\"browser\":true,\"computer\":false}]",
+            "capability-v2-browser-and-computer"
+        );
+        assert_eq!(
+            serde_json::from_value::<CapabilityPayload>(serde_json::json!({
+                "device_id": "fixture-device-1",
+                "fingerprint": fingerprint,
+                "generation": "fixture-generation",
+                "enable_browser": true
+            }))
+            .unwrap()
+            .signing_bytes()
+            .unwrap(),
+            b"[\"styx-device-capabilities-v2\",\"fixture-device-1\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"fixture-generation\",{\"browser\":true}]",
+            "capability-v2-browser-only"
+        );
+
+        assert_eq!(
+            serde_json::from_value::<PairingComparison>(serde_json::json!({
+                "gatewayOrigin": "https://styx-fixture.invalid:8443",
+                "certificateSha256": "b".repeat(64),
+                "requestId": "c".repeat(32),
+                "deviceFingerprint": "d".repeat(64)
+            }))
+            .unwrap()
+            .comparison_code()
+            .unwrap(),
+            "8A13-9C58-E1B6-D2B2",
+            "comparison-v1"
+        );
     }
     #[test]
     fn absence_is_not_null_or_false() {
