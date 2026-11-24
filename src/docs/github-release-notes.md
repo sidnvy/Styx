@@ -8,29 +8,17 @@ computer.
 
 ## Changes
 
-This release candidate builds on `0.8.1-rc.9` with Public MCP compatibility
-for Google Gemini and standard MCP OAuth clients plus release CI caching
-improvements:
+This release candidate builds on `0.8.1-rc.9` with opt-in local Browser CDP attachment, Public MCP compatibility for Google Gemini and standard MCP OAuth clients, legacy forwarder cleanup, and release CI caching improvements:
 
-- **Public MCP handshake & streaming SSE framing (`styx gateway public-mcp`)**:
-  Return direct `application/json` responses for synchronous handshake and
-  discovery requests (`initialize`, `tools/list`, `ping`, `prompts/list`,
-  `resources/list`, `resources/templates/list`) and non-SSE clients, removing
-  upstream `rmcp` SEP-1699 empty priming events that caused Google Gemini Web's
-  MCP client to abort after `initialize`. Streaming `tools/call` SSE responses
-  drop empty priming events and ensure `event: message` framing while preserving
-  session lifetime guards.
-- **Public MCP principal & discovery compatibility**: Route standard MCP
-  discovery probes (`prompts/list`, `resources/list`, `resources/templates/list`)
-  and `notifications/roots/list_changed` cleanly through `GatewayHttp`, and
-  distinguish `PrincipalDomain::PublicMcp` so `tools/call` preserves OpenAI
-  `_meta` `TunnelConversation` correlation for ChatGPT while falling back to
-  isolated per-session `McpSession` ownership for Gemini and standard MCP
-  clients.
-- **CI & Release caching optimization**: Shared `main`-scoped release dependency
-  warm caches (`styx-cache-warm.yml`), external-crate-only `Cargo.lock` cache
-  keys (`cache-key.py`), pruned target caching, full-CPU release builds, and
-  faster internal CI bundle staging.
+- **Opt-in local Browser CDP attachment in Coexist Mode (default OFF)**:
+  - Host-local `browser-cdp.json` toggle (`styx host browser-cdp status|enable|disable`, App IPC `hostBrowserCdp`, macOS SwiftUI & Windows WinForms Settings controls), never modifiable by remote MCP/Gateway callers.
+  - Supports Chrome 144+ `chrome://inspect/#remote-debugging` (`DevToolsActivePort` auto-discovery) and optional canonical loopback (`127.0.0.1` / `localhost` / `[::1]`) endpoints.
+  - Isolated managed browser profiles remain the default (omitting `browser_session_id` never implicitly attaches to the user's browser); when enabled locally, `list_browser_sessions` exposes `existing-browser` (`mode: "cdp"`) for explicit selection and concurrent non-conflicting use alongside isolated profiles, and `browser_close` detaches non-destructively without closing external Chrome or its tabs.
+  - Updated `PUBLIC-MCP-V1.json` guidance to prefer `browser_*` over desktop Computer Use for web pages while reserving desktop tools for native apps/dialogs.
+- **Public MCP handshake, SSE framing & legacy cleanup**:
+  - Return direct `application/json` responses for synchronous handshake and discovery requests (`initialize`, `tools/list`, `ping`, `prompts/list`, `resources/list`, `resources/templates/list`), frame SSE `tools/call` responses cleanly with `event: message` without empty priming events, and route `PrincipalDomain::PublicMcp` cleanly for ChatGPT and Gemini / standard MCP clients.
+  - Removed legacy `public-mcp-forwarder.token` fallback and aligned Linux `chromium` channel selection.
+- **CI & Release caching optimization**: Shared `main`-scoped release dependency warm caches (`styx-cache-warm.yml`), external-crate-only `Cargo.lock` cache keys (`cache-key.py`), pruned target caching, and full-CPU release builds.
 
 All existing Gateway MCP tool names, Host identities, device pairings, browser
 profiles, and Android/Windows/macOS release signing identities remain unchanged.
