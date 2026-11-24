@@ -71,6 +71,10 @@ impl From<Reply> for BrowserReply {
     }
 }
 pub(crate) trait BrowserBootstrap: Send + Sync {
+    /// Host-local opt-in CDP configuration (default OFF).
+    fn cdp_config(&self) -> Result<crate::host::browser_cdp::BrowserCdpConfig, ErrorCategory> {
+        Ok(Default::default())
+    }
     /// Saved local profiles, without caller identities or execution state.
     /// Adapters must explicitly forward discovery rather than hide saved logins.
     fn saved_profiles(&self) -> Result<Vec<String>, ErrorCategory>;
@@ -102,6 +106,11 @@ pub(crate) struct BrowserPort<'a> {
     pub(crate) inputs: &'a BrowserInputs,
 }
 impl BrowserPort<'_> {
+    pub(crate) async fn cdp_config(
+        &self,
+    ) -> Result<crate::host::browser_cdp::BrowserCdpConfig, ErrorCategory> {
+        self.browser_input(|source| source.cdp_config()).await
+    }
     pub(crate) async fn saved_profiles(&self) -> Result<Vec<String>, ErrorCategory> {
         self.browser_input(|source| source.saved_profiles()).await
     }

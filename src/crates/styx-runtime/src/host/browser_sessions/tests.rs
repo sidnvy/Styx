@@ -29,6 +29,7 @@ impl operations::BrowserBootstrap for Bootstrap {
             node_binary: unused.clone(),
             worker_entry: unused.clone(),
             browser_binary: unused,
+            cdp_endpoint: None,
             workspace_dir: self.root.join("workspace"),
             profile_dir: self.root.join("profile"),
             output_dir: self.root.join("output"),
@@ -615,4 +616,191 @@ async fn closed_or_exited_browser_context_recovers_to_saved_profile_on_next_requ
     assert!(session.target.is_none());
     assert!(session.cleanup.is_none());
     assert_ne!(session.lease, old_lease);
+}
+
+struct CdpToggleBootstrap {
+    saved: Vec<String>,
+    cdp: std::sync::Mutex<crate::host::browser_cdp::BrowserCdpConfig>,
+}
+
+impl operations::BrowserBootstrap for CdpToggleBootstrap {
+    fn cdp_config(&self) -> Result<crate::host::browser_cdp::BrowserCdpConfig, ErrorCategory> {
+        Ok(self.cdp.lock().unwrap().clone())
+    }
+    fn saved_profiles(&self) -> Result<Vec<String>, ErrorCategory> {
+        Ok(self.saved.clone())
+    }
+    fn release_profile(&self, _: &OwnerLease) {}
+    fn prepare_profile(&self, _: &OwnerLease) -> Result<OwnedBrowserConfig, ErrorCategory> {
+        Err(ErrorCategory::CapabilityUnsupported)
+    }
+    fn validate_before_spawn(&self) -> Result<(), ErrorCategory> {
+        Ok(())
+    }
+    fn validate_control(&self) -> Result<(), ErrorCategory> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn cdp_coexist_mode_is_opt_in_explicit_isolated_by_default_and_transferable() {
+    use crate::host::browser_cdp::{BrowserCdpConfig, CDP_SESSION_ID};
+    let managed_id = uuid::Uuid::new_v4().simple().to_string();
+    let source = Arc::new(CdpToggleBootstrap {
+        saved: vec![managed_id.clone()],
+        cdp: std::sync::Mutex::new(BrowserCdpConfig::default()),
+    });
+    let (host, authority) = HostCoordinator::new_without_executor(
+        OperationLedger::new(uuid::Uuid::new_v4().to_string().try_into().unwrap()),
+        facts(CapabilityId::ExecRun),
+    )
+    .unwrap();
+    authority
+        .configure_browser(facts(CapabilityId::Browser))
+        .unwrap();
+    let inputs = host.browser_sessions().inputs(source.clone());
+    let engine = Engine {
+        port: BrowserPort {
+            coordinator: &host,
+            authority: &authority,
+            inputs: &inputs,
+        },
+    };
+    let a = named_caller("cdp-a");
+    let b = named_caller("cdp-b");
+    register_caller(&host, &authority, &a);
+    register_caller(&host, &authority, &b);
+
+    // 1. Default OFF: `existing-browser` is hidden and explicit selection is refused.
+    let listed_off = engine.handle(a.clone(), BrowserSessionCommand::List).await;
+    let sessions_off = listed_off.structured_content.as_ref().unwrap()["sessions"]
+        .as_array()
+        .unwrap();
+    assert_eq!(sessions_off.len(), 1);
+    assert_eq!(sessions_off[0]["browser_session_id"], managed_id);
+    assert_eq!(sessions_off[0]["mode"], "managed");
+    assert_eq!(sessions_off[0]["attached_existing_browser"], false);
+    assert_eq!(sessions_off[0]["profile_persistent"], true);
+
+    let refused_off = engine
+        .handle(a.clone(), tabs(Some(CDP_SESSION_ID.to_owned())))
+        .await;
+    assert_eq!(error(&refused_off)["error"], "browser_session_not_found");
+
+    // 2. Opt-in ON: `existing-browser` appears alongside managed profile.
+    *source.cdp.lock().unwrap() = BrowserCdpConfig {
+        enabled: true,
+        endpoint: Some("http://127.0.0.1:9222".to_owned()),
+    };
+    let listed_on = engine.handle(a.clone(), BrowserSessionCommand::List).await;
+    let sessions_on = listed_on.structured_content.as_ref().unwrap()["sessions"]
+        .as_array()
+        .unwrap();
+    let cdp_entry = sessions_on
+        .iter()
+        .find(|s| s["browser_session_id"] == CDP_SESSION_ID)
+        .expect("existing-browser exposed when CDP enabled");
+    assert_eq!(cdp_entry["mode"], "cdp");
+    assert_eq!(cdp_entry["attached_existing_browser"], true);
+    assert_eq!(cdp_entry["profile_persistent"], false);
+    assert_eq!(cdp_entry["available"], true);
+
+    // Explicitly claim `existing-browser` as caller A (even though PrepareOpen returns
+    // capability_unsupported on this fixture, caller A now owns `existing-browser` without
+    // setting `defaults` to it).
+    let a_explicit = engine
+        .handle(a.clone(), tabs(Some(CDP_SESSION_ID.to_owned())))
+        .await;
+    assert_eq!(error(&a_explicit)["error"], "capability_unsupported");
+    assert!(
+        !engine
+            .state()
+            .registry
+            .lock()
+            .unwrap()
+            .defaults
+            .values()
+            .any(|v| v == CDP_SESSION_ID)
+    );
+
+    // 3. Caller B omitting `browser_session_id` picks/creates isolated managed profile concurrently,
+    //    and Caller A omitting `browser_session_id` ALSO never implicitly attaches to `existing-browser`.
+    let b_implicit = engine.handle(b.clone(), tabs(None)).await;
+    assert_eq!(
+        b_implicit.structured_content.as_ref().unwrap()["browser_session_id"],
+        managed_id
+    );
+    let a_implicit = engine.handle(a.clone(), tabs(None)).await;
+    let a_managed_id = a_implicit.structured_content.as_ref().unwrap()["browser_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(a_managed_id, CDP_SESSION_ID);
+    assert_ne!(a_managed_id, managed_id);
+
+    // 4. Caller B cannot act on `existing-browser` while A owns it until explicit take_over.
+    let b_blocked = engine
+        .handle(b.clone(), tabs(Some(CDP_SESSION_ID.to_owned())))
+        .await;
+    assert_eq!(error(&b_blocked)["error"], "browser_session_transferred");
+
+    let taken = engine
+        .handle(
+            b.clone(),
+            BrowserSessionCommand::TakeOver {
+                session_id: CDP_SESSION_ID.to_owned(),
+            },
+        )
+        .await;
+    let taken_body = taken.structured_content.as_ref().unwrap();
+    assert_eq!(taken_body["browser_session_id"], CDP_SESSION_ID);
+    assert_eq!(taken_body["mode"], "cdp");
+    assert_eq!(taken_body["attached_existing_browser"], true);
+    assert_eq!(taken_body["profile_persistent"], false);
+    assert_ne!(
+        engine.state().registry.lock().unwrap().defaults[&caller(&b)],
+        CDP_SESSION_ID
+    );
+
+    let a_blocked = engine
+        .handle(a.clone(), tabs(Some(CDP_SESSION_ID.to_owned())))
+        .await;
+    assert_eq!(error(&a_blocked)["error"], "browser_session_transferred");
+
+    // 5. Explicit browser_close on `existing-browser` detaches cleanly; disabling hides it without
+    //    disrupting managed profiles.
+    let closed = engine
+        .handle(
+            b.clone(),
+            BrowserSessionCommand::Action {
+                session_id: Some(CDP_SESSION_ID.to_owned()),
+                name: "browser_close".into(),
+                arguments: serde_json::from_value(json!({})).unwrap(),
+            },
+        )
+        .await;
+    let closed_body = closed.structured_content.as_ref().unwrap();
+    assert_eq!(closed_body["closed"], true);
+    assert_eq!(closed_body["detached"], true);
+    assert_eq!(closed_body["profile_persistent"], false);
+
+    *source.cdp.lock().unwrap() = BrowserCdpConfig::default();
+    let listed_disabled = engine.handle(b.clone(), BrowserSessionCommand::List).await;
+    let sessions_disabled = listed_disabled.structured_content.as_ref().unwrap()["sessions"]
+        .as_array()
+        .unwrap();
+    assert!(
+        sessions_disabled
+            .iter()
+            .all(|s| s["browser_session_id"] != CDP_SESSION_ID)
+    );
+    assert!(
+        sessions_disabled
+            .iter()
+            .any(|s| s["browser_session_id"] == managed_id)
+    );
+    let after_disable = engine
+        .handle(b, tabs(Some(CDP_SESSION_ID.to_owned())))
+        .await;
+    assert_eq!(error(&after_disable)["error"], "browser_session_not_found");
 }

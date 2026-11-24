@@ -175,6 +175,7 @@ async fn actual_snapshot_refs_navigation_tabs_owner_and_reopen_batch() {
                 browser_binary: std::env::var_os("STYX_TEST_BROWSER_EXECUTABLE")
                     .unwrap()
                     .into(),
+                cdp_endpoint: None,
                 workspace_dir: root.join("workspace"),
                 profile_dir: root.join("profile"),
                 output_dir: root.join("output"),

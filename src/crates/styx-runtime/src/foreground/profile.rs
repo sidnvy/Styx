@@ -152,6 +152,8 @@ fn computer_selected(
 }
 pub struct LoadedProfile {
     settings: Option<Arc<crate::host::settings::HostSettings>>,
+    #[cfg(not(target_os = "android"))]
+    browser_cdp: Option<Arc<crate::host::browser_cdp::BrowserCdpStore>>,
     host_base_dir: PathBuf,
     device: DeviceId,
     endpoint: LinkEndpoint,
@@ -199,6 +201,10 @@ impl std::fmt::Debug for LoadedProfile {
 impl LoadedProfile {
     pub(crate) fn settings(&self) -> Option<Arc<crate::host::settings::HostSettings>> {
         self.settings.clone()
+    }
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn browser_cdp(&self) -> Option<Arc<crate::host::browser_cdp::BrowserCdpStore>> {
+        self.browser_cdp.clone()
     }
     pub(crate) fn exec_selected(&self) -> bool {
         self.settings.as_ref().is_none_or(|s| s.current().exec) && self.executor_enabled()

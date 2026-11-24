@@ -136,6 +136,13 @@ struct ForegroundBrowser {
 }
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 impl crate::host::protocol::browser::BrowserBootstrap for ForegroundBrowser {
+    fn cdp_config(
+        &self,
+    ) -> Result<crate::host::browser_cdp::BrowserCdpConfig, styx_contracts::error::ErrorCategory>
+    {
+        self.source.cdp_config()
+    }
+
     fn saved_profiles(&self) -> Result<Vec<String>, styx_contracts::error::ErrorCategory> {
         self.source.saved_profiles()
     }
@@ -813,6 +820,24 @@ async fn run_owned(
             scope.publish_settings(settings);
         }
     }
+    #[cfg(not(target_os = "android"))]
+    let browser_cdp = admitted.profile.browser_cdp();
+    #[cfg(not(target_os = "android"))]
+    if let Some(cdp) = &browser_cdp {
+        let hook_host = host.clone();
+        cdp.attach_disconnect_hook(Arc::new(move || {
+            let hook_host = hook_host.clone();
+            Box::pin(async move {
+                hook_host
+                    .authority()
+                    .cleanup_browser_cdp_session(Duration::from_secs(10))
+                    .await
+            })
+        }));
+        if let Some(scope) = &settings_scope {
+            scope.publish_browser_cdp(cdp);
+        }
+    }
     // Install before exposing any paired connection. A failed installation
     // follows the same owned Host cleanup below; never early-drop the executor.
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -1186,6 +1211,10 @@ async fn run_owned(
     }
     if let Some(settings) = &settings {
         settings.close().await;
+    }
+    #[cfg(not(target_os = "android"))]
+    if let Some(cdp) = &browser_cdp {
+        cdp.clear_disconnect_hook();
     }
     event(&events, &cancel, "stopping", &device, None);
     let mut outcome = ForegroundOutcome {

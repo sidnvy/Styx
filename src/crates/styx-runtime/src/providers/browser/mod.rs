@@ -65,6 +65,7 @@ pub struct OwnedBrowserConfig {
     pub node_binary: PathBuf,
     pub worker_entry: PathBuf,
     pub browser_binary: PathBuf,
+    pub cdp_endpoint: Option<String>,
     pub workspace_dir: PathBuf,
     pub profile_dir: PathBuf,
     pub output_dir: PathBuf,
@@ -460,7 +461,6 @@ impl OwnedBrowserConfig {
         for path in [
             &self.node_binary,
             &self.worker_entry,
-            &self.browser_binary,
             &self.workspace_dir,
             &self.profile_dir,
             &self.output_dir,
@@ -470,6 +470,26 @@ impl OwnedBrowserConfig {
                 || canonical_path(path)? != *path
             {
                 return Err(BrowserError::InvalidRequest);
+            }
+        }
+        match &self.cdp_endpoint {
+            Some(endpoint) => {
+                if !self.browser_binary.as_os_str().is_empty() {
+                    return Err(BrowserError::InvalidRequest);
+                }
+                let canonical = crate::host::browser_cdp::validate_cdp_endpoint(endpoint)
+                    .map_err(|_| BrowserError::InvalidRequest)?;
+                if &canonical != endpoint {
+                    return Err(BrowserError::InvalidRequest);
+                }
+            }
+            None => {
+                if self.browser_binary.as_os_str().len() > 4096
+                    || !self.browser_binary.is_absolute()
+                    || canonical_path(&self.browser_binary)? != self.browser_binary
+                {
+                    return Err(BrowserError::InvalidRequest);
+                }
             }
         }
         for path in [&self.profile_dir, &self.output_dir] {
@@ -492,6 +512,7 @@ impl OwnedBrowserConfig {
             &self.node_binary,
             &self.worker_entry,
             &self.browser_binary,
+            &self.cdp_endpoint,
             &self.workspace_dir,
             &self.profile_dir,
             &self.output_dir,
@@ -646,7 +667,9 @@ impl BrowserOpenSlot {
         let started = Instant::now();
         let until = started + config.rpc_timeout;
         #[cfg(target_os = "linux")]
-        let desktop_environment = {
+        let desktop_environment = if config.cdp_endpoint.is_some() {
+            Vec::new()
+        } else {
             // Keep this read under the registered resource's cancellation owner.
             // No Browser process has been dispatched if desktop startup is unavailable.
             let environment = tokio::select! {
@@ -673,11 +696,28 @@ impl BrowserOpenSlot {
             {
             let node = pin(&config.node_binary, &mut live.pins)?;
             let worker = pin(&config.worker_entry, &mut live.pins)?;
-            let browser = pin(&config.browser_binary, &mut live.pins)?;
             use std::os::unix::fs::OpenOptionsExt;
             let config_file = config.output_dir.join(format!("worker-{}.json",uuid::Uuid::new_v4()));
             let mut file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&config_file).map_err(|_|BrowserError::SpawnFailed)?;
-            let bytes = serde_json::to_vec(&serde_json::json!({"schema":1,"profile_dir":config.profile_dir,"output_dir":config.output_dir,"workspace_dir":config.workspace_dir,"browser_executable":browser})).map_err(|_|BrowserError::InvalidRequest)?;
+            let payload = match &config.cdp_endpoint {
+                Some(endpoint) => serde_json::json!({
+                    "schema": 1,
+                    "output_dir": config.output_dir,
+                    "workspace_dir": config.workspace_dir,
+                    "cdp_endpoint": endpoint,
+                }),
+                None => {
+                    let browser = pin(&config.browser_binary, &mut live.pins)?;
+                    serde_json::json!({
+                        "schema": 1,
+                        "profile_dir": config.profile_dir,
+                        "output_dir": config.output_dir,
+                        "workspace_dir": config.workspace_dir,
+                        "browser_executable": browser,
+                    })
+                }
+            };
+            let bytes = serde_json::to_vec(&payload).map_err(|_|BrowserError::InvalidRequest)?;
             use std::io::Write;
             file.write_all(&bytes).and_then(|_|file.sync_all()).map_err(|_|BrowserError::SpawnFailed)?;
             live.config_file = config_file;
@@ -1131,16 +1171,19 @@ impl BrowserActionSlot {
                         if !native.dispatched
                             && result.is_error == Some(true)
                             && native.before == native.after
-                            && matches!(native.reason.as_deref(), Some("stale" | "invalid")) =>
+                            && matches!(
+                                native.reason.as_deref(),
+                                Some("stale" | "invalid" | "cdp_unavailable")
+                            ) =>
                     {
                         self.state.references.invalidate();
                         (
                             BrowserActionEvidence::NotDispatched,
                             None,
-                            Some(if native.reason.as_deref() == Some("stale") {
-                                BrowserError::StaleObservation
-                            } else {
-                                BrowserError::InvalidRequest
+                            Some(match native.reason.as_deref() {
+                                Some("stale") => BrowserError::StaleObservation,
+                                Some("cdp_unavailable") => BrowserError::Unsupported,
+                                _ => BrowserError::InvalidRequest,
                             }),
                         )
                     }

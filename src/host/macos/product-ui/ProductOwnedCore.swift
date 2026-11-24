@@ -57,7 +57,7 @@ final class ProductOwnedCore: @unchecked Sendable {
     private var sequence = 0
     private var buffer = Data()
     // Fixed diagnostic vocabulary only. Rust owns operation support and admission.
-    static let diagnosticOperations: Set<String> = ["computers", "inviteComputer", "revokeComputer", "tunnelStatus", "tunnelSave", "pluginRead", "pluginSave", "pluginExport", "startupStatus", "status", "hostCapabilities", "networkInterfaces", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "retireRole", "appLifecycle", "appLogin", "appLoginResult"]
+    static let diagnosticOperations: Set<String> = ["computers", "inviteComputer", "revokeComputer", "tunnelStatus", "tunnelSave", "pluginRead", "pluginSave", "pluginExport", "startupStatus", "status", "hostCapabilities", "hostBrowserCdp", "networkInterfaces", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "retireRole", "appLifecycle", "appLogin", "appLoginResult"]
 
     // Only the fixed package bootstrap below can construct this owner.
     private init(cli: URL, selection: URL, state: URL, cliPin: FileHandle, selectionPin: FileHandle) throws {

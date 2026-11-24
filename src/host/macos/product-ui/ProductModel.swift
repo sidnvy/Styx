@@ -129,6 +129,8 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
     @Published var exec = true
     @Published var computer = false
     @Published var browser = false
+    @Published var browserCdpEndpointDraft = ""
+    @Published var browserCdpDraftEdited = false
     @Published var label = ""
     @Published var allowRemoteHosts = false
     @Published var lanAddress = ""
@@ -310,6 +312,9 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
     func applyNative(_ value: ProductJSON) throws {
         guard value["mode"].string == "rust_host" else { throw ProductCoreError.invalidResponse }
         publish(\.status, value)
+        if !browserCdpDraftEdited {
+            publish(\.browserCdpEndpointDraft, value["browserCdp"]["endpoint"].string ?? "")
+        }
         if !restoredPage {
             restoredPage = true
             observePermissions()
@@ -398,6 +403,11 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
         if let rejected = failure as? ProductOwnedCoreRejection,
            rejected.response["retryable"] == .bool(true), rejected.response["uncertain"] == .bool(false) {
             error = productText("配对请求尚未发送。请检查这台 Mac 的“系统设置 → 隐私与安全性 → 本地网络”是否允许 Styx，并确认两台电脑网络可达、网关允许传入连接。处理后粘贴新邀请，再核对并提交；不会自动重试。", "The pairing request was not sent. Check Styx in this Mac’s System Settings → Privacy & Security → Local Network, network access between the computers, and incoming connections on the hub. Then paste a new invitation, review it and submit again. Styx will not retry automatically.")
+            return
+        }
+        if let rejected = failure as? ProductOwnedCoreRejection,
+           rejected.response["error"].string == "app_input_invalid" {
+            error = productText("输入无效。自定义浏览器 CDP 地址仅支持本机环回 http:// 或 ws:// URL（如 http://127.0.0.1:9222）。", "Invalid input. Custom browser CDP endpoints only allow local loopback http:// or ws:// URLs (such as http://127.0.0.1:9222).")
             return
         }
         if let core = failure as? ProductCoreError, case .loginChangeUnconfirmed = core {
@@ -607,6 +617,18 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
         perform { [self] in
             let result = try await client.native("hostCapabilities", [name: .bool(enabled)])
             guard result["applied"].bool else { throw ProductCoreError.rejected }
+        }
+    }
+    func setBrowserCdp(enabled: Bool, endpoint: String? = nil) {
+        perform { [self] in
+            var payload: [String: ProductJSON] = ["enabled": .bool(enabled)]
+            if let endpoint = endpoint {
+                let trimmed = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+                payload["endpoint"] = trimmed.isEmpty ? .null : .string(trimmed)
+            }
+            let result = try await client.native("hostBrowserCdp", payload)
+            guard result["applied"].bool else { throw ProductCoreError.rejected }
+            if endpoint != nil { browserCdpDraftEdited = false }
         }
     }
     func resumeForeground() {

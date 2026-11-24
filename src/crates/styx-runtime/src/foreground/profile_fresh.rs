@@ -205,6 +205,11 @@ fn load_snapshot(
     };
     let settings = crate::host::settings::HostSettings::open(state_dir, initial)
         .map_err(|_| ProfileError::Invalid)?;
+    #[cfg(not(target_os = "android"))]
+    let browser_cdp = Some(
+        crate::host::browser_cdp::BrowserCdpStore::open(state_dir)
+            .map_err(|_| ProfileError::Invalid)?,
+    );
     // Provider construction inputs are independent of mutable admission. The
     // Host controller gates calls; disabled Cua is not initialized until enabled.
     let deployment_computer = Some(Value::Bool(true));
@@ -248,6 +253,8 @@ fn load_snapshot(
     let signed_version = inventory.version().to_owned();
     let loaded = LoadedProfile {
         settings: Some(settings),
+        #[cfg(not(target_os = "android"))]
+        browser_cdp,
         host_base_dir: state_dir.to_path_buf(),
         device: seed.device_id.clone(),
         endpoint,

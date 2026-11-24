@@ -34,6 +34,7 @@ const stateTool = {
 let macProcess, macProcessClose;
 let nativeEpoch = 1, nativeClosed = false, epochExhausted = false;
 let closeRequestId;
+let isCdpMode = false, attachedBrowser;
 let contextPromise, context, backend, client, server, startupPromise, closing = false, cleanupPromise;
 // Fixed Playwright 1.64 adapter only: reuse its existing in-process bridge,
 // never a new BrowserServer/listener or a process selected by remote input.
@@ -80,14 +81,24 @@ function expectedEpoch(params) {
       || !Number.isSafeInteger(expected.expected_epoch) || expected.expected_epoch < 1) return null;
   return expected.expected_epoch;
 }
+async function closeCdpAttachment() {
+  const browser = attachedBrowser;
+  attachedBrowser = undefined;
+  context = undefined;
+  if (browser) await browser.close();
+}
 async function cleanup() {
   if (cleanupPromise) return cleanupPromise;
   closing = true;
   cleanupPromise = (async () => {
     await startupPromise?.catch(() => {});
     await contextPromise?.catch(() => {});
-    await context?.close();
-    await macProcessClose;
+    if (isCdpMode) {
+      await closeCdpAttachment().catch(() => {});
+    } else {
+      await context?.close();
+      await macProcessClose;
+    }
     await client?.close();
     await backend?.close();
     await server?.close();
@@ -102,13 +113,72 @@ function fail() {
 async function main() {
   if (process.versions.node.split('.')[0] !== '22' || process.argv.length !== 4 || process.argv[2] !== '--config') throw new Error('browser_worker_start_rejected');
   const config = readConfiguration(process.argv[3]);
+  isCdpMode = Object.hasOwn(config, 'cdp_endpoint');
   // Use the installed browser with a visible window; no debug takeover or download.
   delete process.env.PWDEBUG;
   process.env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = '1';
+  const observeContext = (value, browser) => {
+    const pageObserved = page => {
+      advanceEpoch();
+      fact('browser_native_page');
+      page.on('framenavigated', () => { advanceEpoch(); fact('browser_native_navigation'); });
+      page.once('close', () => {
+        advanceEpoch();
+        fact('browser_native_page_closed');
+        if (!isCdpMode && value.pages().length === 0) {
+          nativeClosed = true;
+          // macOS can keep Chrome alive after its last window closes. End this
+          // owned context; an explicit close keeps its response before cleanup.
+          if (!closing && closeRequestId === undefined) void cleanup().catch(fail);
+        }
+      });
+    };
+    for (const page of value.pages()) pageObserved(page);
+    value.on('page', pageObserved);
+    let closedFactEmitted = false;
+    const onClosed = () => {
+      nativeClosed = true;
+      advanceEpoch();
+      if (!closedFactEmitted) {
+        closedFactEmitted = true;
+        fact('browser_native_context_closed');
+      }
+      if (!closing && closeRequestId === undefined) fail();
+    };
+    value.once('close', onClosed);
+    browser?.once('disconnected', onClosed);
+  };
   const getOwnedContext = () => {
     if (closing) throw new Error('browser_worker_closing');
-    // Cache the one launch promise even after closure/failure. No action, launch
-    // or context recovery is replayed after transport errors or browser_close.
+    // Cache the one launch/attach promise after closure or failure in managed
+    // mode; CDP mode resets pre-attach connection failures so retries stay NotDispatched.
+    if (isCdpMode) {
+      contextPromise ??= chromium.connectOverCDP(config.cdp_endpoint, {
+        noDefaults: true,
+        timeout: 4000,
+      }).then(async browser => {
+        const value = browser.contexts()[0];
+        if (!value) {
+          await browser.close().catch(() => {});
+          throw new Error('browser_cdp_unavailable');
+        }
+        attachedBrowser = browser;
+        context = value;
+        if (closing) {
+          await closeCdpAttachment();
+          throw new Error('browser_worker_closing');
+        }
+        observeContext(value, browser);
+        fact('browser_native_context_open');
+        return value;
+      }, err => {
+        if (!attachedBrowser && !closing) contextPromise = undefined;
+        const wrapped = new Error('browser_cdp_unavailable');
+        wrapped.cause = err;
+        throw wrapped;
+      });
+      return contextPromise;
+    }
     contextPromise ??= chromium.launchPersistentContext(config.profile_dir, {
       headless: false, chromiumSandbox: true, executablePath: config.browser_executable,
       // Chromium must stay in the Rust-owned resource/cleanup boundary instead
@@ -124,29 +194,7 @@ async function main() {
       context = value;
       retainMacBrowserProcess(value, config.browser_executable);
       if (closing) { await value.close(); throw new Error('browser_worker_closing'); }
-      const pageObserved = page => {
-        advanceEpoch();
-        fact('browser_native_page');
-        page.on('framenavigated', () => { advanceEpoch(); fact('browser_native_navigation'); });
-        page.once('close', () => {
-          advanceEpoch();
-          fact('browser_native_page_closed');
-          if (value.pages().length === 0) {
-            nativeClosed = true;
-            // macOS can keep Chrome alive after its last window closes. End this
-            // owned context; an explicit close keeps its response before cleanup.
-            if (!closing && closeRequestId === undefined) void cleanup().catch(fail);
-          }
-        });
-      };
-      for (const page of value.pages()) pageObserved(page);
-      value.on('page', pageObserved);
-      value.once('close', () => {
-        nativeClosed = true;
-        advanceEpoch();
-        fact('browser_native_context_closed');
-        if (!closing && closeRequestId === undefined) fail();
-      });
+      observeContext(value);
       await value.pages()[0]?.bringToFront();
       fact('browser_native_context_open');
       return value;
@@ -192,7 +240,12 @@ async function main() {
     // before only after its initial page/lifecycle observations are installed;
     // never retry a tool/snapshot or create a replacement context on failure.
     try { await getOwnedContext(); }
-    catch { throw new Error('browser_native_context_unconfirmed'); }
+    catch (error) {
+      if (isCdpMode && !attachedBrowser && error?.message === 'browser_cdp_unavailable') {
+        return refused('cdp_unavailable');
+      }
+      throw new Error('browser_native_context_unconfirmed');
+    }
     // Initialization can change the factual epoch or close the context. This
     // final guard and backend invocation have no intervening await.
     if (closing || nativeClosed || epochExhausted
@@ -207,12 +260,17 @@ async function main() {
     try {
       result = await client.callTool({ name: params.name, arguments: params.arguments ?? {} }, undefined, { signal: extra.signal });
       if (params.name === 'browser_close' || nativeClosed) {
-        // Context closure is not Node exit/physical process-tree cleanup.
+        // Context closure / CDP detach is not Node exit/physical process-tree cleanup.
         closing = true;
-        const ownedContext = await contextPromise;
-        if (!ownedContext) throw new Error('browser_worker_close_unconfirmed');
-        await ownedContext.close();
-        await macProcessClose;
+        if (isCdpMode) {
+          await contextPromise?.catch(() => {});
+          await closeCdpAttachment();
+        } else {
+          const ownedContext = await contextPromise;
+          if (!ownedContext) throw new Error('browser_worker_close_unconfirmed');
+          await ownedContext.close();
+          await macProcessClose;
+        }
         result = { ...result, structuredContent: { ...result.structuredContent, styx_context_closed: true } };
       }
     } catch {

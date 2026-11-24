@@ -46,9 +46,11 @@ struct OwnerProfile {
 }
 struct LocalBrowser {
     profile: Arc<LoadedProfile>,
+    cdp: Arc<crate::host::browser_cdp::BrowserCdpStore>,
     node: Arc<PinnedExecutable>,
     node_path: PathBuf,
-    browser: PathBuf,
+    browser: Option<PathBuf>,
+    channel: Option<String>,
     runtime: PrivateDirectory,
     profiles: PrivateDirectory,
     assets: PreparedBrowserAssets,
@@ -130,7 +132,15 @@ fn channel_candidates(channel: &str) -> Result<&'static [&'static str]> {
     }
 }
 
-fn selected(profile: &LoadedProfile) -> Result<Option<PathBuf>> {
+struct SelectedBrowser {
+    executable: Option<PathBuf>,
+    channel: Option<String>,
+}
+
+fn selected(
+    profile: &LoadedProfile,
+    cdp: &crate::host::browser_cdp::BrowserCdpStore,
+) -> Result<Option<SelectedBrowser>> {
     let source = profile.browser_source();
     let (deployment, host) = (source.deployment, source.host);
     // Missing or explicit disabled selection does not enable a Browser lane.
@@ -157,21 +167,36 @@ fn selected(profile: &LoadedProfile) -> Result<Option<PathBuf>> {
     {
         return Err(ErrorCategory::CapabilityUnsupported);
     }
+    let channel = d.channel;
+    let cdp_enabled = cdp.current().is_ok_and(|cfg| cfg.enabled);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
+    let resolved = {
         let path = match d.executable {
-            Some(path) => path,
-            None => first_browser(channel_candidates(d.channel.as_deref().unwrap_or("auto"))?)?,
+            Some(path) => Ok(path),
+            None => first_browser(channel_candidates(channel.as_deref().unwrap_or("auto"))?),
         };
-        Ok(Some(resolve_browser(&path)?))
-    }
+        match path {
+            Ok(path) => Ok(Some(resolve_browser(&path)?)),
+            Err(ErrorCategory::CapabilityUnsupported) if cdp_enabled => Ok(None),
+            Err(error) => Err(error),
+        }
+    };
     #[cfg(target_os = "windows")]
-    {
-        Ok(Some(match d.executable {
-            Some(path) => path,
-            None => windows::selected_channel(d.channel.as_deref().unwrap_or("auto"))?,
-        }))
-    }
+    let resolved = {
+        let path = match d.executable {
+            Some(path) => Ok(path),
+            None => windows::selected_channel(channel.as_deref().unwrap_or("auto")),
+        };
+        match path {
+            Ok(path) => Ok(Some(path)),
+            Err(ErrorCategory::CapabilityUnsupported) if cdp_enabled => Ok(None),
+            Err(error) => Err(error),
+        }
+    };
+    Ok(Some(SelectedBrowser {
+        executable: resolved?,
+        channel,
+    }))
 }
 
 /// Fixed local bootstrap stage and existing typed category only. No native
@@ -193,7 +218,12 @@ pub(crate) fn prepare_browser_bootstrap(
     profile: Arc<LoadedProfile>,
 ) -> std::result::Result<Option<Arc<dyn BrowserBootstrap>>, BrowserPreparationError> {
     let at = BrowserPreparationError::new;
-    let Some(browser_path) = selected(&profile).map_err(|e| at("selection", e))? else {
+    let cdp = match profile.browser_cdp() {
+        Some(store) => store,
+        None => crate::host::browser_cdp::BrowserCdpStore::open(profile.host_base_dir())
+            .map_err(|e| at("cdp_store", e))?,
+    };
+    let Some(selection) = selected(&profile, &cdp).map_err(|e| at("selection", e))? else {
         return Ok(None);
     };
     profile
@@ -227,7 +257,6 @@ pub(crate) fn prepare_browser_bootstrap(
     #[cfg(target_os = "windows")]
     let node_path = release.join("bin/node.exe");
     canonical(&node_path).map_err(|e| at("node_path", e))?;
-    let browser = browser_path;
     let browser_root = assets::open_or_create_private_directory(profile.host_base_dir(), "browser")
         .map_err(|e| at("private_profiles", map_error(e)))?;
     let profiles = assets::open_or_create_private_directory(browser_root.path(), "profiles")
@@ -244,7 +273,9 @@ pub(crate) fn prepare_browser_bootstrap(
         workspace: workspace.into(),
         node_path,
         node,
-        browser,
+        browser: selection.executable,
+        channel: selection.channel,
+        cdp,
         runtime,
         profiles,
         assets: staged,
@@ -286,6 +317,10 @@ impl LocalBrowser {
     }
 }
 impl BrowserBootstrap for LocalBrowser {
+    fn cdp_config(&self) -> Result<crate::host::browser_cdp::BrowserCdpConfig> {
+        self.cdp.current()
+    }
+
     fn saved_profiles(&self) -> Result<Vec<String>> {
         saved_profile_ids(&self.profiles)
     }
@@ -313,14 +348,39 @@ impl BrowserBootstrap for LocalBrowser {
         {
             return Err(ErrorCategory::Unauthorized);
         }
-        let private = profile_directory(&self.runtime, &self.profiles, owner.owner_id().as_str())?;
+        let is_cdp = owner
+            .owner_id()
+            .as_str()
+            .starts_with(crate::host::browser_cdp::CDP_OWNER_PREFIX);
+        let (browser_binary, cdp_endpoint, private) = if is_cdp {
+            let cdp = self.cdp.current()?;
+            if !cdp.enabled {
+                return Err(ErrorCategory::PermissionDenied);
+            }
+            let endpoint = crate::host::browser_cdp::resolve_cdp_endpoint(
+                cdp.endpoint.as_deref(),
+                self.channel.as_deref(),
+            )?;
+            let private =
+                assets::fresh_private_directory(self.runtime.path()).map_err(map_error)?;
+            (PathBuf::new(), Some(endpoint), private)
+        } else {
+            let browser = self
+                .browser
+                .clone()
+                .ok_or(ErrorCategory::CapabilityUnsupported)?;
+            let private =
+                profile_directory(&self.runtime, &self.profiles, owner.owner_id().as_str())?;
+            (browser, None, private)
+        };
         let output = assets::fresh_private_directory(self.runtime.path()).map_err(map_error)?;
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         let workspace = assets::fresh_private_directory(self.runtime.path()).map_err(map_error)?;
         let config = OwnedBrowserConfig {
             node_binary: self.node_path.clone(),
             worker_entry: self.assets.entry_path().into(),
-            browser_binary: self.browser.clone(),
+            browser_binary,
+            cdp_endpoint,
             #[cfg(target_os = "linux")]
             workspace_dir: self.workspace.clone(),
             #[cfg(any(target_os = "windows", target_os = "macos"))]

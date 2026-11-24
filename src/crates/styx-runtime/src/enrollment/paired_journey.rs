@@ -1346,6 +1346,7 @@ impl crate::host::protocol::browser::BrowserBootstrap for CapacityBrowser {
             browser_binary: std::env::var_os("STYX_TEST_BROWSER_EXECUTABLE")
                 .expect("owned browser input")
                 .into(),
+            cdp_endpoint: None,
             workspace_dir: workspace,
             profile_dir: profile,
             output_dir: output,

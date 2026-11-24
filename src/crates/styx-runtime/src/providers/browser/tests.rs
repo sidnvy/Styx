@@ -26,6 +26,7 @@ impl Fixture {
             node_binary: never_started.clone(),
             worker_entry: never_started.clone(),
             browser_binary: never_started,
+            cdp_endpoint: None,
             workspace_dir: self.0.join("workspace"),
             profile_dir: self.0.join("profile"),
             output_dir: self.0.join("output"),
@@ -506,5 +507,42 @@ fn frozen_tools_paths_and_snapshot_reference_policy_batch() {
     );
     println!(
         "synthetic policy: frozen schemas + URL/path controls + opaque recursive ref binding; no Native element/atomic-navigation proof claimed"
+    );
+}
+
+#[test]
+fn cdp_owned_browser_config_validates_loopback_canonicality_and_disallows_browser_binary() {
+    let fixture = Fixture::new();
+    let mut cdp = fixture.config();
+    let saved_binary = cdp.browser_binary.clone();
+    cdp.browser_binary = PathBuf::new();
+    cdp.cdp_endpoint = Some("http://127.0.0.1:9222".to_owned());
+    cdp.validate().unwrap();
+    let ws_cdp = OwnedBrowserConfig {
+        cdp_endpoint: Some("ws://localhost:9333/devtools/browser/abc-1".to_owned()),
+        ..cdp.clone()
+    };
+    ws_cdp.validate().unwrap();
+    assert_ne!(cdp.digest().unwrap(), ws_cdp.digest().unwrap());
+
+    let mut bad_remote = cdp.clone();
+    bad_remote.cdp_endpoint = Some("http://192.168.1.5:9222".to_owned());
+    assert_eq!(
+        bad_remote.validate().unwrap_err(),
+        BrowserError::InvalidRequest
+    );
+
+    let mut bad_noncanonical = cdp.clone();
+    bad_noncanonical.cdp_endpoint = Some("http://LOCALHOST:9222/".to_owned());
+    assert_eq!(
+        bad_noncanonical.validate().unwrap_err(),
+        BrowserError::InvalidRequest
+    );
+
+    let mut bad_mixed = cdp;
+    bad_mixed.browser_binary = saved_binary;
+    assert_eq!(
+        bad_mixed.validate().unwrap_err(),
+        BrowserError::InvalidRequest
     );
 }
