@@ -390,15 +390,32 @@ test('cdp worker attaches to existing browser, reuses cookies/tabs, and detaches
   let chrome, server, worker;
   t.after(async () => {
     if (worker) await worker.client.close().catch(() => {});
-    if (chrome && chrome.exitCode === null) {
-      chrome.kill('SIGTERM');
-      await new Promise(resolve => chrome.once('exit', resolve));
+    if (chrome) {
+      if (chrome.exitCode === null) {
+        if (process.platform === 'win32') {
+          chrome.kill();
+        } else {
+          try { process.kill(-chrome.pid, 'SIGTERM'); } catch {}
+        }
+        await new Promise(resolve => chrome.once('exit', resolve));
+      }
+      if (process.platform !== 'win32') {
+        try { process.kill(-chrome.pid, 'SIGKILL'); } catch {}
+      }
     }
     if (server) {
       server.closeAllConnections();
       await new Promise(resolve => server.close(resolve));
     }
-    fs.rmSync(root, { recursive: true, force: true });
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        fs.rmSync(root, { recursive: true, force: true });
+        break;
+      } catch (err) {
+        if (attempt === 19 || !['ENOTEMPTY', 'EBUSY', 'EPERM'].includes(err?.code)) throw err;
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
   });
 
   const nonce = randomUUID();
@@ -431,7 +448,7 @@ test('cdp worker attaches to existing browser, reuses cookies/tabs, and detaches
     '--no-first-run',
     '--no-default-browser-check',
     `${base}/initial`,
-  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  ], { detached: process.platform !== 'win32', stdio: ['ignore', 'ignore', 'pipe'] });
   t.diagnostic(`spawned external browser pid=${chrome.pid}`);
 
   const devToolsFile = path.join(chromeUserDir, 'DevToolsActivePort');
