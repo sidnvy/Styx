@@ -65,6 +65,8 @@ struct AppContainer {
 }
 pub(crate) struct HostScope {
     settings: std::sync::Mutex<std::sync::Weak<crate::host::settings::HostSettings>>,
+    #[cfg(not(target_os = "android"))]
+    browser_cdp: std::sync::Mutex<std::sync::Weak<crate::host::browser_cdp::BrowserCdpStore>>,
     container: Arc<AppContainer>,
     state_dir: PathBuf,
     root: OnceLock<PrivateRoot>,
@@ -75,6 +77,20 @@ impl HostScope {
     }
     fn host_settings(&self) -> Option<Arc<crate::host::settings::HostSettings>> {
         self.settings.lock().ok()?.upgrade()
+    }
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn publish_browser_cdp(
+        &self,
+        store: &Arc<crate::host::browser_cdp::BrowserCdpStore>,
+    ) {
+        *self
+            .browser_cdp
+            .lock()
+            .expect("Host browser CDP publication") = Arc::downgrade(store);
+    }
+    #[cfg(not(target_os = "android"))]
+    fn browser_cdp(&self) -> Option<Arc<crate::host::browser_cdp::BrowserCdpStore>> {
+        self.browser_cdp.lock().ok()?.upgrade()
     }
 
     pub(crate) fn open(state_dir: &Path) -> Result<Self, AppError> {
@@ -131,6 +147,8 @@ impl HostScope {
         }
         let result = Self {
             settings: std::sync::Mutex::new(std::sync::Weak::new()),
+            #[cfg(not(target_os = "android"))]
+            browser_cdp: std::sync::Mutex::new(std::sync::Weak::new()),
             container,
             state_dir,
             root,
@@ -226,6 +244,7 @@ struct EmptyInput {}
 #[serde(rename_all = "camelCase")]
 enum Operation {
     HostCapabilities,
+    HostBrowserCdp,
     Computers,
     InviteComputer,
     RevokeComputer,
@@ -1321,6 +1340,26 @@ impl HostApp {
         if self.running.is_some() && self.scope.host_settings().is_some() {
             supported.push("hostCapabilities");
         }
+        #[cfg(not(target_os = "android"))]
+        let browser_cdp_store = if self.running.is_some() {
+            self.scope.browser_cdp()
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "android"))]
+        if browser_cdp_store.is_some() {
+            supported.push("hostBrowserCdp");
+        }
+        #[cfg(not(target_os = "android"))]
+        let browser_cdp = match browser_cdp_store {
+            Some(store) => tokio::task::spawn_blocking(move || store.status(None).ok())
+                .await
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        #[cfg(target_os = "android")]
+        let browser_cdp: Option<()> = None;
         let foreground = serde_json::to_value(&*self.observed.borrow())
             .expect("closed foreground status serializes");
         #[cfg(target_os = "macos")]
@@ -1337,7 +1376,7 @@ impl HostApp {
             }
             value
         };
-        json!({"schema":1,"capabilities":self.scope.host_settings().map(|s| s.report()),"configuration":configuration,"foreground":foreground,"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
+        json!({"schema":1,"capabilities":self.scope.host_settings().map(|s| s.report()),"browserCdp":browser_cdp,"configuration":configuration,"foreground":foreground,"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
     }
     async fn dispatch(
         &mut self,
@@ -1365,6 +1404,7 @@ impl HostApp {
         if !matches!(
             operation,
             Operation::HostCapabilities
+                | Operation::HostBrowserCdp
                 | Operation::InviteComputer
                 | Operation::RevokeComputer
                 | Operation::TunnelSave
@@ -1415,6 +1455,17 @@ impl HostApp {
                     .map_err(|_| AppError("host_settings_not_applied"))?;
                 return serde_json::to_value(report)
                     .map_err(|_| AppError("host_settings_not_applied"));
+            }
+            Operation::HostBrowserCdp => {
+                #[cfg(target_os = "android")]
+                {
+                    let _ = &input;
+                    return Err(AppError("host_not_running"));
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    return apply_browser_cdp_patch(&self.scope, &input).await;
+                }
             }
             Operation::Computers
             | Operation::InviteComputer
@@ -1535,6 +1586,7 @@ impl HostApp {
             }
             Operation::QuitAdmission
             | Operation::HostCapabilities
+            | Operation::HostBrowserCdp
             | Operation::Computers
             | Operation::InviteComputer
             | Operation::RevokeComputer
@@ -1668,4 +1720,92 @@ async fn serve_app<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         return Err(error);
     }
     Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+async fn apply_browser_cdp_patch(
+    scope: &HostScope,
+    input: &serde_json::value::RawValue,
+) -> Result<Value, AppError> {
+    let patch: crate::host::browser_cdp::BrowserCdpPatch = decode_input(input)?;
+    let cdp = scope.browser_cdp().ok_or(AppError("host_not_running"))?;
+    let (_cfg, applied) = cdp.update(patch).await.map_err(|err| match err {
+        styx_contracts::error::ErrorCategory::InvalidRequest => AppError("app_input_invalid"),
+        _ => AppError("host_settings_not_applied"),
+    })?;
+    let status = tokio::task::spawn_blocking(move || cdp.status(None))
+        .await
+        .map_err(|_| AppError("host_settings_not_applied"))?
+        .map_err(|_| AppError("host_settings_not_applied"))?;
+    Ok(json!({"applied": applied, "browserCdp": status}))
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+mod tests {
+    use super::*;
+
+    fn private_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        dir
+    }
+
+    #[tokio::test]
+    async fn host_browser_cdp_ipc_parses_updates_and_rejects_remote_endpoints() {
+        let parent = private_dir();
+        let state_dir = parent.path().join("host");
+        let scope = HostScope::open(&state_dir).unwrap();
+        let raw_enable = serde_json::value::RawValue::from_string(
+            json!({"enabled": true, "endpoint": "http://127.0.0.1:9222/"}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            apply_browser_cdp_patch(&scope, &raw_enable)
+                .await
+                .unwrap_err()
+                .code(),
+            "host_not_running"
+        );
+
+        std::fs::create_dir(&state_dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let store = crate::host::browser_cdp::BrowserCdpStore::open(&state_dir).unwrap();
+        scope.publish_browser_cdp(&store);
+
+        let request: Request = serde_json::from_str(
+            r#"{"schema":1,"id":7,"operation":"hostBrowserCdp","input":{"enabled":true,"endpoint":"http://LOCALHOST:9222/"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(request.operation, Operation::HostBrowserCdp));
+        let ok = apply_browser_cdp_patch(&scope, &request.input)
+            .await
+            .unwrap();
+        assert_eq!(ok["applied"], json!(true));
+        assert_eq!(ok["browserCdp"]["enabled"], json!(true));
+        assert_eq!(ok["browserCdp"]["endpoint"], json!("http://localhost:9222"));
+
+        let remote: Request = serde_json::from_str(
+            r#"{"schema":1,"id":8,"operation":"hostBrowserCdp","input":{"enabled":true,"endpoint":"http://192.168.1.50:9222"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            apply_browser_cdp_patch(&scope, &remote.input)
+                .await
+                .unwrap_err()
+                .code(),
+            "app_input_invalid"
+        );
+        assert_eq!(
+            store.current().unwrap().endpoint.as_deref(),
+            Some("http://localhost:9222")
+        );
+    }
 }

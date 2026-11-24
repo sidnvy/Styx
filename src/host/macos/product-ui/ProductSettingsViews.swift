@@ -17,6 +17,46 @@ struct ProductHostCapabilitySettings: View {
             if !model.status["capabilities"]["applied"].bool {
                 Text(productText("设置尚未完全生效，请刷新状态查看。", "The settings have not fully applied. Refresh to check their status.")).foregroundStyle(.secondary)
             }
+            if model.nativeSupportsOperation("hostBrowserCdp") && model.status["browserCdp"] != .null {
+                Divider().padding(.vertical, 4)
+                Toggle(isOn: Binding(
+                    get: { model.status["browserCdp"]["enabled"].bool },
+                    set: { model.setBrowserCdp(enabled: $0) }
+                )) {
+                    Text(productText("连接现有浏览器（CDP，高级）", "Attach to existing browser (CDP, advanced)"))
+                }.disabled(model.busy).accessibilityIdentifier("styx-capability-browser-cdp")
+                Text(productText(
+                    "默认关闭；开启“操作浏览器”时仍默认新建隔离窗口以支持多任务并行。开启后，AI 仅在显式选择 existing-browser 时才连接你本机已有 Chrome/Edge/Chromium 的标签页与登录态。支持 Chrome 144+ 在 chrome://inspect/#remote-debugging 开启远程调试后自动发现，或填写本机环回地址（如 http://127.0.0.1:9222）。",
+                    "Off by default; concurrent Browser tasks still use isolated windows by default. When enabled, the assistant only attaches to your existing local Chrome/Edge/Chromium tabs and sign-ins when it explicitly selects existing-browser. Supports Chrome 144+ auto-discovery via chrome://inspect/#remote-debugging or an optional local loopback URL (such as http://127.0.0.1:9222)."
+                )).font(.caption).foregroundStyle(.secondary)
+                if let detected = model.status["browserCdp"]["detectedEndpoint"].string, !detected.isEmpty {
+                    Text(productText("已检测到本机调试端口：\(detected)", "Detected local debugging endpoint: \(detected)"))
+                        .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+                HStack(spacing: 8) {
+                    TextField(
+                        productText("可选环回地址（留空自动发现，如 http://127.0.0.1:9222）", "Optional loopback URL (blank for auto-detect, e.g. http://127.0.0.1:9222)"),
+                        text: Binding(
+                            get: { model.browserCdpEndpointDraft },
+                            set: { model.browserCdpEndpointDraft = $0; model.browserCdpDraftEdited = true }
+                        )
+                    ).textFieldStyle(.roundedBorder).disabled(model.busy)
+                    Button(productText("保存地址", "Save")) {
+                        model.setBrowserCdp(
+                            enabled: model.status["browserCdp"]["enabled"].bool,
+                            endpoint: model.browserCdpEndpointDraft
+                        )
+                    }.disabled(model.busy)
+                    if !(model.status["browserCdp"]["endpoint"].string ?? "").isEmpty || !model.browserCdpEndpointDraft.isEmpty {
+                        Button(productText("自动发现", "Auto-detect")) {
+                            model.setBrowserCdp(
+                                enabled: model.status["browserCdp"]["enabled"].bool,
+                                endpoint: ""
+                            )
+                        }.disabled(model.busy)
+                    }
+                }
+            }
         } else {
             Text(productText("完成本机设置并连接后，可在这里更改能力。", "Finish setup and connect this computer to change its capabilities here.")).font(.caption).foregroundStyle(.secondary)
         }

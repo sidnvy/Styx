@@ -258,7 +258,16 @@ namespace StyxNative {
    {"Browser — visible window on this computer","操作浏览器 — 在这台电脑上打开可见窗口"},
    {"Browser opens a separate window on this computer. Sign in or interact there, then ask ChatGPT to continue in the same session.","浏览器会在这台电脑上打开独立窗口。你可以直接登录或操作，完成后让 ChatGPT 在同一会话中继续。"},
    {"Choose the features to enable on this computer. Browser and Computer Use need an available signed-in desktop.","选择在这台电脑上启用的功能。操作浏览器和电脑需要已登录的桌面。"},
-   {"Exec","运行命令"}
+   {"Exec","运行命令"},
+   {"Attach to existing browser (CDP, advanced)","连接现有浏览器（CDP，高级）"},
+   {"Off by default; concurrent Browser tasks still use isolated windows by default. When enabled, ChatGPT only attaches to your existing Chrome/Edge/Chromium tabs and sign-ins when explicitly selecting existing-browser. Supports chrome://inspect/#remote-debugging auto-discovery or an optional local loopback URL (such as http://127.0.0.1:9222).","默认关闭；并发浏览器任务仍默认使用独立隔离窗口。开启后，仅当显式选择 existing-browser 时才连接你本机已打开的 Chrome/Edge/Chromium 标签页与登录态。支持在浏览器打开 chrome://inspect/#remote-debugging 自动发现，或选填本机环回地址（如 http://127.0.0.1:9222）。"},
+   {"Detected local debugging endpoint: ","已检测到本机调试端口："},
+   {"Optional loopback CDP URL (blank for auto-detect, e.g. http://127.0.0.1:9222)","可选环回 CDP 地址（留空自动发现，如 http://127.0.0.1:9222）"},
+   {"Save CDP endpoint","保存 CDP 地址"},
+   {"Use CDP auto-detect","改为自动发现"},
+   {"Invalid input. Custom browser CDP endpoints only allow local loopback http:// or ws:// URLs (such as http://127.0.0.1:9222).","输入无效。自定义浏览器 CDP 地址仅支持本机环回 http:// 或 ws:// URL（如 http://127.0.0.1:9222）。"},
+   {"Settings have not fully applied. Refresh to check their status.","设置尚未完全生效，请刷新状态查看。"},
+   {"The setting result is unconfirmed. Refresh the status before trying again.","设置结果尚未确认，请刷新状态后重试。"}
   };
   internal static string UI(string value){string translated;return System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName=="zh"&&ChineseText.TryGetValue(value,out translated)?translated:value;}
   internal static Form Window(string title,Size size){return new Form { Text=UI(title),ClientSize=size,StartPosition=FormStartPosition.CenterScreen,BackColor=Color.FromArgb(249,249,247),Font=new Font("Segoe UI",10),AutoScaleMode=AutoScaleMode.Dpi,MinimumSize=size };}
@@ -419,7 +428,8 @@ namespace StyxNative {
  sealed class Settings:Form {
   sealed class CapabilityDraft {internal string Label=Environment.MachineName,LanAddress="";internal bool Exec=true,Computer,Browser,AllowRemoteHosts;internal int Channel;}
   readonly StyxContext owner;readonly FlowLayoutPanel content,navigation;readonly TableLayoutPanel startupPanel;readonly Label startupText;readonly ProgressBar startupProgress;readonly Button retryStartup;readonly Label feedback,statusReadout,observationError;readonly Dictionary<string,CapabilityDraft> capabilityDrafts=new Dictionary<string,CapabilityDraft>();
-  string renderedRustOverviewKey="";
+  string renderedRustOverviewKey="",browserCdpDraft="";
+  bool browserCdpDraftEdited;
   string page="welcome",joinOrigin,joinCa;bool localCreationSubmitted;TextBox label,link;CheckBox exec,computer,browser;ComboBox channel;
   internal Settings(StyxContext context,Icon icon){owner=context;Text=StyxContext.UI("Styx Settings");Icon=icon;ClientSize=new Size(590,720);MinimumSize=new Size(550,650);Font=new Font("Segoe UI",10);BackColor=Color.FromArgb(249,249,247);AutoScaleMode=AutoScaleMode.Dpi;StartPosition=FormStartPosition.CenterScreen;var outer=new TableLayoutPanel { Dock=DockStyle.Fill,RowCount=3,ColumnCount=1,Padding=new Padding(0) };outer.RowStyles.Add(new RowStyle(SizeType.Absolute,62));outer.RowStyles.Add(new RowStyle(SizeType.AutoSize));outer.RowStyles.Add(new RowStyle(SizeType.Percent,100));Controls.Add(outer);navigation=new FlowLayoutPanel { Dock=DockStyle.Fill,WrapContents=false,Padding=new Padding(15,8,0,0) };outer.Controls.Add(navigation,0,0);StyxContext.Button(navigation,"Computers",()=>{ShowPage("overview");return Task.FromResult(0);}).MinimumSize=new Size(100,32);StyxContext.Button(navigation,"ChatGPT",()=>{ShowPage("chat");return Task.FromResult(0);}).MinimumSize=new Size(100,32);StyxContext.Button(navigation,"General",()=>{ShowPage("general");return Task.FromResult(0);}).MinimumSize=new Size(100,32);foreach(Control item in navigation.Controls){item.AutoSize=false;item.Width=165;item.Height=36;}startupPanel=new TableLayoutPanel {Dock=DockStyle.Top,AutoSize=true,ColumnCount=2,RowCount=2,Padding=new Padding(26,8,26,12),Visible=false};startupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));startupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));startupText=new Label {AutoSize=true,MaximumSize=new Size(390,0),Margin=new Padding(0,0,10,8)};startupProgress=new ProgressBar {Dock=DockStyle.Top,Height=8,Style=ProgressBarStyle.Marquee,MarqueeAnimationSpeed=25};retryStartup=new Button {Text="Retry",AutoSize=true,MinimumSize=new Size(75,32)};retryStartup.Click+=async(s,e)=>await owner.InitializeCore();startupPanel.Controls.Add(startupText,0,0);startupPanel.Controls.Add(retryStartup,1,0);startupPanel.Controls.Add(startupProgress,0,1);startupPanel.SetColumnSpan(startupProgress,2);startupText.Paint+=(s,e)=>owner.RecordFirstPaint();outer.Controls.Add(startupPanel,0,1);content=new FlowLayoutPanel {Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoScroll=true,Padding=new Padding(26)};outer.Controls.Add(content,0,2);content.SizeChanged+=(sender,args)=>{foreach(Control child in content.Controls){if(child is Label||child is TextBox||child is CheckBox){child.Width=Math.Max(280,content.ClientSize.Width-content.Padding.Horizontal-22);}}};feedback=new Label {Width=490,Height=100,ForeColor=Color.FromArgb(95,70,35)};statusReadout=new Label {Width=490,Height=140};observationError=new Label {Width=490,Height=65,ForeColor=Color.FromArgb(130,65,35)};FormClosing+=(s,e)=>{if(e.CloseReason==CloseReason.UserClosing){e.Cancel=true;Hide();}};ShowPage("welcome");}
   internal bool StartupActionsGated {get{return !navigation.Enabled&&!content.Enabled;}}
@@ -580,7 +590,7 @@ namespace StyxNative {
    }
   }
   string NativeSettingsStatus(object data){return StyxContext.ConnectionText(data);}
-  static string NativeOverviewKey(object data){return Json.Codec.Serialize(new object[]{Json.Str(data,"enrollment","status"),Json.Str(data,"foreground","error"),Json.Str(data,"foreground","status"),Json.Str(data,"foreground","execConnection"),Json.Get(data,"capabilities"),Json.Str(data,"runtimeUpdate","status"),Json.Yes(data,"runtimeUpdate","can_recover"),Json.Str(data,"runtimeUpdate","transaction_id"),Json.Get(data,"supportedOperations")});}
+  static string NativeOverviewKey(object data){return Json.Codec.Serialize(new object[]{Json.Str(data,"enrollment","status"),Json.Str(data,"foreground","error"),Json.Str(data,"foreground","status"),Json.Str(data,"foreground","execConnection"),Json.Get(data,"capabilities"),Json.Get(data,"browserCdp"),Json.Str(data,"runtimeUpdate","status"),Json.Yes(data,"runtimeUpdate","can_recover"),Json.Str(data,"runtimeUpdate","transaction_id"),Json.Get(data,"supportedOperations")});}
   sealed class NetworkChoice {
    internal string Name,Address;
    public override string ToString(){return String.IsNullOrEmpty(Address)?Name:Name+" · "+Address;}
@@ -594,6 +604,39 @@ namespace StyxNative {
      var toggle=new CheckBox {Text=StyxContext.UI(capability=="computer"?"Computer Use":capability=="browser"?"Browser":"Exec"),Checked=Json.Yes(owner.CurrentStatus,"capabilities","configured",capability),Width=490,Height=32};
      content.Controls.Add(toggle);
      toggle.CheckedChanged+=async(sender,args)=>{toggle.Enabled=false;try{var result=await owner.Call("hostCapabilities",Json.Obj(selectedCapability,toggle.Checked));await owner.RefreshAfterMutation();if(!Json.Yes(result,"applied"))Feedback("Settings have not fully applied. Refresh to check their status.");}catch(Exception){Feedback("The setting result is unconfirmed. Refresh the status before trying again.");}finally{if(!toggle.IsDisposed)toggle.Enabled=true;}};
+    }
+    if(owner.Supports("hostBrowserCdp")&&Json.Get(owner.CurrentStatus,"browserCdp")!=null){
+     if(!browserCdpDraftEdited)browserCdpDraft=Json.Str(owner.CurrentStatus,"browserCdp","endpoint");
+     var cdpToggle=new CheckBox {Text=StyxContext.UI("Attach to existing browser (CDP, advanced)"),Checked=Json.Yes(owner.CurrentStatus,"browserCdp","enabled"),Width=490,Height=32,Margin=new Padding(0,8,0,0)};
+     content.Controls.Add(cdpToggle);
+     cdpToggle.CheckedChanged+=async(sender,args)=>{cdpToggle.Enabled=false;try{var result=await owner.Call("hostBrowserCdp",Json.Obj("enabled",cdpToggle.Checked));await owner.RefreshAfterMutation();if(!Json.Yes(result,"applied"))Feedback("Settings have not fully applied. Refresh to check their status.");}catch(Exception){Feedback("The setting result is unconfirmed. Refresh the status before trying again.");}finally{if(!cdpToggle.IsDisposed)cdpToggle.Enabled=true;}};
+     Explain("Off by default; concurrent Browser tasks still use isolated windows by default. When enabled, ChatGPT only attaches to your existing Chrome/Edge/Chromium tabs and sign-ins when explicitly selecting existing-browser. Supports chrome://inspect/#remote-debugging auto-discovery or an optional local loopback URL (such as http://127.0.0.1:9222).",105);
+     string detected=Json.Str(owner.CurrentStatus,"browserCdp","detectedEndpoint");
+     if(!String.IsNullOrEmpty(detected))StyxContext.Text(content,StyxContext.UI("Detected local debugging endpoint: ")+detected,40);
+     StyxContext.Text(content,"Optional loopback CDP URL (blank for auto-detect, e.g. http://127.0.0.1:9222)",25);
+     var cdpEndpoint=new TextBox {Text=browserCdpDraft,Width=490,AccessibleName="Optional loopback CDP URL",Margin=new Padding(0,0,0,8)};
+     cdpEndpoint.TextChanged+=(sender,args)=>{browserCdpDraft=cdpEndpoint.Text;browserCdpDraftEdited=true;};
+     content.Controls.Add(cdpEndpoint);
+     Action("Save CDP endpoint",async()=>{
+      string trimmed=cdpEndpoint.Text.Trim();
+      object endpointValue=String.IsNullOrEmpty(trimmed)?null:(object)trimmed;
+      bool currentEnabled=Json.Yes(owner.CurrentStatus,"browserCdp","enabled");
+      NativeOperationException rejected=null;object result=null;
+      try{result=await owner.Call("hostBrowserCdp",Json.Obj("enabled",currentEnabled,"endpoint",endpointValue));}catch(NativeOperationException failure){if(failure.Code!="app_input_invalid")throw;rejected=failure;}
+      if(rejected!=null){Feedback("Invalid input. Custom browser CDP endpoints only allow local loopback http:// or ws:// URLs (such as http://127.0.0.1:9222).");return;}
+      browserCdpDraftEdited=false;
+      await owner.RefreshAfterMutation();
+      if(!Json.Yes(result,"applied"))Feedback("Settings have not fully applied. Refresh to check their status.");
+     });
+     if(!String.IsNullOrEmpty(Json.Str(owner.CurrentStatus,"browserCdp","endpoint"))||!String.IsNullOrEmpty(browserCdpDraft)){
+      Action("Use CDP auto-detect",async()=>{
+       bool currentEnabled=Json.Yes(owner.CurrentStatus,"browserCdp","enabled");
+       var result=await owner.Call("hostBrowserCdp",Json.Obj("enabled",currentEnabled,"endpoint",(object)null));
+       browserCdpDraft="";browserCdpDraftEdited=false;
+       await owner.RefreshAfterMutation();
+       if(!Json.Yes(result,"applied"))Feedback("Settings have not fully applied. Refresh to check their status.");
+      });
+     }
     }
   }
   static int DetectInstalledBrowserIndex(){
@@ -796,6 +839,14 @@ namespace StyxNative {
     owner.ApplyPreparationResult(existing);ShowPage("overview");
     if(page=="welcome")throw new Exception("native_retained_role_navigation_offered_fresh_setup");
    }
+   owner.ApplyPreparationResult(Json.Obj("mode","rust_host","configuration",Json.Obj("status","retained"),"status",Json.Obj(),"capabilities",Json.Obj("configured",Json.Obj("exec",true,"browser",true,"computer",false),"applied",true),"browserCdp",Json.Obj("enabled",true,"endpoint","http://127.0.0.1:9222","detectedEndpoint","ws://127.0.0.1:9333/devtools/browser/self-test"),"supportedOperations",new object[]{"hostCapabilities","hostBrowserCdp"}));
+   ShowPage("overview");
+   bool hasCdpToggle=false,hasCdpBox=false;
+   foreach(Control control in content.Controls){
+    var cb=control as CheckBox;if(cb!=null&&cb.Text==StyxContext.UI("Attach to existing browser (CDP, advanced)"))hasCdpToggle=cb.Checked;
+    var tb=control as TextBox;if(tb!=null&&tb.AccessibleName=="Optional loopback CDP URL")hasCdpBox=tb.Text=="http://127.0.0.1:9222";
+   }
+   if(!hasCdpToggle||!hasCdpBox)throw new Exception("native_browser_cdp_controls_missing");
    owner.ApplyPreparationResult(previousStatus);
    Feedback("");ShowPage("welcome");Show();CreateControl();PerformLayout();Application.DoEvents();using(var image=new Bitmap(Width,Height)){DrawToBitmap(image,new Rectangle(0,0,Width,Height));image.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"native-settings.png"));}}
  }

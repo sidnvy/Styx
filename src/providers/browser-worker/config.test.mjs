@@ -43,5 +43,42 @@ test('trusted startup scope accepts exact private directories and rejects aliase
     if (process.platform !== 'win32') {
       write(config); fs.chmodSync(config.profile_dir, 0o755); assert.throws(() => readConfiguration(file));
     }
+
+    // Opt-in CDP configuration validates strict loopback URLs and forbids mixed managed fields.
+    const cdpBase = {
+      schema: 1,
+      output_dir: config.output_dir,
+      workspace_dir: config.workspace_dir,
+    };
+    for (const valid of [
+      'http://127.0.0.1:9222',
+      'http://localhost:9222/',
+      'ws://[::1]:9222/devtools/browser/abc-123_4.5',
+      'ws://127.0.0.1:9333/devtools/browser',
+    ]) {
+      const cdpConfig = { ...cdpBase, cdp_endpoint: valid };
+      write(cdpConfig);
+      assert.deepEqual(readConfiguration(file), cdpConfig);
+    }
+    for (const invalid of [
+      '',
+      'https://127.0.0.1:9222',
+      'http://192.168.1.5:9222',
+      'http://example.com:9222',
+      'http://user@127.0.0.1:9222',
+      'http://127.0.0.1:9222?token=abc',
+      'http://127.0.0.1:9222#frag',
+      'http://127.0.0.1',
+      'http://127.0.0.1:9222/json/version',
+      'ws://127.0.0.1:9222/other',
+      'ws://127.0.0.1:9222/devtools/browser/../secret',
+    ]) {
+      write({ ...cdpBase, cdp_endpoint: invalid });
+      assert.throws(() => readConfiguration(file), `expected rejection for ${invalid}`);
+    }
+    write({ ...cdpBase, cdp_endpoint: 'http://127.0.0.1:9222', profile_dir: config.profile_dir });
+    assert.throws(() => readConfiguration(file));
+    write({ ...cdpBase, cdp_endpoint: 'http://127.0.0.1:9222', browser_executable: executable });
+    assert.throws(() => readConfiguration(file));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

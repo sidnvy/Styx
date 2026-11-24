@@ -46,6 +46,7 @@ fn profile_workspaces_cannot_expose_other_owner_private_directories() {
         node_binary: "/unused/node".into(),
         worker_entry: "/unused/worker".into(),
         browser_binary: "/unused/browser".into(),
+        cdp_endpoint: None,
         profile_dir: profile.into(),
         output_dir: output.into(),
         workspace_dir: workspace.into(),
@@ -311,6 +312,7 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
         browser_binary: std::env::var_os("STYX_TEST_BROWSER_EXECUTABLE")
             .unwrap()
             .into(),
+        cdp_endpoint: None,
         workspace_dir: root.join(format!("{prefix}-work")),
         profile_dir: root.join(format!("{prefix}-profile")),
         output_dir: root.join(format!("{prefix}-output")),

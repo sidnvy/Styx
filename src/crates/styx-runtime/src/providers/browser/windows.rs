@@ -18,11 +18,22 @@ pub(super) async fn start(live: &mut Live, config: &OwnedBrowserConfig) -> Resul
         let root =
             PrivateRoot::open(&config.output_dir).map_err(|_| BrowserError::PermissionDenied)?;
         let name = format!("worker-{}.json", uuid::Uuid::new_v4().simple());
-        let bytes = serde_json::to_vec(&serde_json::json!({
-            "schema":1,"profile_dir":config.profile_dir,"output_dir":config.output_dir,
-            "workspace_dir":config.workspace_dir,"browser_executable":config.browser_binary
-        }))
-        .map_err(|_| BrowserError::InvalidRequest)?;
+        let payload = match &config.cdp_endpoint {
+            Some(endpoint) => serde_json::json!({
+                "schema": 1,
+                "output_dir": config.output_dir,
+                "workspace_dir": config.workspace_dir,
+                "cdp_endpoint": endpoint,
+            }),
+            None => serde_json::json!({
+                "schema": 1,
+                "profile_dir": config.profile_dir,
+                "output_dir": config.output_dir,
+                "workspace_dir": config.workspace_dir,
+                "browser_executable": config.browser_binary,
+            }),
+        };
+        let bytes = serde_json::to_vec(&payload).map_err(|_| BrowserError::InvalidRequest)?;
         let (_observed, pin) = root
             .create_runtime_asset(&name, &bytes)
             .map_err(|_| BrowserError::SpawnFailed)?;
