@@ -1,6 +1,19 @@
 # Styx 重构当前交付清单
 
-## 当前源码与实机证据的边界（2026-11-21）
+## 当前源码与实机基线（2026-11-24）
+
+当前已发布并全量部署运行的最近预发布基线为 [v0.8.1-rc.12](https://github.com/sidnvy/Styx/releases/tag/v0.8.1-rc.12)（源码 `99fd609face2b7af2d98ff23bf7265bf0a0ae62f`），已核对资产保存在 `/home/sid/Developer/Artifacts/Styx/release-0.8.1-rc.12/`：
+
+- **Gateway (`moedeu-apps`)**：已升级并稳定运行 `0.8.1-rc.12`，保持既有身份、配对与 Tunnel `/healthz`；Public MCP 同步 JSON 握手、clean SSE framing、`public-mcp-subject:` 稳定归属与 `destructiveHint: false` 工具契约已生效。
+- **跨平台 Hosts**：Linux (`niuda`)、macOS (`pilotmac`)、Windows (`NAB5-WIN`)、Android (`Pixel 7 Pro`) 及授权的独立节点 `piermini` 均已升级到 `0.8.1-rc.12` 并通过在线能力连接校验。
+- **双端真实账号冒烟**：在 Google Gemini Web（`https://styx.sidnvy.com/mcp`）与 ChatGPT Web（`Styx Gateway`）完成 `list_execution_environments`、并发隔离标签页、会话切换/续读与 `browser_close` (`profile_preserved: true`) 验证。
+- **收口转 Stable (`0.8.1`) 修复项**：
+  1. 修复 Linux Host systemd 停止路径在局部 lane 未完成时在 `TimeoutStopSec=infinity` 下无限自旋 `cleanup_unknown` 的问题（增加固定类别诊断 `reason` 并在 20s 服务停止预算后如实返回未完成收据），以及 `native_service::install()` 对先前 `failed` 但主进程与 cgroup 已清空 unit 的状态判定。
+  2. 将 opt-in `existing-browser` CDP 的 Playwright `connectOverCDP` 超时提升至 25s，并将 Rust `SessionMode::Cdp` 动作预算统一到 `BROWSER_WAIT_PREPARE_TIMEOUT_MS`（35s），避免首次 Chrome 远程调试授权弹窗期间误落入 4-5s `outcome_unknown`。
+
+下文保留历史交付节点记录，不覆盖上述当前状态。
+
+## 历史源码与实机证据节点（2026-11-21，rc.2）
 
 本次重新核对的 niuda Host 与 moedeu-apps Gateway 都在运行
 [v0.8.1-rc.2](https://github.com/sidnvy/Styx/releases/tag/v0.8.1-rc.2)，

@@ -155,7 +155,7 @@ async function main() {
     if (isCdpMode) {
       contextPromise ??= chromium.connectOverCDP(config.cdp_endpoint, {
         noDefaults: true,
-        timeout: 4000,
+        timeout: 25000,
       }).then(async browser => {
         const value = browser.contexts()[0];
         if (!value) {

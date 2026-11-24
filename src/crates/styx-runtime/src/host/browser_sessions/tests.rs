@@ -1002,3 +1002,20 @@ fn attach_session_id_to_content_surfaces_id_without_mutating_errors_or_existing_
             .contains("Browser Session")
     );
 }
+
+#[test]
+fn cdp_session_actions_use_extended_prepare_timeout_for_interactive_attach() {
+    assert_eq!(
+        action_timeout("browser_tabs", SessionMode::Cdp),
+        BROWSER_WAIT_PREPARE_TIMEOUT_MS
+    );
+    assert_eq!(
+        action_timeout("browser_snapshot", SessionMode::Cdp),
+        BROWSER_WAIT_PREPARE_TIMEOUT_MS
+    );
+    assert_eq!(action_timeout("browser_tabs", SessionMode::Managed), 5_000);
+    assert_eq!(
+        action_timeout("browser_navigate", SessionMode::Managed),
+        BROWSER_WAIT_PREPARE_TIMEOUT_MS
+    );
+}

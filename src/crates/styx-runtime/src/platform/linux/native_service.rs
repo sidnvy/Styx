@@ -727,7 +727,7 @@ impl Definition {
         self.validate()?;
         self.ctl("daemon-reload", false).await?;
         let after = self.inspect().await?;
-        if after.active != "inactive" || after.enabled != Some(false) {
+        if !after.stopped_for_mutation() || after.enabled != Some(false) {
             return Err(ServiceError::Unknown);
         }
         Ok(after)
@@ -1270,5 +1270,9 @@ mod mutation_tests {
         os.active = "deactivating".into();
         os.cgroup.clear();
         assert!(!os.stopped_for_mutation());
+
+        os.active = "failed".into();
+        os.enabled = Some(false);
+        assert!(os.stopped_for_mutation() && os.enabled == Some(false));
     }
 }
