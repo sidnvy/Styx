@@ -8,8 +8,12 @@ computer.
 
 ## Changes
 
-This release candidate builds on `0.8.1-rc.9` with opt-in local Browser CDP attachment, Public MCP compatibility for Google Gemini and standard MCP OAuth clients, legacy forwarder cleanup, and release CI caching improvements:
+This release candidate builds on `0.8.1-rc.11` with Google Gemini Web & concurrent Browser session stability fixes, on top of opt-in local Browser CDP attachment, Public MCP compatibility, legacy forwarder cleanup, and release CI caching improvements:
 
+- **Gemini Web & concurrent Browser session stability (0.8.1-rc.12)**:
+  - Marked interactive and navigation `browser_*` tools `destructiveHint: false` in `PUBLIC-MCP-V1.json` and documented automatic idle/new session allocation plus explicit `"new"` isolated sessions.
+  - Bound non-OpenAI `PublicMcp` callers without OpenAI `_meta` to a stable `public-mcp-subject:` owner across `Mcp-Session-Id` rotations while preserving `tunnel-conversation:` correlation for ChatGPT.
+  - Enabled multi-profile idle/new auto-allocation, explicit `"new"` isolated sessions, concurrent omitted-ID `browser_navigate` isolation without auto-selecting `existing-browser` (CDP), and visible `browser_session_id` text headers in Playwright action outputs.
 - **Opt-in local Browser CDP attachment in Coexist Mode (default OFF)**:
   - Host-local `browser-cdp.json` toggle (`styx host browser-cdp status|enable|disable`, App IPC `hostBrowserCdp`, macOS SwiftUI & Windows WinForms Settings controls), never modifiable by remote MCP/Gateway callers.
   - Supports Chrome 144+ `chrome://inspect/#remote-debugging` (`DevToolsActivePort` auto-discovery) and optional canonical loopback (`127.0.0.1` / `localhost` / `[::1]`) endpoints.
