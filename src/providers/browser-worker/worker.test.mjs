@@ -534,6 +534,7 @@ test('cdp worker attaches to existing browser, reuses cookies/tabs, and detaches
 });
 
 test('cdp worker returns browser_native_cdp_unavailable with dispatched=false when endpoint refuses connection', {
+  skip: !executable && 'set STYX_BROWSER_EXECUTABLE to run the real installed browser',
   timeout: 30000,
 }, async t => {
   const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
