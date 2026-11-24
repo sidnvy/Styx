@@ -42,6 +42,7 @@ const MAX_JWT_BYTES: usize = 12_000;
 const MAX_JWKS_BYTES: usize = 256 * 1024;
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 const JWKS_MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+const JWKS_MAX_STALE: Duration = Duration::from_secs(24 * 60 * 60);
 const JWT_CLOCK_LEEWAY_SECS: u64 = 15;
 const DEFAULT_PORT: u16 = 22128;
 
@@ -281,11 +282,45 @@ pub struct VerifiedClaim {
     pub subject: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JwtRejectReason {
+    MissingHeader,
+    InvalidFormat,
+    UnsupportedAlgorithm,
+    JwksFetchFailed,
+    UnknownKid,
+    InvalidSignature,
+    TokenExpired,
+    TokenNotYetValid,
+    ClaimsMismatch,
+    InvalidSubject,
+}
+
+impl JwtRejectReason {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::MissingHeader => "missing_header",
+            Self::InvalidFormat => "invalid_format",
+            Self::UnsupportedAlgorithm => "unsupported_algorithm",
+            Self::JwksFetchFailed => "jwks_fetch_failed",
+            Self::UnknownKid => "unknown_kid",
+            Self::InvalidSignature => "invalid_signature",
+            Self::TokenExpired => "token_expired",
+            Self::TokenNotYetValid => "token_not_yet_valid",
+            Self::ClaimsMismatch => "claims_mismatch",
+            Self::InvalidSubject => "invalid_subject",
+        }
+    }
+}
+
 pub struct JwksVerifier {
     config: PublicMcpConfig,
     header_name: HeaderName,
     client: Option<reqwest::Client>,
     cache: RwLock<CachedJwks>,
+    cache_ttl: Duration,
+    min_refresh_interval: Duration,
+    max_stale: Duration,
 }
 
 impl JwksVerifier {
@@ -306,6 +341,9 @@ impl JwksVerifier {
                 keys: BTreeMap::new(),
                 fetched_at: None,
             }),
+            cache_ttl: JWKS_CACHE_TTL,
+            min_refresh_interval: JWKS_MIN_REFRESH_INTERVAL,
+            max_stale: JWKS_MAX_STALE,
         })
     }
 
@@ -325,7 +363,31 @@ impl JwksVerifier {
                 keys,
                 fetched_at: Some(Instant::now()),
             }),
+            cache_ttl: JWKS_CACHE_TTL,
+            min_refresh_interval: JWKS_MIN_REFRESH_INTERVAL,
+            max_stale: JWKS_MAX_STALE,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn with_cached_keys_and_client(
+        config: PublicMcpConfig,
+        keys: BTreeMap<String, RsaJwk>,
+        fetched_at: Instant,
+        cache_ttl: Duration,
+        min_refresh_interval: Duration,
+        max_stale: Duration,
+    ) -> Result<Self> {
+        let mut verifier = Self::new(config)?;
+        verifier.cache_ttl = cache_ttl;
+        verifier.min_refresh_interval = min_refresh_interval;
+        verifier.max_stale = max_stale;
+        {
+            let mut guard = verifier.cache.write().await;
+            guard.keys = keys;
+            guard.fetched_at = Some(fetched_at);
+        }
+        Ok(verifier)
     }
 
     pub fn config(&self) -> &PublicMcpConfig {
@@ -345,94 +407,160 @@ impl JwksVerifier {
         }
     }
 
-    fn extract_token<'a>(&self, headers: &'a HeaderMap) -> Option<&'a str> {
+    fn extract_token<'a>(
+        &self,
+        headers: &'a HeaderMap,
+    ) -> std::result::Result<&'a str, JwtRejectReason> {
         if headers.get_all(&self.header_name).iter().count() != 1 {
-            return None;
+            return Err(JwtRejectReason::MissingHeader);
         }
-        let raw = headers.get(&self.header_name)?.to_str().ok()?.trim();
+        let raw = headers
+            .get(&self.header_name)
+            .ok_or(JwtRejectReason::MissingHeader)?
+            .to_str()
+            .map_err(|_| JwtRejectReason::InvalidFormat)?
+            .trim();
         let token = if self.header_name == http::header::AUTHORIZATION {
-            raw.strip_prefix("Bearer ")?.trim()
+            raw.strip_prefix("Bearer ")
+                .ok_or(JwtRejectReason::InvalidFormat)?
+                .trim()
         } else {
             raw
         };
         if token.is_empty() || token.len() > MAX_JWT_BYTES {
-            return None;
+            return Err(JwtRejectReason::InvalidFormat);
         }
-        Some(token)
+        Ok(token)
     }
 
-    async fn get_key(&self, kid: &str) -> Option<RsaJwk> {
+    async fn get_key(&self, kid: &str) -> std::result::Result<RsaJwk, JwtRejectReason> {
         let now = Instant::now();
         {
             let guard = self.cache.read().await;
             let fresh = guard
                 .fetched_at
-                .is_some_and(|t| now.saturating_duration_since(t) < JWKS_CACHE_TTL);
+                .is_some_and(|t| now.saturating_duration_since(t) < self.cache_ttl);
             if fresh && let Some(key) = guard.keys.get(kid) {
-                return Some(key.clone());
+                return Ok(key.clone());
             }
         }
         self.refresh_jwks(kid).await
     }
 
-    async fn refresh_jwks(&self, kid: &str) -> Option<RsaJwk> {
+    async fn refresh_jwks(&self, kid: &str) -> std::result::Result<RsaJwk, JwtRejectReason> {
         let Some(client) = self.client.as_ref() else {
-            return self.cache.read().await.keys.get(kid).cloned();
+            return self
+                .cache
+                .read()
+                .await
+                .keys
+                .get(kid)
+                .cloned()
+                .ok_or(JwtRejectReason::UnknownKid);
         };
         let mut guard = self.cache.write().await;
         let now = Instant::now();
         if let Some(fetched) = guard.fetched_at {
-            if now.saturating_duration_since(fetched) < JWKS_CACHE_TTL
+            let age = now.saturating_duration_since(fetched);
+            if age < self.cache_ttl
                 && let Some(key) = guard.keys.get(kid)
             {
-                return Some(key.clone());
+                return Ok(key.clone());
             }
-            if now.saturating_duration_since(fetched) < JWKS_MIN_REFRESH_INTERVAL {
-                return guard.keys.get(kid).cloned();
+            if age < self.min_refresh_interval {
+                return if age < self.max_stale {
+                    guard
+                        .keys
+                        .get(kid)
+                        .cloned()
+                        .ok_or(JwtRejectReason::UnknownKid)
+                } else {
+                    Err(JwtRejectReason::JwksFetchFailed)
+                };
             }
         }
-        let response = client.get(&self.config.jwks_url).send().await.ok()?;
-        if !response.status().is_success() {
-            return None;
+        let fetched = async {
+            let response = client.get(&self.config.jwks_url).send().await.ok()?;
+            if !response.status().is_success() {
+                return None;
+            }
+            let body = response.bytes().await.ok()?;
+            if body.len() > MAX_JWKS_BYTES {
+                return None;
+            }
+            parse_jwks(&body)
         }
-        let body = response.bytes().await.ok()?;
-        if body.len() > MAX_JWKS_BYTES {
-            return None;
+        .await;
+        if let Some(parsed) = fetched {
+            guard.keys = parsed;
+            guard.fetched_at = Some(Instant::now());
+            return guard
+                .keys
+                .get(kid)
+                .cloned()
+                .ok_or(JwtRejectReason::UnknownKid);
         }
-        let parsed = parse_jwks(&body)?;
-        guard.keys = parsed;
-        guard.fetched_at = Some(Instant::now());
-        guard.keys.get(kid).cloned()
+        if guard
+            .fetched_at
+            .is_some_and(|t| now.saturating_duration_since(t) < self.max_stale)
+            && let Some(cached) = guard.keys.get(kid)
+        {
+            record_jwks_stale_fallback();
+            return Ok(cached.clone());
+        }
+        Err(JwtRejectReason::JwksFetchFailed)
+    }
+
+    pub async fn verify_headers_detailed(
+        &self,
+        headers: &HeaderMap,
+    ) -> std::result::Result<VerifiedClaim, JwtRejectReason> {
+        let token = self.extract_token(headers)?;
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| JwtRejectReason::InvalidFormat)?
+            .as_secs();
+        self.verify_jwt_detailed(token, now_unix).await
     }
 
     pub async fn verify_headers(&self, headers: &HeaderMap) -> Option<VerifiedClaim> {
-        let token = self.extract_token(headers)?;
-        let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-        self.verify_jwt(token, now_unix).await
+        self.verify_headers_detailed(headers).await.ok()
     }
 
-    pub async fn verify_jwt(&self, token: &str, now_unix: u64) -> Option<VerifiedClaim> {
+    pub async fn verify_jwt_detailed(
+        &self,
+        token: &str,
+        now_unix: u64,
+    ) -> std::result::Result<VerifiedClaim, JwtRejectReason> {
         if token.is_empty() || token.len() > MAX_JWT_BYTES {
-            return None;
+            return Err(JwtRejectReason::InvalidFormat);
         }
         let mut parts = token.split('.');
-        let header_b64 = parts.next()?;
-        let payload_b64 = parts.next()?;
-        let sig_b64 = parts.next()?;
+        let header_b64 = parts.next().ok_or(JwtRejectReason::InvalidFormat)?;
+        let payload_b64 = parts.next().ok_or(JwtRejectReason::InvalidFormat)?;
+        let sig_b64 = parts.next().ok_or(JwtRejectReason::InvalidFormat)?;
         if parts.next().is_some() {
-            return None;
+            return Err(JwtRejectReason::InvalidFormat);
         }
-        let header_bytes = URL_SAFE_NO_PAD.decode(header_b64).ok()?;
-        let header: Value = serde_json::from_slice(&header_bytes).ok()?;
-        if header.get("alg")?.as_str()? != "RS256" {
-            return None;
+        let header_bytes = URL_SAFE_NO_PAD
+            .decode(header_b64)
+            .map_err(|_| JwtRejectReason::InvalidFormat)?;
+        let header: Value =
+            serde_json::from_slice(&header_bytes).map_err(|_| JwtRejectReason::InvalidFormat)?;
+        if header.get("alg").and_then(Value::as_str) != Some("RS256") {
+            return Err(JwtRejectReason::UnsupportedAlgorithm);
         }
-        let kid = header.get("kid")?.as_str()?;
+        let kid = header
+            .get("kid")
+            .and_then(Value::as_str)
+            .ok_or(JwtRejectReason::InvalidFormat)?;
         if kid.is_empty() || kid.len() > 256 {
-            return None;
+            return Err(JwtRejectReason::InvalidFormat);
         }
         let key = self.get_key(kid).await?;
-        let signature = URL_SAFE_NO_PAD.decode(sig_b64).ok()?;
+        let signature = URL_SAFE_NO_PAD
+            .decode(sig_b64)
+            .map_err(|_| JwtRejectReason::InvalidSignature)?;
         let signing_input_len = header_b64.len() + 1 + payload_b64.len();
         let mut signing_input = Vec::with_capacity(signing_input_len);
         signing_input.extend_from_slice(header_b64.as_bytes());
@@ -444,43 +572,59 @@ impl JwksVerifier {
         };
         public
             .verify(&RSA_PKCS1_2048_8192_SHA256, &signing_input, &signature)
-            .ok()?;
+            .map_err(|_| JwtRejectReason::InvalidSignature)?;
 
-        let payload_bytes = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
-        let claims: Value = serde_json::from_slice(&payload_bytes).ok()?;
-        if claims.get("iss")?.as_str()? != self.config.issuer {
-            return None;
+        let payload_bytes = URL_SAFE_NO_PAD
+            .decode(payload_b64)
+            .map_err(|_| JwtRejectReason::InvalidFormat)?;
+        let claims: Value =
+            serde_json::from_slice(&payload_bytes).map_err(|_| JwtRejectReason::InvalidFormat)?;
+        if claims.get("iss").and_then(Value::as_str) != Some(self.config.issuer.as_str()) {
+            return Err(JwtRejectReason::ClaimsMismatch);
         }
-        let aud_ok = match claims.get("aud")? {
-            Value::String(s) => s == &self.config.audience,
-            Value::Array(items) => items
+        let aud_ok = match claims.get("aud") {
+            Some(Value::String(s)) => s == &self.config.audience,
+            Some(Value::Array(items)) => items
                 .iter()
                 .any(|item| item.as_str() == Some(self.config.audience.as_str())),
             _ => false,
         };
         if !aud_ok {
-            return None;
+            return Err(JwtRejectReason::ClaimsMismatch);
         }
-        let exp = claims.get("exp")?.as_u64()?;
-        let iat = claims.get("iat")?.as_u64()?;
+        let exp = claims
+            .get("exp")
+            .and_then(Value::as_u64)
+            .ok_or(JwtRejectReason::ClaimsMismatch)?;
+        let iat = claims
+            .get("iat")
+            .and_then(Value::as_u64)
+            .ok_or(JwtRejectReason::ClaimsMismatch)?;
         if now_unix > exp.saturating_add(JWT_CLOCK_LEEWAY_SECS) {
-            return None;
+            return Err(JwtRejectReason::TokenExpired);
         }
         if iat > now_unix.saturating_add(JWT_CLOCK_LEEWAY_SECS) {
-            return None;
+            return Err(JwtRejectReason::TokenNotYetValid);
         }
         if let Some(nbf) = claims.get("nbf").and_then(Value::as_u64)
             && nbf > now_unix.saturating_add(JWT_CLOCK_LEEWAY_SECS)
         {
-            return None;
+            return Err(JwtRejectReason::TokenNotYetValid);
         }
-        let sub = claims.get("sub")?.as_str()?;
+        let sub = claims
+            .get("sub")
+            .and_then(Value::as_str)
+            .ok_or(JwtRejectReason::InvalidSubject)?;
         if sub.is_empty() || sub.len() > 256 || sub.bytes().any(|b| b < 0x20 || b == 0x7f) {
-            return None;
+            return Err(JwtRejectReason::InvalidSubject);
         }
-        Some(VerifiedClaim {
+        Ok(VerifiedClaim {
             subject: sub.to_owned(),
         })
+    }
+
+    pub async fn verify_jwt(&self, token: &str, now_unix: u64) -> Option<VerifiedClaim> {
+        self.verify_jwt_detailed(token, now_unix).await.ok()
     }
 }
 
@@ -522,6 +666,41 @@ fn plain_response(status: StatusCode) -> Response<HeldBody> {
         .header("x-content-type-options", "nosniff")
         .body(HeldBody::new(Full::new(Bytes::new()).boxed(), None))
         .expect("static response")
+}
+
+fn unauthorized_response() -> Response<HeldBody> {
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(http::header::WWW_AUTHENTICATE, "Bearer")
+        .header(CACHE_CONTROL, "no-store")
+        .header("x-content-type-options", "nosniff")
+        .body(HeldBody::new(Full::new(Bytes::new()).boxed(), None))
+        .expect("unauthorized response")
+}
+
+fn record_public_mcp_rejection(status: StatusCode, reason: &'static str) {
+    use std::io::Write as _;
+    let line = json!({
+        "schema": 1,
+        "stage": "gateway_public_mcp_rejected",
+        "http_status": status.as_u16(),
+        "reason": reason,
+    });
+    let mut err = std::io::stderr().lock();
+    let _ = serde_json::to_writer(&mut err, &line);
+    let _ = err.write_all(b"\n");
+}
+
+fn record_jwks_stale_fallback() {
+    use std::io::Write as _;
+    let line = json!({
+        "schema": 1,
+        "stage": "gateway_public_mcp_jwks_stale_fallback",
+        "reason": "jwks_fetch_failed",
+    });
+    let mut err = std::io::stderr().lock();
+    let _ = serde_json::to_writer(&mut err, &line);
+    let _ = err.write_all(b"\n");
 }
 
 fn json_response(status: StatusCode, body: Bytes) -> Response<HeldBody> {
@@ -753,10 +932,15 @@ async fn handle_request<B: GatewayToolBackend + GatewayOwnerLifecycle>(
         return Ok(plain_response(StatusCode::NOT_FOUND));
     }
     if !verifier.origin_allowed(request.headers()) {
+        record_public_mcp_rejection(StatusCode::FORBIDDEN, "origin_forbidden");
         return Ok(plain_response(StatusCode::FORBIDDEN));
     }
-    let Some(claim) = verifier.verify_headers(request.headers()).await else {
-        return Ok(plain_response(StatusCode::UNAUTHORIZED));
+    let claim = match verifier.verify_headers_detailed(request.headers()).await {
+        Ok(claim) => claim,
+        Err(reason) => {
+            record_public_mcp_rejection(StatusCode::UNAUTHORIZED, reason.code());
+            return Ok(unauthorized_response());
+        }
     };
     if *request.method() == Method::GET {
         return Ok(plain_response(StatusCode::METHOD_NOT_ALLOWED));
@@ -1258,18 +1442,30 @@ mod tests {
         let url = format!("http://{addr}/mcp");
         let client = reqwest::Client::new();
 
-        // 1. Unauthenticated GET & POST -> 401
-        assert_eq!(client.get(&url).send().await.unwrap().status(), 401);
+        // 1. Unauthenticated GET & POST -> 401 with WWW-Authenticate: Bearer
+        let unauth_get = client.get(&url).send().await.unwrap();
+        assert_eq!(unauth_get.status(), 401);
         assert_eq!(
-            client
-                .post(&url)
-                .header(CONTENT_TYPE, "application/json")
-                .body("{}")
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            401
+            unauth_get
+                .headers()
+                .get(http::header::WWW_AUTHENTICATE)
+                .unwrap(),
+            "Bearer"
+        );
+        let unauth_post = client
+            .post(&url)
+            .header(CONTENT_TYPE, "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauth_post.status(), 401);
+        assert_eq!(
+            unauth_post
+                .headers()
+                .get(http::header::WWW_AUTHENTICATE)
+                .unwrap(),
+            "Bearer"
         );
         // 2. Bad Origin -> 403
         assert_eq!(
@@ -1989,5 +2185,122 @@ mod tests {
             .shutdown(Duration::from_secs(5))
             .await;
         assert!(shutdown.connections_joined);
+    }
+
+    #[tokio::test]
+    async fn jwks_stale_cache_fallback_and_detailed_reject_reasons() {
+        let (kp, jwk) = test_rsa_keypair();
+        let (other_kp, _) = test_rsa_keypair();
+
+        // Bind and close a loopback socket so jwks_url deterministically refuses connections.
+        let closed_listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let dead_port = closed_listener.local_addr().unwrap().port();
+        drop(closed_listener);
+
+        let mut cfg = sample_config();
+        cfg.jwks_url = format!("https://127.0.0.1:{dead_port}/cdn-cgi/access/certs");
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let header = json!({"alg": "RS256", "kid": "kid-1", "typ": "JWT"});
+        let valid_claims = json!({
+            "iss": "https://team.cloudflareaccess.com",
+            "aud": ["aud-123456"],
+            "sub": "user-abc",
+            "iat": now - 10,
+            "exp": now + 300
+        });
+        let good_jwt = sign_jwt(&kp, &header, &valid_claims);
+
+        // 1. Stale past cache_ttl (10ms) but within max_stale (60s): fallback succeeds.
+        let mut keys = BTreeMap::new();
+        keys.insert("kid-1".into(), jwk.clone());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let stale_at = Instant::now() - Duration::from_millis(20);
+        let verifier = JwksVerifier::with_cached_keys_and_client(
+            cfg.clone(),
+            keys,
+            stale_at,
+            Duration::from_millis(10),
+            Duration::from_millis(5),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            verifier.verify_jwt_detailed(&good_jwt, now).await,
+            Ok(VerifiedClaim {
+                subject: "user-abc".into()
+            })
+        );
+
+        // Unknown kid during JWKS outage still fails closed.
+        let unknown_kid = sign_jwt(
+            &kp,
+            &json!({"alg": "RS256", "kid": "kid-new"}),
+            &valid_claims,
+        );
+        assert_eq!(
+            verifier.verify_jwt_detailed(&unknown_kid, now).await,
+            Err(JwtRejectReason::JwksFetchFailed)
+        );
+
+        // Exact rejection reasons for expired, forged, alg=none, wrong claims, missing header.
+        let mut expired = valid_claims.clone();
+        expired["exp"] = json!(now - 30);
+        assert_eq!(
+            verifier
+                .verify_jwt_detailed(&sign_jwt(&kp, &header, &expired), now)
+                .await,
+            Err(JwtRejectReason::TokenExpired)
+        );
+        assert_eq!(
+            verifier
+                .verify_jwt_detailed(&sign_jwt(&other_kp, &header, &valid_claims), now)
+                .await,
+            Err(JwtRejectReason::InvalidSignature)
+        );
+        assert_eq!(
+            verifier
+                .verify_jwt_detailed(
+                    &sign_jwt(&kp, &json!({"alg": "none", "kid": "kid-1"}), &valid_claims),
+                    now
+                )
+                .await,
+            Err(JwtRejectReason::UnsupportedAlgorithm)
+        );
+        let mut bad_iss = valid_claims.clone();
+        bad_iss["iss"] = json!("https://evil.example");
+        assert_eq!(
+            verifier
+                .verify_jwt_detailed(&sign_jwt(&kp, &header, &bad_iss), now)
+                .await,
+            Err(JwtRejectReason::ClaimsMismatch)
+        );
+        assert_eq!(
+            verifier.verify_headers_detailed(&HeaderMap::new()).await,
+            Err(JwtRejectReason::MissingHeader)
+        );
+
+        // 2. Beyond max_stale (10ms): fails closed even for known kid.
+        let mut old_keys = BTreeMap::new();
+        old_keys.insert("kid-1".into(), jwk);
+        let expired_cache = Instant::now() - Duration::from_millis(20);
+        let expired_verifier = JwksVerifier::with_cached_keys_and_client(
+            cfg,
+            old_keys,
+            expired_cache,
+            Duration::from_millis(5),
+            Duration::from_millis(2),
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            expired_verifier.verify_jwt_detailed(&good_jwt, now).await,
+            Err(JwtRejectReason::JwksFetchFailed)
+        );
     }
 }
