@@ -1,8 +1,7 @@
 import AppKit
 import CoreGraphics
 
-// The supplied light artwork is the canonical glyph. Its white card and
-// rounded border are presentation in the JPEG, not part of the brand mark.
+// The supplied borderless light artwork is the canonical glyph.
 func styxBrandGlyph(source: NSImage) -> NSImage? {
     var rect = NSRect(origin: .zero, size: source.size)
     guard let cg = source.cgImage(forProposedRect: &rect, context: nil, hints: nil),
@@ -22,12 +21,11 @@ func styxBrandGlyph(source: NSImage) -> NSImage? {
         let offset = y * rowBytes + x * 4
         return (54 * Int(pixels[offset]) + 183 * Int(pixels[offset + 1]) + 19 * Int(pixels[offset + 2])) / 256
     }
-    // The source is the approved square icon with its glyph in the central 60%.
-    // Search that region so JPEG/background noise and the outer card cannot
-    // become an opaque template rectangle. Preserve all interior wave gaps.
+    // Search the full borderless source artwork while ignoring light JPEG background
+    // pixels (`luminance >= 128`). Preserve all interior wave gaps.
     var left = width, right = -1, bottom = height, top = -1
-    for y in (height / 5)..<(height * 4 / 5) {
-        for x in (width / 5)..<(width * 4 / 5) where luminance(x, y) < 128 {
+    for y in 0..<height {
+        for x in 0..<width where luminance(x, y) < 128 {
             left = min(left, x); right = max(right, x); bottom = min(bottom, y); top = max(top, y)
         }
     }

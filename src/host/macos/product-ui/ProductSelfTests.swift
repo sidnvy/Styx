@@ -89,7 +89,7 @@ func productCoreSelfTest() throws {
 }
 
 private func productStatusImageSelfTest() throws {
-    // Deterministic alpha-mask fixture: outer card border must be ignored, and
+    // Deterministic alpha-mask fixture: outer white margin stays transparent, and
     // an interior white gap must survive. This never replaces the bundled art.
     guard let source = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 64, pixelsHigh: 64,
                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
@@ -97,9 +97,8 @@ private func productStatusImageSelfTest() throws {
           let bytes = source.bitmapData else { throw ProductCoreError.invalidResponse }
     for y in 0..<64 {
         for x in 0..<64 {
-            let disk = (x - 32) * (x - 32) + (y - 32) * (y - 32) < 18 * 18 && abs(y - 32) > 2
-            let card = x == 2 || x == 61 || y == 2 || y == 61
-            let offset = y * 256 + x * 4, value: UInt8 = disk || card ? 0 : 255
+            let disk = (x - 32) * (x - 32) + (y - 32) * (y - 32) < 28 * 28 && abs(y - 32) > 2
+            let offset = y * 256 + x * 4, value: UInt8 = disk ? 0 : 255
             bytes[offset] = value; bytes[offset + 1] = value; bytes[offset + 2] = value; bytes[offset + 3] = 255
         }
     }
