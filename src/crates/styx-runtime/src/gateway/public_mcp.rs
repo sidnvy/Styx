@@ -1713,4 +1713,281 @@ mod tests {
             .await;
         assert!(shutdown.connections_joined);
     }
+
+    struct RecordingPublicMcpBackend {
+        tools: Vec<rmcp::model::Tool>,
+        owners: std::sync::Mutex<Vec<String>>,
+    }
+    impl RecordingPublicMcpBackend {
+        fn new() -> Self {
+            let contract: Value = serde_json::from_str(include_str!(
+                "../../../../docs/rust-core-rewrite/PUBLIC-MCP-V1.json"
+            ))
+            .unwrap();
+            let tools = serde_json::from_value(contract["tools"].clone()).unwrap();
+            Self {
+                tools,
+                owners: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+    impl GatewayToolBackend for RecordingPublicMcpBackend {
+        async fn list_tools(
+            &self,
+            _: &crate::gateway::auth::VerifiedGatewayOwner,
+            _: Option<rmcp::model::PaginatedRequestParams>,
+        ) -> std::result::Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+            Ok(rmcp::model::ListToolsResult {
+                tools: self.tools.clone(),
+                ..Default::default()
+            })
+        }
+        async fn call_tool(
+            &self,
+            owner: &crate::gateway::auth::VerifiedGatewayOwner,
+            _: rmcp::model::CallToolRequestParams,
+        ) -> std::result::Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+            let owner_id = owner.owner_id().as_str().to_owned();
+            self.owners.lock().unwrap().push(owner_id.clone());
+            Ok(rmcp::model::CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text(owner_id),
+            ]))
+        }
+    }
+    impl GatewayOwnerLifecycle for RecordingPublicMcpBackend {
+        fn fence_owner(
+            &self,
+            _: &crate::gateway::auth::VerifiedGatewayOwner,
+        ) -> std::result::Result<(), crate::gateway::http::lifecycle::OwnerFenceError> {
+            Ok(())
+        }
+        async fn cleanup_owner(
+            &self,
+            _: &crate::gateway::auth::VerifiedGatewayOwner,
+            _: Duration,
+        ) -> crate::gateway::http::lifecycle::OwnerCleanup {
+            crate::gateway::http::lifecycle::OwnerCleanup::Complete
+        }
+    }
+
+    #[tokio::test]
+    async fn public_mcp_preserves_subject_owner_across_session_rotation_and_exposes_non_destructive_browser_hints()
+     {
+        async fn open_session(client: &reqwest::Client, url: &str, jwt: &str) -> String {
+            let init = client
+                .post(url)
+                .header("Cf-Access-Jwt-Assertion", jwt)
+                .header(CONTENT_TYPE, "application/json")
+                .header("Accept", "application/json, text/event-stream")
+                .body(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": "init",
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-11-25",
+                            "capabilities": {},
+                            "clientInfo": {"name": "gemini-web", "version": "1.0"}
+                        }
+                    })
+                    .to_string(),
+                )
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(init.status(), 200);
+            let sid = init.headers()["mcp-session-id"]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let ack = client
+                .post(url)
+                .header("Cf-Access-Jwt-Assertion", jwt)
+                .header("Mcp-Session-Id", &sid)
+                .header("Mcp-Protocol-Version", "2025-11-25")
+                .header(CONTENT_TYPE, "application/json")
+                .header("Accept", "application/json, text/event-stream")
+                .body(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(ack.status(), 202);
+            sid
+        }
+
+        async fn call_owner(
+            client: &reqwest::Client,
+            url: &str,
+            jwt: &str,
+            sid: &str,
+            meta: Option<Value>,
+        ) -> String {
+            let mut params = json!({"name": "desktop_list_tools", "arguments": {}});
+            if let Some(meta) = meta {
+                params["_meta"] = meta;
+            }
+            let resp = client
+                .post(url)
+                .header("Cf-Access-Jwt-Assertion", jwt)
+                .header("Mcp-Session-Id", sid)
+                .header("Mcp-Protocol-Version", "2025-11-25")
+                .header(CONTENT_TYPE, "application/json")
+                .header("Accept", "application/json")
+                .body(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": "call",
+                        "method": "tools/call",
+                        "params": params
+                    })
+                    .to_string(),
+                )
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+            let body: Value = resp.json().await.unwrap();
+            body["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+
+        let (kp, jwk) = test_rsa_keypair();
+        let mut keys = BTreeMap::new();
+        keys.insert("kid-live".into(), jwk);
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut cfg = sample_config();
+        cfg.listen_port = addr.port();
+        let verifier = Arc::new(JwksVerifier::with_static_keys(cfg, keys).unwrap());
+        let policy = Arc::new(
+            crate::gateway::auth::GatewayBearerPolicy::new(
+                b"0123456789abcdef0123456789abcdef",
+                vec!["127.0.0.1".into()],
+                vec![],
+            )
+            .unwrap(),
+        );
+        let backend = Arc::new(RecordingPublicMcpBackend::new());
+        let mcp = GatewayHttp::new(policy, backend.clone());
+        let stop = CancellationToken::new();
+        let server = tokio::spawn(serve(listener, verifier, mcp.clone(), stop.clone()));
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let jwt_primary = sign_jwt(
+            &kp,
+            &json!({"alg": "RS256", "kid": "kid-live", "typ": "JWT"}),
+            &json!({
+                "iss": "https://team.cloudflareaccess.com",
+                "aud": ["aud-123456"],
+                "sub": "user@example.com",
+                "iat": now - 10,
+                "exp": now + 600
+            }),
+        );
+        let jwt_other = sign_jwt(
+            &kp,
+            &json!({"alg": "RS256", "kid": "kid-live", "typ": "JWT"}),
+            &json!({
+                "iss": "https://team.cloudflareaccess.com",
+                "aud": ["aud-123456"],
+                "sub": "other@example.com",
+                "iat": now - 10,
+                "exp": now + 600
+            }),
+        );
+
+        let url = format!("http://{addr}/mcp");
+        let client = reqwest::Client::new();
+
+        // 1. Same JWT subject across two rotating MCP sessions (no DELETE on sid1) gets the exact same subject owner.
+        let sid1 = open_session(&client, &url, &jwt_primary).await;
+        let sid2 = open_session(&client, &url, &jwt_primary).await;
+        assert_ne!(sid1, sid2);
+        let owner_s1 = call_owner(&client, &url, &jwt_primary, &sid1, None).await;
+        let owner_s2 = call_owner(&client, &url, &jwt_primary, &sid2, None).await;
+        assert!(owner_s1.starts_with("public-mcp-subject:"), "{owner_s1}");
+        assert_eq!(owner_s1, owner_s2);
+
+        // 2. Different JWT subject gets a distinct subject owner.
+        let sid_other = open_session(&client, &url, &jwt_other).await;
+        let owner_other = call_owner(&client, &url, &jwt_other, &sid_other, None).await;
+        assert!(
+            owner_other.starts_with("public-mcp-subject:"),
+            "{owner_other}"
+        );
+        assert_ne!(owner_other, owner_s1);
+
+        // 3. Same JWT subject WITH complete OpenAI _meta keeps per-conversation tunnel-conversation owners.
+        let owner_chat1 = call_owner(
+            &client,
+            &url,
+            &jwt_primary,
+            &sid1,
+            Some(json!({
+                "openai/organization": "org-1",
+                "openai/subject": "sub-1",
+                "openai/session": "chat-1"
+            })),
+        )
+        .await;
+        let owner_chat2 = call_owner(
+            &client,
+            &url,
+            &jwt_primary,
+            &sid1,
+            Some(json!({
+                "openai/organization": "org-1",
+                "openai/subject": "sub-1",
+                "openai/session": "chat-2"
+            })),
+        )
+        .await;
+        assert!(
+            owner_chat1.starts_with("tunnel-conversation:"),
+            "{owner_chat1}"
+        );
+        assert!(
+            owner_chat2.starts_with("tunnel-conversation:"),
+            "{owner_chat2}"
+        );
+        assert_ne!(owner_chat1, owner_s1);
+        assert_ne!(owner_chat1, owner_chat2);
+
+        // 4. tools/list preserves destructiveHint=false for browser_navigate, browser_evaluate, browser_close.
+        let list_resp = client
+            .post(&url)
+            .header("Cf-Access-Jwt-Assertion", &jwt_primary)
+            .header("Mcp-Session-Id", &sid1)
+            .header("Mcp-Protocol-Version", "2025-11-25")
+            .header(CONTENT_TYPE, "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(json!({"jsonrpc": "2.0", "id": "list-browser", "method": "tools/list", "params": {}}).to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(list_resp.status(), 200);
+        let list_json: Value = list_resp.json().await.unwrap();
+        let listed_tools = list_json["result"]["tools"].as_array().unwrap();
+        for name in ["browser_navigate", "browser_evaluate", "browser_close"] {
+            let tool = listed_tools.iter().find(|t| t["name"] == name).unwrap();
+            assert_eq!(
+                tool["annotations"]["destructiveHint"],
+                json!(false),
+                "{name}"
+            );
+        }
+
+        stop.cancel();
+        server.await.unwrap().unwrap();
+        let shutdown = mcp
+            .paired_shutdown_handle()
+            .shutdown(Duration::from_secs(5))
+            .await;
+        assert!(shutdown.connections_joined);
+    }
 }

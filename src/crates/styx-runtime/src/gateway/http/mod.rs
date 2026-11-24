@@ -382,7 +382,11 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
                 Err(_) => return plain(StatusCode::REQUEST_TIMEOUT),
             }
         };
-        let mut conversation_context = None;
+        enum CallOwnerContext {
+            OpenAiConversation(rmcp::model::RequestMetaObject),
+            PublicMcpSubject,
+        }
+        let mut conversation_context: Option<CallOwnerContext> = None;
         let mut initialize_version = None;
         let mut cancel = false;
         if parts.method == Method::POST {
@@ -397,12 +401,16 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
                     }
                     ClientRequest::CallToolRequest(_) => {
                         if principal.requires_tunnel_conversation() {
-                            conversation_context =
-                                Some(rmcp::model::GetMeta::get_meta(&r.request).clone());
+                            conversation_context = Some(CallOwnerContext::OpenAiConversation(
+                                rmcp::model::GetMeta::get_meta(&r.request).clone(),
+                            ));
                         } else if principal.allows_tunnel_conversation() {
                             let meta = rmcp::model::GetMeta::get_meta(&r.request);
                             if conversation::has_any_openai_correlation_key(meta) {
-                                conversation_context = Some(meta.clone());
+                                conversation_context =
+                                    Some(CallOwnerContext::OpenAiConversation(meta.clone()));
+                            } else if principal.uses_subject_conversation_fallback() {
+                                conversation_context = Some(CallOwnerContext::PublicMcpSubject);
                             }
                         }
                         // Only a tool call shows ChatGPT used Styx: the tunnel
@@ -523,8 +531,13 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             }
         }
         let mut logical_delivery = None;
-        if let Some(meta) = conversation_context {
-            let call = match self.conversation_call(&principal, &meta) {
+        if let Some(context) = conversation_context {
+            let call = match match context {
+                CallOwnerContext::OpenAiConversation(meta) => {
+                    self.conversation_call(&principal, &meta)
+                }
+                CallOwnerContext::PublicMcpSubject => self.public_mcp_subject_call(&principal),
+            } {
                 Ok(call) => call,
                 Err(status) => return plain(status),
             };

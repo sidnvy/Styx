@@ -50,16 +50,23 @@ fn correlation(meta: &RequestMetaObject, principal: Sha256Digest) -> Result<[u8;
     let bytes = serde_json::to_vec(&values).map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok(*Sha256Digest::of_bytes(&bytes).as_bytes())
 }
+
+fn subject_correlation(principal: Sha256Digest) -> [u8; 32] {
+    let principal = principal.to_hex();
+    let bytes = serde_json::to_vec(&["public-mcp-subject", principal.as_str()])
+        .expect("fixed two-element string slice");
+    *Sha256Digest::of_bytes(&bytes).as_bytes()
+}
+
 impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
-    pub(super) fn conversation_call(
+    fn get_or_create_conversation(
         &self,
-        principal: &AuthenticatedGatewayPrincipal,
-        meta: &RequestMetaObject,
+        key: [u8; 32],
+        mint_owner: impl FnOnce() -> Result<
+            crate::gateway::auth::VerifiedGatewayOwner,
+            crate::gateway::auth::GatewayAuthError,
+        >,
     ) -> Result<AuthorizedCall<B>, StatusCode> {
-        if !principal.allows_tunnel_conversation() || self.stop.is_cancelled() {
-            return Err(StatusCode::FORBIDDEN);
-        }
-        let key = correlation(meta, principal.fingerprint())?;
         self.collect_closed_conversations();
         let mut registry = self.conversations.lock().expect("Tunnel conversations");
         if self.stop.is_cancelled() {
@@ -68,9 +75,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
         let conversation = if let Some(existing) = registry.get(&key) {
             existing.clone()
         } else {
-            let owner = principal
-                .new_tunnel_conversation_owner()
-                .map_err(|_| StatusCode::FORBIDDEN)?;
+            let owner = mint_owner().map_err(|_| StatusCode::FORBIDDEN)?;
             let life = self.new_life(owner, lifecycle::Boundary::TunnelConversation);
             let value = Arc::new(Conversation { life });
             registry.insert(key, value.clone());
@@ -80,6 +85,27 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             return Err(StatusCode::NOT_FOUND);
         }
         Ok(AuthorizedCall { conversation })
+    }
+    pub(super) fn conversation_call(
+        &self,
+        principal: &AuthenticatedGatewayPrincipal,
+        meta: &RequestMetaObject,
+    ) -> Result<AuthorizedCall<B>, StatusCode> {
+        if !principal.allows_tunnel_conversation() || self.stop.is_cancelled() {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        let key = correlation(meta, principal.fingerprint())?;
+        self.get_or_create_conversation(key, || principal.new_tunnel_conversation_owner())
+    }
+    pub(super) fn public_mcp_subject_call(
+        &self,
+        principal: &AuthenticatedGatewayPrincipal,
+    ) -> Result<AuthorizedCall<B>, StatusCode> {
+        if !principal.uses_subject_conversation_fallback() || self.stop.is_cancelled() {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        let key = subject_correlation(principal.fingerprint());
+        self.get_or_create_conversation(key, || principal.new_public_mcp_subject_owner())
     }
     pub(super) fn collect_closed_conversations(&self) {
         // Idle conversations keep their owner and resources. Only an explicitly

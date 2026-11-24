@@ -265,14 +265,14 @@ async fn saved_profile_resumes_without_restoring_caller_access_or_execution() {
     assert_eq!(saved["current_operator"], false);
     assert_eq!(saved["available"], true);
     let old_lease = engine
-        .resolve(&a, None, true)
+        .resolve(&a, None, true, None)
         .unwrap()
         .1
         .lock()
         .await
         .lease
         .clone();
-    let (parallel_id, _) = engine.resolve(&b, None, true).unwrap();
+    let (parallel_id, _) = engine.resolve(&b, None, true, None).unwrap();
     assert_ne!(
         parallel_id, id,
         "claim is atomic before the first action obtains its session lock"
@@ -296,14 +296,14 @@ async fn saved_profile_resumes_without_restoring_caller_access_or_execution() {
         error(&engine.handle(b.clone(), tabs(Some(id.clone()))).await)["error"],
         "browser_session_transferred"
     );
-    let (independent, _) = engine.resolve(&b, None, true).unwrap();
+    let (independent, _) = engine.resolve(&b, None, true, None).unwrap();
     assert_ne!(
         independent, id,
         "parallel independent Browser sessions remain available"
     );
 
     // Explicit conversation cleanup makes the existing profile available again.
-    let (_, busy_cell) = engine.resolve(&a, Some(id.clone()), false).unwrap();
+    let (_, busy_cell) = engine.resolve(&a, Some(id.clone()), false, None).unwrap();
     let in_flight = busy_cell.lock().await;
     host.remote_access()
         .lock()
@@ -325,7 +325,7 @@ async fn saved_profile_resumes_without_restoring_caller_access_or_execution() {
         released["available"], true,
         "in-flight caller cleanup is observed after its action ends"
     );
-    assert_eq!(engine.resolve(&c, None, true).unwrap().0, id);
+    assert_eq!(engine.resolve(&c, None, true, None).unwrap().0, id);
     let resumed = engine
         .handle(
             c.clone(),
@@ -391,7 +391,7 @@ async fn saved_profile_resumes_without_restoring_caller_access_or_execution() {
         listed.structured_content.as_ref().unwrap()["sessions"][0]["current_operator"],
         false
     );
-    let (selected, cell) = next.resolve(&b, None, true).unwrap();
+    let (selected, cell) = next.resolve(&b, None, true, None).unwrap();
     assert_eq!(selected, id);
     let session = cell.lock().await;
     assert!(session.operator.as_ref() == Some(&b));
@@ -402,11 +402,12 @@ async fn saved_profile_resumes_without_restoring_caller_access_or_execution() {
 }
 
 #[tokio::test]
-async fn several_saved_profiles_require_selection_instead_of_an_empty_replacement() {
-    let ids = vec![
+async fn several_saved_profiles_allocate_distinct_idle_or_new_sessions_for_concurrent_callers() {
+    let mut ids = vec![
         uuid::Uuid::new_v4().simple().to_string(),
         uuid::Uuid::new_v4().simple().to_string(),
     ];
+    ids.sort();
     let (host, authority, inputs) = saved_host(ids.clone());
     let engine = Engine {
         port: BrowserPort {
@@ -416,25 +417,37 @@ async fn several_saved_profiles_require_selection_instead_of_an_empty_replacemen
         },
     };
     let a = named_caller("a");
+    let b = named_caller("b");
+    let c = named_caller("c");
     register_caller(&host, &authority, &a);
-    let result = engine.handle(a.clone(), tabs(None)).await;
-    assert_eq!(
-        error(&result)["error"],
-        "browser_session_selection_required"
-    );
+    register_caller(&host, &authority, &b);
+    register_caller(&host, &authority, &c);
+
+    let first = engine.handle(a.clone(), tabs(None)).await;
+    let first_id = first.structured_content.as_ref().unwrap()["browser_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(first_id, ids[0]);
     assert_eq!(engine.state().registry.lock().unwrap().sessions.len(), 2);
-    let selected = engine
-        .handle(
-            a,
-            BrowserSessionCommand::TakeOver {
-                session_id: ids[1].clone(),
-            },
-        )
-        .await;
-    assert_eq!(
-        selected.structured_content.as_ref().unwrap()["browser_session_id"],
-        ids[1]
-    );
+
+    let second = engine.handle(b.clone(), tabs(None)).await;
+    let second_id = second.structured_content.as_ref().unwrap()["browser_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(second_id, ids[1]);
+    assert_ne!(second_id, first_id);
+    assert_eq!(engine.state().registry.lock().unwrap().sessions.len(), 2);
+
+    let third = engine.handle(c.clone(), tabs(None)).await;
+    let third_id = third.structured_content.as_ref().unwrap()["browser_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(third_id, first_id);
+    assert_ne!(third_id, second_id);
+    assert_eq!(engine.state().registry.lock().unwrap().sessions.len(), 3);
 }
 
 struct PausedProfiles {
@@ -523,7 +536,7 @@ async fn caller_closed_during_profile_discovery_cannot_reclaim_a_saved_profile()
         listed.structured_content.as_ref().unwrap()["sessions"][0]["available"],
         true
     );
-    assert_eq!(engine.resolve(&b, None, true).unwrap().0, id);
+    assert_eq!(engine.resolve(&b, None, true, None).unwrap().0, id);
 }
 
 #[tokio::test]
@@ -560,7 +573,7 @@ async fn closed_or_exited_browser_context_recovers_to_saved_profile_on_next_requ
     let a = named_caller("recover-after-exit");
     register_caller(&host, &authority, &a);
 
-    let (resolved_id, cell) = engine.resolve(&a, None, true).unwrap();
+    let (resolved_id, cell) = engine.resolve(&a, None, true, None).unwrap();
     assert_ne!(resolved_id, id);
 
     // Prepare an open operation on the session's lease, then simulate an open
@@ -803,4 +816,189 @@ async fn cdp_coexist_mode_is_opt_in_explicit_isolated_by_default_and_transferabl
         .handle(b, tabs(Some(CDP_SESSION_ID.to_owned())))
         .await;
     assert_eq!(error(&after_disable)["error"], "browser_session_not_found");
+}
+
+#[tokio::test]
+async fn explicit_new_and_public_mcp_subject_navigate_isolate_concurrent_sessions_and_ignore_cdp() {
+    use crate::host::browser_cdp::{BrowserCdpConfig, CDP_SESSION_ID};
+    let saved_id = uuid::Uuid::new_v4().simple().to_string();
+    let source = Arc::new(CdpToggleBootstrap {
+        saved: vec![saved_id.clone()],
+        cdp: std::sync::Mutex::new(BrowserCdpConfig {
+            enabled: true,
+            endpoint: Some("http://127.0.0.1:9222".into()),
+        }),
+    });
+    let (host, authority) = HostCoordinator::new_without_executor(
+        OperationLedger::new(uuid::Uuid::new_v4().to_string().try_into().unwrap()),
+        facts(CapabilityId::ExecRun),
+    )
+    .unwrap();
+    authority
+        .configure_browser(facts(CapabilityId::Browser))
+        .unwrap();
+    let inputs = host.browser_sessions().inputs(source.clone());
+    let engine = Engine {
+        port: BrowserPort {
+            coordinator: &host,
+            authority: &authority,
+            inputs: &inputs,
+        },
+    };
+    let gemini_owner = OwnerRef {
+        owner_id: "public-mcp-subject:gemini-user".try_into().unwrap(),
+        owner_epoch: "epoch-1".try_into().unwrap(),
+    };
+    register_caller(&host, &authority, &gemini_owner);
+
+    // Populate saved managed profiles and `existing-browser` (`mode: cdp`) via List first.
+    let listed = engine
+        .handle(gemini_owner.clone(), BrowserSessionCommand::List)
+        .await;
+    assert_eq!(
+        listed.structured_content.as_ref().unwrap()["sessions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // 1. First omitted-ID action claims the saved managed profile (never CDP `existing-browser`),
+    //    sets it as default, and mark it Ready as if opened in conversation 1.
+    let (first_id, first_cell) = engine
+        .resolve(&gemini_owner, None, true, Some("browser_navigate"))
+        .unwrap();
+    assert_eq!(first_id, saved_id);
+    assert_ne!(first_id, CDP_SESSION_ID);
+    {
+        let mut s = first_cell.lock().await;
+        s.phase = Phase::Ready;
+    }
+
+    // 2. Explicit `"new"` allocates a distinct isolated session while preserving the open default,
+    //    and rejects TakeOver("new") / browser_close("new").
+    let (new_id, _) = engine
+        .resolve(
+            &gemini_owner,
+            Some("new".into()),
+            true,
+            Some("browser_tabs"),
+        )
+        .unwrap();
+    assert_ne!(new_id, first_id);
+    assert_ne!(new_id, CDP_SESSION_ID);
+    assert_eq!(
+        engine.state().registry.lock().unwrap().defaults[&caller(&gemini_owner)],
+        first_id
+    );
+    let rejected_takeover = engine
+        .handle(
+            gemini_owner.clone(),
+            BrowserSessionCommand::TakeOver {
+                session_id: "new".into(),
+            },
+        )
+        .await;
+    assert_eq!(
+        error(&rejected_takeover)["error"],
+        "browser_session_not_found"
+    );
+    let rejected_close = engine
+        .handle(
+            gemini_owner.clone(),
+            BrowserSessionCommand::Action {
+                session_id: Some("new".into()),
+                name: "browser_close".into(),
+                arguments: serde_json::from_value(json!({})).unwrap(),
+            },
+        )
+        .await;
+    assert_eq!(error(&rejected_close)["error"], "browser_session_not_found");
+
+    // 3. Same `public-mcp-subject:` owner calling `browser_navigate` with `browser_session_id: None`
+    //    while `first_id` is Ready/open automatically receives a separate isolated session instead of
+    //    overwriting `first_id`.
+    let (second_nav_id, _) = engine
+        .resolve(&gemini_owner, None, true, Some("browser_navigate"))
+        .unwrap();
+    assert_ne!(second_nav_id, first_id);
+    assert_ne!(second_nav_id, new_id);
+    assert_ne!(second_nav_id, CDP_SESSION_ID);
+
+    // Follow-up non-navigate action with explicit `first_id` stays bound to `first_id`.
+    let (followup_first, _) = engine
+        .resolve(
+            &gemini_owner,
+            Some(first_id.clone()),
+            true,
+            Some("browser_snapshot"),
+        )
+        .unwrap();
+    assert_eq!(followup_first, first_id);
+
+    // Closing `second_nav_id` leaves `first_id` intact in Ready phase.
+    let closed_second = engine
+        .handle(
+            gemini_owner.clone(),
+            BrowserSessionCommand::Action {
+                session_id: Some(second_nav_id.clone()),
+                name: "browser_close".into(),
+                arguments: serde_json::from_value(json!({})).unwrap(),
+            },
+        )
+        .await;
+    assert_eq!(
+        closed_second.structured_content.as_ref().unwrap()["closed"],
+        true
+    );
+    let closed_text: Value =
+        serde_json::from_str(&closed_second.content[0].as_text().unwrap().text).unwrap();
+    assert_eq!(closed_text["closed"], true);
+    assert_eq!(closed_text["browser_session_id"], second_nav_id);
+    assert!(first_cell.lock().await.phase == Phase::Ready);
+    assert!(
+        *source.cdp.lock().unwrap()
+            == BrowserCdpConfig {
+                enabled: true,
+                endpoint: Some("http://127.0.0.1:9222".into()),
+            }
+    );
+}
+
+#[test]
+fn attach_session_id_to_content_surfaces_id_without_mutating_errors_or_existing_json() {
+    let mut page_result = CallToolResult::success(vec![ContentBlock::text(
+        "### Page\n- Page URL: https://news.ycombinator.com/",
+    )]);
+    attach_session_id_to_content(&mut page_result, "sess-123");
+    let text = &page_result.content[0].as_text().unwrap().text;
+    assert!(text.starts_with("### Browser Session\n- browser_session_id: sess-123\n\n### Page"));
+
+    let mut prose_mention_result = CallToolResult::success(vec![ContentBlock::text(
+        "### Page\n- mentions browser_session_id in body",
+    )]);
+    attach_session_id_to_content(&mut prose_mention_result, "sess-123");
+    let prose_text = &prose_mention_result.content[0].as_text().unwrap().text;
+    assert!(
+        prose_text.starts_with("### Browser Session\n- browser_session_id: sess-123\n\n### Page")
+    );
+
+    let mut json_result = CallToolResult::success(vec![ContentBlock::text(
+        r#"{"browser_session_id":"sess-123"}"#,
+    )]);
+    attach_session_id_to_content(&mut json_result, "sess-123");
+    assert_eq!(
+        json_result.content[0].as_text().unwrap().text,
+        r#"{"browser_session_id":"sess-123"}"#
+    );
+
+    let mut error_result = failure("browser_session_not_found", false);
+    attach_session_id_to_content(&mut error_result, "sess-123");
+    assert!(
+        !error_result.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("Browser Session")
+    );
 }

@@ -189,6 +189,9 @@ impl AuthenticatedGatewayPrincipal {
             PrincipalDomain::Tunnel | PrincipalDomain::PublicMcp
         )
     }
+    pub(super) fn uses_subject_conversation_fallback(&self) -> bool {
+        self.domain == PrincipalDomain::PublicMcp
+    }
     pub(super) fn new_tunnel_conversation_owner(
         &self,
     ) -> Result<VerifiedGatewayOwner, GatewayAuthError> {
@@ -196,6 +199,14 @@ impl AuthenticatedGatewayPrincipal {
             return Err(GatewayAuthError::Forbidden);
         }
         self.new_owner("tunnel-conversation")
+    }
+    pub(super) fn new_public_mcp_subject_owner(
+        &self,
+    ) -> Result<VerifiedGatewayOwner, GatewayAuthError> {
+        if !self.uses_subject_conversation_fallback() {
+            return Err(GatewayAuthError::Forbidden);
+        }
+        self.new_owner("public-mcp-subject")
     }
     fn new_owner(&self, kind: &str) -> Result<VerifiedGatewayOwner, GatewayAuthError> {
         let sequence = self
