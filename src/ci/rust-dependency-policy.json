@@ -1,0 +1,565 @@
+{
+  "schema": 1,
+  "scope": "foundation_development_gate_not_final_release",
+  "toolchain": "1.97.1",
+  "members": {
+    "styx-contracts": {
+      "workspace_allowed": [],
+      "external_allowed": [
+        "serde",
+        "serde_json",
+        "thiserror",
+        "sha2",
+        "url"
+      ]
+    },
+    "styx-core": {
+      "workspace_allowed": [
+        "styx-contracts"
+      ],
+      "external_allowed": [
+        "thiserror"
+      ],
+      "dev_external_allowed": [
+        "serde_json"
+      ]
+    },
+    "styx-runtime": {
+      "workspace_allowed": [
+        "styx-contracts",
+        "styx-core"
+      ],
+      "external_allowed": [
+        "serde",
+        "serde_json",
+        "sha2",
+        "spake2",
+        "tempfile",
+        "thiserror",
+        "libc",
+        "if-addrs",
+        "getrandom",
+        "tokio",
+        "aws-lc-rs",
+        "ed25519-dalek",
+        "base64",
+        "hex",
+        "zeroize",
+        "url",
+        "nix",
+        "uuid",
+        "tokio-util",
+        "futures-util",
+        "encoding_rs",
+        "rmcp",
+        "http",
+        "http-body",
+        "http-body-util",
+        "bytes",
+        "rustls",
+        "tokio-rustls",
+        "rustls-pemfile",
+        "tokio-tungstenite",
+        "hyper",
+        "hyper-util",
+        "tower",
+        "reqwest",
+        "regex",
+        "rustls-webpki",
+        "zbus",
+        "jsonschema",
+        "security-framework",
+        "security-framework-sys",
+        "core-foundation",
+        "core-foundation-sys",
+        "rustix",
+        "rcgen",
+        "x509-parser",
+        "time",
+        "windows-sys",
+        "windows",
+        "png"
+      ]
+    },
+    "styx": {
+      "workspace_allowed": [
+        "styx-contracts",
+        "styx-runtime"
+      ],
+      "external_allowed": [
+        "clap",
+        "tokio",
+        "tokio-util",
+        "serde",
+        "serde_json",
+        "nix",
+        "console",
+        "dialoguer",
+        "indicatif"
+      ]
+    },
+    "styx-android": {
+      "workspace_allowed": [
+        "styx-contracts",
+        "styx-runtime"
+      ],
+      "external_allowed": [
+        "jni",
+        "serde",
+        "serde_json",
+        "tokio",
+        "tokio-util",
+        "zeroize"
+      ]
+    }
+  },
+  "pure_core_forbidden_paths": [
+    "std::fs",
+    "std::net",
+    "std::os",
+    "std::process",
+    "tokio",
+    "libc",
+    "nix",
+    "windows",
+    "objc",
+    "playwright",
+    "windows_sys"
+  ],
+  "source_guard_limit": "lexical defense in depth; imports/aliases/macros/FFI still need review; not a Rust sandbox or a proof of no IO",
+  "known_ignored": {
+    "app::startup::tests::retained_history_existing_profile_read_only": {
+      "kind": "owner_authorized_existing_mac_profile_observation",
+      "input": "STYX_TEST_RETAINED_HISTORY_PROFILE existing owner-authorized macOS profile; no setup, recovery or role launch",
+      "required_for": "physical retired-root and closed C07 history observation using existing locks; not GUI startup, pairing or recovery acceptance"
+    },
+    "enrollment::service::tests::actual_strict_tls_rejection_survives_restart_without_reviving_old_claim": {
+      "kind": "owned_tls_crypto_journal_fixture",
+      "input": "STYX_TEST_ENROLLMENT_SERVICE_ROOT, STYX_TEST_TLS_FIXTURES and STYX_TEST_NODE22; fresh owned private root",
+      "required_for": "real TLS rejection, new request and restart reference; manually run reference, not native C07 upgrade or platform acceptance"
+    },
+    "store::native_root::host::tests::native_host_rejection_branch_survives_reopen_and_never_admits_credentials": {
+      "kind": "explicit_owned_filesystem",
+      "input": "STYX_TEST_NATIVE_HOST_ROOT existing private parent",
+      "required_for": "protected fresh reader7, seed2 and synthetic signed reader rejection reopen reference; manually run reference, not remote rejection, worker or platform acceptance"
+    },
+    "host::coordinator::desktop_source::tests::installed_transient_observation_failure_preserves_source_and_next_read": {
+      "kind": "owner_authorized_installed_mac_reference",
+      "input": "STYX_TEST_INSTALLED_MAC_SOURCE=read-only and owner-authorized installed Mac App",
+      "required_for": "same source recovers after a completed temporary observation failure; no input; not full platform acceptance"
+    },
+    "host::coordinator::desktop_source::tests::installed_qualification_rejoined_initial_job_takes_strict_read": {
+      "kind": "owner_authorized_installed_mac_reference",
+      "input": "STYX_TEST_INSTALLED_MAC_SOURCE=read-only and owner-authorized installed Mac App",
+      "required_for": "retained read-job reference, no input; not full platform acceptance"
+    },
+    "enrollment::service::tests::paired_journey::five_connected_computers_exec_requires_sockets": {
+      "kind": "explicit_external_runtime",
+      "input": "STYX_TEST_PAIRED_ROOT, STYX_TEST_TLS_FIXTURES, STYX_TEST_CODEX_BIN, STYX_TEST_NODE22; isolated owned loopback roots",
+      "required_for": "one production Gateway, five simultaneously paired real Hosts, one native Exec per computer with independent unique file effect, authenticated connection-count status and all disconnected slots released; reviewer runs outside socket-denied sandbox"
+    },
+    "enrollment::service::tests::paired_journey::named_computers_revoke_requires_sockets": {
+      "kind": "explicit_owned_loopback_enrollment",
+      "input": "STYX_TEST_PAIRED_ROOT, STYX_TEST_TLS_FIXTURES, STYX_TEST_NODE22; isolated private root and TLS listener",
+      "required_for": "two real paired identities, names/normalized platforms in both MCP inventory tools, admin/model negative controls, one revoke and remaining-device visibility; no native executor or package acceptance"
+    },
+    "app::control_binding_tests::completed_stopped_host_control_binding_preserves_execution_refusal_and_integrity": {
+      "kind": "explicit_signed_native_payload",
+      "input": "STYX_TEST_APP_CONTROL_SELECTION absolute protected NativeRuntimeSelection file; isolated strict-TLS enrollment roots only",
+      "required_for": "Stopped App control binding versus execution refusal, Ready/CA integrity and unchanged root/C07; not installed App or release acceptance"
+    },
+    "app::control_binding_tests::reopen_resumes_gateway_intent_without_resuming_stopped_host": {
+      "kind": "explicit_signed_native_payload",
+      "input": "STYX_TEST_APP_CONTROL_SELECTION absolute protected NativeRuntimeSelection file; disposable strict-TLS enrollment roots only",
+      "required_for": "Independent Gateway Running resume, Gateway Stopped negative and unchanged stopped Host after normal quit/reopen; manually run reference, not installed App or platform acceptance"
+    },
+    "crypto::tests::legacy_node22_bidirectional_crypto_batch": {
+      "kind": "explicit_external_runtime",
+      "input": "--node22 absolute binary",
+      "required_for": "legacy_crypto_interop_not_base_foundation"
+    },
+    "store::tests::linux::raw_change_child_probe": {
+      "kind": "owned_subprocess_helper",
+      "parent": "store::tests::linux::concurrent_independent_writer_change_is_detected_after_read"
+    },
+    "store::tests::linux::lock_child_probe": {
+      "kind": "owned_subprocess_helper",
+      "parent": "store::tests::linux::independent_process_observes_kernel_writer_exclusion_then_release"
+    },
+    "providers::codex::tests::real_codex_native_stdio_complete_scenario_batch": {
+      "kind": "explicit_external_runtime",
+      "input": "--codex-bin absolute binary and owned evidence root",
+      "required_for": "Linux real executor development slice, not platform release acceptance"
+    },
+    "ipc::tests::linux::client_child_probe": {
+      "kind": "owned_subprocess_helper",
+      "parent": "ipc::tests::linux::independent_process_peer_is_kernel_bound_not_client_instance_claim"
+    },
+    "providers::codex::tests::real_codex_raw_page_focused_scenario": {
+      "kind": "explicit_external_runtime",
+      "input": "--codex-bin absolute binary and isolated evidence root",
+      "required_for": "original native cursor/base64 read semantics; not complete Host interop"
+    },
+    "host::coordinator::tests::real_owned_start_read_and_dropped_response_scenario": {
+      "kind": "explicit_external_runtime",
+      "input": "--codex-bin absolute binary and isolated evidence root",
+      "required_for": "Host-owned supervised start/read, dropped response, current authorization; not network/platform acceptance"
+    },
+    "providers::codex::tests::real_codex_continuation_permit_focused_scenario": {
+      "kind": "explicit_external_runtime",
+      "input": "--codex-bin",
+      "required_for": "permit-consuming stdin/termination request and unknown outcome; not Host endpoint acceptance"
+    },
+    "host::protocol::tests::actual_tls_wss_codex_start_read_duplicate_and_lost_response_batch": {
+      "kind": "explicit_external_runtime",
+      "input": "--codex-bin + --tls-fixtures",
+      "required_for": "real local TLS/WSS-to-Host-to-Codex; bootstrap-only owners, read resume unsupported"
+    },
+    "tls::tests::aws_lc_owned_loopback_tls_full_scenario_batch": {
+      "kind": "explicit_test_pki",
+      "input": "--tls-fixtures",
+      "required_for": "strict real TLS connections and pin/name negative controls; no product identity changes"
+    },
+    "host::link::tests::strict_tls_wss_data_heartbeat_limits_close_cleanup_batch": {
+      "kind": "explicit_test_pki",
+      "input": "--tls-fixtures",
+      "required_for": "real WSS framing/heartbeats/capacity/cleanup; not full native platform acceptance"
+    },
+    "gateway::http::tests::conversation::authenticated_tunnel_context_across_transports_and_isolation": {
+      "kind": "explicit_owned_loopback_official_sdk_resource_fixture",
+      "input": "STYX_TEST_HTTP_ROOT; dedicated forwarding service credential and ordinary credential; no account key",
+      "required_for": "actual separate HTTP sessions share only one authenticated conversation owner; cross-scope/ordinary forgery and malformed context refusal; transport DELETE survival, live retention, one independent fixture file effect and joined cleanup; not native/TLS/account acceptance"
+    },
+    "gateway::http::tests::official_sdk_tcp_auth_sessions_limits_and_pending_close": {
+      "kind": "owned_loopback_sdk_fixture",
+      "input": "fresh external STYX_TEST_HTTP_ROOT allocated by gate",
+      "required_for": "official Streamable HTTP session/auth/close; counter backend only, not native/account acceptance"
+    },
+    "host::coordinator::tests::real_host_action_nonce_drop_ticket_and_terminate_scenario": {
+      "kind": "explicit_external_runtime",
+      "input": "--codex-bin and owned evidence root",
+      "required_for": "Core-admitted Host stdin/termination and dropped ticket; actual native effect and separate exit/drain"
+    },
+    "host::protocol::tests::actual_canonical_tls_wss_host_action_journey": {
+      "kind": "explicit_external_runtime",
+      "input": "--codex-bin + --tls-fixtures",
+      "required_for": "canonical OwnedExecHost WSS action path; bootstrap owner only, no final account/pairing claim"
+    },
+    "host::coordinator::tests::real_host_physical_retention_and_unknown_archival_scenario": {
+      "kind": "explicit_external_runtime",
+      "input": "--codex-bin and fresh owned evidence root",
+      "required_for": "actual single-process action capacity reuse, ambiguous input/no replay, exit/drain and Core-attested physical archival; not native package acceptance"
+    },
+    "gateway::http::tests::actual_tcp_slow_post_readers_do_not_starve_bodyless_control": {
+      "kind": "owned_loopback_sdk_fixture",
+      "input": "fresh external STYX_TEST_HTTP_ROOT allocated by gate",
+      "required_for": "actual slowPOST pressure, bodyless GET/DELETE separate admissions, two control permits and exact quota return; no native/account claim"
+    },
+    "store::enrollment::tests::linux::journal_crash_child": {
+      "kind": "owned_subprocess_helper",
+      "parent": "store::enrollment::tests::linux::immutable_material_commit_chain_and_process_crash_recovery"
+    },
+    "store::enrollment::tests::linux::immutable_material_commit_chain_and_process_crash_recovery": {
+      "kind": "owned_private_filesystem_crash_fixture",
+      "input": "fresh external STYX_TEST_ENROLLMENT_ROOT allocated by gate --enrollment-store",
+      "required_for": "Linux GNU immutable journal/material/commit/crash slice; synthetic credentials, not enrollment or platform acceptance"
+    },
+    "store::enrollment::clock::tests::durable_floor_atomic_updates_reopen_and_shared_budget_refuse_unsafe_state": {
+      "kind": "owned_private_filesystem_fixture",
+      "input": "fresh external STYX_TEST_ENROLLMENT_CLOCK_ROOT allocated by gate --enrollment-store",
+      "required_for": "Linux GNU literal floor/atomic replacement/reopen/rollback/budget slice; not powerloss or clock-crash acceptance"
+    },
+    "enrollment::recovery::tests::linux::actual_core_journal_recovery_safety_scenario": {
+      "kind": "owned_private_core_journal_fixture",
+      "input": "fresh external STYX_TEST_ENROLLMENT_RECOVERY_ROOT allocated by gate --enrollment-store",
+      "required_for": "Linux GNU actual protected journal + Core closed bootstrap/recovery; not signed crypto/TLS/native enrollment acceptance"
+    },
+    "store::enrollment::owned::tests::owned_journal_thread_move_keeps_writer_and_initial_namespace_identity": {
+      "kind": "owned_private_filesystem_fixture",
+      "input": "fresh STYX_TEST_ENROLLMENT_OWNED_ROOT",
+      "required_for": "static owner move, writer exclusion, namespace pin failure; Linux GNU development only"
+    },
+    "enrollment::profile::tests::actual_node22_profile_join_and_capability_proofs": {
+      "kind": "explicit_external_runtime",
+      "input": "fixed STYX_TEST_NODE22",
+      "required_for": "independent actual Node PSS join/CAS profiles; no native identity migration claim"
+    },
+    "enrollment::service::tests::actual_strict_tls_enrollment_service_full_journey": {
+      "kind": "owned_tls_crypto_journal_fixture",
+      "input": "fresh STYX_TEST_ENROLLMENT_SERVICE_ROOT + explicit TLS fixtures and Node22",
+      "required_for": "actual TLS HTTP Core journal crypto enrollment/self/restart; Core lease test is NOT Host WSS or real Exec"
+    },
+    "enrollment::service::controller_tests::expired_pending_collection_and_observed_store_failure_sticky_fence": {
+      "kind": "owned_private_core_journal_fixture",
+      "input": "fresh STYX_TEST_ENROLLMENT_CONTROLLER_ROOT + fixed Node22",
+      "required_for": "durable expired pending collection and sticky observed material failure; trusted historical fixtures, not TLS pairing acceptance"
+    },
+    "enrollment::service::tests::paired_journey::actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey": {
+      "kind": "owned_tls_mcp_wss_native_fixture",
+      "input": "--paired-host --codex-bin --node22 --tls-fixtures --enrollment-service and fresh owned root",
+      "required_for": "actual signed synthetic pairing, official MCP TLS client, outbound paired Host WSS, native Codex nonce/stdin, cross-owner rejection and device revoke; not installed platform/account acceptance"
+    },
+    "store::payload::tests::payload_inventory_stream_pin_and_replacement_alias_budget_negatives": {
+      "kind": "owned_private_filesystem_native_image_fixture",
+      "input": "fresh STYX_TEST_PAYLOAD_ROOT allocated by --enrollment-store gate",
+      "required_for": "descriptor-relative exact inventory streaming, retained parent-FD ELF launch, replacement/symlink/hardlink/FIFO/oversize/owner-absence negatives; not installed signed CLI or platform acceptance"
+    },
+    "tls::tests::strict_verifier_certificate_classification_batch": {
+      "kind": "explicit_test_pki",
+      "input": "--tls-fixtures plus fresh owned CA-as-leaf fixture root",
+      "required_for": "actual unchanged rustls verifier typed positive/wrongname/issuer/CA-role classification; no weakened validation or original installed Gateway migration claim"
+    },
+    "platform::linux::tests::actual_system_bus_snapshot_matches_independent_loginctl": {
+      "kind": "actual_readonly_linux_system_bus",
+      "input": "--linux-discovery fresh external STYX_TEST_LINUX_DISCOVERY_ROOT; fixed kernel system bus and independent loginctl",
+      "required_for": "Linux candidate OS facts only. Unknown compositor/Agent association, no authorized Desktop/GUI acceptance."
+    },
+    "session_probe::tests::worker_resource_inheritance_fixture": {
+      "kind": "owned_child_only_fixture",
+      "parent": "session_probe::tests::owned_worker_inherits_resources_and_outlives_old_cpu_quota",
+      "required_for": "Child-only actual resource inheritance, sustained CPU, allocation and file use with normal exit; invoked by parent scenario, not independent Desktop acceptance"
+    },
+    "host::coordinator::browser::browser_tests::actual_owned_browser_host_nonce_policy_drop_and_cleanup": {
+      "kind": "explicit_external_runtime",
+      "input": "--browser-host --node22 --codex-bin --browser-executable and fresh owned evidence root",
+      "required_for": "actual Linux visible owned Host Browser nonce/profile/policy/unknown/no-replay and physical cleanup; not paired-network, desktop, account or signed package acceptance"
+    },
+    "host::coordinator::browser::browser_tests::references::actual_snapshot_refs_navigation_tabs_owner_and_reopen_batch": {
+      "kind": "explicit_external_runtime",
+      "input": "--browser-references --browser-host and all explicit owned Browser inputs",
+      "required_for": "actual visible Core/Host opaque refs, native navigation/tab invalidation and reopen ABA; not final crossplatform Browser/account/desktop release"
+    },
+    "app::join_retry_tests::unsent_cli_and_app_join_retry_but_dispatched_join_stays_fenced_requires_sockets": {
+      "kind": "loopback_socket_fixture",
+      "input": "loopback TCP sockets; synthetic signed payload generated by the test, never executed",
+      "required_for": "CLI/App join retry after confirmed non-dispatch, retention of unknown outcomes, one-use short code enrollment, and claim recovery after Gateway restart"
+    },
+    "management::setup::scenario_tests::setup_hub_answers_foreground_connects_and_resumes_without_pairing_requires_sockets": {
+      "kind": "real_signed_payload_fixture",
+      "input": "STYX_SETUP_TEST_PAYLOAD, STYX_SETUP_TEST_PUBLISHER and STYX_SETUP_TEST_PIN naming an installed signed Linux payload, plus target/debug/styx built from the same source",
+      "required_for": "styx setup --answers hub run reaches this computer connected in foreground mode and a rerun resumes without re-pairing; not systemd service, tunnel or ChatGPT acceptance"
+    },
+    "management::setup::scenario_tests::setup_hub_exec_disabled_connects_and_preserves_choice_on_resume_requires_sockets": {
+      "kind": "real_signed_payload_fixture",
+      "input": "STYX_SETUP_TEST_PAYLOAD, STYX_SETUP_TEST_PUBLISHER and STYX_SETUP_TEST_PIN naming an installed signed Linux payload, plus STYX_SETUP_TEST_CLI built from the same source",
+      "required_for": "CLI first setup with Exec disabled connects and resumes with unchanged capability choice and pairing; not installed desktop App or account acceptance"
+    },
+    "gateway::http::lan_tests::gateway_three_listeners_two_lan_addresses_join_and_host_link_requires_sockets": {
+      "kind": "assigned_private_lan_interface_fixture",
+      "input": "STYX_TEST_LAN_ADDRESSES set to two IPv4 addresses assigned to this machine in private or overlay ranges",
+      "required_for": "Hosts join and complete paired negotiation through each of two LAN listeners; not account, App or cross-machine acceptance"
+    },
+    "gateway::http::lan_tests::gateway_two_listeners_lan_join_and_host_link_requires_sockets": {
+      "kind": "assigned_private_lan_interface_fixture",
+      "input": "STYX_TEST_LAN_ADDRESS assigned private/overlay IPv4 and STYX_TEST_CODEX explicit native Codex executor; disposable strict-TLS/WSS roots and isolated HOME/CODEX_HOME for three owned executors",
+      "required_for": "LAN join/Host connection and private-route 404; same verified owner across fully drained Host generations, fresh binding only after completed cleanup, old-owner/frame and unknown-cleanup refusal; not account, App or cross-machine acceptance"
+    },
+    "gateway::http::lan_tests::computer_refusal_reference::gateway_computer_refusal_settles_original_reservation_without_replay": {
+      "kind": "assigned_private_lan_interface_fixture",
+      "input": "STYX_TEST_LAN_ADDRESS assigned private/overlay IPv4; disposable strict-TLS/WSS roots and a controlled unavailable Computer source; no native executor or signed package",
+      "required_for": "exact original Core reservation termination after a proven pre-dispatch refusal, independent subsequent request, retained Unknown/lost-response fences and normal owner cleanup; not native effects or platform acceptance"
+    },
+    "store::configuration::tests::shared_configuration_writer_fence_and_sticky_unknown_batch": {
+      "kind": "owned_filesystem_scenario",
+      "input": "fresh STYX_TEST_CONFIGURATION_ROOT",
+      "required_for": "shared configuration writer, namespace, restart fence and total budget"
+    },
+    "store::management::tests::durable_prepare_preserves_exact_bytes_and_unsettled_high_water_batch": {
+      "kind": "owned_filesystem_scenario",
+      "input": "fresh STYX_TEST_MANAGEMENT_ROOT",
+      "required_for": "exact C07 preparation and retained unresolved journal; not canonical apply"
+    },
+    "store::management::tests::management_preparation_child": {
+      "kind": "owned_subprocess_helper",
+      "parent": "independent r21-transactions/oracle/prepare_batch.py; no production CLI or apply authority"
+    },
+    "store::native_root::tests::fresh_native_root_genesis_reopen_and_retained_unknown_batch": {
+      "kind": "explicit_owned_filesystem",
+      "input": "STYX_TEST_NATIVE_ROOT_ROOT; fresh native-only private root/bootstrap/retained failure batch",
+      "required_for": "native-only configuration transaction evidence; not legacy cutover or OS service acceptance"
+    },
+    "store::management::phase_tests::original_phase_chain_and_unknown_orphans_are_preserved_batch": {
+      "kind": "explicit_owned_filesystem",
+      "input": "STYX_TEST_MANAGEMENT_PHASE_ROOT; original exact phase chain/resync/orphan batch",
+      "required_for": "native-only configuration transaction evidence; not legacy cutover or OS service acceptance"
+    },
+    "store::native_transaction::tests::native_commit_reopen_and_scope_rejections_batch": {
+      "kind": "explicit_owned_filesystem",
+      "input": "STYX_TEST_NATIVE_TRANSACTION_ROOT; native-only canonical commit/reopen/stale recovery rejection batch",
+      "required_for": "native-only configuration transaction evidence; not legacy cutover or OS service acceptance"
+    },
+    "store::native_transaction::tests::native_service_autostart_follow_and_refusal_batch": {
+      "kind": "explicit_owned_filesystem",
+      "input": "STYX_TEST_SERVICE_TIP_ROOT; original C07 commit, partial-write admission fence and successor refusal fixture",
+      "required_for": "--enrollment-store; persisted service policy evidence, not OS ServiceScope or platform service acceptance"
+    },
+    "store::native_transaction::tests::native_transaction_child": {
+      "kind": "owned_subprocess_helper",
+      "input": "independent native-apply-oracle controller; explicit root/action/fault; never production CLI",
+      "required_for": "native-only configuration transaction evidence; not legacy cutover or OS service acceptance"
+    },
+    "enrollment::service::tests::prepare_foreground_fixture_journal": {
+      "kind": "owned_fixture_producer",
+      "input": "explicit fresh STYX_TEST_FOREGROUND_JOURNAL under private existing parent",
+      "required_for": "ordinary CLI foreground acceptance setup only; not a product onboarding/init or platform PASS"
+    },
+    "store::platform::tests::macos_raw_reads_and_distinct_leases_native": {
+      "kind": "explicit_native_macos_filesystem",
+      "input": "STYX_TEST_MACOS_STORE_ROOT absolute fresh leaf; actual macOS host only",
+      "required_for": "Darwin raw bytes/ACL/descriptor replacement and independent kernel leases/birth; not App, TCC, executor, journal or installation acceptance"
+    },
+    "store::platform::tests::macos_store_child": {
+      "kind": "owned_subprocess_helper",
+      "parent": "store::platform::tests::macos_raw_reads_and_distinct_leases_native"
+    },
+    "store::platform::payload_backend::tests::macos_payload_inventory_identity_acl_and_bounds_native": {
+      "kind": "explicit_macos_private_native_image_fixture",
+      "input": "macOS fresh STYX_TEST_MACOS_PAYLOAD_ROOT and original read-only STYX_TEST_MACOS_PAYLOAD_EXECUTABLE",
+      "required_for": "native Darwin inventory, exact raw/hash/CDHash and ACL/alias/replacement/bounds; not process launch, Host readiness or installed signed package"
+    },
+    "platform::macos_spawn::tests::actual_suspended_image_barrier_wrong_cdhash_and_original_wait": {
+      "kind": "explicit_macos_native_suspended_spawn_fixture",
+      "input": "macOS fresh nonexisting STYX_TEST_MACOS_SPAWN_ROOT; only test-owned copied image may be ad-hoc signed",
+      "required_for": "zero effects before resume/wrongCDHash, once after correct resume, retained cancellation and original actual wait; not Codex/Host/App/TCC or final platform acceptance"
+    },
+    "platform::macos_spawn::tests::suspended_fixture_child": {
+      "kind": "owned_subprocess_helper",
+      "parent": "platform::macos_spawn::tests::actual_suspended_image_barrier_wrong_cdhash_and_original_wait",
+      "required_for": "child-only create_new nonce effect in owned copied image; not independently run or counted as platform acceptance"
+    },
+    "store::platform::tests::windows_owned_root_leases_acl_alias_and_pe_pin": {
+      "kind": "explicit_windows_owned_fixture",
+      "input": "STYX_TEST_WINDOWS_STORE_ROOT protected fresh Windows parent",
+      "required_for": "Windows native read/lease/ACL/alias/PE aggregate; not product migration or platform release"
+    },
+    "store::platform::tests::windows_lock_holder_child": {
+      "kind": "owned_subprocess_helper",
+      "parent": "store::platform::tests::windows_owned_root_leases_acl_alias_and_pe_pin"
+    },
+    "platform::windows_spawn::tests::actual_pinned_codex_suspended_job_cleanup_and_waiter_drop": {
+      "kind": "explicit_windows_owned_fixture",
+      "input": "STYX_TEST_WINDOWS_SPAWN_ROOT private fresh parent and original native Codex copies",
+      "required_for": "Windows suspended PE verification, original wait, Job-empty and dropped-waiter custody; not deployment or login acceptance"
+    },
+    "store::platform::tests::windows_browser_runtime_assets_are_fresh_and_nonreplaceable": {
+      "kind": "explicit_windows_owned_fixture",
+      "input": "STYX_TEST_WINDOWS_PRIVATE_CHILD_ROOT fresh current-SID private Windows parent",
+      "required_for": "actual exclusive asset creation, byte readback, write/delete sharing refusal and path rejection; not Browser execution or platform acceptance"
+    },
+    "store::platform::tests::windows_private_runtime_child_creation_and_existing_refusal": {
+      "kind": "explicit_windows_owned_fixture",
+      "input": "STYX_TEST_WINDOWS_PRIVATE_CHILD_ROOT fresh current-SID private Windows parent; elevated default owner may be Administrators",
+      "required_for": "actual current-owner child creation, stable reopen, rejection without repair of unsafe ACL, file and junction; not configuration writes, migration or deployment"
+    },
+    "store::native_root::gateway_tests::fresh_gateway_material_floor_ready_and_failure_custody": {
+      "kind": "explicit_owned_filesystem",
+      "input": "STYX_TEST_NATIVE_GATEWAY_ROOT existing private parent; per-test fresh child",
+      "required_for": "fresh bootstrap material/floor/final ready and retained unknown writer; opaque fixture is not TLS, pairing or runtime acceptance"
+    },
+    "store::native_root::host::tests::native_host_pending_closed_chain_reopen_and_sticky_unknown_aggregate": {
+      "kind": "explicit_owned_filesystem",
+      "input": "STYX_TEST_NATIVE_HOST_ROOT existing private parent",
+      "required_for": "pending Host fixed phase chain and retained unknown writer; opaque bytes are not pairing or runtime acceptance"
+    },
+    "release::windows_tests::existing_public_windows_installation_signature_and_retained_images": {
+      "kind": "explicit_windows_readonly_existing_installation",
+      "input": "STYX_TEST_PUBLIC_WINDOWS_PAYLOAD, STYX_TEST_PUBLIC_WINDOWS_PUBLISHER and external STYX_TEST_WINDOWS_RELEASE_PUBLISHER_PIN",
+      "required_for": "read existing signed public installation, exact publisher/worker/image retention and wrong-pin refusal; no ACL mutation, launch, control or GUI acceptance"
+    },
+    "release::windows_tests::actual_signed_windows_runtime_closure_selection_and_refusals": {
+      "kind": "explicit_windows_signed_fixture",
+      "input": "STYX_TEST_WINDOWS_RELEASE_ROOT protected signed fixture; external publisher pin",
+      "required_for": "Windows native C08 read-only signature/inventory/closure selection and tamper controls; not installation or management writes"
+    },
+    "host::protocol::tests::drain::actual_tls_wss_drain_negotiation_stale_result_and_loss": {
+      "kind": "explicit_external_test_pki",
+      "input": "--tls-fixtures; executor explicitly disabled",
+      "required_for": "actual TLS/WSS drain negotiation, old peer, stale result IDs/Host generations and lost result; contract faults only, no native acceptance"
+    },
+    "store::native_transaction::runtime_update::tests::runtime_update_interruption_and_forward_rollback_batch": {
+      "kind": "explicit_owned_filesystem",
+      "input": "fresh STYX_TEST_NATIVE_RUNTIME_UPDATE_ROOT; signed synthetic C08 and two actual child exits",
+      "required_for": "native stopped runtime update, original C07 recovery and forward rollback; not installed images, App or platform acceptance"
+    },
+    "store::native_transaction::runtime_update::tests::runtime_update_interruption_child": {
+      "kind": "parent_owned_subprocess",
+      "input": "exact parent-owned fixture and persisted-step fault; never run independently",
+      "required_for": "child of runtime_update_interruption_and_forward_rollback_batch; actual process exit, not native execution acceptance"
+    },
+    "enrollment::service::tests::paired_journey::paired_session_capacity_turnover_requires_sockets": {
+      "kind": "explicit_external_runtime",
+      "input": "STYX_TEST_PAIRED_ROOT, STYX_TEST_TLS_FIXTURES, STYX_TEST_CODEX_BIN, STYX_TEST_BROWSER_NODE/WORKER/EXECUTABLE, Node22; isolated owned loopback roots",
+      "required_for": "1050 native Gateway/Host DELETE cycles and 1050 abandon/eviction cycles; exact native effects; live Exec and open Browser protected from expiry; native-tab allocation sample and stale HTTP 404"
+    },
+    "providers::linux_scope::tests::removed_original_cgroup_is_observed_without_zero_link_count": {
+      "kind": "explicit_owned_cgroup_v2",
+      "input": "STYX_TEST_CGROUP_PARENT absolute canonical current-user delegated cgroup v2 directory; creates and removes one empty uniquely named cgroup only",
+      "required_for": "actual retained kernel fd deletion with nonzero link count and same-path replacement negative; no process launch, Host, Gateway or desktop acceptance"
+    },
+    "app::maintenance_integration_tests::native_gui_computer_management_keeps_binding_and_local_identity": {
+      "kind": "explicit_signed_native_payload",
+      "input": "STYX_TEST_APP_CONTROL_SELECTION and STYX_TEST_APP_LAN_ADDRESS; disposable TLS Gateway and two App profiles",
+      "required_for": "Native GUI admin binding, wrong-code refusal, self-revoke refusal, real enrollment and revoke effects; not installed native GUI acceptance"
+    },
+    "app::maintenance_integration_tests::revoked_guest_startup_refusal_allows_fresh_role_without_replay": {
+      "kind": "explicit_signed_native_payload",
+      "input": "STYX_TEST_APP_CONTROL_SELECTION and STYX_TEST_APP_LAN_ADDRESS; disposable real TLS revoked identity and signed Host executor",
+      "required_for": "Revoked initial WSS admission, joined local cleanup, no automatic credential retry, normal Quit and preserved role backup; not installed or account acceptance"
+    },
+    "app::maintenance_integration_tests::strict_settlement_with_live_exec_keeps_host_available_for_owner_cleanup": {
+      "kind": "owned_signed_runtime_app_tls_native_exec_fixture",
+      "input": "STYX_TEST_APP_CONTROL_SELECTION + fresh STYX_TEST_APP_SETTLE_ROOT",
+      "required_for": "strict pre-configuration settlement after a live native Exec; independent one-time file, original PID/starttime exit and exact Host/Gateway cleanup; not installed or account acceptance"
+    },
+    "management::setup_pending_restart_reference_tests::hub_pending_across_foreground_restart_is_refused_without_approval_or_claim": {
+      "kind": "explicit_signed_reader7_loopback_reference",
+      "input": "Current built CLI and STYX_SETUP_TEST_PAYLOAD/PUBLISHER/PIN; fresh private synthetic root; no Tunnel or persistent service",
+      "required_for": "Local Hub pending restart/explicit retirement gate via npm run test:hub-recovery; never native platform or release acceptance"
+    },
+    "management::setup_pending_restart_reference_tests::hub_explicit_retire_preserves_gateway_then_pairs_new_identity_in_same_root": {
+      "kind": "explicit_signed_reader7_loopback_reference",
+      "input": "Current built CLI and STYX_SETUP_TEST_PAYLOAD/PUBLISHER/PIN; fresh private synthetic root; no Tunnel or persistent service",
+      "required_for": "Local Hub pending restart/explicit retirement gate via npm run test:hub-recovery; never native platform or release acceptance"
+    },
+    "enrollment::retirement::tests::linux::signed_reader7_expired_pending_only_advances_durable_floor": {
+      "kind": "explicit_signed_reader7_loopback_reference",
+      "input": "Current built CLI and STYX_SETUP_TEST_PAYLOAD/PUBLISHER/PIN; fresh private synthetic root; no Tunnel or persistent service",
+      "required_for": "Local Hub pending restart/explicit retirement gate via npm run test:hub-recovery; never native platform or release acceptance"
+    },
+    "enrollment::service::tests::paired_journey::browser_sessions_survive_chat_close_and_transfer_requires_sockets": {
+      "kind": "explicit_owned_paired_browser_fixture",
+      "input": "STYX_TEST_PAIRED_ROOT, STYX_TEST_TLS_FIXTURES, STYX_TEST_CODEX_BIN, STYX_TEST_NODE22 and STYX_TEST_BROWSER_NODE/WORKER/EXECUTABLE; real loopback TLS/MCP/WSS/Chrome/Codex",
+      "required_for": "Host Browser retention after chat closure and protocol reconstruction, explicit takeover, prior operator/reference refusal, in-flight transfer Busy, capability disable/re-enable and explicit close; not installed native GUI or ChatGPT account acceptance"
+    },
+    "app::maintenance_integration_tests::reopened_app_gateway_uses_current_bundle_after_old_payload_is_removed": {
+      "kind": "owned_signed_app_gateway_bundle_fixture",
+      "input": "STYX_TEST_APP_PREVIOUS_SELECTION, STYX_TEST_APP_CONTROL_SELECTION and fresh STYX_TEST_APP_BUNDLE_ROOT with disposable previous-runtime payload; removes only that owned old copy",
+      "required_for": "Same-profile App Gateway current-bundle admission and revalidation, two clean restarts, real TLS admin/counts/invitation after old payload removal, unchanged identity and pairing; not installed desktop acceptance"
+    }
+  },
+  "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints",
+  "dependency_reviews": {
+    "windows": {
+      "version": "0.58.0",
+      "scope": "Windows-only runtime OS adapters: local WMI boot observation, fixed TaskScheduler task observation, controlled .lnk COM parsing; no Core OS dependency",
+      "upstream": "https://github.com/microsoft/windows-rs",
+      "license": "MIT OR Apache-2.0",
+      "msrv": "1.70",
+      "build_script": false,
+      "registry_archive_sha256": "dd04d41d93c4992d421894c18c8b43496aa748dd4c081bac0dc93eb0489272b6",
+      "target": "cfg(target_os = \"windows\")",
+      "validation": "Read-only review of exact Cargo manifest/lock and local registry archive/index checksums, features, license files and call sites in platform/windows_legacy_observation.rs and windows_restart_observation.rs. Not native execution or current vulnerability audit."
+    },
+    "jni": {
+      "version": "0.21.1",
+      "scope": "Android-only JNI adapter to the existing app VM; Rust enrollment/Host/Core remain authoritative. No JVM invocation feature or Core OS dependency.",
+      "upstream": "https://github.com/jni-rs/jni-rs",
+      "license": "MIT OR Apache-2.0",
+      "msrv": null,
+      "build_script": false,
+      "registry_archive_sha256": "1a87aa2bb7d2af34197c04845522473242e1aa17c12f4935d5856491a7fb8c97",
+      "target": "cfg(target_os = \"android\")",
+      "validation": "Reviewed exact cached Cargo manifest/lock, registry archive checksum, empty default features, optional invocation features, MIT/Apache license files and four JNI entry points. This upstream manifest declares no MSRV; Android check and actual ARM64 linking passed with the workspace-pinned Rust toolchain. This is not a vulnerability audit."
+    }
+  }
+}

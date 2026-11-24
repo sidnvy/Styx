@@ -1,0 +1,487 @@
+//! HTTP bearer admission. Protocol owner IDs are minted after authentication;
+//! client tool arguments and metadata never construct this authority.
+use aws_lc_rs::constant_time::verify_slices_are_equal;
+use http::{
+    HeaderMap,
+    header::{AUTHORIZATION, HOST, ORIGIN},
+};
+use std::collections::BTreeSet;
+use styx_contracts::identity::{OwnerId, Sha256Digest};
+use uuid::Uuid;
+mod owners;
+use owners::Owners;
+use std::sync::{Arc, Mutex};
+
+/// An explicit LAN bind is limited to private networks and user-run overlays.
+/// Never turn a missing address into a wildcard bind.
+pub(crate) fn lan_address(
+    enabled: bool,
+    address: Option<&str>,
+) -> Result<Option<std::net::Ipv4Addr>, GatewayAuthError> {
+    match (enabled, address) {
+        (false, None) => Ok(None),
+        (true, Some(address)) => {
+            let ip: std::net::Ipv4Addr = address
+                .parse()
+                .map_err(|_| GatewayAuthError::InvalidConfiguration)?;
+            let [a, b, _, _] = ip.octets();
+            if ip.is_private() || (a == 100 && (64..=127).contains(&b)) {
+                Ok(Some(ip))
+            } else {
+                Err(GatewayAuthError::InvalidConfiguration)
+            }
+        }
+        _ => Err(GatewayAuthError::InvalidConfiguration),
+    }
+}
+
+/// Compatibility input and the bounded multi-interface input are exclusive.
+pub(crate) fn lan_addresses(
+    enabled: bool,
+    address: Option<&str>,
+    addresses: Option<&[String]>,
+) -> Result<Vec<std::net::Ipv4Addr>, GatewayAuthError> {
+    if address.is_some() && addresses.is_some() {
+        return Err(GatewayAuthError::InvalidConfiguration);
+    }
+    match addresses {
+        None => Ok(lan_address(enabled, address)?.into_iter().collect()),
+        Some(addresses) => {
+            if !enabled || !(1..=4).contains(&addresses.len()) {
+                return Err(GatewayAuthError::InvalidConfiguration);
+            }
+            let mut result = Vec::with_capacity(addresses.len());
+            for address in addresses {
+                let ip = lan_address(true, Some(address))?
+                    .ok_or(GatewayAuthError::InvalidConfiguration)?;
+                if result.contains(&ip) {
+                    return Err(GatewayAuthError::InvalidConfiguration);
+                }
+                result.push(ip);
+            }
+            Ok(result)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum GatewayAuthError {
+    #[error("invalid Gateway admission configuration")]
+    InvalidConfiguration,
+    #[error("Gateway authentication required")]
+    Unauthenticated,
+    #[error("Gateway ingress is not authorized")]
+    Forbidden,
+}
+
+pub struct GatewayBearerPolicy {
+    owners: Arc<Mutex<Owners>>,
+    token_digest: Sha256Digest,
+    tunnel_token_digest: Option<Sha256Digest>,
+    allowed_hosts: BTreeSet<String>,
+    allowed_origins: BTreeSet<String>,
+}
+impl std::fmt::Debug for GatewayBearerPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayBearerPolicy")
+            .field("token", &"[REDACTED]")
+            .field("allowed_hosts", &self.allowed_hosts)
+            .field("allowed_origins", &self.allowed_origins)
+            .finish()
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrincipalDomain {
+    Ordinary,
+    Tunnel,
+    PublicMcp,
+}
+#[derive(Clone)]
+pub struct AuthenticatedGatewayPrincipal {
+    owners: Arc<Mutex<Owners>>,
+    digest: Sha256Digest,
+    domain: PrincipalDomain,
+}
+impl std::fmt::Debug for AuthenticatedGatewayPrincipal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AuthenticatedGatewayPrincipal([REDACTED])")
+    }
+}
+/// Gateway-minted resource ownership, not a ChatGPT-account identity claim.
+/// No Deserialize and no public constructor accepting an OwnerId.
+#[derive(Clone)]
+pub struct VerifiedGatewayOwner {
+    owners: Arc<Mutex<Owners>>,
+    sequence: u64,
+    owner_id: OwnerId,
+    principal: Sha256Digest,
+    domain: PrincipalDomain,
+}
+impl std::fmt::Debug for VerifiedGatewayOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifiedGatewayOwner")
+            .field("owner_id", &self.owner_id)
+            .finish_non_exhaustive()
+    }
+}
+impl VerifiedGatewayOwner {
+    #[cfg(test)]
+    pub(super) fn is_tunnel(&self) -> bool {
+        self.domain == PrincipalDomain::Tunnel
+    }
+    pub(super) fn requires_tunnel_conversation(&self) -> bool {
+        self.domain == PrincipalDomain::Tunnel
+    }
+    pub(super) fn allows_tunnel_conversation(&self) -> bool {
+        matches!(
+            self.domain,
+            PrincipalDomain::Tunnel | PrincipalDomain::PublicMcp
+        )
+    }
+    pub(crate) fn is_fenced(&self) -> bool {
+        self.owners.lock().map_or(true, |o| o.fenced(self.sequence))
+    }
+    pub(crate) fn fence(&self) {
+        self.owners
+            .lock()
+            .expect("owner ledger")
+            .fence(self.sequence);
+    }
+    pub(crate) fn cleanup_complete(&self) {
+        self.owners
+            .lock()
+            .expect("owner ledger")
+            .complete(self.sequence);
+    }
+    pub(crate) fn with_admission<T>(&self, f: impl FnOnce() -> T) -> Option<T> {
+        let owners = self.owners.lock().ok()?;
+        if owners.fenced(self.sequence) {
+            return None;
+        }
+        Some(f())
+    }
+
+    pub fn owner_id(&self) -> &OwnerId {
+        &self.owner_id
+    }
+    pub fn principal_fingerprint(&self) -> Sha256Digest {
+        self.principal
+    }
+}
+impl AuthenticatedGatewayPrincipal {
+    pub(super) fn fingerprint(&self) -> Sha256Digest {
+        self.digest
+    }
+    /// Exact service-principal binding, not a client-supplied owner claim.
+    pub fn matches_owner(&self, owner: &VerifiedGatewayOwner) -> bool {
+        verify_slices_are_equal(self.digest.as_bytes(), owner.principal.as_bytes()).is_ok()
+    }
+    /// Factory is confined to Gateway adapters after an authenticated ingress.
+    pub(super) fn new_mcp_session_owner(&self) -> Result<VerifiedGatewayOwner, GatewayAuthError> {
+        self.new_owner("mcp-session")
+    }
+    pub(super) fn requires_tunnel_conversation(&self) -> bool {
+        self.domain == PrincipalDomain::Tunnel
+    }
+    pub(super) fn allows_tunnel_conversation(&self) -> bool {
+        matches!(
+            self.domain,
+            PrincipalDomain::Tunnel | PrincipalDomain::PublicMcp
+        )
+    }
+    pub(super) fn uses_subject_conversation_fallback(&self) -> bool {
+        self.domain == PrincipalDomain::PublicMcp
+    }
+    pub(super) fn new_tunnel_conversation_owner(
+        &self,
+    ) -> Result<VerifiedGatewayOwner, GatewayAuthError> {
+        if !self.allows_tunnel_conversation() {
+            return Err(GatewayAuthError::Forbidden);
+        }
+        self.new_owner("tunnel-conversation")
+    }
+    pub(super) fn new_public_mcp_subject_owner(
+        &self,
+    ) -> Result<VerifiedGatewayOwner, GatewayAuthError> {
+        if !self.uses_subject_conversation_fallback() {
+            return Err(GatewayAuthError::Forbidden);
+        }
+        self.new_owner("public-mcp-subject")
+    }
+    fn new_owner(&self, kind: &str) -> Result<VerifiedGatewayOwner, GatewayAuthError> {
+        let sequence = self
+            .owners
+            .lock()
+            .map_err(|_| GatewayAuthError::Forbidden)?
+            .mint()
+            .ok_or(GatewayAuthError::Forbidden)?;
+        Ok(VerifiedGatewayOwner {
+            owners: self.owners.clone(),
+            sequence,
+            owner_id: format!("{kind}:{}", Uuid::new_v4())
+                .try_into()
+                .expect("fixed UUID owner syntax"),
+            principal: self.digest,
+            domain: self.domain,
+        })
+    }
+}
+impl GatewayBearerPolicy {
+    pub fn new(
+        token: &[u8],
+        allowed_hosts: Vec<String>,
+        allowed_origins: Vec<String>,
+    ) -> Result<Self, GatewayAuthError> {
+        if !(32..=4096).contains(&token.len())
+            || !token
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            || allowed_hosts.is_empty()
+        {
+            return Err(GatewayAuthError::InvalidConfiguration);
+        }
+        let mut total = 0usize;
+        for host in &allowed_hosts {
+            total = total
+                .checked_add(host.len())
+                .ok_or(GatewayAuthError::InvalidConfiguration)?;
+            let authority = host
+                .parse::<http::uri::Authority>()
+                .map_err(|_| GatewayAuthError::InvalidConfiguration)?;
+            if host.is_empty()
+                || host.len() > 512
+                || authority.as_str() != host
+                || host.contains('@')
+            {
+                return Err(GatewayAuthError::InvalidConfiguration);
+            }
+        }
+        for origin in &allowed_origins {
+            total = total
+                .checked_add(origin.len())
+                .ok_or(GatewayAuthError::InvalidConfiguration)?;
+            let url =
+                url::Url::parse(origin).map_err(|_| GatewayAuthError::InvalidConfiguration)?;
+            if !matches!(url.scheme(), "http" | "https")
+                || url.origin().ascii_serialization() != *origin
+            {
+                return Err(GatewayAuthError::InvalidConfiguration);
+            }
+        }
+        if total > styx_contracts::CONTROL_FRAME_BYTES {
+            return Err(GatewayAuthError::InvalidConfiguration);
+        }
+        Ok(Self {
+            owners: Arc::new(Mutex::new(Owners::default())),
+            token_digest: Sha256Digest::of_bytes(token),
+            tunnel_token_digest: None,
+            allowed_hosts: allowed_hosts.into_iter().collect(),
+            allowed_origins: allowed_origins.into_iter().collect(),
+        })
+    }
+    /// Gateway bootstrap only. The private verified Tunnel worker gets this
+    /// per-run credential; ordinary model bearers cannot select this domain.
+    pub(crate) fn with_tunnel_ingress(mut self, token: &[u8]) -> Result<Self, GatewayAuthError> {
+        if self.tunnel_token_digest.is_some()
+            || !(32..=4096).contains(&token.len())
+            || !token
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(b))
+        {
+            return Err(GatewayAuthError::InvalidConfiguration);
+        }
+        let digest = Sha256Digest::of_bytes(token);
+        if digest == self.token_digest {
+            return Err(GatewayAuthError::InvalidConfiguration);
+        }
+        self.tunnel_token_digest = Some(digest);
+        Ok(self)
+    }
+    pub fn authorize(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<AuthenticatedGatewayPrincipal, GatewayAuthError> {
+        if headers.get_all(HOST).iter().count() != 1 || headers.get_all(ORIGIN).iter().count() > 1 {
+            return Err(GatewayAuthError::Forbidden);
+        }
+        let host = headers
+            .get(HOST)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(GatewayAuthError::Forbidden)?;
+        if !self.allowed_hosts.contains(host) {
+            return Err(GatewayAuthError::Forbidden);
+        }
+        if let Some(origin) = headers.get(ORIGIN) {
+            let origin = origin.to_str().map_err(|_| GatewayAuthError::Forbidden)?;
+            if !self.allowed_origins.contains(origin) {
+                return Err(GatewayAuthError::Forbidden);
+            }
+        }
+        // Header claims never select an owner. Only the separate private
+        // forwarding bearer admits the dedicated Tunnel context adapter.
+        if headers.contains_key("x-styx-tunnel-context") {
+            return Err(GatewayAuthError::Forbidden);
+        }
+        if headers.get_all(AUTHORIZATION).iter().count() != 1 {
+            return Err(GatewayAuthError::Unauthenticated);
+        }
+        let authorization = headers
+            .get(AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(GatewayAuthError::Unauthenticated)?;
+        let token = authorization
+            .strip_prefix("Bearer ")
+            .ok_or(GatewayAuthError::Unauthenticated)?;
+        if !(32..=4096).contains(&token.len())
+            || !token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        {
+            return Err(GatewayAuthError::Unauthenticated);
+        }
+        let digest = Sha256Digest::of_bytes(token.as_bytes());
+        let ordinary =
+            verify_slices_are_equal(digest.as_bytes(), self.token_digest.as_bytes()).is_ok();
+        let tunnel = self.tunnel_token_digest.is_some_and(|expected| {
+            verify_slices_are_equal(digest.as_bytes(), expected.as_bytes()).is_ok()
+        });
+        if !ordinary && !tunnel {
+            return Err(GatewayAuthError::Unauthenticated);
+        }
+        Ok(AuthenticatedGatewayPrincipal {
+            owners: self.owners.clone(),
+            digest,
+            domain: if tunnel {
+                PrincipalDomain::Tunnel
+            } else {
+                PrincipalDomain::Ordinary
+            },
+        })
+    }
+    /// Public MCP OIDC/JWKS admission after cryptographic JWT verification.
+    /// Isolates principals per `(issuer, subject)`, supports `TunnelConversation`
+    /// when OpenAI correlation metadata is present, and falls back to per-session
+    /// `McpSession` ownership otherwise.
+    pub(crate) fn authorize_public_mcp_subject(
+        &self,
+        issuer: &str,
+        subject: &str,
+    ) -> AuthenticatedGatewayPrincipal {
+        let mut material = Vec::with_capacity(12 + issuer.len() + subject.len());
+        material.extend_from_slice(b"public-mcp:");
+        material.extend_from_slice(issuer.as_bytes());
+        material.push(0);
+        material.extend_from_slice(subject.as_bytes());
+        AuthenticatedGatewayPrincipal {
+            owners: self.owners.clone(),
+            digest: Sha256Digest::of_bytes(&material),
+            domain: PrincipalDomain::PublicMcp,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn gateway_lan_address_requires_explicit_private_or_overlay_ipv4() {
+        assert_eq!(lan_address(false, None).unwrap(), None);
+        for address in [
+            "10.0.0.1",
+            "172.16.0.1",
+            "172.31.255.254",
+            "192.168.1.2",
+            "100.64.0.1",
+            "100.127.255.254",
+        ] {
+            assert!(
+                lan_address(true, Some(address)).unwrap().is_some(),
+                "{address}"
+            );
+        }
+        for address in [
+            "8.8.8.8",
+            "127.0.0.1",
+            "127.0.0.2",
+            "169.254.1.2",
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "100.63.255.255",
+            "100.128.0.1",
+            "172.15.255.255",
+            "172.32.0.1",
+            "::1",
+            "localhost",
+            "192.168.1.1/24",
+        ] {
+            assert!(lan_address(true, Some(address)).is_err(), "{address}");
+        }
+        assert!(lan_address(true, None).is_err());
+        assert!(lan_address(false, Some("192.168.1.2")).is_err());
+    }
+    fn headers() -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(HOST, "localhost:8795".parse().unwrap());
+        h.insert(
+            AUTHORIZATION,
+            format!("Bearer {}", "a".repeat(43)).parse().unwrap(),
+        );
+        h
+    }
+    #[test]
+    fn only_a_valid_ingress_can_mint_independent_session_owners() {
+        let token = "a".repeat(43);
+        let policy =
+            GatewayBearerPolicy::new(token.as_bytes(), vec!["localhost:8795".into()], vec![])
+                .unwrap();
+        let a = policy
+            .authorize(&headers())
+            .unwrap()
+            .new_mcp_session_owner()
+            .unwrap();
+        let b = policy
+            .authorize(&headers())
+            .unwrap()
+            .new_mcp_session_owner()
+            .unwrap();
+        assert_ne!(a.owner_id(), b.owner_id());
+        assert_eq!(a.principal_fingerprint(), b.principal_fingerprint());
+        assert!(!format!("{policy:?}").contains(&token));
+        assert!(!format!("{a:?}").contains(&Sha256Digest::of_bytes(token.as_bytes()).to_hex()));
+        for change in 0..8 {
+            let mut h = headers();
+            match change {
+                0 => {
+                    h.remove(AUTHORIZATION);
+                }
+                1 => {
+                    h.append(AUTHORIZATION, "Bearer duplicate".parse().unwrap());
+                }
+                2 => {
+                    h.insert(
+                        AUTHORIZATION,
+                        format!("Bearer {}", "b".repeat(43)).parse().unwrap(),
+                    );
+                }
+                3 => {
+                    h.insert(HOST, "other.invalid".parse().unwrap());
+                }
+                4 => {
+                    h.append(HOST, "localhost:8795".parse().unwrap());
+                }
+                5 => {
+                    h.insert(ORIGIN, "https://unapproved.invalid".parse().unwrap());
+                }
+                6 => {
+                    h.insert("x-styx-tunnel-context", "claimed-context".parse().unwrap());
+                }
+                7 => {
+                    h.insert(AUTHORIZATION, format!("bearer {}", token).parse().unwrap());
+                }
+                _ => unreachable!(),
+            }
+            assert!(policy.authorize(&h).is_err(), "case {change}");
+        }
+    }
+}

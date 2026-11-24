@@ -1,0 +1,347 @@
+//! Ordinary fresh native Host reader. Snapshot owns protected local bindings;
+//! C08 owns signed workers; neither local DATA nor this adapter grants tools.
+use super::*;
+use crate::store::native_host_snapshot::NativeHostSnapshot;
+use serde_json::Value;
+
+#[derive(Deserialize)]
+struct FreshDeployment {
+    schema: u16,
+    mode: String,
+    host: FreshHost,
+}
+#[derive(Deserialize)]
+struct FreshHost {
+    exec: Option<Value>,
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    computer: Option<Value>,
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    browser: Option<Value>,
+}
+
+/// The connection portion of a fresh protected Host profile. Both the origin
+/// and CA are local pairing inputs; the peer cannot choose its own namespace.
+pub(crate) fn connection_profile(
+    gateway_origin: &str,
+    device_id: &DeviceId,
+    anchor_sha256: Sha256Digest,
+    ca: &[u8],
+) -> Result<(LinkEndpoint, GatewayId, GatewayClientTls), ProfileError> {
+    let gateway = origin(gateway_origin, "https")?;
+    let normalized_origin = gateway.origin().ascii_serialization();
+    if normalized_origin != gateway_origin {
+        return Err(ProfileError::Invalid);
+    }
+    let mut endpoint = gateway;
+    endpoint
+        .set_scheme("wss")
+        .map_err(|_| ProfileError::Invalid)?;
+    endpoint.set_path(&format!("/styx/host/v3/{}/exec", device_id.as_str()));
+    let endpoint = LinkEndpoint::parse(endpoint.as_str()).map_err(|_| ProfileError::Invalid)?;
+    let certs = rustls_pemfile::certs(&mut Cursor::new(ca))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ProfileError::Invalid)?;
+    if certs.len() != 1
+        || TrustAnchorPin::from_certificate_der(&certs[0]).as_hex() != anchor_sha256.to_hex()
+    {
+        return Err(ProfileError::Invalid);
+    }
+    let paired_namespace =
+        crate::tls::paired_gateway_namespace(&TrustAnchorPin::from_certificate_der(&certs[0]));
+    let tls = GatewayClientTls::from_pinned_ca_bundle(
+        ca,
+        &[TrustAnchorPin::from_certificate_der(&certs[0])],
+        None,
+    )
+    .map_err(|_| ProfileError::Invalid)?;
+    Ok((endpoint, paired_namespace, tls))
+}
+
+pub(super) fn load(state_dir: &Path) -> Result<LoadedProfile, ProfileError> {
+    let snapshot =
+        Arc::new(NativeHostSnapshot::open(state_dir).map_err(|_| ProfileError::Changed)?);
+    load_snapshot(state_dir, snapshot)
+}
+pub(super) fn load_for_app(
+    scope: Arc<crate::app::HostScope>,
+) -> Result<LoadedProfile, ProfileError> {
+    let path = scope.state_dir().to_owned();
+    let snapshot = Arc::new(
+        NativeHostSnapshot::open_for_app(&path, scope).map_err(|_| ProfileError::Changed)?,
+    );
+    load_snapshot(&path, snapshot)
+}
+pub(super) fn load_for_app_retained(
+    scope: Arc<crate::app::HostScope>,
+    runtime: Arc<crate::release::VerifiedNativeRelease>,
+) -> Result<LoadedProfile, ProfileError> {
+    let path = scope.state_dir().to_owned();
+    let snapshot = Arc::new(
+        NativeHostSnapshot::open_for_app_retained(&path, scope, runtime)
+            .map_err(|_| ProfileError::Changed)?,
+    );
+    load_snapshot(&path, snapshot)
+}
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(super) fn load_for_service(
+    scope: Arc<crate::platform::native_service::ServiceScope>,
+) -> Result<LoadedProfile, ProfileError> {
+    let path = scope.state_dir().to_owned();
+    let snapshot =
+        Arc::new(NativeHostSnapshot::open_for_service(scope).map_err(|_| ProfileError::Changed)?);
+    load_snapshot(&path, snapshot)
+}
+fn load_snapshot(
+    state_dir: &Path,
+    snapshot: Arc<NativeHostSnapshot>,
+) -> Result<LoadedProfile, ProfileError> {
+    absolute(state_dir)?;
+    snapshot.revalidate().map_err(|_| ProfileError::Changed)?;
+    let seed = snapshot.seed();
+    let ready = snapshot.ready();
+    // NativeHostSnapshot binds the current seed to canonical state and the
+    // signed runtime selection.
+    if seed.schema != 2
+        || ready.schema != 1
+        || seed.platform
+            != if cfg!(target_os = "windows") {
+                "win32"
+            } else if cfg!(target_os = "macos") {
+                "darwin"
+            } else {
+                "linux"
+            }
+        || seed.device_id != ready.device_id
+        || seed.fingerprint != ready.fingerprint
+        || snapshot.state_dir() != state_dir
+    {
+        return Err(ProfileError::Invalid);
+    }
+    let private = DevicePrivateKey::from_pkcs8_pem(snapshot.private_identity_pem())
+        .map_err(|_| ProfileError::Invalid)?;
+    let public = DevicePublicKey::from_spki_pem(seed.public_key_pem.as_bytes())
+        .map_err(|_| ProfileError::Invalid)?;
+    if private.public_key().spki_der() != public.spki_der()
+        || public.fingerprint().as_hex() != seed.fingerprint.to_hex()
+    {
+        return Err(ProfileError::Invalid);
+    }
+    let (endpoint, paired_namespace, tls) = connection_profile(
+        &seed.gateway_origin,
+        &seed.device_id,
+        seed.anchor_sha256,
+        snapshot.ca_pem(),
+    )?;
+    let endpoint_text = endpoint.as_str().to_owned();
+    let token = std::str::from_utf8(snapshot.credential()).map_err(|_| ProfileError::Invalid)?;
+    if !(32..=4096).contains(&token.len())
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+    {
+        return Err(ProfileError::Invalid);
+    }
+    let bearer =
+        SecretBearer::from_protected_reader(token.to_owned()).map_err(|_| ProfileError::Invalid)?;
+    let selection = snapshot.current_selection();
+    let expected = PublisherFingerprint::parse(&seed.runtime.publisher_spki_sha256.to_hex())
+        .map_err(|_| ProfileError::UntrustedRelease)?;
+    let inventory = release::ProfileRelease::from_retained_native(
+        selection,
+        &expected,
+        snapshot.verified_release(),
+    )?;
+    let executor = if inventory.has_worker(NativeExternalWorker::CodexExec) {
+        Some(Arc::new(
+            inventory.pin_worker(NativeExternalWorker::CodexExec)?,
+        ))
+    } else {
+        None
+    };
+    let cwd = PathBuf::from(&seed.cwd);
+    let shell = Path::new(&seed.shell);
+    absolute(&cwd)?;
+    absolute(shell)?;
+    if seed.cwd.len() > 4096
+        || seed.shell.len() > 4096
+        || seed.cwd.contains('\0')
+        || seed.shell.contains('\0')
+    {
+        return Err(ProfileError::Invalid);
+    }
+    let mut capture = Capture {
+        observed: vec![],
+        public: vec![],
+    };
+    let deployment_raw = capture.read(state_dir, "deployment.json", JSON_LIMIT)?;
+    if Sha256Digest::of_bytes(&deployment_raw) != seed.deployment_raw_sha256 {
+        return Err(ProfileError::Changed);
+    }
+    let deployment: FreshDeployment = decode(&deployment_raw)?;
+    if deployment.schema != 1 || deployment.mode != "join-existing" {
+        return Err(ProfileError::Invalid);
+    }
+    let initial = crate::host::settings::Capabilities {
+        exec: deployment
+            .host
+            .exec
+            .as_ref()
+            .and_then(|v| v.get("enabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        browser: seed.browser_requested
+            && ready.browser_approved
+            && deployment
+                .host
+                .browser
+                .as_ref()
+                .and_then(|v| v.get("enabled"))
+                .and_then(Value::as_bool)
+                == Some(true),
+        computer: seed.computer_requested
+            && ready.computer_approved
+            && deployment.host.computer == Some(Value::Bool(true)),
+        android: false,
+    };
+    let settings = crate::host::settings::HostSettings::open(state_dir, initial)
+        .map_err(|_| ProfileError::Invalid)?;
+    #[cfg(not(target_os = "android"))]
+    let browser_cdp = Some(
+        crate::host::browser_cdp::BrowserCdpStore::open(state_dir)
+            .map_err(|_| ProfileError::Invalid)?,
+    );
+    // Provider construction inputs are independent of mutable admission. The
+    // Host controller gates calls; disabled Cua is not initialized until enabled.
+    let deployment_computer = Some(Value::Bool(true));
+    #[cfg(target_os = "linux")]
+    let host_computer = Some(
+        serde_json::json!({"enabled":true,"connections":1,"env":{"CUA_DRIVER_RS_ENABLE_WAYLAND":"1"}}),
+    );
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let host_computer = Some(serde_json::json!({"enabled":true,"connections":1}));
+    let mut browser_options = deployment
+        .host
+        .browser
+        .unwrap_or_else(|| serde_json::json!({}));
+    let options = browser_options
+        .as_object_mut()
+        .ok_or(ProfileError::Invalid)?;
+    // The Host always opens a visible, session-owned browser. These former
+    // launch knobs in persisted setup data no longer select runtime behavior.
+    options.remove("headless");
+    options.remove("persistLogin");
+    options.insert("enabled".into(), Value::Bool(true));
+    let deployment_browser = Some(browser_options.clone());
+    browser_options
+        .as_object_mut()
+        .ok_or(ProfileError::Invalid)?
+        .insert(
+            "profileRoot".into(),
+            Value::String(state_dir.join("browser").to_string_lossy().into_owned()),
+        );
+    let host_browser = Some(browser_options);
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    let release_root = inventory.browser_release_root();
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    let browser_node_version = inventory.browser_node_version();
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let cua_version = inventory.cua_version();
+    #[cfg(target_os = "windows")]
+    let environment = super::super::windows_env::executor_environment(&BTreeMap::new(), state_dir)?;
+    #[cfg(not(target_os = "windows"))]
+    let environment = unix_executor_environment(&seed.shell)?;
+    let signed_version = inventory.version().to_owned();
+    let loaded = LoadedProfile {
+        settings: Some(settings),
+        #[cfg(not(target_os = "android"))]
+        browser_cdp,
+        host_base_dir: state_dir.to_path_buf(),
+        device: seed.device_id.clone(),
+        endpoint,
+        paired_namespace,
+        tls,
+        bearer,
+        executor,
+        inventory,
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+        release_root,
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+        browser_node_version,
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        cua_version,
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        deployment_computer,
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        host_computer,
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+        deployment_browser,
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+        host_browser,
+        cwd,
+        environment,
+        #[cfg(target_os = "windows")]
+        runtime_temp: std::sync::OnceLock::new(),
+        rpc_timeout: Duration::from_millis(35000),
+        observed: capture.observed,
+        diagnostics: ProfileDiagnostics {
+            schema: 1,
+            device_id: seed.device_id.clone(),
+            endpoint: endpoint_text,
+            runtime_format: "native_rust_v1_fresh_host_profile",
+            wire_mode: "paired_v3",
+            version: signed_version,
+            publisher_sha256: expected.as_hex().to_owned(),
+            manifest_sha256: selection.manifest_sha256,
+            preservation: capture.public,
+            tool_health: "NOT RUN",
+            account_acceptance: "NOT RUN",
+        },
+        snapshot,
+    };
+    loaded.revalidate()?;
+    Ok(loaded)
+}
+
+/// Minimal Exec environment for the Host's own OS user. Nothing is inherited
+/// from the caller; HOME/USER come from the passwd entry of the current UID.
+#[cfg(not(target_os = "windows"))]
+fn unix_executor_environment(shell: &str) -> Result<BTreeMap<String, String>, ProfileError> {
+    let user = nix::unistd::User::from_uid(nix::unistd::Uid::current())
+        .map_err(|_| ProfileError::ProtectedRead)?
+        .ok_or(ProfileError::ProtectedRead)?;
+    let home = user.dir.to_str().ok_or(ProfileError::Invalid)?.to_owned();
+    absolute(Path::new(&home))?;
+    let path = if cfg!(target_os = "macos") {
+        "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    } else {
+        "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
+    };
+    Ok(BTreeMap::from([
+        ("HOME".into(), home),
+        ("USER".into(), user.name.clone()),
+        ("LOGNAME".into(), user.name),
+        ("SHELL".into(), shell.to_owned()),
+        ("PATH".into(), path.into()),
+        ("LANG".into(), "C.UTF-8".into()),
+    ]))
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod environment_tests {
+    use super::*;
+
+    #[test]
+    fn exec_environment_uses_passwd_home_and_inherits_nothing_else() {
+        let user = nix::unistd::User::from_uid(nix::unistd::Uid::current())
+            .unwrap()
+            .unwrap();
+        let env = unix_executor_environment("/bin/bash").unwrap();
+        assert_eq!(env["HOME"], user.dir.to_str().unwrap());
+        assert_eq!(env["USER"], user.name);
+        assert_eq!(env["SHELL"], "/bin/bash");
+        assert_eq!(
+            env.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["HOME", "LANG", "LOGNAME", "PATH", "SHELL", "USER"]
+        );
+    }
+}

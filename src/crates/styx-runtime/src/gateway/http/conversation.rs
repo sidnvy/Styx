@@ -1,0 +1,128 @@
+//! Correlation inside an independently authenticated forwarding domain only.
+//! Neither JSON owner claims nor the ordinary model bearer reach this adapter.
+use super::{GatewayHttp, GatewayOwnerLifecycle, Life, lifecycle};
+use crate::gateway::{auth::AuthenticatedGatewayPrincipal, mcp::GatewayToolBackend};
+use http::StatusCode;
+use rmcp::model::RequestMetaObject;
+use std::sync::Arc;
+use styx_contracts::identity::Sha256Digest;
+
+pub(super) struct Conversation<B: GatewayToolBackend + GatewayOwnerLifecycle> {
+    pub life: Arc<Life<B>>,
+}
+/// Constructed only after outer HTTP authentication. SDK preserves this typed
+/// value in HTTP Parts; it has no Deserialize or JSON constructor.
+pub(super) struct AuthorizedCall<B: GatewayToolBackend + GatewayOwnerLifecycle> {
+    pub conversation: Arc<Conversation<B>>,
+}
+impl<B: GatewayToolBackend + GatewayOwnerLifecycle> Clone for AuthorizedCall<B> {
+    fn clone(&self) -> Self {
+        Self {
+            conversation: self.conversation.clone(),
+        }
+    }
+}
+const OPENAI_CORRELATION_KEYS: [&str; 3] =
+    ["openai/organization", "openai/subject", "openai/session"];
+
+pub(super) fn has_any_openai_correlation_key(meta: &RequestMetaObject) -> bool {
+    OPENAI_CORRELATION_KEYS
+        .iter()
+        .any(|name| meta.get(*name).is_some())
+}
+
+fn correlation(meta: &RequestMetaObject, principal: Sha256Digest) -> Result<[u8; 32], StatusCode> {
+    let mut values = Vec::with_capacity(4);
+    let principal = principal.to_hex();
+    values.push(principal.as_str());
+    for name in OPENAI_CORRELATION_KEYS {
+        let value = meta
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| {
+                !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+            })
+            .ok_or(StatusCode::BAD_REQUEST)?;
+        values.push(value);
+    }
+    // Canonical length-delimited serialization, not string concatenation. Only
+    // the hash is retained; raw service correlations never become owner IDs.
+    let bytes = serde_json::to_vec(&values).map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok(*Sha256Digest::of_bytes(&bytes).as_bytes())
+}
+
+fn subject_correlation(principal: Sha256Digest) -> [u8; 32] {
+    let principal = principal.to_hex();
+    let bytes = serde_json::to_vec(&["public-mcp-subject", principal.as_str()])
+        .expect("fixed two-element string slice");
+    *Sha256Digest::of_bytes(&bytes).as_bytes()
+}
+
+impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
+    fn get_or_create_conversation(
+        &self,
+        key: [u8; 32],
+        mint_owner: impl FnOnce() -> Result<
+            crate::gateway::auth::VerifiedGatewayOwner,
+            crate::gateway::auth::GatewayAuthError,
+        >,
+    ) -> Result<AuthorizedCall<B>, StatusCode> {
+        self.collect_closed_conversations();
+        let mut registry = self.conversations.lock().expect("Tunnel conversations");
+        if self.stop.is_cancelled() {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        let conversation = if let Some(existing) = registry.get(&key) {
+            existing.clone()
+        } else {
+            let owner = mint_owner().map_err(|_| StatusCode::FORBIDDEN)?;
+            let life = self.new_life(owner, lifecycle::Boundary::TunnelConversation);
+            let value = Arc::new(Conversation { life });
+            registry.insert(key, value.clone());
+            value
+        };
+        if !conversation.life.is_active() {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        Ok(AuthorizedCall { conversation })
+    }
+    pub(super) fn conversation_call(
+        &self,
+        principal: &AuthenticatedGatewayPrincipal,
+        meta: &RequestMetaObject,
+    ) -> Result<AuthorizedCall<B>, StatusCode> {
+        if !principal.allows_tunnel_conversation() || self.stop.is_cancelled() {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        let key = correlation(meta, principal.fingerprint())?;
+        self.get_or_create_conversation(key, || principal.new_tunnel_conversation_owner())
+    }
+    pub(super) fn public_mcp_subject_call(
+        &self,
+        principal: &AuthenticatedGatewayPrincipal,
+    ) -> Result<AuthorizedCall<B>, StatusCode> {
+        if !principal.uses_subject_conversation_fallback() || self.stop.is_cancelled() {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        let key = subject_correlation(principal.fingerprint());
+        self.get_or_create_conversation(key, || principal.new_public_mcp_subject_owner())
+    }
+    pub(super) fn collect_closed_conversations(&self) {
+        // Idle conversations keep their owner and resources. Only an explicitly
+        // closed, fully settled lifecycle can be removed.
+        self.conversations
+            .lock()
+            .expect("Tunnel conversations")
+            .retain(|_, value| !value.life.is_complete());
+    }
+    pub(super) fn close_conversations(&self) {
+        for value in self
+            .conversations
+            .lock()
+            .expect("Tunnel conversations")
+            .values()
+        {
+            let _ = value.life.close();
+        }
+    }
+}

@@ -1,0 +1,343 @@
+"""Linux v1 journey: the REDUCED-SCOPE.md acceptance steps against one signed payload.
+
+usage: linux-journey.py PAYLOAD_DIR PUBLISHER_PEM PUBLISHER_PIN WORK_DIR PORT
+
+Fresh private Gateway and Host roots under WORK_DIR, loopback Gateway on PORT.
+Steps: verify payload, bootstrap and run Gateway, pair a Host, Exec file effect,
+visible Browser page effect, one Computer Use click on a zenity dialog this
+script opens itself, quit and reopen without re-pairing, Exec again. Every step
+is logged with timings to WORK_DIR/journey.jsonl. Stops at the first unexpected
+result; never retries a command whose outcome is unknown.
+"""
+import atexit, json, os, subprocess, sys, time, threading, signal, hashlib, uuid
+from pathlib import Path
+
+payload, publisher, pin, work, port = sys.argv[1:6]
+work = Path(work)
+WINDOWS = os.name == "nt"
+styx = str(Path(payload) / ("bin/styx.exe" if WINDOWS else "bin/styx"))
+# Windows: each role gets its own process group so Ctrl+Break stops it gracefully.
+GROUP = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {}
+STOP = signal.CTRL_BREAK_EVENT if WINDOWS else signal.SIGTERM
+# Optional lanes, on unless set to 0: a machine without Chrome/Edge, or a macOS
+# CLI payload (Computer Use comes from the Swift App there), records them NOT RUN.
+BROWSER = os.environ.get("STYX_JOURNEY_BROWSER", "1") != "0"
+COMPUTER = os.environ.get("STYX_JOURNEY_COMPUTER", "1") != "0"
+inputs, gparent, hparent, hcwd = (work / n for n in ("inputs", "gateway-parent", "host-parent", "host-cwd"))
+for d in (work, inputs, gparent, hparent, hcwd):
+    # Windows: Python 3.13 turns mode 0o700 into an OWNER RIGHTS ACL, which Styx's
+    # private-root check (current user, SYSTEM, Administrators only) refuses.
+    # Inherit the private run folder's rules instead.
+    d.mkdir(**({} if WINDOWS else {"mode": 0o700}), parents=False, exist_ok=False)
+gateway, host = gparent / "gateway", hparent / "host"
+url = f"https://127.0.0.1:{port}/"
+log = open(work / "journey.jsonl", "a")
+T0 = time.monotonic()
+env = dict(os.environ, STYX_GATEWAY_STARTUP_DIAGNOSTICS="1")
+
+
+def note(event, **fields):
+    rec = {"t": round(time.monotonic() - T0, 3), "event": event, **fields}
+    log.write(json.dumps(rec) + "\n"); log.flush()
+    print(json.dumps(rec), flush=True)
+
+
+def run(name, args, stdout_file=None):
+    start = time.monotonic()
+    if stdout_file:
+        with open(stdout_file, "x") as out:
+            os.chmod(stdout_file, 0o600)
+            p = subprocess.run([styx, *args], stdout=out, stderr=subprocess.PIPE, text=True, env=env)
+        report = None
+    else:
+        p = subprocess.run([styx, *args], capture_output=True, text=True, env=env)
+        report = json.loads(p.stdout) if p.stdout.strip() else None
+    note(name, exit=p.returncode, seconds=round(time.monotonic() - start, 3))
+    if p.returncode != 0:
+        note(name + "_failed", stderr=p.stderr[-2000:], stdout=(p.stdout or "")[-2000:] if not stdout_file else "")
+        raise SystemExit(f"{name} failed")
+    return report
+
+
+ROLES = []
+
+
+@atexit.register
+def stop_leftovers():
+    # Host first, so its transport drains while the Gateway is still up.
+    for role in sorted(ROLES, key=lambda r: r.name != "host"):
+        if role.p.poll() is None:
+            role.p.send_signal(STOP)
+            try:
+                note(role.name + "_cleanup_stopped", code=role.p.wait(timeout=60))
+            except subprocess.TimeoutExpired:
+                note(role.name + "_cleanup_timeout")
+
+
+class Role:
+    """Foreground role process; records each JSON event line with a timestamp."""
+
+    def __init__(self, name, args):
+        ROLES.append(self)
+        self.name, self.events = name, []
+        self.start = time.monotonic()
+        self.p = subprocess.Popen([styx, *args], stdout=subprocess.PIPE, stderr=open(work / f"{name}.stderr.log", "a"), text=True, env=env, **GROUP)
+        note(name + "_spawned", pid=self.p.pid)
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        for line in self.p.stdout:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                ev = {"raw": line.strip()[:300]}
+            ev["_t"] = round(time.monotonic() - self.start, 3)
+            self.events.append(ev)
+            with open(work / f"{self.name}.events.jsonl", "a") as f:
+                f.write(json.dumps(ev) + "\n")
+
+    def wait_for(self, predicate, label, timeout=180):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            for ev in self.events:
+                if predicate(ev):
+                    note(f"{self.name}_{label}", since_spawn=ev["_t"])
+                    return ev
+            if self.p.poll() is not None:
+                note(f"{self.name}_exited_early", code=self.p.returncode)
+                raise SystemExit(f"{self.name} exited")
+            time.sleep(0.05)
+        note(f"{self.name}_{label}_timeout")
+        raise SystemExit(f"{self.name} {label} timeout")
+
+    def stop(self):
+        start = time.monotonic()
+        self.p.send_signal(STOP)
+        code = self.p.wait(timeout=120)
+        note(self.name + "_stopped", code=code, seconds=round(time.monotonic() - start, 3))
+        if code != 0:
+            raise SystemExit(f"{self.name} stop exit {code}")
+
+
+def ev_name(ev):
+    return str(ev.get("event", ev.get("status", "")))
+
+
+def plan_apply(root, component, tx, seq):
+    plan = run(f"{component}_plan_{tx}", ["plan", "--state-dir", str(root), "--component", component, "--run", "running", "--transaction-id", tx, "--sequence", str(seq), "--json"])
+    note(f"{component}_plan_report_keys", keys=sorted(plan) if isinstance(plan, dict) else str(type(plan)))
+    plan_file = plan.get("plan_file") or plan.get("planFile")
+    run(f"{component}_apply_{tx}", ["apply", "--state-dir", str(root), "--plan-file", plan_file, "--authorize", "--json"])
+
+
+def mcp(cmd, *args):
+    p = subprocess.run([sys.executable, "-I", str(Path(__file__).parent / "mcp_client.py"), str(gateway), url, str(gateway / "gateway-ca.pem"), cmd, *args], capture_output=True, text=True, timeout=180)
+    if p.returncode != 0:
+        note("mcp_failed", cmd=cmd, stderr=p.stderr[-2000:])
+        raise SystemExit("mcp failed")
+    return json.loads(p.stdout)
+
+
+def exec_effect(device, label):
+    nonce = uuid.uuid4().hex
+    target = hcwd / f"effect-{label}-{nonce}.txt"
+    if WINDOWS:
+        # Windows Hosts run PowerShell; CreateNew refuses an existing file, like set -C.
+        # No double quotes: Windows command-line parsing strips them.
+        command = (f"$f=[IO.File]::Open('{target}','CreateNew'); $b=[Text.Encoding]::UTF8.GetBytes($env:USERPROFILE + ':{nonce}');"
+                   " $f.Write($b,0,$b.Length); $f.Close()")
+    else:
+        command = f'set -C; printf %s "$HOME:{nonce}" > {target}'
+    # One MCP session for the whole command, polled until it exits, as a model client
+    # does: closing the session ends the command's owner, which stops the command.
+    session = subprocess.Popen([sys.executable, "-I", str(Path(__file__).parent / "mcp_client.py"), str(gateway), url,
+        str(gateway / "gateway-ca.pem"), "session"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+
+    def call(name, arguments):
+        session.stdin.write(json.dumps({"name": name, "arguments": arguments}) + "\n")
+        session.stdin.flush()
+        return json.loads(session.stdout.readline())
+    try:
+        reply = call("exec_command", {"environment_id": device, "cmd": command})
+        polls = 0
+        while True:
+            value = (reply.get("result", {}).get("structuredContent") or {})
+            if value.get("exit_code") is not None or value.get("session_id") is None or polls >= 60:
+                break
+            polls += 1
+            reply = call("write_stdin", {"session_id": value["session_id"], "chars": "", "yield_time_ms": 1000})
+        result = reply
+        note("exec_result_" + label, polls=polls, result=json.dumps(result)[:1500])
+    finally:
+        session.stdin.close()
+        session.wait(timeout=30)
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline and not target.exists():
+        time.sleep(0.1)
+    if WINDOWS:
+        home = os.environ["USERPROFILE"]
+    else:
+        import pwd
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    ok = target.exists() and target.read_text().strip() == home + ":" + nonce
+    note("exec_effect_" + label, ok=ok)
+    if not ok:
+        raise SystemExit("exec effect missing")
+
+
+def tool_text(reply):
+    result = reply.get("result", {})
+    if result.get("isError"):
+        note("tool_error", result=json.dumps(reply)[:1500])
+        raise SystemExit("tool error")
+    return result
+
+
+def computer_click(device):
+    """One click on a dialog this script owns; the dialog's exit code is the effect.
+
+    List, read and click run in ONE MCP session, as a model client does:
+    an observation is bound to the session that made it.
+    """
+    nonce = uuid.uuid4().hex[:12]
+    if WINDOWS:
+        form = (f"Add-Type -AssemblyName System.Windows.Forms; $f=New-Object Windows.Forms.Form; $f.Text='styx-click-{nonce}';"
+                "$b=New-Object Windows.Forms.Button; $b.Text='Confirm';"
+                # Close 1.5 s after the click: the Windows Cua driver inspects the window after
+                # invoking, and a window that vanishes at once turns the reply into an error.
+                "$t=New-Object Windows.Forms.Timer; $t.Interval=1500; $t.Add_Tick({[Environment]::Exit(0)});"
+                "$b.Add_Click({$b.Text='Clicked'; $t.Start()});"
+                "$f.Controls.Add($b); $f.TopMost=$true; [void]$f.ShowDialog(); exit 3")
+        dialog = subprocess.Popen(["powershell", "-NoProfile", "-Command", form])
+    else:
+        dialog = subprocess.Popen(["zenity", "--question", "--title", f"styx-click-{nonce}",
+            "--text", f"Styx journey click test {nonce}", "--ok-label", "Confirm", "--cancel-label", "Cancel"])
+    atexit.register(lambda: dialog.poll() is None and dialog.kill())
+    session = subprocess.Popen([sys.executable, "-I", str(Path(__file__).parent / "mcp_client.py"), str(gateway), url,
+        str(gateway / "gateway-ca.pem"), "session"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+
+    def call(name, arguments):
+        session.stdin.write(json.dumps({"name": name, "arguments": {"environment_id": device, **arguments}}) + "\n")
+        session.stdin.flush()
+        return tool_text(json.loads(session.stdout.readline()))
+    try:
+        start = time.monotonic()
+        windows = []
+        while time.monotonic() - start < 15 and not windows:
+            windows = (call("list_windows", {"pid": dialog.pid}).get("structuredContent") or {}).get("windows") or []
+            if not windows:
+                time.sleep(0.5)
+        note("computer_list_windows", seconds=round(time.monotonic() - start, 3), windows=json.dumps(windows)[:600])
+        if not windows:
+            raise SystemExit("dialog window not listed")
+        window_id = windows[0].get("window_id", windows[0].get("windowId"))
+        structured = call("get_window_state", {"pid": dialog.pid, "window_id": window_id, "query": "Confirm",
+                                               "include_screenshot": False}).get("structuredContent") or {}
+        tokens = [e.get("element_token") for e in structured.get("elements", [])
+                  if "confirm" in json.dumps(e).lower() and e.get("element_token")]
+        note("computer_state", tokens=tokens)
+        if not tokens:
+            raise SystemExit("Confirm button not found in the accessibility tree")
+        clicked = call("click", {"element_token": tokens[-1]})
+        note("computer_click_result", result=json.dumps(clicked)[:600])
+    finally:
+        session.stdin.close()
+        session.wait(timeout=30)
+    try:
+        code = dialog.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        code = None
+    note("computer_click_effect", ok=code == 0, dialog_exit=code)
+    if code != 0:
+        raise SystemExit("click effect missing")
+
+
+# --- verify payload, bootstrap Gateway -------------------------------------------
+selection = inputs / "runtime-selection.json"
+run("release_verify", ["release", "verify", "--payload-dir", payload, "--publisher-file", publisher, "--expected-publisher", pin, "--runtime-selection"], stdout_file=selection)
+gdep = inputs / "gateway.json"
+gdep.write_text(json.dumps({"schema": 1, "mode": "create-local", "gateway": {"url": url, "listenHost": "127.0.0.1"}})); os.chmod(gdep, 0o600)
+run("gateway_bootstrap", ["gateway", "bootstrap", "--parent-dir", str(gparent), "--name", "gateway", "--deployment-file", str(gdep), "--runtime-selection-file", str(selection), "--json"])
+plan_apply(gateway, "gateway", "gateway-first-run", 1)
+g = Role("gateway", ["gateway", "run", "--state-dir", str(gateway)])
+g.wait_for(lambda e: "listen" in ev_name(e) or e.get("listening") is True, "listening")
+
+# --- pair Host ---------------------------------------------------------------------
+invitation = inputs / "invitation.txt"
+run("gateway_invite", ["gateway", "invite", "--state-dir", str(gateway), "--invitation-file", str(invitation), "--ttl-seconds", "600", "--authorize", "--json"])
+import ssl
+ca_der = ssl.PEM_cert_to_DER_cert((gateway / "gateway-ca.pem").read_text())
+hdep = inputs / "host.json"
+hdep.write_text(json.dumps({"schema": 1, "mode": "join-existing",
+    "gateway": {"url": url.rstrip("/"), "caFile": str(gateway / "gateway-ca.pem"), "expectedCaSha256": hashlib.sha256(ca_der).hexdigest()},
+    "host": {"label": "linux-journey", "cwd": str(hcwd), "shell": os.path.join(os.environ.get("SystemRoot", ""), "System32", "WindowsPowerShell", "v1.0", "powershell.exe") if WINDOWS else "/bin/bash", "computer": COMPUTER, "browser": {"enabled": BROWSER, "channel": "chrome"}},
+    "runtimeSelectionFile": str(selection), "invitationFile": str(invitation)})); os.chmod(hdep, 0o600)
+req = run("host_join_request", ["host", "join", "request", "--parent-dir", str(hparent), "--name", "host", "--deployment-file", str(hdep), "--json"])
+pending = run("gateway_pending", ["gateway", "pending", "--state-dir", str(gateway), "--json"])
+note("join_request_keys", request=sorted(req), pending=json.dumps(pending)[:800])
+pick = lambda *k: next(req[x] for x in k if x in req)
+run("gateway_approve", ["gateway", "approve", "--state-dir", str(gateway), "--request-id", pick("request_id", "requestId"), "--device-id", pick("device_id", "deviceId"), "--fingerprint", pick("fingerprint"), "--comparison-code", pick("comparison_code", "comparisonCode"), *(["--enable-browser"] if BROWSER else []), *(["--enable-computer"] if COMPUTER else []), "--authorize", "--json"])
+claim = run("host_join_claim", ["host", "join", "claim", "--state-dir", str(host), "--json"])
+note("claim", status=claim.get("status"))
+device = pick("device_id", "deviceId")
+plan_apply(host, "host", "host-first-run", 1)
+h = Role("host", ["host", "run", "--state-dir", str(host)])
+h.wait_for(lambda e: ev_name(e) == "connected", "connected")
+note("first_setup_connected_total", seconds=round(time.monotonic() - T0, 3))
+
+# --- real effect, then reopen without re-pairing -----------------------------------
+note("tools", names=mcp("list"))
+envs = mcp("call", "list_execution_environments", "{}")
+note("environments", result=json.dumps(envs)[:1500])
+text = json.dumps(envs)
+if device not in text:
+    raise SystemExit("paired device not listed as an execution environment")
+note("status",result=json.dumps(mcp("call", "get_execution_environment_status", json.dumps({"environment_id": device})))[:1500])
+exec_effect(device, "first")
+nonce = uuid.uuid4().hex
+import http.server
+class Page(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = f"<title>styx-{nonce}</title><p>{nonce}</p>".encode()
+        self.send_response(200); self.send_header("Content-Type", "text/html"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Page)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+page = f"http://127.0.0.1:{server.server_address[1]}/styx-journey"
+for attempt in range(30 if BROWSER or COMPUTER else 0):
+    st = json.loads(mcp("call", "get_execution_environment_status", json.dumps({"environment_id": device}))["result"]["content"][0]["text"])
+    if st["browser"]["connection"] == "connected" and st["computer"]["connection"] == "connected":
+        break
+    time.sleep(1)
+if BROWSER or COMPUTER:
+    note("lanes", browser=st["browser"], computer=st["computer"], waited_s=attempt)
+if not BROWSER:
+    note("browser_not_run", reason="STYX_JOURNEY_BROWSER=0")
+else:
+    nav = mcp("call", "browser_navigate", json.dumps({"environment_id": device, "url": page}))
+    snap = mcp("call", "browser_snapshot", json.dumps({"environment_id": device}))
+    # Each MCP client call is its own session, so the effect is read from the
+    # navigation result: the page title Chrome reports for the served page.
+    browser_ok = f"styx-{nonce}" in json.dumps(nav)
+    note("browser_effect", ok=browser_ok, navigate=json.dumps(nav)[:600], snapshot=json.dumps(snap)[:600])
+    if not browser_ok:
+        raise SystemExit("browser effect missing")
+if not COMPUTER:
+    note("computer_click_not_run", reason="STYX_JOURNEY_COMPUTER=0")
+else:
+    try:
+        computer_click(device)
+    except SystemExit as stop:
+        # Recorded as a failed step; the run continues to quit and reopen.
+        note("computer_click_failed", reason=str(stop))
+h.stop(); g.stop()
+R0 = time.monotonic()
+g = Role("gateway", ["gateway", "run", "--state-dir", str(gateway)])
+g.wait_for(lambda e: "listen" in ev_name(e) or e.get("listening") is True, "reopen_listening")
+h = Role("host", ["host", "run", "--state-dir", str(host)])
+h.wait_for(lambda e: ev_name(e) == "connected", "reopen_connected")
+note("reopen_connected_total", seconds=round(time.monotonic() - R0, 3))
+exec_effect(device, "reopen")
+h.stop(); g.stop()
+note("journey_complete")

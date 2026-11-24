@@ -1,0 +1,901 @@
+//! Argument boundaries only. Subprocess/OS effects belong to interop acceptance.
+use super::*;
+#[test]
+fn cli_gateway_reject_requires_exact_identity_and_explicit_authorization() {
+    let fields = [
+        ("--state-dir", "/private/gateway"),
+        ("--request-id", "0123456789abcdef0123456789abcdef"),
+        ("--device-id", "styx-device"),
+        (
+            "--fingerprint",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+        ("--comparison-code", "123456"),
+    ];
+    let args = || {
+        ["styx", "gateway", "reject"]
+            .into_iter()
+            .chain(fields.into_iter().flat_map(|(flag, value)| [flag, value]))
+            .chain(["--authorize", "--json"])
+            .collect::<Vec<_>>()
+    };
+    let cli = Cli::try_parse_from(args()).unwrap();
+    let Command::Gateway {
+        command:
+            GatewayCommand::Reject {
+                state_dir,
+                request_id,
+                device_id,
+                fingerprint,
+                comparison_code,
+                authorize,
+                json,
+            },
+    } = cli.command
+    else {
+        panic!("expected reject")
+    };
+    assert_eq!(state_dir, PathBuf::from("/private/gateway"));
+    assert_eq!(request_id, fields[1].1);
+    assert_eq!(device_id, fields[2].1);
+    assert_eq!(fingerprint, fields[3].1);
+    assert_eq!(comparison_code, fields[4].1);
+    assert!(authorize && json);
+    for (omitted, _) in fields {
+        let remaining = ["styx", "gateway", "reject"]
+            .into_iter()
+            .chain(
+                fields
+                    .into_iter()
+                    .filter(|(flag, _)| *flag != omitted)
+                    .flat_map(|(flag, value)| [flag, value]),
+            )
+            .chain(["--authorize", "--json"]);
+        assert!(Cli::try_parse_from(remaining).is_err(), "missing {omitted}");
+    }
+    assert!(Cli::try_parse_from(args().into_iter().filter(|a| *a != "--authorize")).is_err());
+}
+#[test]
+fn cli_guided_setup_status_and_invite_use_explicit_profile_roots() {
+    assert!(Cli::try_parse_from(["styx", "setup"]).is_ok());
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "setup",
+            "--answers",
+            "/private/answers.json",
+            "--foreground",
+            "--exit-when-connected"
+        ])
+        .is_ok()
+    );
+    assert!(Cli::try_parse_from(["styx", "setup", "--exit-when-connected"]).is_err());
+    assert!(
+        Cli::try_parse_from(["styx", "setup", "--foreground", "--exit-when-connected"]).is_err()
+    );
+    assert!(Cli::try_parse_from(["styx", "status", "--json"]).is_ok());
+    assert!(
+        Cli::try_parse_from(["styx", "status", "--state-dir", "/private/host", "--json"]).is_ok()
+    );
+    assert!(Cli::try_parse_from(["styx", "status", "--native"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "status",
+            "--root",
+            "/private/setup",
+            "--state-dir",
+            "/private/host"
+        ])
+        .is_err()
+    );
+    assert!(Cli::try_parse_from(["styx", "invite", "--root", "/private/setup"]).is_ok());
+}
+#[test]
+fn cli_gateway_invite_origin_is_a_closed_optional_selection() {
+    let base = [
+        "styx",
+        "gateway",
+        "invite",
+        "--state-dir",
+        "/private/gateway",
+        "--invitation-file",
+        "/private/invite",
+        "--authorize",
+        "--json",
+    ];
+    assert!(Cli::try_parse_from(base).is_ok());
+    for origin in ["lan", "loopback"] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--origin", origin])).is_ok());
+    }
+    for origin in ["public", "https://192.168.1.2:8795"] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--origin", origin])).is_err());
+    }
+}
+#[test]
+fn cli_gateway_invite_app_link_address_and_ttl_boundaries() {
+    let base = [
+        "styx",
+        "gateway",
+        "invite",
+        "--state-dir",
+        "/private/gateway",
+        "--invitation-file",
+        "/private/invite",
+        "--authorize",
+        "--json",
+    ];
+    let cli = Cli::try_parse_from(base.into_iter().chain([
+        "--origin-address",
+        "10.0.2.19",
+        "--app-link-file",
+        "/private/join-link",
+    ]))
+    .unwrap();
+    let Command::Gateway {
+        command:
+            GatewayCommand::Invite {
+                origin_address,
+                app_link_file,
+                ttl_seconds,
+                ..
+            },
+    } = cli.command
+    else {
+        panic!("invite required")
+    };
+    assert_eq!(origin_address.unwrap().to_string(), "10.0.2.19");
+    assert_eq!(app_link_file.unwrap(), PathBuf::from("/private/join-link"));
+    assert_eq!(ttl_seconds, 600);
+    for ttl in ["60", "600"] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--ttl-seconds", ttl])).is_ok());
+    }
+    for ttl in ["0", "59", "601"] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--ttl-seconds", ttl])).is_err());
+    }
+    for address in ["::1", "hostname", "10.0.2.19:8795"] {
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain(["--origin-address", address])).is_err()
+        );
+    }
+    assert!(
+        Cli::try_parse_from(base.into_iter().chain([
+            "--origin",
+            "loopback",
+            "--origin-address",
+            "10.0.2.19",
+        ]))
+        .is_err()
+    );
+}
+
+#[test]
+fn cli_host_mode_rejects_legacy_gateway_and_raw_credentials() {
+    let cli =
+        Cli::try_parse_from(["styx", "host", "run", "--state-dir", "/owned/private"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Host {
+            command: HostCommand::Run { .. }
+        }
+    ));
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "host",
+            "run",
+            "--state-dir",
+            "/owned/private",
+            "--legacy-gateway",
+        ])
+        .is_err()
+    );
+    for option in ["--token", "--bearer", "--codex-bin", "--publisher-pin"] {
+        assert!(
+            Cli::try_parse_from([
+                "styx",
+                "host",
+                "run",
+                "--state-dir",
+                "/owned/private",
+                option,
+                "untrusted"
+            ])
+            .is_err()
+        );
+    }
+    assert!(Cli::try_parse_from(["styx", "host", "run"]).is_err());
+    assert!(
+        Cli::try_parse_from(["styx", "doctor", "--state-dir", "/owned/private", "--json"]).is_ok()
+    );
+    assert!(Cli::try_parse_from(["styx", "gateway", "run"]).is_ok());
+}
+
+#[test]
+fn desktop_candidate_diagnostics_cannot_supply_authority_or_change_profile_mode() {
+    let cli = Cli::try_parse_from(["styx", "doctor", "--desktop-sessions", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Doctor {
+            state_dir: None,
+            desktop_sessions: true,
+            watch: false,
+            json: true
+        }
+    ));
+    assert!(Cli::try_parse_from(["styx", "doctor"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "doctor",
+            "--desktop-sessions",
+            "--state-dir",
+            "/owned/private"
+        ])
+        .is_err()
+    );
+    for option in ["--uid", "--socket", "--session", "--display", "--grant"] {
+        assert!(
+            Cli::try_parse_from(["styx", "doctor", "--desktop-sessions", option, "untrusted"])
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn management_commands_use_one_native_configuration_model() {
+    let init = Cli::try_parse_from([
+        "styx",
+        "init",
+        "--parent-dir",
+        "/owned/private",
+        "--name",
+        "fresh-native",
+        "--deployment-file",
+        "/owned/deployment.json",
+        "--mode",
+        "join-existing",
+        "--manager",
+        "foreground-cli",
+        "--host",
+        "--json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        init.command,
+        Command::Init {
+            mode: NativeModeArg::JoinExisting,
+            manager: NativeManagerArg::ForegroundCli,
+            host: true,
+            gateway: false,
+            json: true,
+            ..
+        }
+    ));
+    let plan = [
+        "styx",
+        "plan",
+        "--state-dir",
+        "/owned/private",
+        "--component",
+        "host",
+        "--run",
+        "stopped",
+        "--transaction-id",
+        "native-17",
+        "--sequence",
+        "17",
+        "--json",
+    ];
+    let parsed = Cli::try_parse_from(plan).unwrap();
+    assert!(matches!(
+        parsed.command,
+        Command::Plan {
+            component: NativeComponentArg::Host,
+            run: NativeRunArg::Stopped,
+            sequence: 17,
+            ..
+        }
+    ));
+    for missing in ["--component", "--run", "--transaction-id", "--sequence"] {
+        let mut args = Vec::new();
+        let mut skip = false;
+        for arg in plan {
+            if skip {
+                skip = false;
+                continue;
+            }
+            if arg == missing {
+                skip = true;
+                continue;
+            }
+            args.push(arg);
+        }
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+    let mut obsolete_selector = plan.to_vec();
+    obsolete_selector.push("--native");
+    assert!(Cli::try_parse_from(obsolete_selector).is_err());
+    for sequence in ["0", "-1", "18446744073709551616"] {
+        let invalid: Vec<_> = plan
+            .into_iter()
+            .map(|arg| if arg == "17" { sequence } else { arg })
+            .collect();
+        assert!(Cli::try_parse_from(invalid).is_err());
+    }
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "apply",
+            "--state-dir",
+            "/owned/private",
+            "--plan-file",
+            "/owned/plan.json"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "recover",
+            "--state-dir",
+            "/owned/private",
+            "--transaction-id",
+            "native-17"
+        ])
+        .is_err()
+    );
+    let apply = Cli::try_parse_from([
+        "styx",
+        "apply",
+        "--state-dir",
+        "/owned/private",
+        "--plan-file",
+        "/owned/plan.json",
+        "--authorize",
+        "--json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        apply.command,
+        Command::Apply {
+            authorize: true,
+            json: true,
+            ..
+        }
+    ));
+    let recover = Cli::try_parse_from([
+        "styx",
+        "recover",
+        "--state-dir",
+        "/owned/private",
+        "--transaction-id",
+        "native-17",
+        "--authorize",
+    ])
+    .unwrap();
+    assert!(matches!(
+        recover.command,
+        Command::Recover {
+            authorize: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        Cli::try_parse_from([
+            "styx",
+            "transaction",
+            "--state-dir",
+            "/owned/private",
+            "--transaction-id",
+            "native-17",
+            "--json"
+        ])
+        .unwrap()
+        .command,
+        Command::Transaction { json: true, .. }
+    ));
+    assert!(matches!(
+        Cli::try_parse_from(["styx", "status", "--state-dir", "/owned/private"])
+            .unwrap()
+            .command,
+        Command::Status {
+            state_dir: Some(_),
+            ..
+        }
+    ));
+    assert!(
+        Cli::try_parse_from(["styx", "plan", "--state-dir", "/owned/private", "--json"]).is_err()
+    );
+    for option in [
+        "--token",
+        "--bearer",
+        "--publisher-pin",
+        "--codex-bin",
+        "--writer-stopped",
+        "--adopt-legacy",
+    ] {
+        let mut args = vec![
+            "styx",
+            "apply",
+            "--state-dir",
+            "/owned/private",
+            "--plan-file",
+            "/owned/plan.json",
+            "--authorize",
+        ];
+        args.extend([option, "untrusted"]);
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "transaction",
+            "--state-dir",
+            "/owned/private",
+            "--transaction-id",
+            "native-17",
+            "--authorize"
+        ])
+        .is_err()
+    );
+    let invalid_run: Vec<_> = plan
+        .into_iter()
+        .map(|arg| if arg == "stopped" { "auto" } else { arg })
+        .collect();
+    assert!(Cli::try_parse_from(invalid_run).is_err());
+}
+
+#[test]
+fn release_verification_requires_external_pin_and_has_no_execution_overrides() {
+    let pin = "a".repeat(64);
+    let args = [
+        "styx",
+        "release",
+        "verify",
+        "--payload-dir",
+        "/owned/payload",
+        "--publisher-file",
+        "/owned/trusted-publisher.pem",
+        "--expected-publisher",
+        pin.as_str(),
+        "--json",
+    ];
+    assert!(matches!(
+        Cli::try_parse_from(args).unwrap().command,
+        Command::Release {
+            command: ReleaseCommand::Verify { json: true, .. }
+        }
+    ));
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "release",
+            "verify",
+            "--payload-dir",
+            "/owned/payload",
+            "--publisher-file",
+            "/owned/trusted-publisher.pem"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "release",
+            "verify",
+            "--payload-dir",
+            "/owned/payload",
+            "--expected-publisher",
+            pin.as_str()
+        ])
+        .is_err()
+    );
+    for option in [
+        "--key",
+        "--private-key",
+        "--entrypoint",
+        "--binary",
+        "--trust-package-key",
+        "--install",
+        "--run",
+    ] {
+        let mut invalid = args.to_vec();
+        invalid.extend([option, "untrusted"]);
+        assert!(Cli::try_parse_from(invalid).is_err());
+    }
+    // Release verification input is not a new Host publisher-policy override.
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "host",
+            "run",
+            "--state-dir",
+            "/owned/private",
+            "--expected-publisher",
+            pin.as_str()
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn cli_tunnel_requires_authorization_and_only_file_credentials() {
+    let args = [
+        "styx",
+        "gateway",
+        "tunnel",
+        "configure",
+        "--state-dir",
+        "/private/gateway",
+        "--tunnel-id",
+        "tunnel_abcdefgh",
+        "--api-key-file",
+        "/private/key",
+    ];
+    assert!(Cli::try_parse_from(args).is_err());
+    let mut authorized = args.to_vec();
+    authorized.extend(["--auto-start", "--authorize", "--json"]);
+    assert!(matches!(
+        Cli::try_parse_from(authorized.clone()).unwrap().command,
+        Command::Gateway {
+            command: GatewayCommand::Tunnel {
+                command: GatewayTunnelCommand::Configure {
+                    auto_start: true,
+                    authorize: true,
+                    json: true,
+                    ..
+                }
+            }
+        }
+    ));
+    for flag in [
+        "--api-key",
+        "--key",
+        "--binary",
+        "--tunnel-client",
+        "--proxy",
+    ] {
+        let mut invalid = authorized.clone();
+        invalid.extend([flag, "untrusted"]);
+        assert!(Cli::try_parse_from(invalid).is_err());
+    }
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "gateway",
+            "tunnel",
+            "status",
+            "--state-dir",
+            "/private/gateway",
+            "--json"
+        ])
+        .is_ok()
+    );
+    let remove = [
+        "styx",
+        "gateway",
+        "tunnel",
+        "remove",
+        "--state-dir",
+        "/private/gateway",
+    ];
+    assert!(Cli::try_parse_from(remove).is_err());
+    let mut authorized = remove.to_vec();
+    authorized.extend(["--authorize", "--json"]);
+    assert!(Cli::try_parse_from(authorized).is_ok());
+
+    let pub_args = [
+        "styx",
+        "gateway",
+        "public-mcp",
+        "configure",
+        "--state-dir",
+        "/private/gateway",
+        "--issuer",
+        "https://team.cloudflareaccess.com",
+        "--audience",
+        "aud-123",
+        "--jwks-url",
+        "https://team.cloudflareaccess.com/cdn-cgi/access/certs",
+        "--port",
+        "22128",
+        "--enable",
+    ];
+    assert!(Cli::try_parse_from(pub_args).is_err());
+    let mut pub_auth = pub_args.to_vec();
+    pub_auth.extend(["--authorize", "--json"]);
+    assert!(matches!(
+        Cli::try_parse_from(pub_auth).unwrap().command,
+        Command::Gateway {
+            command: GatewayCommand::PublicMcp {
+                command: GatewayPublicMcpCommand::Configure {
+                    port: 22128,
+                    enable: true,
+                    authorize: true,
+                    json: true,
+                    ..
+                }
+            }
+        }
+    ));
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "gateway",
+            "public-mcp",
+            "status",
+            "--state-dir",
+            "/private/gateway",
+            "--json"
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "gateway",
+            "public-mcp",
+            "disable",
+            "--state-dir",
+            "/private/gateway",
+            "--authorize",
+            "--json"
+        ])
+        .is_ok()
+    );
+}
+
+#[test]
+fn cli_role_retire_has_explicit_roots_and_authorization_boundary() {
+    let scoped = Cli::try_parse_from([
+        "styx",
+        "role",
+        "retire",
+        "--state-dir",
+        "/owned/host",
+        "--setup-root",
+        "/owned",
+        "--authorize",
+    ])
+    .unwrap();
+    assert!(matches!(
+        scoped.command,
+        Command::Role {
+            command: RoleCommand::Retire {
+                setup_root: Some(_),
+                ..
+            }
+        }
+    ));
+    let cli = Cli::try_parse_from([
+        "styx",
+        "role",
+        "retire",
+        "--state-dir",
+        "/owned/host",
+        "--gateway-state-dir",
+        "/owned/gateway",
+        "--allow-other-devices",
+        "--authorize",
+        "--json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Role {
+            command: RoleCommand::Retire {
+                authorize: true,
+                allow_other_devices: true,
+                gateway_state_dir: Some(_),
+                json: true,
+                ..
+            }
+        }
+    ));
+    assert!(Cli::try_parse_from(["styx", "role", "retire", "--authorize", "--json"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "role",
+            "retire",
+            "--state-dir",
+            "/owned/host",
+            "--token",
+            "secret"
+        ])
+        .is_err()
+    );
+}
+#[tokio::test]
+async fn cli_role_retire_refuses_without_authorize_before_opening_roots() {
+    let cli = Cli::try_parse_from([
+        "styx",
+        "role",
+        "retire",
+        "--state-dir",
+        "/nonexistent/host",
+        "--json",
+    ])
+    .unwrap();
+    assert_eq!(run(cli).await, ExitCode::from(2));
+}
+
+#[test]
+fn computers_accepts_root_before_or_after_remove_and_explicit_self_override() {
+    for argv in [
+        vec!["styx", "computers", "--root", "/owned", "--all"],
+        vec![
+            "styx",
+            "computers",
+            "--root",
+            "/owned",
+            "remove",
+            "Desk",
+            "--yes",
+        ],
+        vec![
+            "styx",
+            "computers",
+            "remove",
+            "styx-local",
+            "--root",
+            "/owned",
+            "--yes",
+            "--include-this-computer",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(argv).is_ok());
+    }
+}
+
+#[test]
+fn plugin_details_are_owner_local_and_do_not_accept_credentials_or_conflicting_icons() {
+    assert!(Cli::try_parse_from(["styx", "plugin", "configure"]).is_ok());
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "plugin",
+            "--gateway-state-dir",
+            "/private/gateway",
+            "configure",
+            "--plugin-id",
+            "styx-vm",
+            "--display-name",
+            "我的 Styx",
+            "--default-icon",
+            "--yes"
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "plugin",
+            "configure",
+            "--icon-file",
+            "/image.png",
+            "--default-icon"
+        ])
+        .is_err()
+    );
+    assert!(Cli::try_parse_from(["styx", "plugin", "configure", "--token", "SECRET"]).is_err());
+    assert!(Cli::try_parse_from(["styx", "plugin", "export"]).is_err());
+    assert!(
+        Cli::try_parse_from(["styx", "plugin", "export", "--output", "/private/styx-vm"]).is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "plugin",
+            "--root",
+            "/a",
+            "--gateway-state-dir",
+            "/b",
+            "show"
+        ])
+        .is_err()
+    );
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn cli_host_browser_cdp_status_enable_validate_and_disable() {
+    use styx_runtime::host::browser_cdp::BrowserCdpStore;
+
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let root_path = std::env::temp_dir().join(format!("styx-cli-cdp-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root_path);
+    std::fs::create_dir(&root_path).unwrap();
+    let _cleanup = Cleanup(root_path.clone());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&root_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let state_arg = root_path.to_str().unwrap().to_owned();
+
+    let status_cli = Cli::try_parse_from([
+        "styx",
+        "host",
+        "browser-cdp",
+        "status",
+        "--state-dir",
+        &state_arg,
+        "--json",
+    ])
+    .unwrap();
+    assert_eq!(run(status_cli).await, ExitCode::SUCCESS);
+    assert!(
+        !BrowserCdpStore::open(&root_path)
+            .unwrap()
+            .current()
+            .unwrap()
+            .enabled
+    );
+
+    let enable_cli = Cli::try_parse_from([
+        "styx",
+        "host",
+        "browser-cdp",
+        "enable",
+        "--state-dir",
+        &state_arg,
+        "--endpoint",
+        "http://LOCALHOST:9222/",
+        "--json",
+    ])
+    .unwrap();
+    assert_eq!(run(enable_cli).await, ExitCode::SUCCESS);
+    let saved = BrowserCdpStore::open(&root_path)
+        .unwrap()
+        .current()
+        .unwrap();
+    assert!(saved.enabled);
+    assert_eq!(saved.endpoint.as_deref(), Some("http://localhost:9222"));
+
+    let bad_cli = Cli::try_parse_from([
+        "styx",
+        "host",
+        "browser-cdp",
+        "enable",
+        "--state-dir",
+        &state_arg,
+        "--endpoint",
+        "http://192.168.1.10:9222",
+    ])
+    .unwrap();
+    assert_eq!(run(bad_cli).await, ExitCode::from(2));
+    assert_eq!(
+        BrowserCdpStore::open(&root_path)
+            .unwrap()
+            .current()
+            .unwrap(),
+        saved
+    );
+
+    let disable_cli = Cli::try_parse_from([
+        "styx",
+        "host",
+        "browser-cdp",
+        "disable",
+        "--state-dir",
+        &state_arg,
+        "--clear-endpoint",
+        "--json",
+    ])
+    .unwrap();
+    assert_eq!(run(disable_cli).await, ExitCode::SUCCESS);
+    let after = BrowserCdpStore::open(&root_path)
+        .unwrap()
+        .current()
+        .unwrap();
+    assert!(!after.enabled);
+    assert!(after.endpoint.is_none());
+}

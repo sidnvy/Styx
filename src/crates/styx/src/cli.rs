@@ -1,0 +1,2389 @@
+//! Process entry adapter. Runtime owns trusted profile admission and cleanup;
+//! command arguments never supply credentials, executor binaries or authority.
+use clap::{Parser, Subcommand, ValueEnum};
+use std::{
+    ffi::OsString,
+    io::{self, Write},
+    path::PathBuf,
+    process::ExitCode,
+};
+use tokio_util::sync::CancellationToken;
+#[path = "computers.rs"]
+mod computers;
+#[path = "install.rs"]
+mod install;
+#[cfg(target_os = "linux")]
+#[path = "install_boot.rs"]
+mod install_boot;
+#[cfg(target_os = "linux")]
+#[path = "lifecycle.rs"]
+mod lifecycle;
+#[path = "plugin_command.rs"]
+mod plugin_command;
+#[path = "plugin_package.rs"]
+mod plugin_package;
+#[path = "setup.rs"]
+mod setup;
+#[path = "setup_prompt.rs"]
+mod setup_prompt;
+#[path = "status_view.rs"]
+mod status_view;
+
+#[path = "upgrade.rs"]
+mod upgrade;
+
+#[derive(Parser)]
+#[command(
+    name = "styx",
+    version,
+    about = "Styx Rust runtime (development build)"
+)]
+pub(crate) struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+#[derive(Subcommand)]
+enum ComputersCommand {
+    /// Revoke one paired computer by exact label or device id.
+    Remove {
+        selector: String,
+        #[arg(long)]
+        yes: bool,
+        /// Allow revoking this hub's own local computer.
+        #[arg(long)]
+        include_this_computer: bool,
+    },
+}
+#[derive(Subcommand)]
+enum PluginCommand {
+    /// Show the saved identity, presentation and icon fingerprint.
+    Show,
+    /// Edit plugin details; an existing identity is retained.
+    Configure {
+        #[arg(long)]
+        display_name: Option<String>,
+        #[arg(long)]
+        short_description: Option<String>,
+        #[arg(long)]
+        long_description: Option<String>,
+        #[arg(long, conflicts_with = "default_icon")]
+        icon_file: Option<PathBuf>,
+        #[arg(long)]
+        default_icon: bool,
+        /// For first creation, use the identity of the existing plugin to update.
+        #[arg(long)]
+        plugin_id: Option<String>,
+        #[arg(long)]
+        preview_file: Option<PathBuf>,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Export the saved details and this hub's verified connection, without uploading.
+    Export {
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        preview_file: Option<PathBuf>,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+#[derive(Subcommand)]
+enum LocalAppCommand {
+    Status {
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+#[derive(Subcommand)]
+enum Command {
+    /// Start this user's configured Linux services, retaining the existing pairing.
+    #[cfg(target_os = "linux")]
+    Start {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Quit Styx through its existing platform owner; settings are retained.
+    Quit {
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read the local native Windows App owner without contacting a Gateway.
+    App {
+        #[command(subcommand)]
+        command: LocalAppCommand,
+    },
+    /// Install signed Linux files persistently and optionally run first-time setup.
+    Install {
+        #[arg(long)]
+        payload_dir: PathBuf,
+        #[arg(long)]
+        publisher_file: PathBuf,
+        #[arg(long)]
+        expected_publisher: String,
+        #[arg(long)]
+        bin_dir: Option<PathBuf>,
+        #[arg(long)]
+        authorize: bool,
+        #[arg(long)]
+        setup: bool,
+        #[arg(long, value_enum, default_value = "desktop")]
+        mode: install::Mode,
+    },
+    /// Configure or export this hub's plugin name, descriptions and icon.
+    Plugin {
+        #[arg(long, global = true, conflicts_with = "gateway_state_dir")]
+        root: Option<PathBuf>,
+        /// Owner-only Gateway profile for a Gateway installed without styx setup.
+        #[arg(long, global = true)]
+        gateway_state_dir: Option<PathBuf>,
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
+    /// Guided first-run setup; noninteractive use requires a private answers file.
+    Setup {
+        #[arg(long)]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        answers: Option<PathBuf>,
+        /// Keep roles in this process instead of installing Linux user services.
+        #[arg(long)]
+        foreground: bool,
+        /// Test mode: stop and join foreground roles after connection is observed.
+        #[arg(long, requires = "foreground", requires = "answers", hide = true)]
+        exit_when_connected: bool,
+    },
+    /// Invite another computer to this hub and optionally review its request.
+    Invite {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// List paired computers, or revoke one computer's pairing on this hub.
+    Computers {
+        #[arg(long, global = true)]
+        root: Option<PathBuf>,
+        /// Include historical revoked pairings in the list.
+        #[arg(long)]
+        all: bool,
+        #[command(subcommand)]
+        command: Option<ComputersCommand>,
+    },
+    /// Stop and remove this computer's Styx login services; data stays on disk.
+    Uninstall {
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Upgrade Linux services to a signed payload, keeping this computer paired.
+    Upgrade {
+        #[arg(long)]
+        payload: PathBuf,
+        #[arg(long)]
+        publisher_file: Option<PathBuf>,
+        #[arg(long)]
+        expected_publisher: Option<String>,
+        #[arg(long)]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        yes: bool,
+        /// Directory containing the installed Styx command.
+        #[arg(long)]
+        bin_dir: Option<PathBuf>,
+    },
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[command(name = "__upgrade-apply", hide = true)]
+    UpgradeApply {
+        #[arg(long)]
+        root: PathBuf,
+    },
+    /// Back up stopped role roots, then set up or join again normally.
+    Role {
+        #[command(subcommand)]
+        command: RoleCommand,
+    },
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[command(name = "__service-run", hide = true)]
+    ServiceRun {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long, value_enum)]
+        role: NativeComponentArg,
+    },
+    /// Explicit native user-service lifecycle; never enables linger or sudo.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    Service {
+        #[arg(value_enum)]
+        action: ServiceActionArg,
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long, value_enum)]
+        component: NativeComponentArg,
+        #[arg(long)]
+        transaction_id: Option<String>,
+        #[arg(long)]
+        expected_revision: Option<u64>,
+        #[arg(long)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Private native App owned-child transport, never a network endpoint.
+    #[command(name = "__app-core", hide = true)]
+    AppCore {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(
+            long,
+            required_unless_present = "runtime_selection_file",
+            conflicts_with = "runtime_selection_file"
+        )]
+        deployment_file: Option<PathBuf>,
+        #[arg(long)]
+        runtime_selection_file: Option<PathBuf>,
+    },
+    // Fixed read-only worker mode; there are no target/credential/path options.
+    #[command(name = "__linux-desktop-probe", hide = true)]
+    LinuxDesktopProbe,
+    #[command(name = "__linux-desktop-watch", hide = true)]
+    LinuxDesktopWatch,
+    #[command(name = "__linux-desktop-association", hide = true)]
+    LinuxDesktopAssociation {
+        #[arg(long)]
+        candidate: String,
+    },
+    #[command(name = "__linux-desktop-association-check", hide = true)]
+    LinuxDesktopAssociationCheck {
+        #[arg(long)]
+        candidate: String,
+    },
+    /// Print build and contract identity; never claims a running service.
+    BuildInfo {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run the explicitly configured native Host in this foreground process.
+    Host {
+        #[command(subcommand)]
+        command: HostCommand,
+    },
+    /// Run the protected paired Gateway in this foreground process.
+    Gateway {
+        #[command(subcommand)]
+        command: GatewayCommand,
+    },
+    /// Verify an offline release using an externally trusted public publisher pin.
+    Release {
+        #[command(subcommand)]
+        command: ReleaseCommand,
+    },
+    /// Initialize a fresh native configuration root; never adopts legacy state.
+    Init {
+        #[arg(long)]
+        parent_dir: PathBuf,
+        #[arg(long)]
+        name: OsString,
+        #[arg(long)]
+        deployment_file: PathBuf,
+        #[arg(long, value_enum)]
+        mode: NativeModeArg,
+        #[arg(long, value_enum)]
+        manager: NativeManagerArg,
+        #[arg(long)]
+        host: bool,
+        #[arg(long)]
+        gateway: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply an exact reviewed native plan; no services are started here.
+    Apply {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        plan_file: PathBuf,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reconcile the original native transaction; never mint a replacement ID.
+    Recover {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        transaction_id: String,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a native transaction without applying or recovering it.
+    Transaction {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        transaction_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Prepare a native desired-state change without applying it or starting services.
+    Plan {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, value_enum)]
+        component: NativeComponentArg,
+        #[arg(long, value_enum)]
+        run: NativeRunArg,
+        #[arg(long)]
+        transaction_id: String,
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        sequence: u64,
+    },
+    /// Inspect the existing deployment without connecting or starting services.
+    Status {
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        #[arg(long, conflicts_with = "state_dir")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate a profile, or inspect OS desktop candidates without granting access.
+    Doctor {
+        #[arg(
+            long,
+            required_unless_present = "desktop_sessions",
+            conflicts_with = "desktop_sessions"
+        )]
+        state_dir: Option<PathBuf>,
+        /// Linux OS candidates only; does not attach or authorize a desktop.
+        #[arg(long)]
+        desktop_sessions: bool,
+        /// Stream unverified Linux OS candidates; cancellation fences the source.
+        #[arg(long, requires = "desktop_sessions")]
+        watch: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum NativeModeArg {
+    CreateLocal,
+    JoinExisting,
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum NativeManagerArg {
+    ForegroundCli,
+    AppManaged,
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    PersistentService,
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum NativeComponentArg {
+    Host,
+    Gateway,
+}
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ServiceActionArg {
+    Install,
+    Status,
+    Enable,
+    Disable,
+    Start,
+    Stop,
+    Uninstall,
+}
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+impl ServiceActionArg {
+    fn native(self) -> styx_runtime::management::native::service::ServiceAction {
+        use styx_runtime::management::native::service::ServiceAction;
+        match self {
+            Self::Install => ServiceAction::Install,
+            Self::Status => ServiceAction::Status,
+            Self::Enable => ServiceAction::Enable,
+            Self::Disable => ServiceAction::Disable,
+            Self::Start => ServiceAction::Start,
+            Self::Stop => ServiceAction::Stop,
+            Self::Uninstall => ServiceAction::Uninstall,
+        }
+    }
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum NativeRunArg {
+    Running,
+    Stopped,
+}
+impl Cli {
+    pub(crate) fn is_desktop_probe_worker(&self) -> bool {
+        matches!(
+            self.command,
+            Command::LinuxDesktopProbe
+                | Command::LinuxDesktopWatch
+                | Command::LinuxDesktopAssociation { .. }
+        )
+    }
+}
+#[derive(Subcommand)]
+enum RoleCommand {
+    Retire {
+        #[arg(long)]
+        state_dir: PathBuf,
+        /// Explicitly retire a Join attempt, or an unfinished Hub local pairing on POSIX.
+        #[arg(long)]
+        setup_root: Option<PathBuf>,
+        #[arg(long)]
+        gateway_state_dir: Option<PathBuf>,
+        #[arg(long)]
+        allow_other_devices: bool,
+        #[arg(long)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+#[derive(Subcommand)]
+enum HostCommand {
+    /// Explicit native enrollment; does not start or install a Host.
+    Join {
+        #[command(subcommand)]
+        command: HostJoinCommand,
+    },
+    /// Run the existing native Host profile in the foreground.
+    Run {
+        #[arg(long)]
+        state_dir: PathBuf,
+    },
+    /// Read or update local opt-in CDP browser attachment settings.
+    #[cfg(not(target_os = "android"))]
+    BrowserCdp {
+        #[command(subcommand)]
+        command: HostBrowserCdpCommand,
+    },
+}
+#[cfg(not(target_os = "android"))]
+#[derive(Subcommand)]
+enum HostBrowserCdpCommand {
+    /// Show local opt-in CDP attachment configuration and auto-detected endpoint.
+    Status {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enable local opt-in CDP attachment (auto-discovers DevToolsActivePort unless --endpoint is set).
+    Enable {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Disable local opt-in CDP attachment.
+    Disable {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        clear_endpoint: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+#[derive(Subcommand)]
+enum HostJoinCommand {
+    /// Create a fresh private Host identity and request Gateway approval once.
+    Request {
+        #[arg(long)]
+        parent_dir: PathBuf,
+        #[arg(long)]
+        name: OsString,
+        #[arg(long)]
+        deployment_file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Claim an approved credential and verify current authenticated self state.
+    Claim {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum GatewayInviteOrigin {
+    Loopback,
+    Lan,
+}
+#[derive(Subcommand)]
+enum GatewayPublicMcpCommand {
+    /// Configure native OIDC/JWKS loopback ingress (for Cloudflare Access or HTTPS reverse proxies).
+    Configure {
+        #[arg(long)]
+        state_dir: PathBuf,
+        /// Expected JWT issuer (https://...).
+        #[arg(long)]
+        issuer: String,
+        /// Expected JWT audience (AUD).
+        #[arg(long)]
+        audience: String,
+        /// JWKS endpoint URL (https://...).
+        #[arg(long)]
+        jwks_url: String,
+        /// Loopback listen port on 127.0.0.1 (default: 22128).
+        #[arg(long, default_value_t = 22128)]
+        port: u16,
+        /// HTTP header carrying the JWT (default: cf-access-jwt-assertion; also supports authorization).
+        #[arg(long)]
+        jwt_header: Option<String>,
+        /// Allowed browser Origin URLs (repeatable; default: https://chatgpt.com, https://gemini.google.com).
+        #[arg(long = "allowed-origin")]
+        allowed_origin: Vec<String>,
+        /// Enable the native Public MCP loopback listener when Gateway starts.
+        #[arg(long)]
+        enable: bool,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the saved native Public MCP configuration.
+    Status {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Disable the native Public MCP loopback listener while preserving saved settings.
+    Disable {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GatewayCommand {
+    /// Configure the Gateway-owned Secure MCP Tunnel transport.
+    Tunnel {
+        #[command(subcommand)]
+        command: GatewayTunnelCommand,
+    },
+    /// Configure native Public MCP HTTPS/OIDC loopback ingress (replaces external proxy scripts).
+    PublicMcp {
+        #[command(subcommand)]
+        command: GatewayPublicMcpCommand,
+    },
+    /// Create one invitation and publish its secret only to a new private file.
+    Invite {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        invitation_file: PathBuf,
+        #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(60..=600))]
+        ttl_seconds: u64,
+        /// Origin to report for the Host deployment (default: LAN when enabled).
+        #[arg(long, value_enum)]
+        origin: Option<GatewayInviteOrigin>,
+        /// Select one of the Gateway's configured private IPv4 addresses.
+        #[arg(long, conflicts_with = "origin")]
+        origin_address: Option<std::net::Ipv4Addr>,
+        /// Export a secret styx://join link to a new private file.
+        #[arg(long)]
+        app_link_file: Option<PathBuf>,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Observe authoritative pending identities; never approves or claims them.
+    Pending {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Approve exactly one explicitly compared pending identity.
+    Approve {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        device_id: String,
+        #[arg(long)]
+        fingerprint: String,
+        #[arg(long)]
+        comparison_code: String,
+        #[arg(long)]
+        enable_computer: bool,
+        #[arg(long)]
+        enable_browser: bool,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reject exactly one explicitly compared pending identity.
+    Reject {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        device_id: String,
+        #[arg(long)]
+        fingerprint: String,
+        #[arg(long)]
+        comparison_code: String,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Initialize fresh Gateway-only foreground configuration; no service launch or legacy adoption.
+    Bootstrap {
+        #[arg(long)]
+        parent_dir: PathBuf,
+        #[arg(long)]
+        name: OsString,
+        #[arg(long)]
+        deployment_file: PathBuf,
+        #[arg(long)]
+        runtime_selection_file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    Run {
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum GatewayTunnelCommand {
+    Configure {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        tunnel_id: String,
+        #[arg(long)]
+        api_key_file: PathBuf,
+        #[arg(long)]
+        auto_start: bool,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Status {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    Remove {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReleaseCommand {
+    /// Native App bootstrap metadata; payload verification belongs to install/update.
+    #[command(hide = true)]
+    InstalledSelection {
+        #[arg(long)]
+        payload_dir: PathBuf,
+        #[arg(long)]
+        publisher_file: PathBuf,
+        #[arg(long)]
+        expected_publisher: String,
+    },
+    /// Commit a verified runtime selection for a stopped fresh foreground profile.
+    Select {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        runtime_selection_file: PathBuf,
+        #[arg(long)]
+        transaction_id: String,
+        #[arg(long)]
+        sequence: u64,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Copy a verified runtime to a new private version directory; never activates it.
+    Stage {
+        #[arg(long)]
+        payload_dir: PathBuf,
+        #[arg(long)]
+        publisher_file: PathBuf,
+        #[arg(long)]
+        expected_publisher: String,
+        #[arg(long)]
+        parent_dir: PathBuf,
+        #[arg(long)]
+        name: OsString,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read-only signature and payload verification; never installs or runs it.
+    Verify {
+        #[arg(long)]
+        payload_dir: PathBuf,
+        #[arg(long)]
+        publisher_file: PathBuf,
+        /// Public SHA256 pin from trusted external policy, not from the payload.
+        #[arg(long)]
+        expected_publisher: String,
+        #[arg(long)]
+        json: bool,
+        /// Emit verified runtime selection data for the native App bootstrap.
+        #[arg(long)]
+        runtime_selection: bool,
+    },
+}
+
+fn error(code: &str) -> ExitCode {
+    // Curated codes only; runtime errors may contain private paths or inputs.
+    eprintln!("{}", serde_json::json!({"schema":1,"error":code}));
+    ExitCode::from(2)
+}
+fn setup_result(result: Result<(), setup::Failure>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => {
+            if setup_prompt::enhanced() {
+                setup_prompt::failure(failure.code, failure.hint(), failure.exit == 4);
+            } else {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"schema":1,"error":failure.code,"outcome":if failure.exit == 4 {"unknown"} else {"stopped"},"operations_replayed":false})
+                );
+                if let Some(hint) = failure.hint() {
+                    eprintln!("{hint}");
+                }
+            }
+            if failure.exit == 4 {
+                eprintln!(
+                    "Setup stopped with an unknown outcome. Preserve the original inputs and role roots. Check styx status and the original pending request/transaction before taking another action; do not request, approve or pair again automatically."
+                );
+                let _ = io::stdout().flush();
+                let _ = io::stderr().flush();
+                std::process::exit(4);
+            }
+            ExitCode::from(failure.exit)
+        }
+    }
+}
+fn write_json(value: &impl serde::Serialize) -> io::Result<()> {
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    serde_json::to_writer(&mut output, value)?;
+    output.write_all(b"\n")?;
+    output.flush()
+}
+fn native_error_output(
+    value: &styx_runtime::management::native::NativeManagementError,
+) -> serde_json::Value {
+    serde_json::json!({"schema":1,"error":value.code()})
+}
+/// An unresolved owned migration/recovery job must survive until explicit
+/// whole-process teardown. Dropping its result would leave runtime shutdown
+/// waiting for the original blocking custody job.
+fn native_recovery_result<T: serde::Serialize>(
+    result: Result<T, styx_runtime::management::native::NativeManagementError>,
+    json: bool,
+    summary: &'static str,
+) -> ExitCode {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if let Err(value) = &result
+        && value.requires_process_teardown()
+    {
+        let mut output = native_error_output(value);
+        output["outcome"] = serde_json::json!("unknown");
+        output["operations_replayed"] = serde_json::json!(false);
+        output["cleanup_confirmed"] = serde_json::json!(false);
+        output["process_exit"] = serde_json::json!("explicit_scope_teardown");
+        eprintln!("{output}");
+        let _ = io::stdout().flush();
+        let _ = io::stderr().flush();
+        // Keep the entire original result alive; this is not successful cleanup.
+        std::process::exit(i32::from(value.exit_code()));
+    }
+    native_result(result, json, summary)
+}
+fn native_result<T: serde::Serialize>(
+    result: Result<T, styx_runtime::management::native::NativeManagementError>,
+    json: bool,
+    summary: &'static str,
+) -> ExitCode {
+    match result {
+        Ok(value) => {
+            if !json {
+                eprintln!("{summary}");
+            }
+            if write_json(&value).is_err() {
+                error("output_unavailable")
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(value) => {
+            eprintln!("{}", native_error_output(&value));
+            ExitCode::from(value.exit_code())
+        }
+    }
+}
+fn gateway_admin_result(
+    result: Result<
+        styx_runtime::management::native_gateway_admin::AdminReport,
+        styx_runtime::management::native_gateway_admin::AdminError,
+    >,
+    json: bool,
+) -> ExitCode {
+    match result {
+        Ok(report) => {
+            if !json {
+                eprintln!("Native Gateway admin observation; invitation secrets are file-only:");
+            }
+            if write_json(&report).is_ok() {
+                ExitCode::SUCCESS
+            } else if matches!(
+                report.operation,
+                "gateway_invite" | "gateway_approve" | "gateway_reject"
+            ) {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"schema":1,"error":"native_gateway_admin_response_unknown","outcome":"unknown","operations_replayed":false})
+                );
+                ExitCode::from(4)
+            } else {
+                error("output_unavailable")
+            }
+        }
+        Err(value) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({"schema":1,"error":value.code(),"outcome":value.outcome(),"operations_replayed":false})
+            );
+            ExitCode::from(value.exit_code())
+        }
+    }
+}
+fn join_result(
+    result: Result<
+        styx_runtime::management::native_join::JoinReport,
+        styx_runtime::management::native_join::JoinError,
+    >,
+    json: bool,
+) -> ExitCode {
+    match result {
+        Ok(value) => {
+            if !json {
+                eprintln!("Native Host enrollment observed; runtime not started:");
+            }
+            if write_json(&value).is_err() {
+                error("output_unavailable")
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(value) => {
+            let mut report = serde_json::json!({"schema":1,"error":value.code()});
+            if let Some(hint) = value.hint() {
+                report["hint"] = hint.into();
+                report["retryable"] = value.retryable().into();
+                report["uncertain"] = value.uncertain().into();
+            }
+            if let Some((field, reason)) = value.detail() {
+                report["field"] = field.into();
+                report["reason"] = reason.into();
+            }
+            eprintln!("{report}");
+            ExitCode::from(value.exit_code())
+        }
+    }
+}
+impl NativeModeArg {
+    fn native(self) -> styx_contracts::native_management::NativeDeploymentMode {
+        use styx_contracts::native_management::NativeDeploymentMode;
+        match self {
+            Self::CreateLocal => NativeDeploymentMode::CreateLocal,
+            Self::JoinExisting => NativeDeploymentMode::JoinExisting,
+        }
+    }
+}
+impl NativeManagerArg {
+    fn native(self) -> styx_contracts::native_management::NativeManager {
+        use styx_contracts::native_management::NativeManager;
+        match self {
+            Self::ForegroundCli => NativeManager::ForegroundCli,
+            Self::AppManaged => NativeManager::AppManaged,
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            Self::PersistentService => NativeManager::PersistentService,
+        }
+    }
+}
+impl NativeComponentArg {
+    fn native(self) -> styx_runtime::management::native::NativeComponent {
+        use styx_runtime::management::native::NativeComponent;
+        match self {
+            Self::Host => NativeComponent::Host,
+            Self::Gateway => NativeComponent::Gateway,
+        }
+    }
+}
+impl NativeRunArg {
+    fn native(self) -> styx_contracts::native_management::NativeRunDesired {
+        use styx_contracts::native_management::NativeRunDesired;
+        match self {
+            Self::Running => NativeRunDesired::Running,
+            Self::Stopped => NativeRunDesired::Stopped,
+        }
+    }
+}
+async fn desktop_association_check(candidate: &str) -> ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        match styx_runtime::session_probe::association::inspect_candidate_association(candidate)
+            .await
+        {
+            Ok(output) => match write_json(&output) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => error("output_unavailable"),
+            },
+            Err(refusal) => error(refusal.code()),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = candidate;
+        error("desktop_association_unsupported")
+    }
+}
+
+async fn desktop_association_worker(candidate: &str) -> ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        match styx_runtime::session_probe::association::worker_association(candidate).await {
+            Ok(output) => match write_json(&output) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => error("output_unavailable"),
+            },
+            Err(refusal) => match write_json(&refusal) {
+                Ok(()) => ExitCode::from(2),
+                Err(_) => error("output_unavailable"),
+            },
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = candidate;
+        error("desktop_association_unsupported")
+    }
+}
+
+async fn desktop_probe_worker() -> ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        match styx_runtime::session_probe::worker_snapshot().await {
+            Ok(snapshot) => match write_json(&snapshot) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => error("output_unavailable"),
+            },
+            Err(styx_runtime::session_probe::ProbeError::Discovery(value)) => {
+                let refusal = styx_runtime::session_probe::WorkerRefusal::from_error(value);
+                if write_json(&refusal).is_err() {
+                    error("output_unavailable")
+                } else {
+                    ExitCode::from(2)
+                }
+            }
+            Err(value) => error(value.code()),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        error("desktop_discovery_unsupported")
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn watch_write<T: serde::Serialize>(
+    output: &mut crate::watch_output::WatchOutput,
+    value: &T,
+) -> io::Result<()> {
+    tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        output.write_json(value),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "watch output unavailable"))?
+}
+
+async fn desktop_watch_worker() -> ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        use styx_runtime::session_probe::watch::{self, Wire};
+        let mut output = match crate::watch_output::WatchOutput::open() {
+            Ok(value) => value,
+            Err(_) => return error("output_unavailable"),
+        };
+        let cancel = CancellationToken::new();
+        let (events, mut rx) = tokio::sync::mpsc::channel(8);
+        let watching = watch::worker_watch(events, cancel.clone());
+        tokio::pin!(watching);
+        let signal = stop_signal();
+        tokio::pin!(signal);
+        let mut output_ok = true;
+        let mut signal_ok = true;
+        let stopped = loop {
+            tokio::select! {
+                biased;
+                _=output.disconnected()=>{output_ok=false;cancel.cancel();break watching.await;},
+                result=&mut signal=>{signal_ok=result.is_ok();cancel.cancel();break watching.await;},
+                result=&mut watching=>break result,
+                event=rx.recv()=>if let Some(event)=event && watch_write(&mut output,&Wire::Event(event)).await.is_err(){output_ok=false;cancel.cancel();break watching.await;},
+            }
+        };
+        while let Ok(event) = rx.try_recv() {
+            if output_ok && watch_write(&mut output, &Wire::Event(event)).await.is_err() {
+                output_ok = false;
+            }
+        }
+        if output_ok
+            && watch_write(&mut output, &Wire::Shutdown(stopped))
+                .await
+                .is_err()
+        {
+            output_ok = false;
+        }
+        let finished = output.finish().await.is_ok();
+        if !output_ok || !finished {
+            return error("output_unavailable");
+        }
+        if signal_ok && stopped.connection_closed {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(2)
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        error("desktop_discovery_unsupported")
+    }
+}
+async fn desktop_watch_diagnostics(json: bool) -> ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        use styx_runtime::session_probe::watch::{self, ParentStop};
+        if !json {
+            eprintln!("Unverified OS candidates; this stream grants no Desktop access:");
+        }
+        let mut output = match crate::watch_output::WatchOutput::open() {
+            Ok(value) => value,
+            Err(_) => return error("output_unavailable"),
+        };
+        let cancel = CancellationToken::new();
+        let (events, mut rx) = tokio::sync::mpsc::channel(8);
+        let watching = watch::watch_current_user(events, cancel.clone());
+        tokio::pin!(watching);
+        let signal = stop_signal();
+        tokio::pin!(signal);
+        let mut output_ok = true;
+        let mut signal_ok = true;
+        let report = loop {
+            tokio::select! {
+                biased;
+                _=output.disconnected()=>{output_ok=false;cancel.cancel();break watching.await;},
+                result=&mut signal=>{signal_ok=result.is_ok();cancel.cancel();break watching.await;},
+                result=&mut watching=>break result,
+                event=rx.recv()=>if let Some(event)=event && watch_write(&mut output,&event).await.is_err(){output_ok=false;cancel.cancel();break watching.await;},
+            }
+        };
+        while let Ok(event) = rx.try_recv() {
+            if output_ok && watch_write(&mut output, &event).await.is_err() {
+                output_ok = false;
+            }
+        }
+        if output_ok
+            && watch_write(
+                &mut output,
+                &serde_json::json!({"schema":1,"watch_shutdown":report}),
+            )
+            .await
+            .is_err()
+        {
+            output_ok = false;
+        }
+        let finished = output.finish().await.is_ok();
+        if !output_ok || !finished {
+            return error("output_unavailable");
+        }
+        if signal_ok
+            && report.child_reaped
+            && report.stdout_joined
+            && report.reason == ParentStop::Cancelled
+        {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(2)
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = json;
+        error("desktop_discovery_unsupported")
+    }
+}
+
+async fn desktop_diagnostics(json: bool) -> ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        match styx_runtime::foreground::discover_desktop_candidates().await {
+            Ok(snapshot) => {
+                if !json {
+                    eprintln!(
+                        "OS desktop candidates; agent association and desktop authorization are unproven:"
+                    );
+                }
+                if write_json(&snapshot).is_err() {
+                    error("output_unavailable")
+                } else {
+                    ExitCode::SUCCESS
+                }
+            }
+            Err(value) => error(value.code()),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = json;
+        error("desktop_discovery_unsupported")
+    }
+}
+#[cfg(unix)]
+async fn stop_signal() -> io::Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! { r=tokio::signal::ctrl_c()=>r, _=terminate.recv()=>Ok(()) }
+}
+#[cfg(windows)]
+async fn stop_signal() -> io::Result<()> {
+    let mut interrupt = tokio::signal::windows::ctrl_c()?;
+    let mut terminate = tokio::signal::windows::ctrl_break()?;
+    tokio::select! {
+        event = interrupt.recv() => event.ok_or_else(|| io::Error::other("console_signal_closed")),
+        event = terminate.recv() => event.ok_or_else(|| io::Error::other("console_signal_closed")),
+    }
+}
+#[cfg(not(any(unix, windows)))]
+async fn stop_signal() -> io::Result<()> {
+    tokio::signal::ctrl_c().await
+}
+
+async fn local_app(
+    state_dir: Option<PathBuf>,
+    operation: styx_runtime::app_control::Operation,
+    json: bool,
+) -> ExitCode {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (state_dir, operation, json);
+        error("local_app_control_windows_only")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let path = match state_dir.or_else(|| {
+            std::env::var_os("LOCALAPPDATA")
+                .map(|p| PathBuf::from(p).join("StyxPreview/WindowsFirst"))
+        }) {
+            Some(path) => path,
+            None => return error("app_control_state_dir_required"),
+        };
+        match styx_runtime::app_control::request(&path, operation).await {
+            Ok(report) => {
+                let code = report.exit_code();
+                if json {
+                    if write_json(&report).is_err() {
+                        return error("output_unavailable");
+                    }
+                } else {
+                    eprintln!(
+                        "Styx App: {}{}",
+                        report.status,
+                        report
+                            .code
+                            .as_ref()
+                            .map(|s| format!(" ({s})"))
+                            .unwrap_or_default()
+                    );
+                }
+                ExitCode::from(code)
+            }
+            Err(err) => error(err.0),
+        }
+    }
+}
+
+pub(crate) async fn run(cli: Cli) -> ExitCode {
+    use styx_runtime::foreground;
+    match cli.command {
+        #[cfg(target_os = "linux")]
+        Command::Start { root } => setup_result(lifecycle::run(root, true).await),
+        Command::Quit { state_dir, json } => {
+            #[cfg(target_os = "linux")]
+            {
+                let _ = json;
+                setup_result(lifecycle::run(state_dir, false).await)
+            }
+            #[cfg(not(target_os = "linux"))]
+            local_app(state_dir, styx_runtime::app_control::Operation::Quit, json).await
+        }
+        Command::App {
+            command: LocalAppCommand::Status { state_dir, json },
+        } => {
+            local_app(
+                state_dir,
+                styx_runtime::app_control::Operation::Status,
+                json,
+            )
+            .await
+        }
+        Command::Install {
+            payload_dir,
+            publisher_file,
+            expected_publisher,
+            bin_dir,
+            authorize,
+            setup,
+            mode,
+        } => setup_result(
+            install::run(install::Options {
+                payload: payload_dir,
+                publisher: publisher_file,
+                pin: expected_publisher,
+                bin: bin_dir,
+                authorize,
+                setup,
+                mode,
+            })
+            .await,
+        ),
+        Command::Plugin {
+            root,
+            gateway_state_dir,
+            command,
+        } => setup_result(plugin_command::run(root, gateway_state_dir, command).await),
+        Command::Setup {
+            root,
+            answers,
+            foreground,
+            exit_when_connected,
+        } => setup_result(setup::run(root, answers, foreground, exit_when_connected).await),
+        Command::Invite { root } => setup_result(setup::invite(root).await),
+        Command::Computers { root, all, command } => {
+            setup_result(computers::run(root, all, command).await)
+        }
+        Command::Upgrade {
+            payload,
+            publisher_file,
+            expected_publisher,
+            root,
+            yes,
+            bin_dir,
+        } => setup_result(
+            upgrade::run(
+                payload,
+                publisher_file,
+                expected_publisher,
+                root,
+                yes,
+                bin_dir,
+            )
+            .await,
+        ),
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        Command::UpgradeApply { root } => setup_result(upgrade::apply(root).await),
+        Command::Uninstall { root, yes } => setup_result(setup::uninstall(root, yes).await),
+        Command::Status {
+            state_dir: None,
+            root,
+            json,
+            ..
+        } => setup_result(status_view::run(root, json).await),
+        Command::Role {
+            command:
+                RoleCommand::Retire {
+                    state_dir,
+                    setup_root,
+                    gateway_state_dir,
+                    allow_other_devices,
+                    authorize,
+                    json,
+                },
+        } => {
+            if !authorize {
+                return error("role_retire_authorization_required");
+            }
+            if setup_root.is_some() && (gateway_state_dir.is_some() || allow_other_devices) {
+                return error("role_retire_invalid_options");
+            }
+            let result = tokio::task::spawn_blocking(move || {
+                if let Some(root) = setup_root {
+                    return styx_runtime::management::role_retire::retire_setup_host(
+                        &root, &state_dir,
+                    );
+                }
+                styx_runtime::management::role_retire::retire_role(
+                    &state_dir,
+                    gateway_state_dir.as_deref(),
+                    styx_runtime::management::role_retire::RetireOptions {
+                        allow_other_devices,
+                    },
+                )
+            })
+            .await;
+            match result {
+                Ok(Ok(report)) => {
+                    if json {
+                        if write_json(&report).is_err() {
+                            return error("output_unavailable");
+                        }
+                    } else {
+                        println!(
+                            "Role retired; use --json for backup paths, then set up or join again."
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Ok(Err(failure)) => {
+                    if json {
+                        let body =
+                            serde_json::json!({"error":failure.code,"retirement":failure.report});
+                        if write_json(&body).is_err() {
+                            return error("output_unavailable");
+                        }
+                    } else {
+                        eprintln!("{}", failure.code);
+                    }
+                    ExitCode::from(failure.exit_code())
+                }
+                Err(_) => error("role_retire_worker_unknown"),
+            }
+        }
+
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        Command::Service {
+            action,
+            state_dir,
+            component,
+            transaction_id,
+            expected_revision,
+            authorize,
+            json,
+        } => {
+            if action != ServiceActionArg::Status && !authorize {
+                return error("explicit_service_authorization_required");
+            }
+            let transaction_id = match transaction_id
+                .map(styx_contracts::identity::TransactionId::try_from)
+                .transpose()
+            {
+                Ok(v) => v,
+                Err(_) => return error("native_management_invalid_input"),
+            };
+            native_recovery_result(
+                styx_runtime::management::native::service::manage(
+                    &state_dir,
+                    action.native(),
+                    component.native(),
+                    transaction_id,
+                    expected_revision,
+                )
+                .await,
+                json,
+                "Native service observations; inspect canonical intent and actual OS state:",
+            )
+        }
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        Command::ServiceRun { state_dir, role } => {
+            let cancel = CancellationToken::new();
+            let (events, mut received) = tokio::sync::mpsc::channel(16);
+            let output_cancel = cancel.clone();
+            let output = tokio::spawn(async move {
+                let mut healthy = true;
+                while let Some(event) = received.recv().await {
+                    if healthy && write_json(&event).is_err() {
+                        healthy = false;
+                        output_cancel.cancel();
+                    }
+                }
+                healthy
+            });
+            let running = styx_runtime::management::native::service::run(
+                &state_dir,
+                role.native(),
+                cancel.clone(),
+                events,
+            );
+            tokio::pin!(running);
+            let result = tokio::select! {result=&mut running=>result,signal=stop_signal()=>{if signal.is_err(){cancel.cancel();let _=running.await;return error("signal_listener_failed");}cancel.cancel();running.await}};
+            if !output.await.unwrap_or(false) {
+                return error("output_unavailable");
+            }
+            native_recovery_result(
+                result,
+                true,
+                "Native service stopped with physical cleanup observations:",
+            )
+        }
+        Command::AppCore {
+            state_dir,
+            deployment_file,
+            runtime_selection_file,
+        } => {
+            let cancel = CancellationToken::new();
+            let signal_cancel = cancel.clone();
+            let signal = tokio::spawn(async move {
+                let result = stop_signal().await;
+                signal_cancel.cancel();
+                result
+            });
+            let result = match (deployment_file, runtime_selection_file) {
+                (Some(deployment), None) => {
+                    styx_runtime::app::serve(
+                        &state_dir,
+                        &deployment,
+                        tokio::io::stdin(),
+                        tokio::io::stdout(),
+                        cancel,
+                    )
+                    .await
+                }
+                (None, Some(selection)) => {
+                    styx_runtime::app::serve_native(
+                        &state_dir,
+                        &selection,
+                        tokio::io::stdin(),
+                        tokio::io::stdout(),
+                        cancel,
+                    )
+                    .await
+                }
+                _ => return error("app_startup_invalid"),
+            };
+            let signal_failed = if signal.is_finished() {
+                !matches!(signal.await, Ok(Ok(())))
+            } else {
+                signal.abort();
+                let _ = signal.await;
+                false
+            };
+            if signal_failed {
+                return error("signal_listener_failed");
+            }
+            match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(value) => error(value.code()),
+            }
+        }
+        Command::LinuxDesktopProbe => desktop_probe_worker().await,
+        Command::LinuxDesktopWatch => desktop_watch_worker().await,
+        Command::LinuxDesktopAssociation { candidate } => {
+            desktop_association_worker(&candidate).await
+        }
+        Command::LinuxDesktopAssociationCheck { candidate } => {
+            desktop_association_check(&candidate).await
+        }
+        Command::Init {
+            parent_dir,
+            name,
+            deployment_file,
+            mode,
+            manager,
+            host,
+            gateway,
+            json,
+        } => {
+            let options = styx_runtime::management::native::NativeCreateOptions {
+                mode: mode.native(),
+                manager: manager.native(),
+                host,
+                gateway,
+            };
+            native_result(
+                styx_runtime::management::native::initialize(
+                    &parent_dir,
+                    &name,
+                    &deployment_file,
+                    options,
+                )
+                .await,
+                json,
+                "Native configuration initialized with stopped/disabled intent; no service started:",
+            )
+        }
+        Command::Plan {
+            state_dir,
+            json,
+            component,
+            run,
+            transaction_id,
+            sequence,
+        } => {
+            let Ok(transaction_id) =
+                styx_contracts::identity::TransactionId::try_from(transaction_id)
+            else {
+                return error("invalid_transaction_id");
+            };
+            let change = styx_runtime::management::native::NativeDesiredChange {
+                component: component.native(),
+                run: run.native(),
+                transaction_id,
+                sequence,
+            };
+            native_result(
+                styx_runtime::management::native::plan(&state_dir, change).await,
+                json,
+                "Native desired-state plan prepared for review; no service changed:",
+            )
+        }
+        Command::Apply {
+            state_dir,
+            plan_file,
+            authorize,
+            json,
+        } => {
+            if !authorize {
+                return error("authorization_required");
+            }
+            native_result(
+                styx_runtime::management::native::apply(&state_dir, &plan_file).await,
+                json,
+                "Native desired-state transaction; inspect report for completion:",
+            )
+        }
+        Command::Recover {
+            state_dir,
+            transaction_id,
+            authorize,
+            json,
+        } => {
+            if !authorize {
+                return error("authorization_required");
+            }
+            let result =
+                styx_runtime::management::native::recover(&state_dir, &transaction_id).await;
+            native_recovery_result(
+                result,
+                json,
+                "Original native transaction reconciliation; no automatic service start:",
+            )
+        }
+        Command::Transaction {
+            state_dir,
+            transaction_id,
+            json,
+        } => native_result(
+            styx_runtime::management::native::inspect(&state_dir, Some(&transaction_id)).await,
+            json,
+            "Read-only native transaction report:",
+        ),
+        Command::Status {
+            state_dir: Some(state_dir),
+            json,
+            ..
+        } => native_result(
+            styx_runtime::management::native::inspect(&state_dir, None).await,
+            json,
+            "Read-only native configuration report:",
+        ),
+        Command::Release {
+            command:
+                ReleaseCommand::Select {
+                    state_dir,
+                    runtime_selection_file,
+                    transaction_id,
+                    sequence,
+                    authorize,
+                    json,
+                },
+        } => {
+            if !authorize {
+                return error("native_management_authorization_required");
+            }
+            match styx_runtime::management::native::update::select_runtime(
+                &state_dir,
+                &runtime_selection_file,
+                &transaction_id,
+                sequence,
+            )
+            .await
+            {
+                Ok(report) => {
+                    if !json {
+                        eprintln!(
+                            "Stopped profile runtime selection committed; start the role explicitly."
+                        );
+                    }
+                    if write_json(&report).is_ok() {
+                        ExitCode::SUCCESS
+                    } else {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({"schema":1,"error":"output_unavailable","outcome":"unknown","operations_replayed":false})
+                        );
+                        ExitCode::from(4)
+                    }
+                }
+                Err(value) => {
+                    eprintln!("{}", native_error_output(&value));
+                    ExitCode::from(value.exit_code())
+                }
+            }
+        }
+        Command::Release {
+            command:
+                ReleaseCommand::Stage {
+                    payload_dir,
+                    publisher_file,
+                    expected_publisher,
+                    parent_dir,
+                    name,
+                    authorize,
+                    json,
+                },
+        } => {
+            if !authorize {
+                return error("native_release_authorization_required");
+            }
+            match styx_runtime::release::stage(
+                &payload_dir,
+                &publisher_file,
+                &expected_publisher,
+                &parent_dir,
+                &name,
+            )
+            .await
+            {
+                Ok(selection) => {
+                    if !json {
+                        eprintln!(
+                            "Verified runtime staged; no configuration or running component changed."
+                        );
+                    }
+                    if write_json(&serde_json::json!({
+                        "schema": 1, "operation": "release_stage", "staged": true,
+                        "installed": false, "runtime_launched": false, "operations_replayed": false,
+                        "runtime_selection": selection,
+                    }))
+                    .is_ok()
+                    {
+                        ExitCode::SUCCESS
+                    } else {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({"schema":1,"error":"output_unavailable","outcome":"unknown","operations_replayed":false})
+                        );
+                        ExitCode::from(4)
+                    }
+                }
+                Err(value) => {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({"schema":1,"error":value.code(),"operations_replayed":false})
+                    );
+                    ExitCode::from(value.exit_code())
+                }
+            }
+        }
+        Command::Release {
+            command:
+                ReleaseCommand::InstalledSelection {
+                    payload_dir,
+                    publisher_file,
+                    expected_publisher,
+                },
+        } => {
+            match styx_runtime::release::installed_selection(
+                &payload_dir,
+                &publisher_file,
+                &expected_publisher,
+            )
+            .await
+            {
+                Ok(selection) => {
+                    if write_json(&selection).is_ok() {
+                        ExitCode::SUCCESS
+                    } else {
+                        error("output_unavailable")
+                    }
+                }
+                Err(value) => error(value.code()),
+            }
+        }
+        Command::Release {
+            command:
+                ReleaseCommand::Verify {
+                    payload_dir,
+                    publisher_file,
+                    expected_publisher,
+                    json,
+                    runtime_selection,
+                },
+        } => {
+            if runtime_selection {
+                return match styx_runtime::release::inspect_selection(
+                    &payload_dir,
+                    &publisher_file,
+                    &expected_publisher,
+                )
+                .await
+                {
+                    Ok(selection) => {
+                        if write_json(&selection).is_ok() {
+                            ExitCode::SUCCESS
+                        } else {
+                            error("output_unavailable")
+                        }
+                    }
+                    Err(value) => error(value.code()),
+                };
+            }
+            match styx_runtime::release::inspect(&payload_dir, &publisher_file, &expected_publisher)
+                .await
+            {
+                Ok(report) => {
+                    if !json {
+                        eprintln!(
+                            "Offline release verification; no installation or runtime activation:"
+                        );
+                    }
+                    if write_json(&report).is_err() {
+                        error("output_unavailable")
+                    } else {
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(value) => {
+                    eprintln!("{}", serde_json::json!({"schema":1,"error":value.code()}));
+                    ExitCode::from(value.exit_code())
+                }
+            }
+        }
+        Command::BuildInfo { json } => {
+            if json {
+                return if write_json(&native_build_info()).is_ok() {
+                    ExitCode::SUCCESS
+                } else {
+                    error("output_unavailable")
+                };
+            }
+            println!(
+                "styx {} contract={} stage={}",
+                env!("CARGO_PKG_VERSION"),
+                styx_contracts::CONTRACT_VERSION,
+                styx_runtime::IMPLEMENTATION_STAGE
+            );
+            ExitCode::SUCCESS
+        }
+        Command::Host {
+            command: HostCommand::Join { command },
+        } => match command {
+            HostJoinCommand::Request {
+                parent_dir,
+                name,
+                deployment_file,
+                json,
+            } => join_result(
+                styx_runtime::management::native_join::request(
+                    &parent_dir,
+                    &name,
+                    &deployment_file,
+                )
+                .await,
+                json,
+            ),
+            HostJoinCommand::Claim { state_dir, json } => join_result(
+                styx_runtime::management::native_join::claim(&state_dir).await,
+                json,
+            ),
+        },
+        Command::Gateway {
+            command: GatewayCommand::PublicMcp { command },
+        } => {
+            use styx_runtime::gateway::public_mcp;
+            let (result, json) = match command {
+                GatewayPublicMcpCommand::Configure {
+                    state_dir,
+                    issuer,
+                    audience,
+                    jwks_url,
+                    port,
+                    jwt_header,
+                    allowed_origin,
+                    enable,
+                    authorize,
+                    json,
+                } => {
+                    let origins = if allowed_origin.is_empty() {
+                        None
+                    } else {
+                        Some(allowed_origin)
+                    };
+                    let result = tokio::task::spawn_blocking(move || {
+                        public_mcp::configure(
+                            &state_dir,
+                            &issuer,
+                            &audience,
+                            &jwks_url,
+                            Some(port),
+                            jwt_header.as_deref(),
+                            origins,
+                            enable,
+                            authorize,
+                        )
+                    })
+                    .await;
+                    (
+                        result.unwrap_or_else(|_| {
+                            Err(public_mcp::PublicMcpError::new("public_mcp_worker_failed"))
+                        }),
+                        json,
+                    )
+                }
+                GatewayPublicMcpCommand::Status { state_dir, json } => {
+                    let result =
+                        tokio::task::spawn_blocking(move || public_mcp::status(&state_dir)).await;
+                    (
+                        result.unwrap_or_else(|_| {
+                            Err(public_mcp::PublicMcpError::new("public_mcp_worker_failed"))
+                        }),
+                        json,
+                    )
+                }
+                GatewayPublicMcpCommand::Disable {
+                    state_dir,
+                    authorize,
+                    json,
+                } => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        public_mcp::disable(&state_dir, authorize)
+                    })
+                    .await;
+                    (
+                        result.unwrap_or_else(|_| {
+                            Err(public_mcp::PublicMcpError::new("public_mcp_worker_failed"))
+                        }),
+                        json,
+                    )
+                }
+            };
+            match result {
+                Ok(report) => {
+                    if json {
+                        if write_json(&report).is_err() {
+                            return error("output_unavailable");
+                        }
+                    } else {
+                        println!(
+                            "Gateway Public MCP status: {} (use --json for details).",
+                            report.status
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => error(e.code()),
+            }
+        }
+        Command::Gateway {
+            command: GatewayCommand::Tunnel { command },
+        } => {
+            use foreground::tunnel;
+            let (result, json) = match command {
+                GatewayTunnelCommand::Configure {
+                    state_dir,
+                    tunnel_id,
+                    api_key_file,
+                    auto_start,
+                    authorize,
+                    json,
+                } => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        tunnel::configure(
+                            &state_dir,
+                            &tunnel_id,
+                            &api_key_file,
+                            auto_start,
+                            authorize,
+                        )
+                    })
+                    .await;
+                    (result.unwrap_or_else(|_| Err(tunnel::worker_error())), json)
+                }
+                GatewayTunnelCommand::Status { state_dir, json } => {
+                    (tunnel::status(&state_dir).await, json)
+                }
+                GatewayTunnelCommand::Remove {
+                    state_dir,
+                    authorize,
+                    json,
+                } => {
+                    let result =
+                        tokio::task::spawn_blocking(move || tunnel::remove(&state_dir, authorize))
+                            .await;
+                    (result.unwrap_or_else(|_| Err(tunnel::worker_error())), json)
+                }
+            };
+            match result {
+                Ok(report) => {
+                    if json {
+                        if write_json(&report).is_err() {
+                            return error("output_unavailable");
+                        }
+                    } else {
+                        println!("Gateway tunnel configuration observed; use --json for details.");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => error(e.code()),
+            }
+        }
+        Command::Gateway {
+            command:
+                GatewayCommand::Invite {
+                    state_dir,
+                    invitation_file,
+                    ttl_seconds,
+                    origin,
+                    origin_address,
+                    app_link_file,
+                    json,
+                    ..
+                },
+        } => {
+            use styx_runtime::management::native_gateway_admin::{self, InvitationOrigin};
+            let origin = origin_address.map(InvitationOrigin::Address).or_else(|| {
+                origin.map(|origin| match origin {
+                    GatewayInviteOrigin::Loopback => InvitationOrigin::Loopback,
+                    GatewayInviteOrigin::Lan => InvitationOrigin::Lan,
+                })
+            });
+            gateway_admin_result(
+                native_gateway_admin::invite_with_options(
+                    &state_dir,
+                    &invitation_file,
+                    ttl_seconds,
+                    origin,
+                    app_link_file.as_deref(),
+                )
+                .await,
+                json,
+            )
+        }
+        Command::Gateway {
+            command: GatewayCommand::Pending { state_dir, json },
+        } => gateway_admin_result(
+            styx_runtime::management::native_gateway_admin::pending(&state_dir).await,
+            json,
+        ),
+        Command::Gateway {
+            command:
+                GatewayCommand::Approve {
+                    state_dir,
+                    request_id,
+                    device_id,
+                    fingerprint,
+                    comparison_code,
+                    enable_computer,
+                    enable_browser,
+                    json,
+                    ..
+                },
+        } => {
+            let Ok(device_id) = styx_contracts::identity::DeviceId::try_from(device_id) else {
+                return error("native_gateway_admin_input");
+            };
+            let Ok(fingerprint) = styx_contracts::identity::Sha256Digest::try_from(fingerprint)
+            else {
+                return error("native_gateway_admin_input");
+            };
+            let selected = styx_runtime::management::native_gateway_admin::ApprovalSelection {
+                request_id,
+                device_id,
+                fingerprint,
+                comparison_code,
+                enable_computer,
+                enable_browser,
+            };
+            gateway_admin_result(
+                styx_runtime::management::native_gateway_admin::approve(&state_dir, selected).await,
+                json,
+            )
+        }
+        Command::Gateway {
+            command:
+                GatewayCommand::Reject {
+                    state_dir,
+                    request_id,
+                    device_id,
+                    fingerprint,
+                    comparison_code,
+                    json,
+                    ..
+                },
+        } => {
+            let Ok(device_id) = styx_contracts::identity::DeviceId::try_from(device_id) else {
+                return error("native_gateway_admin_input");
+            };
+            let Ok(fingerprint) = styx_contracts::identity::Sha256Digest::try_from(fingerprint)
+            else {
+                return error("native_gateway_admin_input");
+            };
+            let selected = styx_runtime::management::native_gateway_admin::RejectionSelection {
+                request_id,
+                device_id,
+                fingerprint,
+                comparison_code,
+            };
+            gateway_admin_result(
+                styx_runtime::management::native_gateway_admin::reject(&state_dir, selected).await,
+                json,
+            )
+        }
+        Command::Gateway {
+            command:
+                GatewayCommand::Bootstrap {
+                    parent_dir,
+                    name,
+                    deployment_file,
+                    runtime_selection_file,
+                    json,
+                },
+        } => {
+            match styx_runtime::management::native_gateway::bootstrap(
+                &parent_dir,
+                &name,
+                &deployment_file,
+                &runtime_selection_file,
+            )
+            .await
+            {
+                Ok(value) => {
+                    if !json {
+                        eprintln!(
+                            "Fresh Gateway-only foreground configuration initialized; Gateway not started:"
+                        );
+                    }
+                    if write_json(&value).is_err() {
+                        error("output_unavailable")
+                    } else {
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(value) => {
+                    // Retain the owned error through output, as for native_result.
+                    eprintln!("{}", serde_json::json!({"schema":1,"error":value.code()}));
+                    ExitCode::from(value.exit_code())
+                }
+            }
+        }
+        Command::Gateway {
+            command: GatewayCommand::Run {
+                state_dir: Some(state_dir),
+            },
+        } => {
+            let cancel = CancellationToken::new();
+            let (events, mut received) = tokio::sync::mpsc::channel(16);
+            let event_cancel = cancel.clone();
+            let output = tokio::spawn(async move {
+                let mut healthy = true;
+                while let Some(event) = received.recv().await {
+                    if healthy && write_json(&event).is_err() {
+                        healthy = false;
+                        event_cancel.cancel();
+                    }
+                }
+                healthy
+            });
+            let mut signal_failed = false;
+            let outcome = {
+                let running = foreground::gateway_run(&state_dir, cancel.clone(), events);
+                tokio::pin!(running);
+                tokio::select! {
+                    result = &mut running => result,
+                    signal = stop_signal() => {
+                        signal_failed = signal.is_err();
+                        cancel.cancel();
+                        // The original owned future retains its leases until
+                        // tracked connections, native owners and workers settle.
+                        running.await
+                    },
+                }
+            };
+            let output_healthy = output.await.unwrap_or(false);
+            if signal_failed {
+                return error("signal_listener_failed");
+            }
+            if !output_healthy {
+                return error("output_unavailable");
+            }
+            match outcome {
+                Ok(outcome) => {
+                    if write_json(&outcome).is_err() {
+                        return error("output_unavailable");
+                    }
+                    if outcome.is_complete() {
+                        ExitCode::SUCCESS
+                    } else if outcome.local_stop_complete()
+                        && (outcome.unconfirmed_owner_cleanups > 0
+                            || outcome.unconfirmed_transport_drains > 0)
+                        && !outcome.worker_failure_observed
+                        && !outcome.listener_error_observed
+                    {
+                        // A stopped local Gateway is not proof of remote native
+                        // cleanup. Keep that uncertainty visible and nonzero.
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({"schema":1,"error":if outcome.unconfirmed_owner_cleanups > 0 {
+                                "remote_owner_cleanup_unconfirmed"
+                            } else {
+                                "remote_transport_drain_unconfirmed"
+                            }})
+                        );
+                        ExitCode::from(4)
+                    } else {
+                        error("gateway_shutdown_unknown")
+                    }
+                }
+                Err(error_value) => error(error_value.code()),
+            }
+        }
+        Command::Gateway {
+            command: GatewayCommand::Run { state_dir: None },
+        } => error("gateway_input_required"),
+        Command::Doctor {
+            desktop_sessions: true,
+            watch: true,
+            json,
+            ..
+        } => desktop_watch_diagnostics(json).await,
+        Command::Doctor {
+            desktop_sessions: true,
+            json,
+            ..
+        } => desktop_diagnostics(json).await,
+        Command::Doctor {
+            state_dir: Some(state_dir),
+            json,
+            ..
+        } => {
+            match foreground::inspect(&state_dir).await {
+                Ok(diagnostics) => {
+                    // The same redacted diagnostics are used in both modes;
+                    // --json commits to one JSON line for machine consumers.
+                    if !json {
+                        eprintln!("Read-only deployment diagnostics:");
+                    }
+                    if write_json(&diagnostics).is_err() {
+                        return error("output_unavailable");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error_value) => error(error_value.code()),
+            }
+        }
+        Command::Doctor {
+            state_dir: None, ..
+        } => error("doctor_input_required"),
+        Command::Host {
+            command: HostCommand::Run { state_dir },
+        } => {
+            let cancel = CancellationToken::new();
+            let (events, mut received) = tokio::sync::mpsc::channel(16);
+            let event_cancel = cancel.clone();
+            let output = tokio::spawn(async move {
+                let mut healthy = true;
+                while let Some(event) = received.recv().await {
+                    if healthy && write_json(&event).is_err() {
+                        healthy = false;
+                        event_cancel.cancel();
+                    }
+                }
+                healthy
+            });
+            let mut signal_failed = false;
+            let outcome = {
+                let running = foreground::host_run(&state_dir, cancel.clone(), events);
+                tokio::pin!(running);
+                tokio::select! {
+                    result=&mut running=>result,
+                    signal=stop_signal()=>{
+                        signal_failed = signal.is_err();
+                        cancel.cancel();
+                        // Keep the SAME foreground future alive for real bounded
+                        // cleanup. Dropping it or exiting here would fake stop.
+                        running.await
+                    },
+                }
+            };
+            let output_healthy = output.await.unwrap_or(false);
+            if signal_failed {
+                return error("signal_listener_failed");
+            }
+            if !output_healthy {
+                return error("output_unavailable");
+            }
+            match outcome {
+                Ok(outcome) => {
+                    if write_json(&outcome).is_err() {
+                        return error("output_unavailable");
+                    }
+                    if let Some(reason) = outcome.stop_reason {
+                        error(reason)
+                    } else if outcome.local_stop_complete() {
+                        ExitCode::SUCCESS
+                    } else {
+                        error("host_shutdown_unknown")
+                    }
+                }
+                Err(error_value) => error(error_value.code()),
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        Command::Host {
+            command: HostCommand::BrowserCdp { command },
+        } => {
+            use styx_runtime::host::browser_cdp::{BrowserCdpPatch, BrowserCdpStore};
+            let (state_dir, patch, json) = match command {
+                HostBrowserCdpCommand::Status { state_dir, json } => (state_dir, None, json),
+                HostBrowserCdpCommand::Enable {
+                    state_dir,
+                    endpoint,
+                    json,
+                } => (
+                    state_dir,
+                    Some(BrowserCdpPatch {
+                        enabled: Some(true),
+                        endpoint: endpoint.map(Some),
+                    }),
+                    json,
+                ),
+                HostBrowserCdpCommand::Disable {
+                    state_dir,
+                    clear_endpoint,
+                    json,
+                } => (
+                    state_dir,
+                    Some(BrowserCdpPatch {
+                        enabled: Some(false),
+                        endpoint: if clear_endpoint { Some(None) } else { None },
+                    }),
+                    json,
+                ),
+            };
+            let store = match BrowserCdpStore::open(&state_dir) {
+                Ok(store) => store,
+                Err(_) => return error("host_browser_cdp_unavailable"),
+            };
+            let mut applied = true;
+            if let Some(patch) = patch {
+                match store.update(patch).await {
+                    Ok((_cfg, ok)) => applied = ok,
+                    Err(styx_contracts::error::ErrorCategory::InvalidRequest) => {
+                        return error("host_browser_cdp_endpoint_invalid");
+                    }
+                    Err(_) => return error("host_browser_cdp_unavailable"),
+                }
+            }
+            let Ok(status) = store.status(None) else {
+                return error("host_browser_cdp_unavailable");
+            };
+            if json {
+                let body = serde_json::json!({
+                    "applied": applied,
+                    "browserCdp": status,
+                });
+                if write_json(&body).is_err() {
+                    return error("output_unavailable");
+                }
+            } else if status.enabled {
+                match (
+                    status.endpoint.as_deref(),
+                    status.detected_endpoint.as_deref(),
+                ) {
+                    (Some(endpoint), _) => {
+                        println!("Browser CDP attach: enabled (endpoint: {endpoint})");
+                    }
+                    (None, Some(detected)) => {
+                        println!("Browser CDP attach: enabled (auto-detected: {detected})");
+                    }
+                    (None, None) => {
+                        println!(
+                            "Browser CDP attach: enabled (auto-detect; open chrome://inspect/#remote-debugging in Chrome/Edge/Chromium or pass --endpoint http://127.0.0.1:9222)"
+                        );
+                    }
+                }
+            } else {
+                println!("Browser CDP attach: disabled");
+            }
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "cli_tests.rs"]
+mod tests;
+
+/// This binary's closed reader declaration, consumed only with build/source/hash
+/// evidence. It does not claim installed state, readiness or platform acceptance.
+fn native_build_info() -> serde_json::Value {
+    let target = if cfg!(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        target_env = "gnu"
+    )) {
+        "x86_64-unknown-linux-gnu"
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "x86_64-apple-darwin"
+    } else if cfg!(all(
+        target_os = "windows",
+        target_arch = "x86_64",
+        target_env = "msvc"
+    )) {
+        "x86_64-pc-windows-msvc"
+    } else {
+        "unsupported"
+    };
+    serde_json::json!({
+        "schema": 1, "target": target,
+        "minimum_release_reader": styx_contracts::native_release::NativeReleaseReader::NativeRuntimeV2,
+        "supported_state_readers": [styx_contracts::management::ReaderContract::NativeStateV1]
+    })
+}

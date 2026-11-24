@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "compiler": "Inno Setup 7.1.0 x64",
+  "source": "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe",
+  "downloadSha256": "0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f",
+  "authenticodePublisher": "Pyrsys B.V.",
+  "compilerSha256": "d06ebd38f38e3cee60a3c50cc45bd449d77e0bc6a5cabc607ea9886808e4de1a",
+  "toolMode": "upstream /PORTABLE=1 /CURRENTUSER /NOICONS, isolated directory; no global compiler install",
+  "verification": "Check upstream release digest and valid Authenticode publisher before execution. No test certificate or trust change is permitted.",
+  "msix": "Native registration not attempted: executable unsigned mode requires all-user deployment; trusted signing identity unavailable."
+}

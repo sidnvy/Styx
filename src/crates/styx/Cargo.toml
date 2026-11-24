@@ -1,0 +1,24 @@
+[package]
+name = "styx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+styx-contracts.workspace = true
+styx-runtime.workspace = true
+clap.workspace = true
+console.workspace = true
+dialoguer.workspace = true
+indicatif.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix.workspace = true

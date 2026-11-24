@@ -1,0 +1,30 @@
+# Styx @VERSION@ — Linux desktop
+
+Share this computer with ChatGPT through an existing Gateway, or make this
+computer the Gateway and share it too. Setup lets you choose which capabilities
+this computer provides: commands, Browser Automation and Computer Use.
+
+Extract the archive, enter its folder, and start installation:
+
+```sh
+cd @BUNDLE@
+./install.sh
+```
+
+The installer keeps Styx in your user data directory, registers the `styx`
+command, and opens terminal setup with the desktop role choices. After installation
+you can remove the extracted folder; the installed program is retained separately.
+
+Join an existing Gateway with its address and pairing code. A Host-only computer
+does not need a separate Tunnel or ChatGPT connection. Setup also offers creating
+a Gateway together with this Host. Computer Use needs an available desktop session
+and the platform's normal permissions.
+
+Styx uses your systemd user services and follows your desktop login lifecycle,
+including when this computer also runs the Gateway. Desktop installation does
+not enable systemd linger.
+
+Use `styx quit` to stop Styx and `styx start` to start it again. To remove its
+user services while retaining your configuration, run `styx uninstall`.
+Install a newer package through its same `./install.sh` entry; the installer
+updates an existing setup and preserves its configuration.

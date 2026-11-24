@@ -1,0 +1,20 @@
+{
+  "host_id": "example-host",
+  "gateway_ws_url": "wss://gateway.private.example:8795",
+  "token_file": "/home/operator/.config/styx/host-bearer.token",
+  "exec": {
+    "binary": "/home/operator/.local/share/styx/codex",
+    "cwd": "/home/operator/styx-scratch",
+    "env": {
+      "CODEX_HOME": "/home/operator/.local/share/styx/codex-home"
+    }
+  },
+  "computer": {
+    "enabled": true,
+    "binary": "/home/operator/.local/share/styx/cua-driver",
+    "connections": 2,
+    "env": {
+      "CUA_DRIVER_RS_ENABLE_WAYLAND": "1"
+    }
+  }
+}

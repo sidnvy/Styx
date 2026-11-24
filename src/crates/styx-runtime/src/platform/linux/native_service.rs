@@ -1,0 +1,1278 @@
+//! Fixed native user units. Environment variables and a matching unit name are
+//! not runtime authority: admission authenticates the actual original process.
+use crate::store::{PrivateRoot, ProcessIdentity, RootIdentity};
+use nix::{
+    fcntl::{OFlag, open as open_fd, openat},
+    sys::stat::{Mode, mkdirat},
+    unistd::{Uid, UnlinkatFlags, User, unlinkat},
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    fs::File,
+    os::unix::fs::MetadataExt,
+    path::{Component, Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
+use std::{
+    io::Write,
+    os::fd::{AsFd, OwnedFd},
+};
+use styx_contracts::identity::Sha256Digest;
+use styx_contracts::native_management::{
+    NativeManager, NativeRunDesired, NativeRuntimeSelection, NativeState,
+};
+use tokio::{
+    io::AsyncReadExt,
+    process::Command,
+    sync::oneshot,
+    time::{Instant, timeout_at},
+};
+
+const OUTPUT_LIMIT: usize = 64 * 1024;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ServiceError {
+    #[error("invalid native service reference")]
+    Invalid,
+    #[error("native service conflicts with current facts")]
+    Conflict,
+    #[error("user manager or protected profile unavailable")]
+    Unavailable,
+    #[error("native service action or cleanup outcome unknown")]
+    Unknown,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+fn identity(file: &File) -> ServiceResult<FileIdentity> {
+    let m = file.metadata().map_err(|_| ServiceError::Unknown)?;
+    Ok(FileIdentity {
+        device: m.dev(),
+        inode: m.ino(),
+    })
+}
+fn environment(command: &mut Command, runtime: &Path) {
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LANG", "C.UTF-8")
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={}/bus", runtime.display()),
+        )
+        .current_dir("/");
+}
+struct Tool {
+    success: bool,
+    stdout: Vec<u8>,
+}
+/// Each utility is owned until actual wait, including timeout/cancel. A timeout
+/// terminates only this exact utility child, never the Host or its cgroup.
+async fn tool(
+    binary: &'static str,
+    args: Vec<OsString>,
+    runtime: PathBuf,
+    end: Instant,
+) -> ServiceResult<Tool> {
+    if Instant::now() >= end {
+        return Err(ServiceError::Unknown);
+    }
+    let (send, receive) = oneshot::channel();
+    tokio::spawn(async move {
+        let mut unreaped = None;
+        let result = async {
+            let mut command = Command::new(binary);
+            environment(&mut command, &runtime);
+            let mut child = command
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|_| ServiceError::Unavailable)?;
+            let mut stdout = child.stdout.take().ok_or(ServiceError::Unknown)?;
+            let mut stderr = child.stderr.take().ok_or(ServiceError::Unknown)?;
+            let mut out = vec![0u8; OUTPUT_LIMIT + 1];
+            let mut err = vec![0u8; 8193];
+            let result = timeout_at(end, async {
+                let (a, b, status) = tokio::join!(
+                    read_bounded(&mut stdout, &mut out),
+                    read_bounded(&mut stderr, &mut err),
+                    child.wait()
+                );
+                let a = a?;
+                b?;
+                let status = status.map_err(|_| ServiceError::Unknown)?;
+                out.truncate(a);
+                Ok(Tool {
+                    success: status.success(),
+                    stdout: out,
+                })
+            })
+            .await
+            .unwrap_or(Err(ServiceError::Unknown));
+            drop(stdout);
+            drop(stderr);
+            if result.is_err() && !terminate_utility(&mut child).await {
+                unreaped = Some(child);
+            }
+            result
+        }
+        .await;
+        if let Some(mut child) = unreaped {
+            // Return Unknown within the cleanup budget, while the original
+            // owned child remains retained until actual wait.
+            tokio::spawn(async move {
+                while child.wait().await.is_err() {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            });
+        }
+        let _ = send.send(result);
+    });
+    receive.await.map_err(|_| ServiceError::Unknown)?
+}
+async fn terminate_utility(child: &mut tokio::process::Child) -> bool {
+    if let Some(pid) = child.id() {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        );
+    }
+    if matches!(
+        tokio::time::timeout(Duration::from_millis(250), child.wait()).await,
+        Ok(Ok(_))
+    ) {
+        return true;
+    }
+    // Tokio retains ownership of the child. This escalation cannot target a
+    // manager-owned Host, an arbitrary caller PID, or a service cgroup.
+    let _ = child.start_kill();
+    matches!(
+        tokio::time::timeout(Duration::from_secs(2), child.wait()).await,
+        Ok(Ok(_))
+    )
+}
+// Uses only Tokio reads into preallocated bounded buffers; no unbounded output().
+async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    buffer: &mut [u8],
+) -> ServiceResult<usize> {
+    let mut used = 0;
+    loop {
+        if used == buffer.len() {
+            return Err(ServiceError::Unknown);
+        }
+        let n = reader
+            .read(&mut buffer[used..])
+            .await
+            .map_err(|_| ServiceError::Unknown)?;
+        if n == 0 {
+            return Ok(used);
+        }
+        used += n;
+    }
+}
+#[zbus::proxy(
+    interface = "org.freedesktop.systemd1.Manager",
+    default_path = "/org/freedesktop/systemd1"
+)]
+trait SystemdManager {
+    fn ref_unit(&self, name: &str) -> zbus::Result<()>;
+    fn unref_unit(&self, name: &str) -> zbus::Result<()>;
+}
+struct SystemdUnitPin {
+    connection: zbus::Connection,
+    owner: String,
+    unit: String,
+}
+impl SystemdUnitPin {
+    // Callers retain their own exact native unit definition and generation.
+    // This is the same authenticated current-user manager RefUnit port.
+    async fn open_user(runtime: &Path, uid: u32, unit: &str, end: Instant) -> ServiceResult<Self> {
+        let stream = timeout_at(end, tokio::net::UnixStream::connect(runtime.join("bus")))
+            .await
+            .map_err(|_| ServiceError::Unknown)?
+            .map_err(|_| ServiceError::Unavailable)?;
+        if stream
+            .peer_cred()
+            .map_err(|_| ServiceError::Unavailable)?
+            .uid()
+            != uid
+        {
+            return Err(ServiceError::Conflict);
+        }
+        let connection = timeout_at(
+            end,
+            zbus::connection::Builder::unix_stream(stream)
+                .max_queued(4)
+                .method_timeout(Duration::from_secs(2))
+                .build(),
+        )
+        .await
+        .map_err(|_| ServiceError::Unknown)?
+        .map_err(|_| ServiceError::Unavailable)?;
+        let result = async {
+            let bus = zbus::fdo::DBusProxy::new(&connection)
+                .await
+                .map_err(|_| ServiceError::Unavailable)?;
+            let owner = bus
+                .get_name_owner(
+                    "org.freedesktop.systemd1"
+                        .try_into()
+                        .map_err(|_| ServiceError::Invalid)?,
+                )
+                .await
+                .map_err(|_| ServiceError::Unavailable)?;
+            if bus
+                .get_connection_unix_user(owner.as_ref().into())
+                .await
+                .map_err(|_| ServiceError::Unknown)?
+                != uid
+            {
+                return Err(ServiceError::Conflict);
+            }
+            let manager = SystemdManagerProxy::builder(&connection)
+                .destination(owner.as_str())
+                .map_err(|_| ServiceError::Invalid)?
+                .build()
+                .await
+                .map_err(|_| ServiceError::Unavailable)?;
+            manager
+                .ref_unit(unit)
+                .await
+                .map_err(|_| ServiceError::Unknown)?;
+            Ok::<_, ServiceError>(owner.to_string())
+        }
+        .await;
+        match result {
+            Ok(owner) => Ok(Self {
+                connection,
+                owner,
+                unit: unit.into(),
+            }),
+            Err(error) => {
+                let _ = connection.close().await;
+                Err(error)
+            }
+        }
+    }
+    async fn unref(&self) -> ServiceResult<()> {
+        let manager = SystemdManagerProxy::builder(&self.connection)
+            .destination(self.owner.as_str())
+            .map_err(|_| ServiceError::Invalid)?
+            .build()
+            .await
+            .map_err(|_| ServiceError::Unknown)?;
+        manager
+            .unref_unit(&self.unit)
+            .await
+            .map_err(|_| ServiceError::Unknown)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ServiceRole {
+    Host,
+    Gateway,
+}
+impl ServiceRole {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Gateway => "gateway",
+        }
+    }
+    pub(crate) fn desired(
+        self,
+        state: &NativeState,
+    ) -> Option<styx_contracts::native_management::NativeComponentDesired> {
+        match self {
+            Self::Host => state.desired.host,
+            Self::Gateway => state.desired.gateway,
+        }
+    }
+}
+
+pub(crate) const CONTROL_SOCKET_NAME: &str = ".styx-service-control-v1.sock";
+type ServiceResult<T> = std::result::Result<T, ServiceError>;
+fn invalid<T>(_: T) -> ServiceError {
+    ServiceError::Invalid
+}
+fn changed<T>(_: T) -> ServiceError {
+    ServiceError::Conflict
+}
+fn unknown<T>(_: T) -> ServiceError {
+    ServiceError::Unknown
+}
+fn unavailable<T>(_: T) -> ServiceError {
+    ServiceError::Unavailable
+}
+// The fixed user-manager cgroup contains user@UID.service. The literal @
+// is safe in unit paths; systemd expansion characters and whitespace stay denied.
+fn safe_path(path: &Path) -> ServiceResult<&str> {
+    let s = path.to_str().ok_or(ServiceError::Invalid)?;
+    if !path.is_absolute()
+        || s.len() > 4096
+        || s.contains("//")
+        || !s
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-@".contains(&b))
+        || path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return Err(ServiceError::Invalid);
+    }
+    Ok(s)
+}
+fn checked_directory(path: &Path, create: bool) -> ServiceResult<File> {
+    safe_path(path)?;
+    let mut fd: OwnedFd = open_fd(
+        "/",
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(unavailable)?;
+    for part in path.components().filter_map(|c| {
+        if let Component::Normal(v) = c {
+            Some(v)
+        } else {
+            None
+        }
+    }) {
+        let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+        let next = match openat(fd.as_fd(), Path::new(part), flags, Mode::empty()) {
+            Ok(v) => v,
+            Err(nix::errno::Errno::ENOENT) if create => {
+                mkdirat(fd.as_fd(), Path::new(part), Mode::S_IRWXU).map_err(unavailable)?;
+                File::from(fd.try_clone().map_err(unknown)?)
+                    .sync_all()
+                    .map_err(unknown)?;
+                openat(fd.as_fd(), Path::new(part), flags, Mode::empty()).map_err(unavailable)?
+            }
+            Err(e) => return Err(unavailable(e)),
+        };
+        let m = nix::sys::stat::fstat(&next).map_err(unknown)?;
+        if (m.st_uid != 0 && m.st_uid != Uid::current().as_raw()) || m.st_mode & 0o022 != 0 {
+            return Err(ServiceError::Conflict);
+        }
+        fd = next;
+    }
+    Ok(File::from(fd))
+}
+fn bytes(file: &File, limit: usize) -> ServiceResult<Vec<u8>> {
+    use std::os::unix::fs::FileExt as _;
+    let before = file.metadata().map_err(unknown)?;
+    if before.len() > limit as u64 {
+        return Err(ServiceError::Conflict);
+    }
+    let mut result = vec![0; before.len() as usize];
+    file.read_exact_at(&mut result, 0).map_err(unknown)?;
+    let after = file.metadata().map_err(unknown)?;
+    if (
+        before.dev(),
+        before.ino(),
+        before.ctime(),
+        before.ctime_nsec(),
+        before.len(),
+    ) != (
+        after.dev(),
+        after.ino(),
+        after.ctime(),
+        after.ctime_nsec(),
+        after.len(),
+    ) {
+        return Err(ServiceError::Conflict);
+    }
+    Ok(result)
+}
+struct UnitPin {
+    file: File,
+    metadata: (u64, u64, i64, i64),
+    raw: Vec<u8>,
+}
+impl UnitPin {
+    fn capture(parent: &File, name: &str) -> ServiceResult<Option<Self>> {
+        let fd = match openat(
+            parent.as_fd(),
+            name,
+            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(v) => v,
+            Err(nix::errno::Errno::ENOENT) => return Ok(None),
+            Err(e) => return Err(unavailable(e)),
+        };
+        let file = File::from(fd);
+        let m = file.metadata().map_err(unknown)?;
+        if !m.is_file()
+            || m.uid() != Uid::current().as_raw()
+            || m.mode() & 0o077 != 0
+            || m.nlink() != 1
+        {
+            return Err(ServiceError::Conflict);
+        }
+        let raw = bytes(&file, 32 * 1024)?;
+        Ok(Some(Self {
+            file,
+            metadata: (m.dev(), m.ino(), m.ctime(), m.ctime_nsec()),
+            raw,
+        }))
+    }
+    fn validate(&self, parent: &File, name: &str, expected: &[u8]) -> ServiceResult<()> {
+        let now = Self::capture(parent, name)?.ok_or(ServiceError::Conflict)?;
+        let held = self.file.metadata().map_err(unknown)?;
+        if self.metadata != now.metadata
+            || (held.dev(), held.ino(), held.ctime(), held.ctime_nsec()) != self.metadata
+            || self.raw != expected
+            || now.raw != expected
+            || bytes(&self.file, 32 * 1024)? != expected
+        {
+            return Err(ServiceError::Conflict);
+        }
+        Ok(())
+    }
+}
+/// The original signed executable and protected scope are retained throughout
+/// each OS operation. A report/serialized unit name cannot reconstruct this.
+pub(crate) struct Definition {
+    root: PrivateRoot,
+    root_identity: RootIdentity,
+    path: PathBuf,
+    role: ServiceRole,
+    selection: NativeRuntimeSelection,
+    candidate: Arc<crate::release::VerifiedNativeRelease>,
+    image: File,
+    image_identity: FileIdentity,
+    executable: PathBuf,
+    parent_path: PathBuf,
+    parent: File,
+    parent_identity: FileIdentity,
+    unit: String,
+    expected: Vec<u8>,
+    pin: Option<UnitPin>,
+    runtime: PathBuf,
+    operation_running: Option<RunningBinding>,
+    // RefUnit prevents GC from erasing this operation's terminal exit facts.
+    // Unknown keeps the original connection in the retained Definition.
+    manager_pin: Option<SystemdUnitPin>,
+}
+impl Definition {
+    /// Installation alone may create missing fixed user-unit directories. No
+    /// existing mode/ACL or unknown unit is repaired or overwritten.
+    pub(crate) fn prepare(
+        path: &Path,
+        role: ServiceRole,
+        create_directories: bool,
+    ) -> ServiceResult<Self> {
+        safe_path(path)?;
+        let root = PrivateRoot::open(path).map_err(unavailable)?;
+        let root_identity = root.identity();
+        let RootIdentity::Linux { device, inode, uid } = root_identity;
+        if uid != Uid::current().as_raw() || uid == 0 {
+            return Err(ServiceError::Conflict);
+        }
+        let canonical = read_state(&root)?;
+        // Check the actual platform address contract before any C07/OS effect.
+        // No truncated path, alias, or fallback endpoint may select another root.
+        if canonical.desired.gateway.is_some() {
+            nix::sys::socket::UnixAddr::new(&path.join(CONTROL_SOCKET_NAME)).map_err(invalid)?;
+        }
+        role.desired(&canonical).ok_or(ServiceError::Invalid)?;
+        let selection = selection(&canonical)?;
+        let candidate = Arc::new(crate::release::load_selected(&selection).map_err(changed)?);
+        if candidate.report().target != "x86_64-unknown-linux-gnu" {
+            return Err(ServiceError::Invalid);
+        }
+        let executable = Path::new(&selection.payload_path).join(candidate.report().entrypoint);
+        safe_path(&executable)?;
+        let image = File::open(&executable).map_err(unavailable)?;
+        let image_identity = identity(&image)?;
+        candidate.revalidate().map_err(changed)?;
+        let home = User::from_uid(Uid::current())
+            .map_err(unavailable)?
+            .ok_or(ServiceError::Unavailable)?
+            .dir;
+        let parent_path = home.join(".config/systemd/user");
+        let parent = checked_directory(&parent_path, create_directories)?;
+        let parent_identity = identity(&parent)?;
+        let digest = Sha256Digest::of_bytes(
+            format!("styx-native-service-v1:{device}:{inode}:{uid}").as_bytes(),
+        )
+        .to_hex();
+        let unit = format!("styx-native-{}-{}.service", &digest[..32], role.name());
+        let expected = unit_definition(&executable, path, role)?.into_bytes();
+        let pin = UnitPin::capture(&parent, &unit)?;
+        if pin.as_ref().is_some_and(|p| p.raw != expected) {
+            return Err(ServiceError::Conflict);
+        }
+        let runtime = PathBuf::from(format!("/run/user/{uid}"));
+        let directory = checked_directory(&runtime, false)?;
+        if directory.metadata().map_err(unknown)?.uid() != uid {
+            return Err(ServiceError::Conflict);
+        }
+        let result = Self {
+            root,
+            root_identity: RootIdentity::Linux { device, inode, uid },
+            path: path.into(),
+            role,
+            selection,
+            candidate,
+            image,
+            image_identity,
+            executable,
+            parent_path,
+            parent,
+            parent_identity,
+            unit,
+            expected,
+            pin,
+            runtime,
+            operation_running: None,
+            manager_pin: None,
+        };
+        result.validate()?;
+        Ok(result)
+    }
+    pub(crate) fn validate(&self) -> ServiceResult<()> {
+        self.validate_identity()?;
+        if selection(&read_state(&self.root)?)? != self.selection {
+            return Err(ServiceError::Conflict);
+        }
+        Ok(())
+    }
+    // Physical authority is independent of a concurrent desired-state commit.
+    // Ordinary manager calls still use validate(), including state selection.
+    fn validate_identity(&self) -> ServiceResult<()> {
+        if self.root.identity() != self.root_identity
+            || PrivateRoot::open(&self.path)
+                .map_err(unavailable)?
+                .identity()
+                != self.root_identity
+            || identity(&self.parent)? != self.parent_identity
+            || identity(&checked_directory(&self.parent_path, false)?)? != self.parent_identity
+            || identity(&self.image)? != self.image_identity
+            || identity(&File::open(&self.executable).map_err(unavailable)?)? != self.image_identity
+        {
+            return Err(ServiceError::Conflict);
+        }
+        self.candidate.revalidate().map_err(changed)?;
+        if let Some(pin) = &self.pin {
+            pin.validate(&self.parent, &self.unit, &self.expected)?;
+        } else if UnitPin::capture(&self.parent, &self.unit)?.is_some() {
+            return Err(ServiceError::Conflict);
+        }
+        Ok(())
+    }
+    pub(crate) fn state(&self) -> ServiceResult<NativeState> {
+        read_state(&self.root)
+    }
+    async fn ctl(&self, verb: &'static str, no_block: bool) -> ServiceResult<()> {
+        self.validate()?;
+        let mut args: Vec<OsString> = ["--user", "--no-ask-password"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        if no_block {
+            args.push("--no-block".into());
+        }
+        args.push(verb.into());
+        if verb != "daemon-reload" {
+            args.push(self.unit.clone().into());
+        }
+        let output = tool(
+            "/usr/bin/systemctl",
+            args,
+            self.runtime.clone(),
+            Instant::now() + Duration::from_secs(15),
+        )
+        .await?;
+        if !output.success {
+            return Err(ServiceError::Unknown);
+        }
+        Ok(())
+    }
+    pub(crate) async fn inspect(&self) -> ServiceResult<ServiceObservation> {
+        self.validate()?;
+        let output = tool("/usr/bin/systemctl", vec!["--user".into(),"--no-pager".into(),"show".into(),
+            "--property=Id,LoadState,ActiveState,SubState,InvocationID,ControlGroup,MainPID,ExecMainPID,ExecMainCode,ExecMainStatus,Result,FragmentPath,SourcePath,DropInPaths,NeedDaemonReload,Transient,UnitFileState,Restart,KillMode,SendSIGKILL,TimeoutStopUSec".into(),self.unit.clone().into()],self.runtime.clone(),Instant::now()+Duration::from_secs(10)).await?;
+        let text = std::str::from_utf8(&output.stdout).map_err(unknown)?;
+        let mut fields = BTreeMap::new();
+        for line in text.lines() {
+            let (name, value) = line.split_once('=').ok_or(ServiceError::Unknown)?;
+            if value.len() > 4096 || fields.insert(name.to_owned(), value.to_owned()).is_some() {
+                return Err(ServiceError::Unknown);
+            }
+        }
+        let get = |key: &str| {
+            fields
+                .get(key)
+                .map(String::as_str)
+                .ok_or(ServiceError::Unknown)
+        };
+        let load = get("LoadState")?;
+        if self.pin.is_none() {
+            if load != "not-found" {
+                return Err(ServiceError::Conflict);
+            }
+            return Ok(ServiceObservation::absent(self.unit.clone(), self.role));
+        }
+        if !output.success
+            || get("Id")? != self.unit
+            || load != "loaded"
+            || !get("SourcePath")?.is_empty()
+            || get("FragmentPath")?
+                != self
+                    .parent_path
+                    .join(&self.unit)
+                    .to_str()
+                    .ok_or(ServiceError::Invalid)?
+            || !get("DropInPaths")?.is_empty()
+            || get("NeedDaemonReload")? != "no"
+            || get("Transient")? != "no"
+            || get("Restart")? != "no"
+            || get("KillMode")? != "mixed"
+            || get("SendSIGKILL")? != "yes"
+            || get("TimeoutStopUSec")? != "infinity"
+        {
+            return Err(ServiceError::Conflict);
+        }
+        let active = get("ActiveState")?.to_owned();
+        let substate = get("SubState")?.to_owned();
+        if !["active", "inactive", "activating", "deactivating", "failed"]
+            .contains(&active.as_str())
+        {
+            return Err(ServiceError::Unknown);
+        }
+        let invocation = get("InvocationID")?.to_owned();
+        if !invocation.is_empty()
+            && (invocation.len() != 32 || !invocation.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(ServiceError::Conflict);
+        }
+        let enabled = match get("UnitFileState")? {
+            "enabled" => Some(true),
+            "disabled" => Some(false),
+            _ => return Err(ServiceError::Conflict),
+        };
+        let pid = get("MainPID")?.parse().map_err(unknown)?;
+        let exec_pid = get("ExecMainPID")?.parse().map_err(unknown)?;
+        let result = get("Result")?;
+        let manager_success =
+            result == "success" && get("ExecMainCode")? == "1" && get("ExecMainStatus")? == "0";
+        let cgroup = get("ControlGroup")?.to_owned();
+        if !cgroup.is_empty() {
+            self.cgroup_path(&cgroup)?;
+        }
+        self.validate()?;
+        Ok(ServiceObservation {
+            schema: 1,
+            unit: self.unit.clone(),
+            role: self.role,
+            installed: true,
+            enabled,
+            active,
+            substate,
+            invocation_id: invocation,
+            main_pid: pid,
+            exec_main_pid: exec_pid,
+            cgroup,
+            manager_success,
+            lifetime_scope: "user_login",
+            survives_logout: None,
+            runtime_health: "not_observed",
+        })
+    }
+    fn cgroup_path(&self, value: &str) -> ServiceResult<PathBuf> {
+        let uid = Uid::current().as_raw();
+        if !value.starts_with(&format!("/user.slice/user-{uid}.slice/user@{uid}.service/"))
+            || !value.ends_with(&format!("/{}", self.unit))
+            || value.contains("//")
+            || Path::new(value)
+                .components()
+                .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+        {
+            return Err(ServiceError::Conflict);
+        }
+        Ok(Path::new("/sys/fs/cgroup").join(value.trim_start_matches('/')))
+    }
+    pub(crate) async fn install(&mut self) -> ServiceResult<ServiceObservation> {
+        if self.pin.is_some() {
+            return Err(ServiceError::Conflict);
+        }
+        let before = self.inspect().await?;
+        if before.installed {
+            return Err(ServiceError::Conflict);
+        }
+        let fd = openat(
+            self.parent.as_fd(),
+            self.unit.as_str(),
+            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::S_IRUSR | Mode::S_IWUSR,
+        )
+        .map_err(unknown)?;
+        let mut file = File::from(fd);
+        file.write_all(&self.expected).map_err(unknown)?;
+        file.sync_all().map_err(unknown)?;
+        self.parent.sync_all().map_err(unknown)?;
+        self.pin = Some(UnitPin::capture(&self.parent, &self.unit)?.ok_or(ServiceError::Unknown)?);
+        self.validate()?;
+        self.ctl("daemon-reload", false).await?;
+        let after = self.inspect().await?;
+        if !after.stopped_for_mutation() || after.enabled != Some(false) {
+            return Err(ServiceError::Unknown);
+        }
+        Ok(after)
+    }
+    pub(crate) async fn set_enabled(&self, enabled: bool) -> ServiceResult<ServiceObservation> {
+        let before = self.inspect().await?;
+        if !before.installed {
+            return Err(ServiceError::Conflict);
+        }
+        self.ctl(if enabled { "enable" } else { "disable" }, false)
+            .await?;
+        let after = self.inspect().await?;
+        // Enabling/disabling reloads unit files. For a stopped unit (no main
+        // process) systemd may reset `failed` to `inactive` and clear the old
+        // invocation id; nothing is running either way, so neither is a change.
+        let stopped = |o: &ServiceObservation| {
+            o.main_pid == 0 && matches!(o.active.as_str(), "inactive" | "failed")
+        };
+        let both_stopped = stopped(&before) && stopped(&after);
+        if after.enabled != Some(enabled)
+            || before.main_pid != after.main_pid
+            || (!both_stopped
+                && (before.invocation_id != after.invocation_id || before.active != after.active))
+        {
+            return Err(ServiceError::Unknown);
+        }
+        Ok(after)
+    }
+    pub(crate) async fn start(&self) -> ServiceResult<ServiceObservation> {
+        let before = self.inspect().await?;
+        // A failed invocation with no remaining cgroup is terminal too. The
+        // management owner already holds the inactive execution lease before
+        // committing Running. Do not clear or reinterpret its failed receipt,
+        // and refuse failed units that may still own descendants.
+        if !before.stopped_for_mutation() {
+            return Err(ServiceError::Conflict);
+        }
+        self.ctl("start", true).await?;
+        let until = Instant::now() + Duration::from_secs(20);
+        loop {
+            let status = self.inspect().await?;
+            if status.active == "active" && status.substate == "running" && status.main_pid != 0 {
+                self.bind_running(&status)?;
+                return Ok(status);
+            }
+            if status.active == "failed" || Instant::now() >= until {
+                return Err(ServiceError::Unknown);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    /// Capture BEFORE committing Stopped or asking the original Core to drain.
+    /// The actual original birth/CG handles remain here on every later failure.
+    pub(crate) async fn prepare_stop(&mut self) -> ServiceResult<()> {
+        if self.operation_running.is_some() || self.manager_pin.is_some() {
+            return Err(ServiceError::Conflict);
+        }
+        let before = self.inspect().await?;
+        if before.active != "active" || before.main_pid == 0 {
+            return Err(ServiceError::Conflict);
+        }
+        self.operation_running = Some(self.bind_running(&before)?);
+        self.manager_pin = Some(
+            SystemdUnitPin::open_user(
+                &self.runtime,
+                Uid::current().as_raw(),
+                &self.unit,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await?,
+        );
+        // RefUnit is not generation authority. Bind only the unchanged original
+        // invocation, retaining the pin even if this observation becomes unknown.
+        let after = self.inspect().await?;
+        if after.main_pid != before.main_pid
+            || after.invocation_id != before.invocation_id
+            || !self
+                .operation_running
+                .as_ref()
+                .ok_or(ServiceError::Conflict)?
+                .birth
+                .still_current()
+                .map_err(unknown)?
+        {
+            return Err(ServiceError::Conflict);
+        }
+        Ok(())
+    }
+    pub(crate) async fn stop(
+        &mut self,
+        request_os_stop: bool,
+    ) -> ServiceResult<ServiceObservation> {
+        let bound = self
+            .operation_running
+            .as_ref()
+            .ok_or(ServiceError::Conflict)?;
+        let ProcessIdentity::Linux {
+            pid: original_pid, ..
+        } = bound.birth;
+        if request_os_stop {
+            let current = self.inspect().await?;
+            if current.invocation_id != bound.invocation {
+                return Err(ServiceError::Conflict);
+            }
+            if current.main_pid != 0 {
+                if current.main_pid != original_pid
+                    || !bound.birth.still_current().map_err(unknown)?
+                {
+                    return Err(ServiceError::Conflict);
+                }
+                // Exactly one manager request for the captured invocation. No
+                // process is signalled by a raw caller-supplied PID.
+                self.ctl("stop", true).await?;
+            }
+        }
+        let until = Instant::now() + Duration::from_secs(45);
+        loop {
+            let status = self.inspect().await?;
+            if !status.invocation_id.is_empty() && status.invocation_id != bound.invocation {
+                return Err(ServiceError::Conflict);
+            }
+            let held = bound.cgroup.metadata().map_err(unknown)?;
+            if (FileIdentity {
+                device: held.dev(),
+                inode: held.ino(),
+            }) != bound.cgroup_identity
+            {
+                return Err(ServiceError::Conflict);
+            }
+            let empty = held.nlink() == 0 || group_empty(&bound.events)?;
+            if status.active == "inactive"
+                && status.main_pid == 0
+                && status.exec_main_pid == original_pid
+                && status.manager_success
+                && !bound.birth.still_current().map_err(unknown)?
+                && empty
+            {
+                // Capture the exact terminal report before explicit UnrefUnit.
+                // An uncertain release retains the original pin/owner resources.
+                self.manager_pin
+                    .as_ref()
+                    .ok_or(ServiceError::Conflict)?
+                    .unref()
+                    .await?;
+                drop(self.manager_pin.take());
+                return Ok(status);
+            }
+            if Instant::now() >= until {
+                return Err(ServiceError::Unknown);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    pub(crate) async fn uninstall(&mut self) -> ServiceResult<ServiceObservation> {
+        let before = self.inspect().await?;
+        if !before.stopped_for_mutation() || before.enabled != Some(false) {
+            return Err(ServiceError::Conflict);
+        }
+        self.validate()?;
+        unlinkat(
+            self.parent.as_fd(),
+            self.unit.as_str(),
+            UnlinkatFlags::NoRemoveDir,
+        )
+        .map_err(unknown)?;
+        self.parent.sync_all().map_err(unknown)?;
+        self.pin = None;
+        self.ctl("daemon-reload", false).await?;
+        self.inspect().await
+    }
+    fn bind_running(&self, status: &ServiceObservation) -> ServiceResult<RunningBinding> {
+        let birth = ProcessIdentity::observe(status.main_pid).map_err(unknown)?;
+        if status.main_pid == 0
+            || status.invocation_id.len() != 32
+            || status.invocation_id.bytes().all(|b| b == b'0')
+            || identity(&File::open(format!("/proc/{}/exe", status.main_pid)).map_err(unknown)?)?
+                != self.image_identity
+        {
+            return Err(ServiceError::Conflict);
+        }
+        let raw = std::fs::read(format!("/proc/{}/cmdline", status.main_pid)).map_err(unknown)?;
+        let expected = [
+            self.executable.as_os_str().as_encoded_bytes(),
+            b"__service-run",
+            b"--state-dir",
+            self.path.as_os_str().as_encoded_bytes(),
+            b"--role",
+            self.role.name().as_bytes(),
+        ];
+        if raw
+            .split(|v| *v == 0)
+            .filter(|v| !v.is_empty())
+            .collect::<Vec<_>>()
+            != expected
+        {
+            return Err(ServiceError::Conflict);
+        }
+        let cg = self.cgroup_path(&status.cgroup)?;
+        let cgroup = checked_directory(&cg, false)?;
+        let cgroup_identity = identity(&cgroup)?;
+        let events = File::from(
+            openat(
+                cgroup.as_fd(),
+                "cgroup.events",
+                OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(unknown)?,
+        );
+        require_membership(status.main_pid, &status.cgroup)?;
+        if !birth.still_current().map_err(unknown)? {
+            return Err(ServiceError::Conflict);
+        }
+        Ok(RunningBinding {
+            birth,
+            cgroup,
+            cgroup_identity,
+            events,
+            cgroup_path: status.cgroup.clone(),
+            invocation: status.invocation_id.clone(),
+        })
+    }
+}
+fn read_state(root: &PrivateRoot) -> ServiceResult<NativeState> {
+    let marker = root
+        .read_raw(".styx-native-root-v1.json", 4096)
+        .map_err(unavailable)?;
+    let marker = crate::store::native_state::decode_marker(marker.bytes()).map_err(changed)?;
+    let RootIdentity::Linux { device, inode, uid } = root.identity();
+    if marker.root_identity
+        != (styx_contracts::native_management::NativeRootIdentity::Linux { device, inode, uid })
+    {
+        return Err(ServiceError::Conflict);
+    }
+    let raw = root
+        .read_raw("state.json", 1024 * 1024)
+        .map_err(unavailable)?;
+    crate::store::native_state::decode_state(raw.bytes(), &marker)
+        .map(|v| v.state().clone())
+        .map_err(changed)
+}
+fn selection(state: &NativeState) -> ServiceResult<NativeRuntimeSelection> {
+    serde_json::from_str(
+        state
+            .extensions
+            .get("runtime_selection_v1")
+            .ok_or(ServiceError::Invalid)?
+            .get(),
+    )
+    .map_err(invalid)
+}
+fn require_membership(pid: u32, expected: &str) -> ServiceResult<()> {
+    let raw = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).map_err(unknown)?;
+    if raw.len() > 4096 || raw.lines().collect::<Vec<_>>() != [format!("0::{expected}")] {
+        return Err(ServiceError::Conflict);
+    }
+    let m = std::fs::metadata(format!("/proc/{pid}")).map_err(unknown)?;
+    if m.uid() != Uid::current().as_raw() {
+        return Err(ServiceError::Conflict);
+    }
+    Ok(())
+}
+fn group_empty(events: &File) -> ServiceResult<bool> {
+    use std::os::unix::fs::FileExt as _;
+    let mut buf = [0; 4096];
+    let n = match events.read_at(&mut buf, 0) {
+        Ok(n) => n,
+        // kernfs keeps the held inode/nlink after cgroup removal, but reads of
+        // this originally captured cgroup.events FD return ENODEV. A removed
+        // cgroup has no member processes. Do not reopen its reusable pathname;
+        // every other error remains unknown. The caller still proves original
+        // process exit, manager success, invocation and held cgroup identity.
+        Err(error) if error.raw_os_error() == Some(nix::libc::ENODEV) => return Ok(true),
+        Err(error) => return Err(unknown(error)),
+    };
+    if n == buf.len() {
+        return Err(ServiceError::Unknown);
+    }
+    let text = std::str::from_utf8(&buf[..n]).map_err(unknown)?;
+    let values = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("populated "))
+        .collect::<Vec<_>>();
+    match values.as_slice() {
+        ["0"] => Ok(true),
+        ["1"] => Ok(false),
+        _ => Err(ServiceError::Unknown),
+    }
+}
+fn unit_definition(executable: &Path, path: &Path, role: ServiceRole) -> ServiceResult<String> {
+    let binary = safe_path(executable)?;
+    let path = safe_path(path)?;
+    Ok(format!(
+        "# Styx native Rust user service v1\n[Unit]\nDescription=Styx native {}\n\n[Service]\nType=exec\nExecStart={binary} __service-run --state-dir {path} --role {}\nWorkingDirectory=/\nRestart=no\nKillMode=mixed\nSendSIGKILL=yes\nTimeoutStopSec=infinity\nUMask=0077\nEnvironment=PATH=/usr/bin:/bin LANG=C.UTF-8\n\n[Install]\nWantedBy=default.target\n",
+        role.name(),
+        role.name()
+    ))
+}
+#[derive(Serialize)]
+pub(crate) struct ServiceObservation {
+    pub(crate) schema: u16,
+    pub(crate) unit: String,
+    pub(crate) role: ServiceRole,
+    pub(crate) installed: bool,
+    pub(crate) enabled: Option<bool>,
+    pub(crate) active: String,
+    pub(crate) substate: String,
+    pub(crate) invocation_id: String,
+    pub(crate) main_pid: u32,
+    pub(crate) exec_main_pid: u32,
+    pub(crate) cgroup: String,
+    pub(crate) manager_success: bool,
+    pub(crate) lifetime_scope: &'static str,
+    pub(crate) survives_logout: Option<bool>,
+    pub(crate) runtime_health: &'static str,
+}
+impl ServiceObservation {
+    // A failed invocation is terminal only after both its main process and
+    // cgroup are gone. Use the same precondition before the configuration
+    // commit and before the OS operation; neither layer may accept more.
+    pub(crate) fn stopped_for_mutation(&self) -> bool {
+        self.installed
+            && self.main_pid == 0
+            && (self.active == "inactive" || (self.active == "failed" && self.cgroup.is_empty()))
+    }
+    pub(crate) fn start_allowed(&self, desired: NativeRunDesired) -> bool {
+        self.stopped_for_mutation()
+            && (desired == NativeRunDesired::Stopped
+                || (desired == NativeRunDesired::Running && self.active == "failed"))
+    }
+    fn absent(unit: String, role: ServiceRole) -> Self {
+        Self {
+            schema: 1,
+            unit,
+            role,
+            installed: false,
+            enabled: None,
+            active: "not_installed".into(),
+            substate: "not_installed".into(),
+            invocation_id: String::new(),
+            main_pid: 0,
+            exec_main_pid: 0,
+            cgroup: String::new(),
+            manager_success: false,
+            lifetime_scope: "user_login",
+            survives_logout: None,
+            runtime_health: "not_observed",
+        }
+    }
+}
+struct RunningBinding {
+    birth: ProcessIdentity,
+    cgroup: File,
+    cgroup_identity: FileIdentity,
+    events: File,
+    cgroup_path: String,
+    invocation: String,
+}
+/// Client-side binding to the actual installed service process. SO_PEERCRED
+/// must still match this retained peer after connecting the fixed control path.
+pub(crate) struct ServicePeer {
+    definition: Definition,
+    running: RunningBinding,
+}
+impl ServicePeer {
+    pub(crate) async fn observe(path: &Path, role: ServiceRole) -> ServiceResult<Arc<Self>> {
+        let definition = Definition::prepare(path, role, false)?;
+        let desired = role
+            .desired(&definition.state()?)
+            .ok_or(ServiceError::Invalid)?;
+        if desired.manager != NativeManager::PersistentService
+            || desired.run != NativeRunDesired::Running
+        {
+            return Err(ServiceError::Conflict);
+        }
+        let before = definition.inspect().await?;
+        if before.main_pid == 0 || before.active != "active" && before.active != "activating" {
+            return Err(ServiceError::Conflict);
+        }
+        let running = definition.bind_running(&before)?;
+        let after = definition.inspect().await?;
+        if after.main_pid != before.main_pid || after.invocation_id != before.invocation_id {
+            return Err(ServiceError::Conflict);
+        }
+        let peer = Arc::new(Self {
+            definition,
+            running,
+        });
+        peer.validate()?;
+        Ok(peer)
+    }
+    pub(crate) fn pid(&self) -> u32 {
+        let ProcessIdentity::Linux { pid, .. } = &self.running.birth;
+        *pid
+    }
+    pub(crate) fn uid(&self) -> u32 {
+        let RootIdentity::Linux { uid, .. } = &self.definition.root_identity;
+        *uid
+    }
+    pub(crate) fn validate(&self) -> ServiceResult<()> {
+        self.definition.validate()?;
+        let desired = self
+            .definition
+            .role
+            .desired(&self.definition.state()?)
+            .ok_or(ServiceError::Invalid)?;
+        if desired.manager != NativeManager::PersistentService {
+            return Err(ServiceError::Conflict);
+        }
+        self.validate_identity()
+    }
+    fn validate_identity(&self) -> ServiceResult<()> {
+        self.definition.validate_identity()?;
+        if !self.running.birth.still_current().map_err(unknown)?
+            || identity(&self.running.cgroup)? != self.running.cgroup_identity
+            || identity(&checked_directory(
+                &self.definition.cgroup_path(&self.running.cgroup_path)?,
+                false,
+            )?)? != self.running.cgroup_identity
+            || identity(&File::open(format!("/proc/{}/exe", self.pid())).map_err(unknown)?)?
+                != self.definition.image_identity
+            || self.running.invocation.len() != 32
+        {
+            return Err(ServiceError::Conflict);
+        }
+        require_membership(self.pid(), &self.running.cgroup_path)
+    }
+}
+/// Non-serializable current-process authority. No environment variable, request
+/// path or serialized report can construct a service scope.
+pub(crate) struct ServiceScope {
+    peer: Arc<ServicePeer>,
+}
+impl ServiceScope {
+    pub(crate) async fn authenticate(path: &Path, role: ServiceRole) -> ServiceResult<Arc<Self>> {
+        let peer = ServicePeer::observe(path, role).await?;
+        if peer.pid() != std::process::id() {
+            return Err(ServiceError::Conflict);
+        }
+        let scope = Arc::new(Self { peer });
+        scope.validate()?;
+        Ok(scope)
+    }
+    pub(crate) fn state_dir(&self) -> &Path {
+        &self.peer.definition.path
+    }
+    pub(crate) fn role(&self) -> ServiceRole {
+        self.peer.definition.role
+    }
+    pub(crate) fn validate(&self) -> ServiceResult<()> {
+        // This already-minted scope remains the original process while an
+        // explicit Stopped target drains it. New scopes still require Running.
+        self.peer.validate()
+    }
+    /// Retained OS authority only. ServiceTip must separately validate its full
+    /// original C07 state chain before admitting work; this cannot mint a scope
+    /// or accept a different manager, runtime selection, or execution process.
+    pub(crate) fn validate_identity(&self) -> ServiceResult<()> {
+        self.peer.validate_identity()
+    }
+}
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn stopped_owned_utility_is_reaped_without_touching_sibling() {
+        let mut stopped = Command::new("/usr/bin/sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("owned stopped utility");
+        let mut sibling = Command::new("/usr/bin/sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("owned independent sibling");
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(stopped.id().expect("utility PID") as i32),
+            nix::sys::signal::Signal::SIGSTOP,
+        )
+        .expect("stop exact owned child");
+        let stop_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let status = std::fs::read_to_string(format!(
+                "/proc/{}/status",
+                stopped.id().expect("owned utility PID")
+            ))
+            .expect("owned utility status");
+            if status.lines().any(|line| {
+                line.starts_with("State:") && line.split_whitespace().nth(1) == Some("T")
+            }) {
+                break;
+            }
+            assert!(
+                Instant::now() < stop_deadline,
+                "actual Stopped not observed"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let before = Instant::now();
+        assert!(terminate_utility(&mut stopped).await);
+        assert!(before.elapsed() < Duration::from_secs(3));
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            stopped
+                .try_wait()
+                .expect("actual wait")
+                .expect("actual exit")
+                .signal(),
+            Some(nix::libc::SIGKILL)
+        );
+        assert!(sibling.try_wait().expect("independent sibling").is_none());
+        sibling.kill().await.expect("reap exact test sibling");
+    }
+    #[test]
+    fn failed_units_require_both_main_process_and_cgroup_absence() {
+        let mut os = ServiceObservation::absent("owned-test.service".into(), ServiceRole::Host);
+        assert!(!os.stopped_for_mutation());
+        os.installed = true;
+        os.active = "failed".into();
+        assert!(os.stopped_for_mutation());
+        assert!(os.start_allowed(NativeRunDesired::Running));
+        os.active = "inactive".into();
+        assert!(!os.start_allowed(NativeRunDesired::Running));
+        assert!(os.start_allowed(NativeRunDesired::Stopped));
+        os.active = "failed".into();
+
+        os.main_pid = 42;
+        assert!(!os.stopped_for_mutation());
+        os.main_pid = 0;
+        os.cgroup = "/retained-original-cgroup".into();
+        assert!(!os.stopped_for_mutation());
+        assert!(!os.start_allowed(NativeRunDesired::Running));
+        os.active = "inactive".into();
+        assert!(os.stopped_for_mutation());
+        os.main_pid = 42;
+        assert!(!os.stopped_for_mutation());
+        os.main_pid = 0;
+        os.active = "deactivating".into();
+        os.cgroup.clear();
+        assert!(!os.stopped_for_mutation());
+
+        os.active = "failed".into();
+        os.enabled = Some(false);
+        assert!(os.stopped_for_mutation() && os.enabled == Some(false));
+    }
+}

@@ -1,0 +1,1246 @@
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs b/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs
+--- a/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs
+@@ -1043,13 +1043,32 @@
+     if native.is_empty() {
+         return false;
+     }
+-    accessible == native
+-        || accessible
+-            .strip_prefix(native)
+-            .and_then(|suffix| suffix.strip_prefix(" - "))
+-            .is_some_and(|profile| {
+-                !profile.trim().is_empty() && !profile.chars().any(char::is_control)
+-            })
++    let valid_segment =
++        |segment: &str| !segment.trim().is_empty() && !segment.chars().any(char::is_control);
++    let matches_with_optional_profile = |expected: &str| {
++        accessible == expected
++            || accessible
++                .strip_prefix(expected)
++                .and_then(|suffix| suffix.strip_prefix(" - "))
++                .is_some_and(valid_segment)
++    };
++    if matches_with_optional_profile(native) {
++        return true;
++    }
++    let Some((page, app)) = native.rsplit_once(" - ") else {
++        return false;
++    };
++    let Some(rest) = accessible
++        .strip_prefix(page)
++        .and_then(|s| s.strip_prefix(" - Part of group "))
++    else {
++        return false;
++    };
++    let tail_sep = format!(" - {app}");
++    let Some((group, tail)) = rest.split_once(&tail_sep) else {
++        return false;
++    };
++    valid_segment(group) && (tail.is_empty() || tail.strip_prefix(" - ").is_some_and(valid_segment))
+ }
+ 
+ fn correlate_hyprland_frame(
+@@ -1143,6 +1162,24 @@
+             ),
+             Some(7)
+         );
++        assert_eq!(
++            correlate_hyprland_frame(
++                &[frame(
++                    "Tunnels | Cloudflare - Part of group 🔎 Styx HTTPS 验收 - Google Chrome - Sid"
++                )],
++                &[("Tunnels | Cloudflare - Google Chrome", 800, 600)],
++                0,
++            ),
++            Some(7)
++        );
++        assert_eq!(
++            correlate_hyprland_frame(
++                &[frame("Page - Part of group Work - Google Chrome")],
++                &[("Page - Google Chrome", 800, 600)],
++                0,
++            ),
++            Some(7)
++        );
+     }
+ 
+     #[test]
+@@ -3430,7 +3465,7 @@
+ fn is_checkbox_role(role: &str) -> bool {
+     matches!(
+         role.trim().to_ascii_lowercase().as_str(),
+-        "check box" | "checkbox"
++        "check box" | "checkbox" | "radio button" | "radio menu item" | "check menu item"
+     )
+ }
+ 
+@@ -4189,6 +4224,50 @@
+     )
+ }
+ 
++/// Whether the exact cached object can receive foreground text. A readable or
++/// focusable button/document is not an editable target. No value is read here.
++pub fn text_input_ready_ref(object_ref: &ObjectRef, require_focus: bool) -> Result<bool> {
++    bounded_for(
++        REF_ACTION_BUDGET,
++        async {
++            let conn = shared_connection().await?;
++            let (acc, _) = live_accessible(conn, object_ref).await?;
++            match call(acc.get_state()).await {
++                Some(Ok(state)) => Ok(text_input_state_ready(&state, require_focus)),
++                Some(Err(error)) => Err(anyhow!("cached text target state unavailable: {error}")),
++                None => Err(anyhow!("cached text target state timed out")),
++            }
++        },
++        || Err(anyhow!("cached text target state timed out")),
++    )
++}
++
++fn text_input_state_ready(state: &StateSet, require_focus: bool) -> bool {
++    is_enabled_state(state)
++        && state.contains(State::Editable)
++        && (!require_focus || state.contains(State::Focused))
++}
++
++#[cfg(test)]
++#[test]
++fn foreground_text_requires_an_enabled_editable_exact_target() {
++    let editable = StateSet::new(State::Editable | State::Enabled);
++    assert!(text_input_state_ready(&editable, false));
++    assert!(!text_input_state_ready(&editable, true));
++    assert!(text_input_state_ready(
++        &StateSet::new(State::Editable | State::Sensitive | State::Focused),
++        true
++    ));
++    assert!(!text_input_state_ready(
++        &StateSet::new(State::Enabled | State::Focused),
++        false
++    ));
++    assert!(!text_input_state_ready(
++        &StateSet::new(State::Editable | State::Focused),
++        false
++    ));
++}
++
+ /// [`focus_element`] on a snapshot-cached element identity.
+ pub fn focus_element_ref(object_ref: &ObjectRef) -> Result<bool> {
+     bounded_for(
+@@ -5822,7 +5901,7 @@
+     if let Ok(et) = proxies.editable_text().await {
+         // Replace whole contents (parity with the Windows/macOS set_value,
+         // which overwrite rather than insert at the caret).
+-        if et.set_text_contents(value).await.unwrap_or(false) {
++        if et.set_text_contents(value).await? {
+             commit_editable_write(&proxies).await;
+             return Ok(());
+         }
+@@ -5833,7 +5912,7 @@
+             Err(_) => 0,
+         };
+         match editable_insert_length_for(value, toolkit_of(acc)).await {
+-            Some(len) if et.insert_text(off, value, len).await.unwrap_or(false) => {
++            Some(len) if et.insert_text(off, value, len).await? => {
+                 commit_editable_write(&proxies).await;
+                 return Ok(());
+             }
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/tools/set_value.rs b/libs/cua-driver/rust/crates/platform-linux/src/tools/set_value.rs
+--- a/libs/cua-driver/rust/crates/platform-linux/src/tools/set_value.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/tools/set_value.rs
+@@ -13,10 +13,11 @@
+ 
+ use super::impl_::{
+     attach_focus_guard, background_virtual_key, background_virtual_text, foreground_budget,
+-    input_error_result, non_ax_escalation, position_named_session_keyboard_cursor,
+-    prove_token_element, refuse_if_disabled, resolve_cursor_key, resolve_element_local_coords,
+-    spawn_blocking_bounded, stale_observed_element, values_agree, window_local_to_screen,
+-    x11_pixel_click_no_focus_steal, ToolState,
++    hyprland_foreground, input_error_result, non_ax_escalation,
++    position_named_session_keyboard_cursor, prove_token_element, refuse_if_disabled,
++    resolve_cursor_key, resolve_element_local_coords, spawn_blocking_bounded,
++    stale_observed_element, values_agree, window_local_to_screen, x11_pixel_click_no_focus_steal,
++    ToolState,
+ };
+ 
+ // ── set_value ─────────────────────────────────────────────────────────────────
+@@ -127,6 +128,15 @@
+             }
+             Err(error) => return ToolResult::error(format!("Task error: {error}")),
+         };
++        // Use the same exact-target native keyboard as foreground type_text.
++        // The standard AX/selection attempt above remains the first route.
++        if hyprland_foreground(delivery) {
++            let object = match token.object() {
++                Ok(object) => object.clone(),
++                Err(error) => return input_error_result(error),
++            };
++            return super::type_text::foreground_text_input(pid, xid, object, value, true).await;
++        }
+         // 2. No accessibility write route. A combo box is opened with a click
+         //    and the option picked from its popup (whose items only exist and
+         //    act while it is open), then the popup is closed. Anything else is
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/capture.rs b/libs/cua-driver/rust/crates/platform-windows/src/capture.rs
+--- a/libs/cua-driver/rust/crates/platform-windows/src/capture.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/capture.rs
+@@ -362,7 +362,38 @@
+     Some((png, x, y))
+ }
+ 
++fn capture_dpi_unaware_window(hwnd: u64) -> Result<Option<(Vec<u8>, bool, Option<FrameGeometry>)>> {
++    use windows::Win32::UI::HiDpi::{
++        GetAwarenessFromDpiAwarenessContext, GetWindowDpiAwarenessContext, DPI_AWARENESS_INVALID,
++        DPI_AWARENESS_UNAWARE,
++    };
++    let context = unsafe { GetWindowDpiAwarenessContext(HWND(hwnd as *mut _)) };
++    if context == Default::default() {
++        bail!("window DPI context unavailable; capture geometry is unproven");
++    }
++    let awareness = unsafe { GetAwarenessFromDpiAwarenessContext(context) };
++    if awareness == DPI_AWARENESS_INVALID {
++        bail!("window DPI awareness unavailable; capture geometry is unproven");
++    }
++    if awareness != DPI_AWARENESS_UNAWARE {
++        return Ok(None);
++    }
++    let (pixels, width, height) = crate::wgc::screenshot_window_via_wgc(hwnd).map_err(|error| {
++        anyhow::anyhow!(
++            "DPI-unaware window needs compositor capture; no partial GDI or screen-region fallback: {error}"
++        )
++    })?;
++    Ok(Some((
++        cua_driver_core::image_utils::encode_bgra_to_png(&pixels, width, height)?,
++        false,
++        // WGC gives no proven screen origin. Preserve the existing restriction
++        // against using this frame as mapped pixel-action evidence.
++        None,
++    )))
++}
++
+ fn screenshot_window_mapped(hwnd: u64) -> Result<(Vec<u8>, bool, Option<FrameGeometry>)> {
++    if let Some(capture) = capture_dpi_unaware_window(hwnd)? { return Ok(capture); }
+     match unsafe { screenshot_window_bytes_with_occlusion_unsafe(hwnd) } {
+         Ok(capture) => Ok(capture),
+         Err(primary_error) => {
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs b/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs
+--- a/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs
+@@ -550,6 +550,23 @@
+     send_click_synthesized_mods_impl(target, sx, sy, count, button, modifiers, ClickMode::Desktop)
+ }
+ 
++/// All requested mouse/modifier events were inserted, then focus moved outside
++/// the exact target/owned-window set. This records dispatch, never visible effect
++/// or authority over the newly foreground window.
++#[derive(Debug)]
++pub(crate) struct CompletedClickFocusChanged {
++    pub(crate) target: u64,
++    pub(crate) actual: u64,
++}
++
++impl std::fmt::Display for CompletedClickFocusChanged {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "foreground_unavailable: exact target HWND 0x{:x} or a verified same-process post-action window was not foreground after the click (actual foreground HWND 0x{:x})", self.target, self.actual)
++    }
++}
++
++impl std::error::Error for CompletedClickFocusChanged {}
++
+ #[derive(Clone, Copy, PartialEq)]
+ enum ClickMode {
+     NonActivating,
+@@ -802,13 +819,13 @@
+                 foreground_target.expect("foreground target captured before input"),
+                 actual.0 as usize as u64,
+             ) {
+-                bail!(
+-                    "foreground_unavailable: exact target HWND {:?} or a verified same-process \
+-                     post-action window was not foreground after the click \
+-                     (actual foreground HWND {:?})",
+-                    target.0,
+-                    actual.0
+-                );
++                // This point is reachable only after complete SendInput. Keep
++                // pre-dispatch and partial-send errors distinct from this fact.
++                return Err(CompletedClickFocusChanged {
++                    target: target.0 as usize as u64,
++                    actual: actual.0 as usize as u64,
++                }
++                .into());
+             }
+         }
+     }
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/tools/click.rs b/libs/cua-driver/rust/crates/platform-windows/src/tools/click.rs
+--- a/libs/cua-driver/rust/crates/platform-windows/src/tools/click.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/click.rs
+@@ -37,6 +37,12 @@
+         "effect": "refused",
+         "detail": error.to_string(),
+     }))
++}
++
++fn completed_click_focus_change(error: &anyhow::Error) -> bool {
++    error
++        .downcast_ref::<crate::input::mouse::CompletedClickFocusChanged>()
++        .is_some()
+ }
+ 
+ // ── click ─────────────────────────────────────────────────────────────────────
+@@ -763,6 +769,12 @@
+                         "✅ Performed SendInput click on [{idx}] at screen ({cx},{cy}) (delivery_mode:foreground)."
+                     ))
+                     .with_structured(json!({ "path": "pixel", "verified": false, "effect": "unverifiable" })),
++                    Ok(Err(error)) if completed_click_focus_change(&error) => {
++                        ToolResult::text(format!(
++                            "Sent the complete foreground click on [{idx}] at ({cx},{cy}); post-action foreground changed. Verify the effect with a fresh observation."
++                        ))
++                        .with_structured(json!({ "path": "pixel", "verified": false, "effect": "unverifiable" }))
++                    }
+                     Ok(Err(e)) => ToolResult::error(e.to_string()),
+                     Err(e) => ToolResult::error(format!("Task error: {e}")),
+                 };
+@@ -1533,3 +1545,26 @@
+         assert_eq!(capture_id["minLength"], 1);
+     }
+ }
++
++#[cfg(test)]
++mod completed_click_receipt_tests {
++    use super::completed_click_focus_change;
++
++    #[test]
++    fn completed_dispatch_requires_native_typed_receipt_not_error_text() {
++        let receipt: anyhow::Error = crate::input::mouse::CompletedClickFocusChanged {
++            target: 1,
++            actual: 2,
++        }
++        .into();
++        assert!(completed_click_focus_change(&receipt));
++        let copied_text = anyhow::anyhow!(receipt.to_string());
++        assert!(!completed_click_focus_change(&copied_text));
++        assert!(!completed_click_focus_change(&anyhow::anyhow!(
++            "foreground_unavailable: Windows did not activate exact target HWND; no mouse input was sent"
++        )));
++        assert!(!completed_click_focus_change(&anyhow::anyhow!(
++            "SendInput inserted fewer modifier or mouse events than expected for the foreground click."
++        )));
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs b/libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs
+--- a/libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/tools/type_text.rs
+@@ -12,16 +12,15 @@
+ use std::{fs, sync::Arc};
+ 
+ use super::impl_::{
+-    announce_keyboard_target, atspi_up, background_keyboard_refusal, background_virtual_text,
+-    coordinate_frame_is_desktop, coordinate_frame_schema, focus_by_pixel,
+-    focus_hyprland_foreground, focus_nested_inject_target, foreground_hyprland_refusal,
+-    foreground_structured, hyprland_foreground, hyprland_input_result, inject_terminal_input,
+-    input_error_result, invalid_pointer_arguments, is_chromium_embedder, is_popup_keyboard_grab,
+-    is_terminal_process, is_webkitgtk_embedder, isolated_hyprland_background,
+-    isolated_hyprland_refusal, isolated_hyprland_result, isolated_hyprland_task_error,
+-    named_session_cursor_key, position_named_session_keyboard_cursor, prove_token_element,
+-    refuse_if_disabled, resolve_cursor_key, spawn_blocking_bounded, spawn_isolated_hyprland,
+-    stale_observed_element, text_typing_budget, unavailable_chromium_background,
++    atspi_up, background_keyboard_refusal, background_virtual_text, coordinate_frame_is_desktop,
++    coordinate_frame_schema, focus_by_pixel, focus_nested_inject_target, foreground_structured,
++    hyprland_foreground, hyprland_input_result, inject_terminal_input, input_error_result,
++    invalid_pointer_arguments, is_chromium_embedder, is_popup_keyboard_grab, is_terminal_process,
++    is_webkitgtk_embedder, isolated_hyprland_background, isolated_hyprland_refusal,
++    isolated_hyprland_result, isolated_hyprland_task_error, named_session_cursor_key,
++    position_named_session_keyboard_cursor, prove_token_element, refuse_if_disabled,
++    resolve_cursor_key, spawn_blocking_bounded, spawn_isolated_hyprland, stale_observed_element,
++    text_typing_budget, unavailable_chromium_background,
+     unavailable_wayland_focused_input_background, unavailable_webkit_keyboard_background,
+     values_agree, KeyRoute, ToolState,
+ };
+@@ -64,6 +63,66 @@
+     s
+ }
+ 
++/// Publish only after the native writer completed, without claiming an app readback.
++fn foreground_text_completed_result() -> ToolResult {
++    hyprland_input_result(Ok(json!({"ok": true})), true)
++}
++
++/// The exact-target foreground writer shared by typing and whole-field replacement.
++pub(super) async fn foreground_text_input(
++    pid: u32,
++    xid: u64,
++    object: crate::atspi::native::ObjectRef,
++    text: String,
++    replace: bool,
++) -> ToolResult {
++    if !crate::wayland::keyboard_input_available() {
++        return ToolResult::error("native Wayland virtual keyboard is unavailable")
++            .with_structured(json!({"code":"keyboard_unavailable","effect":"none"}));
++    }
++    let budget = text_typing_budget(&text)
++        + if replace {
++            std::time::Duration::from_millis(200)
++        } else {
++            std::time::Duration::ZERO
++        };
++    let result = spawn_blocking_bounded("foreground element text", budget, move || {
++        if !crate::atspi::native::text_input_ready_ref(&object, false)? {
++            anyhow::bail!("observed target is not an enabled editable element");
++        }
++        crate::wayland::hyprland::activate_exact(xid, pid)?;
++        if !crate::atspi::native::focus_element_ref(&object)? {
++            anyhow::bail!("native element focus was not confirmed");
++        }
++        if !crate::wayland::hyprland::target_is_active(xid, Some(pid))? {
++            anyhow::bail!("target lost compositor focus before typing");
++        }
++        crate::wayland::type_text_focused_once(&text, replace, |_| {
++            if !crate::wayland::hyprland::target_is_active(xid, Some(pid))?
++                || !crate::atspi::native::text_input_ready_ref(&object, true)?
++            {
++                anyhow::bail!("observed text target lost focus or editability");
++            }
++            Ok(())
++        })
++    })
++    .await;
++    let detail = match result {
++        Ok(Ok(())) => return foreground_text_completed_result(),
++        Ok(Err(error)) => format!("{error:#}"),
++        Err(error) => format!("foreground element text task: {error}"),
++    };
++    // A focus change or input could already have happened. Preserve
++    // that uncertainty and its bounded cause; never retry the write.
++    let detail: String = detail.chars().take(512).collect();
++    ToolResult::error(format!(
++        "foreground keyboard input outcome is unconfirmed: {detail}"
++    ))
++    .with_structured(json!({
++        "code":"foreground_input_unknown","effect":"unknown","detail":detail
++    }))
++}
++
+ /// Structured payload for the Electron/Chromium AX-echo case: the AT-SPI
+ /// `insertText` rung returned success on a Chromium embedder, but on those
+ /// surfaces the a11y bridge can accept and echo the write while the renderer
+@@ -163,6 +222,40 @@
+     use super::*;
+ 
+     #[test]
++    fn foreground_text_completed_result_has_publishable_unverified_record() {
++        let legacy = type_text_structured("wayland_keyboard", 4, false);
++        assert!(
++            cua_driver_core::action_record::ActionExecutionRecord::from_legacy(
++                "type_text",
++                &json!({"delivery_mode": "foreground"}),
++                &legacy,
++            )
++            .is_none(),
++            "the old success payload omitted a recognized execution record"
++        );
++
++        let result = foreground_text_completed_result();
++        assert_ne!(result.is_error, Some(true));
++        let record = result
++            .action_record
++            .expect("completed native input must carry its record");
++        let public = record
++            .public_result()
++            .expect("native input record must project");
++        public.validate_invariants().unwrap();
++        let value = serde_json::to_value(public).unwrap();
++        for tool in ["type_text", "set_value"] {
++            assert!(cua_driver_contract::validate_success_output(tool, value.clone()).unwrap());
++        }
++        assert_eq!(value["effect"], "unverifiable");
++        assert_eq!(value["route"], "global_input");
++        assert_eq!(value["delivery"]["mode"], "foreground");
++        assert!(value["delivery"]["delivered_count"].is_null());
++        assert!(value["evidence"].is_null());
++        assert!(value.get("execution_state").is_none());
++    }
++
++    #[test]
+     fn typed_text_is_confirmed_only_when_read_back() {
+         let confirmed =
+             type_text_readback_result(1, 3, "-40", "via targeted AT-SPI", Some("-40.0".into()));
+@@ -444,93 +537,27 @@
+         }
+ 
+         if hyprland_foreground(delivery) {
+-            if xid_opt.is_none() {
+-                return foreground_hyprland_refusal("an exact window_id is required");
+-            }
+-            // Native editables retain their verifiable, addressed AT-SPI route.
+-            if !is_chromium_embedder(pid) && !is_webkitgtk_embedder(pid) {
+-                if let Some(element) = token.clone() {
+-                    let text_ax = text.clone();
+-                    if matches!(
+-                        tokio::task::spawn_blocking(move || crate::atspi::type_into_token(
+-                            pid, &element, &text_ax
+-                        ))
+-                        .await,
+-                        Ok(Ok(()))
+-                    ) {
+-                        position_named_session_keyboard_cursor(
+-                            &self.state,
+-                            &args,
+-                            pid,
+-                            xid,
+-                            token.clone(),
+-                            None,
+-                            true,
+-                        )
+-                        .await;
+-                        return type_text_ax_result(
+-                            pid,
+-                            text.chars().count(),
+-                            "via targeted AT-SPI",
+-                        );
+-                    }
+-                }
+-            }
+-            match crate::wayland::hyprland_input::text_actions(&text) {
+-                Ok(actions) if !actions.is_empty() => {}
+-                Ok(_) => return foreground_hyprland_refusal("foreground text must not be empty"),
+-                Err(error) => return foreground_hyprland_refusal(error.to_string()),
+-            }
+-            if let Err(error) =
+-                focus_hyprland_foreground(&self.state, &args, pid, xid, token.clone(), px.zip(py))
+-                    .await
+-            {
+-                return error;
++            // Explicit foreground typing uses the normal compositor and virtual
++            // keyboard protocol. It does not require the optional isolated-input
++            // compositor plugin and never tries AX then repeats through keys.
++            let Some(element) = token.as_ref() else {
++                return ToolResult::error("a fresh exact element token is required")
++                    .with_structured(json!({"code":"input_invalid_args","effect":"none"}));
++            };
++            if xid_opt.is_none() || px.is_some() || py.is_some() {
++                return ToolResult::error("an exact element/window target is required")
++                    .with_structured(json!({"code":"input_invalid_args","effect":"none"}));
+             }
+-            if named_session_cursor_key(&args).is_some() {
+-                if px.is_none() {
+-                    position_named_session_keyboard_cursor(
+-                        &self.state,
+-                        &args,
+-                        pid,
+-                        xid,
+-                        token.clone(),
+-                        None,
+-                        true,
++            let object = match element.object() {
++                Ok(object) => object.clone(),
++                Err(_) => {
++                    return ToolResult::error(
++                        "cached element is unavailable; observe the window again",
+                     )
+-                    .await;
++                    .with_structured(json!({"code":"input_stale_observation","effect":"none"}));
+                 }
+-            } else {
+-                announce_keyboard_target(&args, pid, xid, token.clone(), px.zip(py)).await;
+-            }
+-            let owner = named_session_cursor_key(&args);
+-            let (_cancellation, dispatch) =
+-                match spawn_isolated_hyprland(&args, move |cancellation| {
+-                    crate::wayland::hyprland_input::execute_foreground_text(
+-                        owner,
+-                        pid,
+-                        xid,
+-                        &text,
+-                        cancellation,
+-                    )
+-                }) {
+-                    Ok(dispatch) => dispatch,
+-                    Err(_) => {
+-                        return foreground_hyprland_refusal(
+-                            "authenticated admitted lifecycle required",
+-                        )
+-                    }
+-                };
+-            return hyprland_input_result(
+-                match dispatch.await {
+-                    Ok(result) => result,
+-                    Err(error) => Err(crate::wayland::hyprland_input::unknown_dispatch(
+-                        error.into(),
+-                        0,
+-                    )),
+-                },
+-                true,
+-            );
++            };
++            return foreground_text_input(pid, xid, object, text, false).await;
+         }
+ 
+         position_named_session_keyboard_cursor(
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/wayland/mod.rs b/libs/cua-driver/rust/crates/platform-linux/src/wayland/mod.rs
+--- a/libs/cua-driver/rust/crates/platform-linux/src/wayland/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/wayland/mod.rs
+@@ -2854,6 +2854,26 @@
+ /// the caller. This avoids re-resolving a title that can change mid-sequence
+ /// (for example after opening a Chromium tab). Under niri, text goes out on
+ /// niri's own keymap and stops if focus leaves the window that had it.
++/// Native support evidence only; no keyboard is created and no input is sent.
++pub fn keyboard_input_available() -> bool {
++    is_wayland() && virtual_keyboard::available().unwrap_or(false)
++}
++
++/// One native virtual-keyboard delivery after exact element focus is confirmed.
++/// Reuse the existing Unicode planner, per-key admission and bounded cleanup.
++pub fn type_text_focused_once(
++    text: &str,
++    replace: bool,
++    still_focused: impl FnMut(usize) -> anyhow::Result<()>,
++) -> anyhow::Result<()> {
++    virtual_keyboard::type_text(text, replace, still_focused)
++}
++
++/// One native virtual-keyboard key or modifier chord after exact window focus is confirmed.
++pub fn press_key_focused_once(modifiers: &[String], key: &str) -> anyhow::Result<()> {
++    virtual_keyboard::hotkey(modifiers, key)
++}
++
+ pub fn type_text_focused(text: &str) -> anyhow::Result<()> {
+     type_into(None, text)
+ }
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/wayland/virtual_keyboard.rs b/libs/cua-driver/rust/crates/platform-linux/src/wayland/virtual_keyboard.rs
+--- a/libs/cua-driver/rust/crates/platform-linux/src/wayland/virtual_keyboard.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/wayland/virtual_keyboard.rs
+@@ -107,6 +107,30 @@
+     }
+ }
+ 
++/// Inspect the standard Wayland globals without constructing an input device.
++pub(super) fn available() -> anyhow::Result<bool> {
++    let conn = Connection::connect_to_env()?;
++    let mut queue = conn.new_event_queue::<State>();
++    let qh = queue.handle();
++    conn.display().get_registry(&qh, ());
++    let mut state = State::default();
++    let deadline = std::time::Instant::now() + super::NIRI_ROUNDTRIP_TIMEOUT;
++    super::bounded_roundtrip(&conn, &mut queue, &mut state, deadline)?;
++    super::bounded_roundtrip(&conn, &mut queue, &mut state, deadline)?;
++    Ok(state.manager.is_some() && state.seats.selected().is_some())
++}
++
++pub(super) fn type_text(
++    text: &str,
++    replace: bool,
++    still_focused: impl FnMut(usize) -> anyhow::Result<()>,
++) -> anyhow::Result<()> {
++    let connection = Connection::connect_to_env()?;
++    super::niri::keyboard::type_text_on_connection(connection, text, replace, still_focused)
++}
++
++wayland_client::delegate_dispatch!(State: [wayland_client::protocol::wl_callback::WlCallback: super::Answered] => super::Answered);
++
+ pub(super) fn hotkey(modifiers: &[String], key: &str) -> anyhow::Result<()> {
+     let transitions = hotkey_transitions(modifiers, key)?;
+     let conn = Connection::connect_to_env()?;
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs b/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs
+--- a/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs
+@@ -811,6 +811,31 @@
+     Ok(())
+ }
+ 
++/// Focus an exact compositor address only after binding it to the expected PID.
++/// Uses ordinary Hyprland IPC once, not the optional isolated-input plugin.
++pub fn activate_exact(address: u64, pid: u32) -> Result<()> {
++    capture_target(&list_windows()?, address, Some(pid))?;
++    if target_is_active(address, Some(pid))? {
++        return Ok(());
++    }
++    let mut ipc = ipc_connection()?;
++    let command = format!("/dispatch hl.dsp.focus({{ window = \"address:0x{address:x}\" }})");
++    let reply = read_reply(&mut ipc, command.as_bytes(), action_capped(QUERY_TIMEOUT)?)?;
++    anyhow::ensure!(
++        reply.trim_ascii() == b"ok",
++        "Hyprland exact focus was refused: {}",
++        String::from_utf8_lossy(&reply)
++            .chars()
++            .take(256)
++            .collect::<String>()
++    );
++    anyhow::ensure!(
++        target_is_active(address, Some(pid))?,
++        "Hyprland exact focus was not confirmed"
++    );
++    Ok(())
++}
++
+ pub fn window_for_address(address: u64) -> Option<Window> {
+     list_windows()
+         .ok()?
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/tools/check_permissions.rs b/libs/cua-driver/rust/crates/platform-linux/src/tools/check_permissions.rs
+--- a/libs/cua-driver/rust/crates/platform-linux/src/tools/check_permissions.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/tools/check_permissions.rs
+@@ -76,6 +76,6 @@
+             if x11_ok { "✅ available" } else { "❌ requires X11" }
+         );
+         ToolResult::text(status_text)
+-            .with_structured(json!({ "x11": x11_ok, "wayland": wayland_display.is_some(), "wayland_enabled": crate::wayland::wayland_enabled(), "atspi": atspi_ok, "dbus_session_bus_address": dbus_address, "xsend_event": x11_ok }))
++            .with_structured(json!({ "x11": x11_ok, "wayland": wayland_display.is_some(), "wayland_enabled": crate::wayland::wayland_enabled(), "atspi": atspi_ok, "dbus_session_bus_address": dbus_address, "xsend_event": x11_ok, "wayland_virtual_keyboard": crate::wayland::keyboard_input_available() }))
+     }
+ }
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/wayland/niri/keyboard.rs b/libs/cua-driver/rust/crates/platform-linux/src/wayland/niri/keyboard.rs
+--- a/libs/cua-driver/rust/crates/platform-linux/src/wayland/niri/keyboard.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/wayland/niri/keyboard.rs
+@@ -371,6 +371,73 @@
+             plan_text(xkb, map, group, text)
+         })?;
+     outcome(sent, total, typed, finished)
++}
++
++/// Use the same Unicode planner and bounded virtual-keyboard writer on an
++/// already connected compositor. The caller owns exact window/element focus;
++/// this entry invokes no niri IPC and checks that focus before each key.
++pub(in crate::wayland) fn type_text_on_connection(
++    connection: Connection,
++    text: &str,
++    replace: bool,
++    mut still_focused: impl FnMut(usize) -> Result<()>,
++) -> Result<()> {
++    let text = super::super::text_keys::typable_text(text)?;
++    if text.is_empty() && !replace {
++        return Ok(());
++    }
++    let keys = if replace {
++        text.chars().count().max(1) + 1
++    } else {
++        text.chars().count()
++    };
++    let deadline = session_deadline(
++        Instant::now(),
++        keys,
++        crate::input::action::current().map(|action| action.deadline()),
++    );
++    still_focused(0)?;
++    let mut keyboard = Keyboard::bind_connection(connection, deadline)?;
++    let mut sent = Sent::default();
++    let mut total = 0;
++    let typed = (|| {
++        let parts = if replace {
++            plan_replacement_text(xkb1()?, &keyboard.base.text, 0, &text)?
++        } else {
++            plan_text(xkb1()?, &keyboard.base.text, 0, &text)?
++        };
++        total = parts.iter().map(|part| part.keys.len()).sum();
++        type_parts(&mut keyboard, &parts, 0, deadline, &mut sent, still_focused)
++    })();
++    let finished = keyboard.finish(0);
++    outcome(sent, total, typed, finished)
++}
++
++/// Plan the whole replacement before selection is emitted, using the same
++/// keymap and Unicode planner as typing. Empty text clears the selection.
++fn plan_replacement_text(xkb: &Xkb1, map: &str, group: u32, text: &str) -> Result<Vec<Part>> {
++    let mut parts = plan_text(xkb, map, group, text)?;
++    if text.is_empty() {
++        return Ok(vec![Part {
++            keys: vec![
++                plan_key(xkb, map, group, &["ctrl".into()], "a")?,
++                plan_key(xkb, map, group, &[], "BackSpace")?,
++            ],
++            extended: None,
++        }]);
++    }
++    let first = parts.first_mut().context("nonempty text has no key plan")?;
++    // Selection must be the first key under the text's keymap, just as the
++    // first character is for type_text. Do not send a base-map key first.
++    let select_all = plan_key(
++        xkb,
++        first.extended.as_deref().unwrap_or(map),
++        group,
++        &["ctrl".into()],
++        "a",
++    )?;
++    first.keys.insert(0, select_all);
++    Ok(parts)
+ }
+ 
+ /// Press the key `name` (an X keysym name) with `modifiers` (`ctrl`,
+@@ -600,6 +667,11 @@
+         let socket = super::attested_wayland_socket()?;
+         let connection =
+             Connection::from_socket(socket).context("connect to niri's Wayland display")?;
++        Self::bind_connection(connection, deadline)
++    }
++
++    fn bind_connection(connection: Connection, deadline: Instant) -> Result<Self> {
++        crate::input::action::fence(connection.backend().poll_fd())?;
+         let mut queue = connection.new_event_queue::<State>();
+         let handle = queue.handle();
+         connection.display().get_registry(&handle, ());
+@@ -822,6 +894,121 @@
+             .iter()
+             .flat_map(|part| part.keys.iter().map(|key| key.code))
+             .collect()
++    }
++
++    #[test]
++    fn foreground_text_plan_preserves_ascii_cjk_and_unicode() {
++        let input = "Styx 中文 é € 😀";
++        let parts = plan_text(xkb1().unwrap(), US_DE, 0, input).unwrap();
++        let mut output = String::new();
++        for part in &parts {
++            let map = compile(part.extended.as_deref().unwrap_or(US_DE)).unwrap();
++            let mut state = xkb::State::new(&map);
++            for key in &part.keys {
++                state.update_mask(key.modifiers, 0, 0, 0, 0, key.group);
++                output.push_str(&state.key_get_utf8(xkb::Keycode::new(key.code + 8)));
++                assert!(chromium_receives(key.code));
++            }
++        }
++        assert_eq!(output, input);
++    }
++
++    #[test]
++    fn replacement_text_plan_selects_all_then_types_ascii_cjk_and_newlines() {
++        for input in ["replacement", "中文替换", "Styx 中文\nline 2"] {
++            let parts = plan_replacement_text(xkb1().unwrap(), US_DE, 0, input).unwrap();
++            let mut output = String::new();
++            let mut index = 0;
++            for part in &parts {
++                let map = compile(part.extended.as_deref().unwrap_or(US_DE)).unwrap();
++                let control = 1 << map.mod_get_index("Control");
++                let mut state = xkb::State::new(&map);
++                for key in &part.keys {
++                    state.update_mask(key.modifiers, 0, 0, 0, 0, key.group);
++                    let code = xkb::Keycode::new(key.code + 8);
++                    if index == 0 {
++                        assert_eq!(state.key_get_one_sym(code), xkb::Keysym::a);
++                        assert_ne!(key.modifiers & control, 0);
++                    } else {
++                        assert_eq!(key.modifiers & control, 0);
++                        output.push_str(&state.key_get_utf8(code).replace('\r', "\n"));
++                    }
++                    index += 1;
++                }
++            }
++            assert_eq!(output, input);
++            assert_eq!(index, input.chars().count() + 1);
++        }
++    }
++
++    #[test]
++    fn replacement_text_uploads_unicode_keymap_before_selection() {
++        let text = "Styx 原生替换\n第二行";
++        let parts = plan_replacement_text(xkb1().unwrap(), US_DE, 0, text).unwrap();
++        assert!(
++            parts[0].extended.is_some(),
++            "the first key needs the text keymap"
++        );
++        let mut recorder = Recorder::default();
++        let mut sent = Sent::default();
++        type_parts(&mut recorder, &parts, 0, later(), &mut sent, |_| Ok(())).unwrap();
++        assert_eq!(recorder.events[0], "keymap", "upload before the first key");
++        assert_eq!(recorder.events[1], parts[0].keys[0].code.to_string());
++        assert_eq!(sent.done, text.chars().count() + 1);
++    }
++
++    #[test]
++    fn replacement_text_empty_clears_and_invalid_text_has_no_plan() {
++        let parts = plan_replacement_text(xkb1().unwrap(), US_DE, 0, "").unwrap();
++        let keys: Vec<Key> = parts
++            .iter()
++            .flat_map(|part| part.keys.iter().copied())
++            .collect();
++        assert_eq!(keys.len(), 2);
++        let map = compile(US_DE).unwrap();
++        let mut state = xkb::State::new(&map);
++        state.update_mask(keys[1].modifiers, 0, 0, 0, 0, keys[1].group);
++        assert_eq!(
++            state.key_get_one_sym(xkb::Keycode::new(keys[1].code + 8)),
++            xkb::Keysym::BackSpace
++        );
++        assert!(plan_replacement_text(xkb1().unwrap(), US_DE, 0, "ok\u{7}").is_err());
++    }
++
++    #[test]
++    fn foreground_text_cancellation_between_focus_and_send_stops_without_replay() {
++        #[derive(Default)]
++        struct AdmittedRecorder(Vec<u32>);
++        impl Strokes for AdmittedRecorder {
++            fn upload(&mut self, _: &str) -> Result<()> {
++                Ok(())
++            }
++            fn stroke(&mut self, key: Key, _: u32, _: Instant) -> Result<()> {
++                crate::input::action::admit(|| self.0.push(key.code))
++            }
++        }
++        for replace in [false, true] {
++            let action = crate::input::action::Action::new(Duration::from_secs(60));
++            let _bound = crate::input::action::bind(action.clone());
++            let parts = if replace {
++                plan_replacement_text(xkb1().unwrap(), US_DE, 0, "abc").unwrap()
++            } else {
++                plan_text(xkb1().unwrap(), US_DE, 0, "abc").unwrap()
++            };
++            let total = parts.iter().map(|part| part.keys.len()).sum();
++            let mut writer = AdmittedRecorder::default();
++            let mut sent = Sent::default();
++            let result = type_parts(&mut writer, &parts, 0, later(), &mut sent, |done| {
++                if done == 1 {
++                    action.abandon();
++                }
++                Ok(())
++            });
++            assert!(result.is_err());
++            assert_eq!(writer.0, vec![30]);
++            assert_eq!(sent.done, 1);
++            assert!(outcome(sent, total, result, Ok(())).is_err());
++        }
+     }
+ 
+     #[test]
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/atspi/mod.rs b/libs/cua-driver/rust/crates/platform-linux/src/atspi/mod.rs
+--- a/libs/cua-driver/rust/crates/platform-linux/src/atspi/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/atspi/mod.rs
+@@ -730,7 +730,10 @@
+                 Err(error) if native::is_no_value_route(&error) => {
+                     Ok(select_option(object, value).unwrap_or(Err(error)))
+                 }
+-                done => done.map(Ok),
++                // Only a gone cached object is known to precede the write.
++                // Other errors include lost setter replies and bounded timeouts.
++                Err(error) if error.is::<native::CachedElementGone>() => Err(error),
++                done => Ok(done),
+             },
+             |idx| Ok(native::set_value(pid, idx, value)),
+         )
+diff --git a/libs/cua-driver/rust/crates/platform-linux/tests/set_value_outcome.rs b/libs/cua-driver/rust/crates/platform-linux/tests/set_value_outcome.rs
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-linux/tests/set_value_outcome.rs
+@@ -0,0 +1,273 @@
++//! Normal set_value replies and retries against fault-controlled private AT-SPI.
++#![cfg(target_os = "linux")]
++use platform_linux::atspi::{
++    native::ObjectRef, set_value_token, snapshot::CachedElement, AtspiIdentity, TokenElement,
++};
++use std::io::BufRead;
++use std::process::{Child, Command, Stdio};
++use std::sync::{Arc, Mutex};
++
++const SERVICE: &str = "org.cua.SetValueFixture";
++const OBJECT: &str = "/org/a11y/atspi/accessible/entry";
++#[derive(Clone, Default)]
++struct Counts {
++    setters: usize,
++    effects: usize,
++    inserts: usize,
++    activates: usize,
++    values: usize,
++    resolutions: usize,
++}
++struct Bus {
++    child: Child,
++    _directory: tempfile::TempDir,
++}
++impl Drop for Bus {
++    fn drop(&mut self) {
++        let _ = self.child.kill();
++        let _ = self.child.wait();
++    }
++}
++struct A11yBus(String);
++#[zbus::interface(name = "org.a11y.Bus")]
++impl A11yBus {
++    fn get_address(&self) -> String {
++        self.0.clone()
++    }
++}
++struct Accessible;
++#[zbus::interface(name = "org.a11y.atspi.Accessible")]
++impl Accessible {
++    fn get_role_name(&self) -> String {
++        "text".into()
++    }
++    fn get_interfaces(&self) -> Vec<String> {
++        ["Accessible", "EditableText", "Text", "Action", "Value"]
++            .into_iter()
++            .map(|name| format!("org.a11y.atspi.{name}"))
++            .collect()
++    }
++}
++struct Registry(Arc<Mutex<Counts>>);
++#[zbus::interface(name = "org.a11y.atspi.Accessible")]
++impl Registry {
++    fn get_children(&self) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
++        self.0.lock().unwrap().resolutions += 1;
++        Vec::new()
++    }
++}
++struct Editable(Arc<Mutex<Counts>>);
++#[zbus::interface(name = "org.a11y.atspi.EditableText")]
++impl Editable {
++    async fn set_text_contents(&self, text: &str) -> zbus::fdo::Result<bool> {
++        {
++            let mut count = self.0.lock().unwrap();
++            count.setters += 1;
++            if !matches!(text, "explicit-false" | "insert-error-after-effect") {
++                count.effects += 1;
++            }
++        }
++        match text {
++            "explicit-false" | "insert-error-after-effect" => Ok(false),
++            "error-after-effect" => Err(zbus::fdo::Error::Failed(
++                "fixture applied before its error".into(),
++            )),
++            "timeout-after-effect" => {
++                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
++                Ok(true)
++            }
++            _ => Ok(true),
++        }
++    }
++    fn insert_text(&self, _position: i32, text: &str, _length: i32) -> zbus::fdo::Result<bool> {
++        let mut counts = self.0.lock().unwrap();
++        counts.inserts += 1;
++        counts.effects += 1;
++        if text == "insert-error-after-effect" {
++            Err(zbus::fdo::Error::Failed(
++                "fixture insert applied before its error".into(),
++            ))
++        } else {
++            Ok(true)
++        }
++    }
++}
++struct Text;
++#[zbus::interface(name = "org.a11y.atspi.Text")]
++impl Text {
++    #[zbus(property)]
++    fn caret_offset(&self) -> i32 {
++        0
++    }
++}
++struct Action(Arc<Mutex<Counts>>);
++#[zbus::interface(name = "org.a11y.atspi.Action")]
++impl Action {
++    #[zbus(property, name = "NActions")]
++    fn n_actions(&self) -> i32 {
++        1
++    }
++    fn get_name(&self, _index: i32) -> String {
++        "activate".into()
++    }
++    fn do_action(&self, _index: i32) -> bool {
++        self.0.lock().unwrap().activates += 1;
++        true
++    }
++}
++struct NumericValue(Arc<Mutex<Counts>>);
++#[zbus::interface(name = "org.a11y.atspi.Value")]
++impl NumericValue {
++    #[zbus(property)]
++    fn current_value(&self) -> f64 {
++        0.0
++    }
++    #[zbus(property)]
++    fn set_current_value(&self, _value: f64) {
++        self.0.lock().unwrap().values += 1;
++    }
++}
++
++#[test]
++fn normal_set_value_preserves_false_fallback_but_does_not_retry_errors() {
++    let directory = tempfile::tempdir().unwrap();
++    let config = directory.path().join("bus.conf");
++    std::fs::write(&config,format!("<busconfig><type>session</type><listen>unix:dir={}</listen><auth>EXTERNAL</auth><policy context=\"default\"><allow send_destination=\"*\" eavesdrop=\"true\"/><allow eavesdrop=\"true\"/><allow own=\"*\"/></policy></busconfig>",directory.path().display())).unwrap();
++    let child = Command::new("dbus-daemon")
++        .arg(format!("--config-file={}", config.display()))
++        .args(["--nofork", "--print-address=1"])
++        .stdout(Stdio::piped())
++        .spawn()
++        .expect("private dbus-daemon required");
++    let mut bus = Bus {
++        child,
++        _directory: directory,
++    };
++    let mut address = String::new();
++    std::io::BufReader::new(bus.child.stdout.take().unwrap())
++        .read_line(&mut address)
++        .unwrap();
++    let address = address.trim().to_owned();
++    assert!(!address.is_empty());
++    std::env::set_var("DBUS_SESSION_BUS_ADDRESS", &address);
++    let runtime = tokio::runtime::Builder::new_multi_thread()
++        .worker_threads(2)
++        .enable_all()
++        .build()
++        .unwrap();
++    let counts = Arc::new(Mutex::new(Counts::default()));
++    let _service = runtime.block_on(async {
++        zbus::connection::Builder::address(address.as_str())
++            .unwrap()
++            .name(SERVICE)
++            .unwrap()
++            .name("org.a11y.Bus")
++            .unwrap()
++            .name("org.a11y.atspi.Registry")
++            .unwrap()
++            .serve_at("/org/a11y/atspi/accessible/root", Registry(counts.clone()))
++            .unwrap()
++            .serve_at("/org/a11y/bus", A11yBus(address.clone()))
++            .unwrap()
++            .serve_at(OBJECT, Accessible)
++            .unwrap()
++            .serve_at(OBJECT, Editable(counts.clone()))
++            .unwrap()
++            .serve_at(OBJECT, Text)
++            .unwrap()
++            .serve_at(OBJECT, Action(counts.clone()))
++            .unwrap()
++            .serve_at(OBJECT, NumericValue(counts.clone()))
++            .unwrap()
++            .build()
++            .await
++            .unwrap()
++    });
++    let object = ObjectRef {
++        bus: SERVICE.into(),
++        path: OBJECT.into(),
++    };
++    let mut token = TokenElement {
++        index: 0,
++        observed: CachedElement {
++            key: 1,
++            identity: AtspiIdentity {
++                bus_name: SERVICE.into(),
++                path: OBJECT.into(),
++                frame_bus_name: SERVICE.into(),
++                frame_path: OBJECT.into(),
++            },
++            object_ref: Some(object),
++            role: "text".into(),
++            disabled: false,
++            in_web_content: false,
++            bounds: None,
++        },
++        may_reresolve: true,
++    };
++    for (text, success, inserts) in [
++        ("acknowledged", true, 0),
++        ("explicit-false", true, 1),
++        ("error-after-effect", false, 0),
++        ("insert-error-after-effect", false, 1),
++        ("timeout-after-effect", false, 0),
++    ] {
++        let before = counts.lock().unwrap().clone();
++        let result = set_value_token(424242, &token, text);
++        assert_eq!(result.is_ok(), success, "{text}: {result:?}");
++        if !success {
++            let error = result.unwrap_err();
++            assert!(
++                !platform_linux::atspi::native::is_no_value_route(&error),
++                "{text}: {error:#}"
++            );
++            assert!(
++                error
++                    .to_string()
++                    .contains(if text == "timeout-after-effect" {
++                        "timed out"
++                    } else {
++                        "fixture"
++                    }),
++                "original setter error is preserved: {text}: {error:#}"
++            );
++        }
++        let observed = counts.lock().unwrap();
++        assert_eq!(
++            observed.setters,
++            before.setters + 1,
++            "one setter for {text}"
++        );
++        assert_eq!(
++            observed.effects,
++            before.effects + 1,
++            "one application effect for {text}"
++        );
++        assert_eq!(
++            observed.inserts,
++            before.inserts + inserts,
++            "ordinary false fallback for {text}"
++        );
++        assert_eq!(
++            observed.activates,
++            before.activates + usize::from(success),
++            "normal successful commit for {text}"
++        );
++        assert_eq!(
++            observed.values, before.values,
++            "no numeric fallback for {text}"
++        );
++        assert_eq!(
++            observed.resolutions, before.resolutions,
++            "no ordinal retry for {text}"
++        );
++    }
++    // A missing object precedes any write and retains the ordinary index lookup.
++    token.observed.object_ref = None;
++    let before = counts.lock().unwrap().clone();
++    assert!(set_value_token(424242, &token, "missing-object").is_err());
++    let observed = counts.lock().unwrap();
++    assert!(observed.resolutions > before.resolutions);
++    assert_eq!(observed.setters, before.setters);
++    assert_eq!(observed.effects, before.effects);
++}
+
+
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/tools/press_key.rs b/libs/cua-driver/rust/crates/platform-linux/src/tools/press_key.rs
+--- a/libs/cua-driver/rust/crates/platform-linux/src/tools/press_key.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/tools/press_key.rs
+@@ -273,6 +273,51 @@
+             if xid_opt.is_none() {
+                 return foreground_hyprland_refusal("an exact window_id is required");
+             }
++            if !crate::wayland::hyprland_input::enabled() {
++                if !crate::wayland::keyboard_input_available() {
++                    return ToolResult::error("native Wayland virtual keyboard is unavailable")
++                        .with_structured(json!({"code":"keyboard_unavailable","effect":"none"}));
++                }
++                let object = token.as_ref().and_then(|t| t.object().ok().cloned());
++                let key_owned = key.clone();
++                let mods_owned = mods.clone();
++                let result = spawn_blocking_bounded(
++                    "foreground key",
++                    foreground_budget(1),
++                    move || {
++                        crate::wayland::hyprland::activate_exact(xid, pid)?;
++                        if let Some(obj) = object.as_ref() {
++                            let _ = crate::atspi::native::focus_element_ref(obj)?;
++                        }
++                        if !crate::wayland::hyprland::target_is_active(xid, Some(pid))? {
++                            anyhow::bail!("target lost compositor focus before key press");
++                        }
++                        crate::wayland::press_key_focused_once(&mods_owned, &key_owned)
++                    },
++                )
++                .await;
++                return match result {
++                    Ok(Ok(())) => {
++                        super::impl_::hyprland_input_result(Ok(json!({"ok": true})), true)
++                    }
++                    Ok(Err(error)) => {
++                        let detail: String = format!("{error:#}").chars().take(512).collect();
++                        ToolResult::error(format!(
++                            "foreground keyboard key outcome is unconfirmed: {detail}"
++                        ))
++                        .with_structured(json!({
++                            "code": "foreground_input_unknown",
++                            "effect": "unknown",
++                            "detail": detail,
++                        }))
++                    }
++                    Err(error) => ToolResult::error(format!("foreground key task: {error}"))
++                        .with_structured(json!({
++                            "code": "foreground_input_unknown",
++                            "effect": "unknown",
++                        })),
++                };
++            }
+             let action = match foreground_hyprland_key(key, mods) {
+                 Ok(action) => action,
+                 Err(error) => return error,

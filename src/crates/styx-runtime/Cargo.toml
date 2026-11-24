@@ -1,0 +1,77 @@
+[package]
+name = "styx-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+styx-contracts.workspace = true
+styx-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+spake2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+libc.workspace = true
+if-addrs.workspace = true
+getrandom.workspace = true
+tokio.workspace = true
+
+aws-lc-rs.workspace = true
+ed25519-dalek.workspace = true
+base64.workspace = true
+png.workspace = true
+hex.workspace = true
+zeroize.workspace = true
+
+url.workspace = true
+nix.workspace = true
+uuid.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+
+encoding_rs.workspace = true
+regex.workspace = true
+jsonschema.workspace = true
+
+rmcp = { workspace = true, features = ["transport-streamable-http-client-reqwest"] }
+http.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+tower.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+rcgen.workspace = true
+x509-parser.workspace = true
+time.workspace = true
+webpki.workspace = true
+tokio-tungstenite.workspace = true
+
+reqwest = { workspace = true, features = ["rustls"] }
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus.workspace = true
+rustix.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework.workspace = true
+security-framework-sys.workspace = true
+core-foundation.workspace = true
+core-foundation-sys.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "=0.58.0", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_Wmi", "Win32_System_TaskScheduler", "Win32_System_Time", "Win32_UI_Shell", "Win32_Storage_FileSystem"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_SystemServices", "Win32_System_SystemInformation", "Win32_UI_Shell", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_System_StationsAndDesktops", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

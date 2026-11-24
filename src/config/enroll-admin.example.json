@@ -1,0 +1,5 @@
+{
+  "gateway_url": "https://gateway.private.example:8795",
+  "gateway_ca_file": "/private/trusted-gateway-ca.pem",
+  "admin_token_file": "/private/styx-owner-approval.token"
+}

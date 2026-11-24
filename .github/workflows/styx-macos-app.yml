@@ -1,0 +1,45 @@
+name: Styx macOS app compile
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', '.github/workflows/styx-macos-app.yml']
+  pull_request:
+    paths: ['src/**', '.github/workflows/styx-macos-app.yml']
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  compile:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked Styx dependencies
+        run: npm --prefix src ci --ignore-scripts --no-audit --no-fund
+      - name: Packaging contracts
+        run: node --test src/host/test/macos-app.test.mjs
+      - name: Compile production sources as a native testing owner
+        run: |
+          node src/host/macos/ci-native-build.mjs "$RUNNER_TEMP/styx-native-ci"
+          echo "STYX_NATIVE_TEST_BINARY=$RUNNER_TEMP/styx-native-ci/Styx.app/Contents/MacOS/Styx" >> "$GITHUB_ENV"
+      - name: Native ownership and product protocol self-test
+        run: |
+          "$STYX_NATIVE_TEST_BINARY" --self-test
+          "$STYX_NATIVE_TEST_BINARY" --native-model-self-test
+      - name: Native client and isolated Core observation fixtures
+        run: node --test --test-concurrency=1 src/host/macos/test/*.test.mjs
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Provision checksum-pinned Cua in scratch
+        run: python src/host/prepare-cua.py --output "$RUNNER_TEMP/styx-liveness-cua"
+      - name: Verify actual Cua exits when its native owner is killed
+        run: python src/host/macos/liveness-acceptance.py "$STYX_NATIVE_TEST_BINARY" "$RUNNER_TEMP/styx-liveness-cua/cua-driver"
+      - name: Record boundaries
+        run: echo 'Synthetic native window/Core fixtures and the Cua owner lifetime are checked. Developer ID signing, notarization, LaunchServices responsibility, TCC, real desktop automation, full app crash recovery, and upgrade permission persistence NOT RUN.' >> "$GITHUB_STEP_SUMMARY"

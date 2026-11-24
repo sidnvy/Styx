@@ -1,0 +1,354 @@
+//! Private Host wire DTOs; parsing these values alone grants no authority.
+pub(crate) const PAIRING_REVOKED_CLOSE_CODE: u16 = 4001;
+pub(crate) const PAIRING_REVOKED_CLOSE_REASON: &str = "styx_pairing_revoked";
+use serde::{Deserialize, Serialize};
+use styx_contracts::{
+    error::{ErrorCategory, ExecutionCertainty},
+    identity::*,
+    operation::*,
+};
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Request {
+    pub request_id: RequestId,
+    #[serde(default)]
+    pub connection_generation: Option<ConnectionGeneration>,
+    pub call: Call,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Call {
+    Android {
+        owner: OwnerRef,
+        grant_revision: u64,
+        command: AndroidCommand,
+    },
+    BrowserSession {
+        owner: OwnerRef,
+        grant_revision: u64,
+        command: BrowserSessionCommand,
+    },
+    ExecTask {
+        owner: OwnerRef,
+        grant_revision: u64,
+        command: ExecTaskCommand,
+    },
+    GetCapabilities,
+    SetCapabilities {
+        patch: crate::host::settings::CapabilityPatch,
+    },
+    Negotiate {
+        version: u16,
+        challenge: String,
+        gateway_namespace: GatewayId,
+        gateway_epoch: GatewayEpoch,
+    },
+    PrepareStart {
+        owner: OwnerRef,
+        grant_revision: u64,
+        timeout_ms: u32,
+        spec: Box<serde_json::value::RawValue>,
+    },
+    DispatchStart {
+        owner: OwnerRef,
+        target: ResourceTarget,
+    },
+    InspectStart {
+        owner: OwnerRef,
+        target: ResourceTarget,
+    },
+    Read {
+        owner: OwnerRef,
+        target: ResourceTarget,
+        grant_revision: u64,
+        timeout_ms: u32,
+        max_bytes: u32,
+        wait_ms: u32,
+    },
+    PrepareAction {
+        owner: OwnerRef,
+        target: ResourceTarget,
+        grant_revision: u64,
+        timeout_ms: u32,
+        action: Box<serde_json::value::RawValue>,
+    },
+    DispatchAction {
+        owner: OwnerRef,
+        action: ActionRef,
+    },
+    InspectAction {
+        owner: OwnerRef,
+        action: ActionRef,
+    },
+    DesktopSession {
+        owner: OwnerRef,
+        grant_revision: u64,
+        #[serde(default)]
+        timeout_ms: Option<u32>,
+        action: Box<serde_json::value::RawValue>,
+    },
+    /// Same authenticated connection only; the Host first advertises support.
+    EnableTransportDrain,
+    /// Result of the one original transport drain, not a native-exit proof.
+    TransportDrainResult {
+        drain_id: RequestId,
+        host_generation: HostGeneration,
+        complete: bool,
+    },
+    OwnerOpen {
+        owner: OwnerRef,
+        grant_revision: u64,
+    },
+    OwnerRevoke {
+        owner: OwnerRef,
+    },
+    OwnerCleanup {
+        owner: OwnerRef,
+        timeout_ms: u32,
+    },
+    // Direct native mutations have no authority; use Host prepare+dispatch.
+    Write {},
+    Terminate {},
+}
+pub const HOST_BROWSER_SESSIONS_V1: &str = "host_browser_sessions_v1";
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum BrowserSessionCommand {
+    List,
+    TakeOver {
+        session_id: String,
+    },
+    Action {
+        session_id: Option<String>,
+        name: String,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    },
+}
+pub const HOST_EXEC_TASKS_V1: &str = "host_exec_tasks_v1";
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecTaskCommand {
+    Run {
+        spec: Box<serde_json::value::RawValue>,
+        max_output_tokens: usize,
+        yield_time_ms: u32,
+    },
+    Poll {
+        session_id: u64,
+        chars: String,
+        max_output_tokens: usize,
+        yield_time_ms: u32,
+    },
+    List,
+    Stop {
+        session_id: u64,
+    },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecTaskResult {
+    pub value: serde_json::Value,
+    pub is_error: bool,
+}
+pub const COMPUTER_V3: &str = "computer_v3";
+pub const TRANSPORT_DRAIN_V1: &str = "transport_drain_v1";
+/// Private negotiated total stop budget, not a business-operation deadline.
+pub(crate) const TRANSPORT_DRAIN_TIMEOUT_MS: u32 = 15_000;
+
+/// Host-initiated request on the original authenticated socket. Identity and
+/// authority come from the retained Entry, never these untrusted wire fields.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HostControl {
+    TransportDrainV1 {
+        drain_id: RequestId,
+        connection_generation: ConnectionGeneration,
+        host_generation: HostGeneration,
+        timeout_ms: u32,
+    },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportDrainOutcome {
+    Complete,
+    Unknown,
+    Unsupported,
+}
+/// Existing wait_for permits thirty seconds. Keep an explicit bounded margin
+/// for provider settlement; ordinary operations and owner cleanup are unchanged.
+#[cfg(not(target_os = "android"))]
+pub(crate) const BROWSER_WAIT_PREPARE_TIMEOUT_MS: u32 = 35_000;
+impl Call {
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn response_budget(&self) -> Option<std::time::Duration> {
+        if self.is_computer() {
+            return None;
+        }
+        Some(match self {
+            Self::BrowserSession { .. } => std::time::Duration::from_secs(85),
+            Self::SetCapabilities { .. } => std::time::Duration::from_secs(75),
+            _ => std::time::Duration::from_secs(35),
+        })
+    }
+    pub(crate) fn is_android(&self) -> bool {
+        matches!(self, Self::Android { .. })
+    }
+    pub(crate) fn is_browser(&self) -> bool {
+        matches!(self, Self::BrowserSession { .. })
+    }
+    pub(crate) fn is_computer(&self) -> bool {
+        matches!(self, Self::DesktopSession { .. })
+    }
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerRef {
+    pub owner_id: OwnerId,
+    pub owner_epoch: OwnerEpoch,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionRef {
+    pub operation_id: OperationId,
+    pub payload_digest: Sha256Digest,
+}
+#[derive(Serialize, Deserialize)]
+pub struct Snapshot {
+    pub operation_id: OperationId,
+    pub payload_digest: Sha256Digest,
+    pub target: Option<ResourceTarget>,
+    pub state: OperationState,
+    pub liveness: ExecutionLiveness,
+    pub output_drain: OutputDrain,
+}
+#[derive(Serialize, Deserialize)]
+pub struct Chunk {
+    pub stream: String,
+    pub text: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum Reply {
+    Android {
+        result: serde_json::Value,
+    },
+    BrowserSession {
+        result: rmcp::model::CallToolResult,
+    },
+    DesktopSession {
+        result: rmcp::model::CallToolResult,
+    },
+    ExecTask {
+        result: ExecTaskResult,
+    },
+    Capabilities {
+        report: crate::host::settings::SettingsReport,
+    },
+    Negotiated {
+        version: u16,
+        challenge: String,
+        device_id: DeviceId,
+        host_generation: HostGeneration,
+        connection_generation: ConnectionGeneration,
+        features: Vec<String>,
+        write: bool,
+        terminate: bool,
+        read_resume: bool,
+        owner_issuance: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant_revision: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_version: Option<String>,
+    },
+    TransportDrainEnabled,
+    TransportDrainResultAccepted {
+        drain_id: RequestId,
+    },
+    OwnerOpened {
+        owner: OwnerRef,
+        grant_revision: u64,
+    },
+    OwnerRevoked {
+        owner: OwnerRef,
+        fenced: bool,
+        cleanup: String,
+    },
+    OwnerCleanup {
+        owner: OwnerRef,
+        complete: bool,
+    },
+    Prepared {
+        snapshot: Snapshot,
+    },
+    Start {
+        snapshot: Snapshot,
+        dispatch: String,
+    },
+    Inspected {
+        snapshot: Snapshot,
+    },
+    Read {
+        chunks: Vec<Chunk>,
+        liveness: ExecutionLiveness,
+        output_drain: OutputDrain,
+        exit_code: Option<i32>,
+        read_resume: bool,
+    },
+    Action {
+        snapshot: Snapshot,
+        dispatch: String,
+        acknowledgment: Option<ActionAcknowledgmentDto>,
+        write_id: Option<String>,
+    },
+    Unsupported {
+        feature: String,
+    },
+    Error {
+        category: ErrorCategory,
+        certainty: ExecutionCertainty,
+        cursor_may_be_consumed: bool,
+    },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ActionAcknowledgmentDto {
+    WriteAccepted,
+    // Request acknowledgment, never process-exit proof.
+    TerminateRequested { was_running: bool },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Response {
+    pub request_id: RequestId,
+    pub connection_generation: ConnectionGeneration,
+    pub reply: Reply,
+}
+
+/// Android calls use the same authenticated Host connection and operation owner.
+pub const ANDROID_V1: &str = "android_v1";
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AndroidCommand {
+    pub name: String,
+    pub arguments: serde_json::Map<String, serde_json::Value>,
+}
+impl AndroidCommand {
+    pub fn capability(&self) -> Result<styx_contracts::capability::CapabilityId, ErrorCategory> {
+        use styx_contracts::capability::CapabilityId;
+        match self.name.as_str() {
+            "android_list_displays" => Ok(CapabilityId::AndroidObserve),
+            "android_observe" => Ok(CapabilityId::AndroidObserve),
+            "android_act" => Ok(CapabilityId::AndroidAct),
+            "android_run_steps" => Ok(CapabilityId::AndroidRunSteps),
+            _ => Err(ErrorCategory::CapabilityUnsupported),
+        }
+    }
+    pub fn validate(&self) -> Result<(), ErrorCategory> {
+        self.capability()?;
+        if self.arguments.keys().any(|key| key.starts_with("__")) {
+            return Err(ErrorCategory::InvalidRequest);
+        }
+        Ok(())
+    }
+}

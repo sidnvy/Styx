@@ -1,0 +1,657 @@
+//! Owned Hyper upgrades. Registry routes; Core lease and owner gates authorize.
+use super::relay::{Command, Entry, RelayError, RelayHandle, cleanup_control};
+use crate::host::protocol::wire::{
+    ANDROID_V1, COMPUTER_V3, Call, HOST_BROWSER_SESSIONS_V1, HostControl, Reply,
+    Request as WireRequest, Response as WireResponse, TRANSPORT_DRAIN_V1,
+};
+use bytes::Bytes;
+use futures_util::{Sink, SinkExt, StreamExt};
+use http::{Method, Request, Response};
+use http_body::Body;
+use http_body_util::Full;
+use std::{
+    collections::BTreeMap,
+    io::Write,
+    pin::Pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+use styx_contracts::identity::*;
+use styx_core::enrollment::{ConnectionLease, Lane};
+use tokio::sync::mpsc;
+use tokio_tungstenite::{
+    WebSocketStream,
+    tungstenite::{
+        Message,
+        protocol::{CloseFrame, Role, WebSocketConfig, frame::coding::CloseCode},
+    },
+};
+use tokio_util::sync::CancellationToken;
+// Frame, write-buffer, command-queue and in-flight limits remain per link.
+const FRAME: usize = styx_contracts::DESKTOP_BROWSER_FRAME_BYTES + 64 * 1024;
+// A blackholed idle socket must not retain a computer slot indefinitely.
+// Only a received Pong resets this clock; business traffic cannot hide a loss.
+struct Heartbeat {
+    deadline: tokio::time::Instant,
+    awaiting_pong: bool,
+}
+impl Heartbeat {
+    fn new(now: tokio::time::Instant) -> Self {
+        Self {
+            deadline: now + Duration::from_secs(10),
+            awaiting_pong: false,
+        }
+    }
+    fn tick(&mut self, now: tokio::time::Instant) -> Result<bool, RelayError> {
+        if now < self.deadline {
+            return Ok(false);
+        }
+        if self.awaiting_pong {
+            return Err(RelayError::Offline);
+        }
+        self.awaiting_pong = true;
+        self.deadline = now + Duration::from_secs(5);
+        Ok(true)
+    }
+    fn pong(&mut self, now: tokio::time::Instant) {
+        self.awaiting_pong = false;
+        self.deadline = now + Duration::from_secs(10);
+    }
+}
+pub(crate) fn device_path(path: &str) -> Option<DeviceId> {
+    let s = path.strip_prefix("/styx/host/v3/")?.strip_suffix("/exec")?;
+    if !s.starts_with("styx-")
+        || s.len() != 29
+        || !s[5..]
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
+    }
+    s.to_owned().try_into().ok()
+}
+fn reject(status: u16) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(status)
+        .header("connection", "close")
+        .header("cache-control", "no-store")
+        .body(Full::new(Bytes::new()))
+        .expect("static response")
+}
+
+struct LiveFence(Arc<Entry>);
+impl Drop for LiveFence {
+    fn drop(&mut self) {
+        self.0.live.store(false, Ordering::Release);
+        self.0.stop.cancel();
+    }
+}
+struct Pending {
+    result: tokio::sync::oneshot::Sender<Result<Reply, RelayError>>,
+    gate: Option<Arc<Mutex<bool>>>,
+    control: bool,
+    drain_fenced: bool,
+    lane: Lane,
+    deadline: Option<tokio::time::Instant>,
+}
+impl RelayHandle {
+    pub(crate) async fn upgrade(
+        &self,
+        mut req: Request<hyper::body::Incoming>,
+    ) -> Response<Full<Bytes>> {
+        let Some(device) = device_path(req.uri().path()) else {
+            return reject(404);
+        };
+        if req.method() != Method::GET
+            || req.version() != http::Version::HTTP_11
+            || req.uri().query().is_some()
+            || req.uri().scheme().is_some()
+            || req.uri().authority().is_some()
+            || req.headers().contains_key("origin")
+            || req.headers().contains_key("sec-websocket-protocol")
+            || req.headers().contains_key("sec-websocket-extensions")
+            || req.headers().contains_key("transfer-encoding")
+            || req
+                .headers()
+                .get_all("content-length")
+                .iter()
+                .any(|v| v != "0")
+            || !req.body().is_end_stream()
+            || req.body().size_hint().exact() != Some(0)
+        {
+            return reject(400);
+        }
+        let response =
+            match tokio_tungstenite::tungstenite::handshake::server::create_response_with_body(
+                &req,
+                || Full::new(Bytes::new()),
+            ) {
+                Ok(r) => r,
+                Err(_) => return reject(400),
+            };
+        let slot = self.inner.links.admit();
+        let generation: ConnectionGeneration =
+            match format!("paired-{}", uuid::Uuid::new_v4()).try_into() {
+                Ok(g) => g,
+                Err(_) => return reject(503),
+            };
+        let profile = match self.inner.shared.profiles().await {
+            Ok(p) => match p.into_iter().find(|p| p.device_id == device) {
+                Some(p) => p,
+                None => return reject(403),
+            },
+            Err(_) => return reject(503),
+        };
+        let admitted = self
+            .inner
+            .shared
+            .with(|s| {
+                s.profile_is_current(&device, &profile.capability_generation)?;
+                // Each attempt is the same authenticated Core admission. A denied
+                // or occupied Exec lane cannot veto an independently granted lane.
+                // Preserve 409 Conflict (already-connected half-open socket) over
+                // ungranted-lane 403 Proof errors so reconnecting peers back off
+                // cleanly instead of misinterpreting an occupied slot as revocation.
+                let mut preferred_error = None;
+                let mut last_error = None;
+                for lane in [Lane::Exec, Lane::Browser, Lane::Computer] {
+                    let admission = if lane == Lane::Exec {
+                        s.admit_upgrade(req.headers(), &device, generation.clone())
+                    } else {
+                        s.admit_upgrade_for_lane(req.headers(), &device, generation.clone(), lane)
+                    };
+                    match admission {
+                        Ok(lease) => return Ok((lane, lease)),
+                        Err(error) => {
+                            if error.status() == 409
+                                || (error.status() == 503 && preferred_error.is_none())
+                            {
+                                preferred_error = Some(error);
+                            }
+                            last_error = Some(error);
+                        }
+                    }
+                }
+                Err(preferred_error
+                    .or(last_error)
+                    .expect("capability lane admission attempts"))
+            })
+            .await;
+        let (initial_lane, lease) = match admitted {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) if error.status() == 409 => return reject(409),
+            Ok(Err(error)) if error.status() == 503 => return reject(503),
+            Err(_) => return reject(503),
+            Ok(Err(_)) => return reject(403),
+        };
+        let upgrade_headers = req.headers().clone();
+        let upgraded = hyper::upgrade::on(&mut req);
+        let relay = self.clone();
+        let stop = CancellationToken::new();
+        let task_stop = stop.clone();
+        let mut lease = Some(lease);
+        let attached = {
+            if let Ok(mut state) = self.inner.state.lock() {
+                if !state.reap_finished() {
+                    self.inner.shutdown_failed.store(true, Ordering::Release);
+                }
+                if !state.closing {
+                    let lease = lease.take().expect("admitted lease");
+                    let task = tokio::spawn(async move {
+                        let _slot = slot;
+
+                        let mut bootstrap_lease = Some(lease);
+                        let mut lease: Option<ConnectionLease> = None;
+                        let mut browser_lease: Option<ConnectionLease> = None;
+                        let mut computer_lease: Option<ConnectionLease> = None;
+                        let mut entry: Option<Arc<Entry>> = None;
+                        let result=async {
+                            let io=tokio::select! {
+                                _=task_stop.cancelled()=>return Err(RelayError::Offline),
+                                r=tokio::time::timeout(Duration::from_secs(5),upgraded)=>r.map_err(|_|RelayError::Unknown)?.map_err(|_|RelayError::Unknown)?,
+                            };
+                            let config=WebSocketConfig::default().max_message_size(Some(FRAME)).max_frame_size(Some(FRAME)).max_write_buffer_size(FRAME+64*1024);
+                            let socket=WebSocketStream::from_raw_socket(hyper_util::rt::TokioIo::new(io),Role::Server,Some(config)).await;
+                            let(mut sink,mut source)=socket.split();
+                            let challenge=format!("challenge-{}",uuid::Uuid::new_v4());
+                            let request=WireRequest{request_id:request_id()?,connection_generation:None,call:Call::Negotiate{
+                                version:3,challenge:challenge.clone(),gateway_namespace:relay.inner.gateway.clone(),gateway_epoch:relay.inner.epoch.clone()}};
+                            guarded_send(&relay,bootstrap_lease.as_ref().expect("initial admission"),None,None,&mut sink,&request,&task_stop).await?;
+                            let response=tokio::select!{
+                                _=task_stop.cancelled()=>return Err(RelayError::Offline),
+                                r=tokio::time::timeout(Duration::from_secs(5),read_response(&mut source))=>r.map_err(|_|RelayError::Unknown)??,
+                            };
+                            if response.request_id!=request.request_id{return Err(RelayError::Invalid)}
+                            let(host_generation,host_connection,grant_revision,host_version,exec_feature,browser_feature,computer_feature,android_feature,drain_feature,host_settings)=match response.reply {
+                                Reply::Negotiated{version:3,challenge:got,device_id,host_generation,connection_generation,grant_revision:Some(rev),owner_issuance,
+                                    features,write,terminate,read_resume,host_version,..}
+                                    if ["owner_open","owner_revoke","owner_cleanup"].iter().all(|f|features.iter().any(|v|v==f))
+                                        && got==challenge && device_id==device
+                                        && connection_generation==response.connection_generation && owner_issuance=="gateway_authenticated" => {
+                                            let exec=exec_negotiated(&features,write,terminate,read_resume);
+                                            let browser=features.iter().any(|v|v==HOST_BROWSER_SESSIONS_V1);
+                                            let version=host_version.filter(|v| !v.is_empty() && v.len()<=64 && v.bytes().all(|b| (0x21..=0x7e).contains(&b)));
+                                            (host_generation,connection_generation,rev,version,exec,browser,features.iter().any(|v|v==COMPUTER_V3),features.iter().any(|v|v==ANDROID_V1),features.iter().any(|v|v==TRANSPORT_DRAIN_V1),features.iter().any(|v|v==crate::host::settings::FEATURE))
+                                        },
+                                _=>return Err(RelayError::Unauthorized),
+                            };
+                            let drain_enabled = if drain_feature {
+                                let enable = WireRequest { request_id: request_id()?, connection_generation: Some(host_connection.clone()), call: Call::EnableTransportDrain };
+                                guarded_send(&relay,bootstrap_lease.as_ref().expect("initial admission"),None,None,&mut sink,&enable,&task_stop).await?;
+                                let enabled=tokio::time::timeout(Duration::from_secs(5),read_response(&mut source)).await.map_err(|_|RelayError::Unknown)??;
+                                if enabled.request_id != enable.request_id || enabled.connection_generation != host_connection
+                                    || !matches!(enabled.reply,Reply::TransportDrainEnabled) { return Err(RelayError::Invalid); }
+                                true
+                            } else { false };
+                            // A negotiation admission is never business authority.
+                            // Move it once iff its exact lane was negotiated;
+                            // otherwise it stays control-only until actual WS end.
+                            for lane in [Lane::Exec,Lane::Browser,Lane::Computer] {
+                                let negotiated=match lane {Lane::Exec=>exec_feature,Lane::Browser=>browser_feature,Lane::Computer=>computer_feature};
+                                if !negotiated || (host_settings && lane != Lane::Exec) {continue}
+                                let admitted=if lane==initial_lane {
+                                    bootstrap_lease.take()
+                                } else {
+                                    match relay.inner.shared.with(|s| {
+                                        s.profile_is_current(&device,&profile.capability_generation)?;
+                                        s.admit_upgrade_for_lane(&upgrade_headers,&device,generation.clone(),lane)
+                                    }).await {Ok(Ok(value))=>Some(value),_=>None}
+                                };
+                                match lane {Lane::Exec=>lease=admitted,Lane::Browser=>browser_lease=admitted,Lane::Computer=>computer_lease=admitted}
+                            }
+                            drop(upgrade_headers);
+                            let(tx,mut rx)=mpsc::channel::<Command>(3);
+                            let e=Arc::new(Entry{host_settings,device:device.clone(),transport_generation:generation.clone(),host_connection,host_generation,grant_revision,host_version,profile,
+                                tx,stop:task_stop.clone(),live:AtomicBool::new(true),transport_ended:AtomicBool::new(false),admission:Mutex::new(false),drain:Mutex::new(None),drain_enabled,lease:tokio::sync::Mutex::new(lease.take()),
+                                bootstrap_lane:initial_lane,bootstrap_lease:tokio::sync::Mutex::new(bootstrap_lease.take()),exec_feature,browser_feature,computer_feature,android_feature,
+                                browser_lease:tokio::sync::Mutex::new(browser_lease.take()),computer_lease:tokio::sync::Mutex::new(computer_lease.take())});
+                            entry=Some(e.clone());let _fence=LiveFence(e.clone());
+                            {
+                                let mut state=relay.inner.state.lock().map_err(|_|RelayError::Unknown)?;
+                                if state.closing||state.entries.contains_key(&device){return Err(RelayError::Busy)}
+                                state.entries.insert(device.clone(),e.clone());
+                            }
+                            relay.retire_superseded_bindings(&e);
+                            let mut pending:BTreeMap<RequestId,Pending>=BTreeMap::new();
+                            let mut heartbeat = Heartbeat::new(tokio::time::Instant::now());
+                            loop {
+                                let until=pending.values().filter_map(|p|p.deadline).min()
+                                    .unwrap_or(heartbeat.deadline).min(heartbeat.deadline);
+                                tokio::select! {
+                                    _=task_stop.cancelled()=>break,
+                                    _=tokio::time::sleep_until(until)=>{
+                                        let now = tokio::time::Instant::now();
+                                        if pending.values().any(|p| p.deadline.is_some_and(|deadline| deadline <= now)) { return Err(RelayError::Unknown); }
+                                        if heartbeat.tick(now)? {
+                                            if let Err(error) = relay.control_lane(&e).await {
+                                                let revoked = relay.inner.shared.with(|s|s.profile_is_revoked(&e.device,&e.profile.capability_generation)).await;
+                                                if matches!(revoked,Ok(Ok(true))) {
+                                                    let frame = CloseFrame { code:CloseCode::from(crate::host::protocol::wire::PAIRING_REVOKED_CLOSE_CODE), reason:crate::host::protocol::wire::PAIRING_REVOKED_CLOSE_REASON.into() };
+                                                    // Delivery is best effort. Revocation is already durable;
+                                                    // no transport acknowledgment proves remote task exit.
+                                                    let _ = tokio::time::timeout(Duration::from_secs(5),sink.send(Message::Close(Some(frame)))).await;
+                                                }
+                                                return Err(error);
+                                            }
+                                            tokio::time::timeout(Duration::from_secs(5), sink.send(Message::Ping(Bytes::new())))
+                                                .await.map_err(|_| RelayError::Unknown)?.map_err(|_| RelayError::Unknown)?;
+                                        }
+                                    },
+                                    command=rx.recv()=>{
+                                        let Some(command)=command else{break};
+                                        let control=e.host_settings || matches!(command.call,Call::GetCapabilities|Call::SetCapabilities{..}|Call::OwnerOpen{..}|Call::OwnerRevoke{..}|Call::OwnerCleanup{..}|Call::EnableTransportDrain|Call::TransportDrainResult{..});
+                                        let drain_fenced=!cleanup_control(&command.call);
+                                        let lane=match relay.authorization_lane(&e,&command.call).await {
+                                            Ok(lane)=>lane,
+                                            Err(error)=>{let _=command.result.send(Err(error));continue},
+                                        };
+                                        let response_budget=command.call.response_budget();
+                                        let request=WireRequest{request_id:request_id()?,connection_generation:Some(e.host_connection.clone()),call:command.call};
+                                        let locked=if control {e.control_lease_for(lane).await}else{e.lease_for(lane).await};
+                                        let Some(l)=locked.as_ref() else {
+                                            let _=command.result.send(Err(if lane!=Lane::Exec{RelayError::Unauthorized}else{RelayError::Offline}));
+                                            continue
+                                        };
+                                        let result=guarded_send(&relay,l,command.gate.as_deref(),drain_fenced.then_some(&e.admission),&mut sink,&request,&task_stop).await;
+                                        drop(locked);
+                                        // Drop sensitive request payload after send, keep only response channel & gate.
+                                        let Command { result: reply_tx, gate, .. } = command;
+                                        match result {
+                                            Ok(())=>{pending.insert(request.request_id,Pending{result:reply_tx,gate,control,drain_fenced,lane,deadline:response_budget.map(|budget| tokio::time::Instant::now()+budget)});},
+                                            Err(error)=>{
+                                                let _=reply_tx.send(Err(error));
+                                                // Proven refusal before start_send is local to its lane. Actual
+                                                // socket/write uncertainty still invalidates the physical WS.
+                                                if known_pre_send_refusal(error){continue}
+                                                return Err(error)
+                                            },
+                                        }
+                                    },
+                                    response=read_message(&mut source)=>{
+                                        let response=match response? {
+                                            Incoming::Response(response)=>response,
+                                            Incoming::Control(control)=>{relay.begin_transport_drain(&e,control)?;continue},
+                                            Incoming::Ping=>{
+                                                tokio::time::timeout(Duration::from_secs(5), sink.flush()).await.map_err(|_|RelayError::Unknown)?.map_err(|_|RelayError::Unknown)?;
+                                                continue;
+                                            },
+                                            Incoming::Pong=>{
+                                                heartbeat.pong(tokio::time::Instant::now());
+                                                continue;
+                                            },
+                                        };
+                                        if response.connection_generation!=e.host_connection{return Err(RelayError::Invalid)}
+                                        let Some(p)=pending.remove(&response.request_id) else{return Err(RelayError::Invalid)};
+                                        let locked=if p.control {e.control_lease_for(p.lane).await}else{e.lease_for(p.lane).await};
+                                        let Some(l)=locked.as_ref() else {
+                                            let _=p.result.send(Err(if p.lane!=Lane::Exec{RelayError::Unauthorized}else{RelayError::Offline}));
+                                            continue
+                                        };
+                                        relay.inner.shared.with(|s| {
+                                            let allowed=s.authorize_host_frame(l).is_ok();
+                                            let admission=p.drain_fenced.then(||e.admission.lock());
+                                            let drain_allowed=match &admission {None=>true,Some(Ok(g))=>!**g,Some(Err(_))=>false};
+                                            let gate=p.gate.as_ref().map(|g|g.lock());
+                                            let gate_allowed=match &gate{None=>true,Some(Ok(g))=>!**g,Some(Err(_))=>false};
+                                            let result=if allowed&&drain_allowed&&gate_allowed{Ok(response.reply)}else{Err(RelayError::Unauthorized)};
+                                            let _=p.result.send(result);
+                                        }).await.map_err(|_|RelayError::Unknown)?;
+                                    },
+                                }
+                            }
+                            drop(sink);drop(source);Ok::<(),RelayError>(())
+                        }.await;
+                        if let Some(e) = entry {
+                            e.live.store(false, Ordering::Release);
+                            e.stop.cancel();
+                            relay.join_transport_drain(&e).await;
+                            e.transport_ended.store(true, Ordering::Release);
+                            if let Ok(mut state) = relay.inner.state.lock()
+                                && state
+                                    .entries
+                                    .get(&device)
+                                    .is_some_and(|current| Arc::ptr_eq(current, &e))
+                            {
+                                state.entries.remove(&device);
+                            }
+                            bootstrap_lease = e.bootstrap_lease.lock().await.take();
+                            lease = e.lease.lock().await.take();
+                            browser_lease = e.browser_lease.lock().await.take();
+                            computer_lease = e.computer_lease.lock().await.take();
+                        }
+                        // This task has dropped its socket halves (also on Err).
+                        // No logical offline inference from a timeout alone.
+                        for lease in [bootstrap_lease, lease, browser_lease, computer_lease]
+                            .into_iter()
+                            .flatten()
+                        {
+                            let _ = relay
+                                .inner
+                                .shared
+                                .with(|s| s.host_connection_ended(lease, true))
+                                .await;
+                        }
+                        let _ = result;
+                    });
+                    state.tasks.push((stop, task));
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if !attached {
+            if let Some(lease) = lease {
+                let _ = self
+                    .inner
+                    .shared
+                    .with(|s| s.host_connection_ended(lease, true))
+                    .await;
+            }
+            return reject(503);
+        }
+        response
+    }
+}
+fn request_id() -> Result<RequestId, RelayError> {
+    format!("relay-{}", uuid::Uuid::new_v4())
+        .try_into()
+        .map_err(|_| RelayError::Invalid)
+}
+struct Bounded(Vec<u8>);
+impl Write for Bounded {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        if self.0.len().saturating_add(b.len()) > FRAME {
+            return Err(std::io::Error::other("frame capacity"));
+        }
+        self.0.extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+async fn guarded_send<S: Sink<Message> + Unpin>(
+    relay: &RelayHandle,
+    lease: &ConnectionLease,
+    gate: Option<&Mutex<bool>>,
+    admission: Option<&Mutex<bool>>,
+    sink: &mut S,
+    request: &WireRequest,
+    stop: &CancellationToken,
+) -> Result<(), RelayError> {
+    let mut out = Bounded(Vec::new());
+    serde_json::to_writer(&mut out, request).map_err(|_| RelayError::Invalid)?;
+    let text = String::from_utf8(out.0).map_err(|_| RelayError::Invalid)?;
+    tokio::select! {_=stop.cancelled()=>return Err(RelayError::Offline),ready=tokio::time::timeout(Duration::from_secs(5),futures_util::future::poll_fn(|cx|Pin::new(&mut *sink).poll_ready(cx)))=>{ready.map_err(|_|RelayError::Unknown)?.map_err(|_|RelayError::Unknown)?;}}
+    relay
+        .inner
+        .shared
+        .with(|s| {
+            s.authorize_host_frame(lease)
+                .map_err(|_| RelayError::Unauthorized)?;
+            let admission = admission.map(|gate| gate.lock());
+            if match &admission {
+                None => false,
+                Some(Ok(g)) => **g,
+                Some(Err(_)) => true,
+            } {
+                return Err(RelayError::Unauthorized);
+            }
+            let guard = gate.map(|g| g.lock());
+            if match &guard {
+                None => false,
+                Some(Ok(g)) => **g,
+                Some(Err(_)) => true,
+            } {
+                return Err(RelayError::Unauthorized);
+            }
+            if stop.is_cancelled() {
+                return Err(RelayError::Offline);
+            }
+            Pin::new(&mut *sink)
+                .start_send(Message::Text(text.into()))
+                .map_err(|_| RelayError::Unknown)
+        })
+        .await
+        .map_err(|_| RelayError::Unknown)??;
+    tokio::select! {_=stop.cancelled()=>Err(RelayError::Unknown),r=tokio::time::timeout(Duration::from_secs(5),sink.flush())=>r.map_err(|_|RelayError::Unknown)?.map_err(|_|RelayError::Unknown)}
+}
+enum Incoming {
+    Response(Box<WireResponse>),
+    Control(HostControl),
+    Ping,
+    Pong,
+}
+fn decode_message(text: &str) -> Result<Incoming, RelayError> {
+    // Borrow only the discriminant, then parse the selected DTO directly.
+    // serde's untagged Content tree otherwise duplicates the entire frame.
+    #[derive(serde::Deserialize)]
+    struct Kind<'a> {
+        #[serde(borrow)]
+        kind: Option<&'a str>,
+    }
+    let kind: Kind<'_> = serde_json::from_str(text).map_err(|_| RelayError::Invalid)?;
+    if kind.kind.is_some() {
+        serde_json::from_str(text)
+            .map(Incoming::Control)
+            .map_err(|_| RelayError::Invalid)
+    } else {
+        serde_json::from_str(text)
+            .map(|response| Incoming::Response(Box::new(response)))
+            .map_err(|_| RelayError::Invalid)
+    }
+}
+async fn read_message<
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+>(
+    source: &mut S,
+) -> Result<Incoming, RelayError> {
+    match source.next().await {
+        Some(Ok(Message::Text(text))) if text.len() <= FRAME => decode_message(text.as_str()),
+        Some(Ok(Message::Ping(_))) => Ok(Incoming::Ping),
+        Some(Ok(Message::Pong(_))) => Ok(Incoming::Pong),
+        _ => Err(RelayError::Unknown),
+    }
+}
+async fn read_response<
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+>(
+    source: &mut S,
+) -> Result<WireResponse, RelayError> {
+    loop {
+        match read_message(source).await? {
+            Incoming::Response(response) => return Ok(*response),
+            Incoming::Control(_) => return Err(RelayError::Invalid),
+            Incoming::Ping | Incoming::Pong => {}
+        }
+    }
+}
+
+fn known_pre_send_refusal(error: RelayError) -> bool {
+    // guarded_send emits these only before start_send. Any write/flush/timeout
+    // uncertainty is Unknown and must still end the entire physical transport.
+    matches!(
+        error,
+        RelayError::Unauthorized | RelayError::Unsupported | RelayError::Invalid
+    )
+}
+// Exec's feature family is optional on a shared physical transport. Partial
+// support never authorizes Exec, and does not veto Browser/Computer features.
+fn exec_negotiated(features: &[String], write: bool, terminate: bool, read_resume: bool) -> bool {
+    write
+        && terminate
+        && !read_resume
+        && [
+            crate::host::protocol::wire::HOST_EXEC_TASKS_V1,
+            "prepare_start",
+            "dispatch_start",
+            "inspect_start",
+            "read",
+            "prepare_action",
+            "dispatch_action",
+            "inspect_action",
+        ]
+        .iter()
+        .all(|name| features.iter().any(|feature| feature == name))
+}
+#[cfg(test)]
+#[path = "lane_independence_tests.rs"]
+mod lane_independence_tests;
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    #[test]
+    fn idle_blackholed_connection_expires_and_live_pong_renews() {
+        let start = tokio::time::Instant::now();
+        let mut dead = Heartbeat::new(start);
+        assert!(!dead.tick(start + Duration::from_secs(9)).unwrap());
+        assert!(dead.tick(start + Duration::from_secs(10)).unwrap());
+        assert!(!dead.tick(start + Duration::from_secs(14)).unwrap());
+        assert!(matches!(
+            dead.tick(start + Duration::from_secs(15)),
+            Err(RelayError::Offline)
+        ));
+        let mut live = Heartbeat::new(start);
+        for n in 0..200 {
+            let at = start + Duration::from_secs(n * 14 + 10);
+            assert!(live.tick(at).unwrap());
+            live.pong(at + Duration::from_secs(4));
+        }
+    }
+
+    fn ceiling_response(kind: &str) -> String {
+        let mut value = serde_json::json!({"request_id":"fixture-reply","connection_generation":"fixture-connection","reply":{}});
+        value["reply"] = if kind == "exec" {
+            serde_json::json!({"status":"read","chunks":[{"stream":"stdout","text":""}],"liveness":"running","output_drain":"open","exit_code":null,"read_resume":false})
+        } else {
+            serde_json::json!({"status":"browser_session","result":{"content":[if kind == "screenshot" {serde_json::json!({"type":"image","mimeType":"image/png","data":""})} else {serde_json::json!({"type":"text","text":""})}]}})
+        };
+        let length = FRAME - serde_json::to_string(&value).unwrap().len();
+        if kind == "exec" {
+            value["reply"]["chunks"][0]["text"] = serde_json::Value::String("x".repeat(length));
+        } else {
+            let field = if kind == "screenshot" { "data" } else { "text" };
+            value["reply"]["result"]["content"][0][field] =
+                serde_json::Value::String("x".repeat(length));
+        }
+        let text = serde_json::to_string(&value).unwrap();
+        assert_eq!(text.len(), FRAME);
+        text
+    }
+    #[tokio::test]
+    async fn exec_snapshot_and_screenshot_at_frame_ceiling_use_production_decoder() {
+        for kind in ["exec", "snapshot", "screenshot"] {
+            let (peer, server) = tokio::io::duplex(64 * 1024);
+            let config = WebSocketConfig::default()
+                .max_message_size(Some(FRAME))
+                .max_frame_size(Some(FRAME))
+                .max_write_buffer_size(FRAME + 64 * 1024);
+            let mut peer = WebSocketStream::from_raw_socket(peer, Role::Client, Some(config)).await;
+            let mut server =
+                WebSocketStream::from_raw_socket(server, Role::Server, Some(config)).await;
+            let text = ceiling_response(kind);
+            // Multiple pages exercise streaming and high-water buffer reuse.
+            for _ in 0..3 {
+                let (sent, received) = tokio::join!(
+                    peer.send(Message::Text(text.clone().into())),
+                    read_message(&mut server)
+                );
+                sent.unwrap();
+                assert!(matches!(received, Ok(Incoming::Response(_))), "{kind}");
+            }
+        }
+    }
+    #[tokio::test]
+    async fn oversized_incoming_frame_is_refused() {
+        let (peer, server) = tokio::io::duplex(64 * 1024);
+        let mut peer = WebSocketStream::from_raw_socket(peer, Role::Client, None).await;
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(FRAME))
+            .max_frame_size(Some(FRAME));
+        let mut server = WebSocketStream::from_raw_socket(server, Role::Server, Some(config)).await;
+        let sender =
+            tokio::spawn(
+                async move { peer.send(Message::Text("x".repeat(FRAME + 1).into())).await },
+            );
+        assert!(read_message(&mut server).await.is_err());
+        drop(server);
+        let _ = sender.await.unwrap();
+    }
+    #[test]
+    fn frame_ceiling_and_direct_response_decode_remain_enforced() {
+        let mut out = Bounded(Vec::new());
+        out.write_all(&vec![b'x'; FRAME]).unwrap();
+        assert!(out.write_all(b"x").is_err());
+        assert_eq!(out.0.len(), FRAME);
+        let message = r#"{"request_id":"fixture-reply","connection_generation":"fixture-connection","reply":{"status":"unsupported","feature":"fixture"}}"#;
+        assert!(matches!(decode_message(message), Ok(Incoming::Response(_))));
+        assert!(decode_message(r#"{"kind":"unknown"}"#).is_err());
+    }
+}

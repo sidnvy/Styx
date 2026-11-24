@@ -1,0 +1,87 @@
+[workspace]
+members = ["src/crates/styx-contracts", "src/crates/styx-core", "src/crates/styx-runtime", "src/crates/styx", "src/crates/styx-android"]
+resolver = "3"
+
+[workspace.package]
+version = "0.8.2"
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT"
+
+[workspace.dependencies]
+jni = "=0.21.1"
+styx-contracts = { path = "src/crates/styx-contracts" }
+styx-core = { path = "src/crates/styx-core" }
+styx-runtime = { path = "src/crates/styx-runtime" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.150", features = ["raw_value"] }
+thiserror = "=2.0.18"
+sha2 = "=0.10.9"
+spake2 = "=0.4.0"
+tempfile = "=3.27.0"
+url = "=2.5.8"
+libc = "=0.2.186"
+if-addrs = "=0.15.0"
+getrandom = "=0.3.4"
+nix = { version = "=0.31.3", features = ["fs", "user", "dir", "resource", "process", "signal", "socket", "poll"] }
+uuid = { version = "=1.29.0", features = ["v4"] }
+tokio-util = { version = "=0.7.20", features = ["codec", "rt"] }
+futures-util = { version = "=0.3.34", features = ["sink"] }
+aws-lc-rs = "=1.18.1"
+ed25519-dalek = { version = "=2.2.0", features = ["pem", "pkcs8"] }
+base64 = "=0.22.1"
+png = "=0.18.1"
+hex = "=0.4.3"
+encoding_rs = "=0.8.35"
+regex = "=1.12.4"
+jsonschema = { version = "=0.60.1", default-features = false }
+rmcp = { version = "=3.7.0", default-features = false, features = ["server", "client", "transport-async-rw", "transport-streamable-http-server"] }
+http = "=1.4.0"
+hyper = { version = "=1.12.0", features = ["server", "client", "http1"] }
+hyper-util = { version = "=0.1.21", features = ["tokio", "server", "service", "http1"] }
+tower = { version = "=0.5.3", features = ["util"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["json", "stream"] }
+http-body = "=1.1.0"
+http-body-util = "=0.1.3"
+bytes = "=1.12.1"
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "aws_lc_rs", "tls12"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["aws_lc_rs", "tls12"] }
+rustls-pemfile = "=2.2.0"
+rcgen = { version = "=0.14.10", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser", "zeroize"] }
+x509-parser = { version = "=0.18.1", default-features = false, features = ["verify-aws"] }
+time = "=0.3.47"
+webpki = { package = "rustls-webpki", version = "=0.103.16", default-features = false, features = ["std"] }
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
+zeroize = "=1.9.1"
+tokio = { version = "=1.52.3", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "fs", "time", "sync", "signal", "process"] }
+clap = { version = "=4.6.1", features = ["derive"] }
+console = "=0.16.6"
+dialoguer = { version = "=0.12.0", default-features = false }
+indicatif = { version = "=0.18.6", default-features = false }
+rustix = { version = "=1.1.5", features = ["process"] }
+zbus = { version = "=5.14.0", default-features = false, features = ["tokio"] }
+security-framework = "=3.7.0"
+security-framework-sys = "=2.17.0"
+core-foundation = "=0.10.1"
+core-foundation-sys = "=0.8.7"
+windows-sys = "=0.61.2"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
+# R93 timings identify runtime codegen and the final binary as the critical path.
+# Use Cargo's non-incremental default for our two large crates; dependencies
+# retain their existing profile and cache. Keep thin LTO and optimization level.
+[profile.release.package.styx-runtime]
+codegen-units = 16
+
+[profile.release.package.styx]
+codegen-units = 16

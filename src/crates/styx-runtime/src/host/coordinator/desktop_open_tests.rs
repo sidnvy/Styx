@@ -1,0 +1,327 @@
+//! Independent Computer owners and cleanup-gate fixtures, not native desktop
+//! acceptance. Fake CUA uses the production MCP transport.
+use super::*;
+use crate::providers::cua::fake_driver::FakeDriver;
+use rmcp::model::CallToolResult;
+use serde_json::json;
+use styx_contracts::{error::Recovery, session::SessionIdentity};
+use styx_core::session::RegistrationFacts;
+
+async fn fixture() -> (HostCoordinator, HostAuthority, OwnerLease, OwnerLease) {
+    let facts = AdmissionFacts {
+        device_id: "handoff-device".try_into().unwrap(),
+        grant_revision: 1,
+        local_policy_allowed: true,
+        descriptor: CapabilityDescriptor {
+            contract_version: 1,
+            capability_id: CapabilityId::ExecRun,
+            scope: Scope::Host,
+            provider_id: "fixture".try_into().unwrap(),
+            configured: true,
+            remote_grant: true,
+            availability: Availability::Available,
+            authorization: Authorization::Granted,
+            target_session: None,
+            reason: None,
+            observed_at: 0,
+            observation_generation: 1,
+            recovery: Recovery::None,
+        },
+        session_state: None,
+        current_observation: None,
+    };
+    let (host, authority) = HostCoordinator::new_without_executor(
+        OperationLedger::new("handoff-generation".try_into().unwrap()),
+        facts,
+    )
+    .unwrap();
+    let a = authority
+        .register_verified_owner("owner-a".try_into().unwrap(), "epoch-a".try_into().unwrap())
+        .unwrap();
+    let b = authority
+        .register_verified_owner("owner-b".try_into().unwrap(), "epoch-b".try_into().unwrap())
+        .unwrap();
+    {
+        let mut state = host.inner.state.lock().unwrap();
+        let registration = state
+            .sessions
+            .attest(RegistrationFacts {
+                id: "handoff-session".try_into().unwrap(),
+                identity: SessionIdentity::Linux {
+                    uid: nix::unistd::Uid::current().as_raw(),
+                    login_instance: "fixture-login".into(),
+                    seat: None,
+                    compositor_instance: "fixture-compositor".into(),
+                    display_identity: "fixture-display".into(),
+                },
+                agent_instance: "fixture-agent".try_into().unwrap(),
+                protocol_version: 1,
+                provenance: "synthetic source".into(),
+            })
+            .unwrap();
+        let binding = state.sessions.register(registration).unwrap();
+        let binding = state
+            .sessions
+            .set_state(&binding, styx_contracts::session::SessionState::Connecting)
+            .unwrap();
+        state
+            .sessions
+            .provider(
+                &binding,
+                ProviderEvidence {
+                    capability: CapabilityId::DesktopWindowsRead,
+                    provider: "fixture".try_into().unwrap(),
+                    availability: Availability::Available,
+                    authorization: Authorization::Granted,
+                    provenance: "fake CUA; not OS evidence".into(),
+                    reason: None,
+                    recovery: Recovery::None,
+                },
+                Duration::from_secs(60),
+            )
+            .unwrap();
+        state.desktop = Some(test_lane(binding));
+    }
+    (host, authority, a, b)
+}
+fn prepare(host: &HostCoordinator, owner: &OwnerLease, budget: Duration) -> OperationSnapshot {
+    let mut state = host.inner.state.lock().unwrap();
+    let context = PreparedContext {
+        device_id: state.facts.device_id.clone(),
+        grant_revision: 1,
+        session: Some(desktop(&state).unwrap().binding.clone()),
+        observation: None,
+        capability: CapabilityId::DesktopWindowsRead,
+        deadline: Some(MonotonicMillis(host.now().0 + budget.as_millis() as u64)),
+        disconnect_policy: DisconnectPolicy::RetainForOwner,
+    };
+    state
+        .ledger
+        .prepare_desktop_agent(owner, context, b"fixture-open".to_vec(), host.now())
+        .unwrap()
+}
+fn running(host: &HostCoordinator, owner: &OwnerLease, open: &OperationSnapshot) {
+    let mut state = host.inner.state.lock().unwrap();
+    let admission = facts(&state, CapabilityId::DesktopWindowsRead).unwrap();
+    assert!(matches!(
+        state
+            .ledger
+            .dispatch(owner, &open.id, open.payload_digest, &admission, host.now())
+            .unwrap(),
+        DispatchDisposition::ExecuteOnce(_)
+    ));
+    state
+        .ledger
+        .record_executor_fact(&open.id, ExecutorFact::Running, host.now())
+        .unwrap();
+}
+async fn action(driver: &FakeDriver) {
+    let before = driver.calls.lock().unwrap().len();
+    let action = CuaAction::call_tool("list_windows".into(), Default::default()).unwrap();
+    assert_eq!(driver.call(&action).await.0, CuaEvidence::Acknowledged);
+    assert_eq!(driver.calls.lock().unwrap().len(), before + 1);
+}
+
+#[tokio::test]
+async fn desktop_open_keeps_independent_live_and_closing_owners_admissible() {
+    let (host, authority, a, b) = fixture().await;
+    let open_a = prepare(&host, &a, Duration::from_secs(10));
+    let admission_a = host
+        .reserve_desktop_open(&a, &open_a.id, open_a.payload_digest)
+        .await
+        .unwrap();
+    let slot_a = admission_a.slot.unwrap();
+    running(&host, &a, &open_a);
+    drop(admission_a.execution);
+    let driver_a =
+        FakeDriver::start(json!({}), CallToolResult::structured(json!({"windows":[]}))).await;
+    let open_b = prepare(&host, &b, Duration::from_secs(10));
+    let admission_b = host
+        .reserve_desktop_open(&b, &open_b.id, open_b.payload_digest)
+        .await
+        .unwrap();
+    let slot_b = admission_b
+        .slot
+        .expect("a live owner cannot block another owner");
+    assert!(!admission_b.waited);
+    drop(admission_b.execution);
+    let driver_b =
+        FakeDriver::start(json!({}), CallToolResult::structured(json!({"windows":[]}))).await;
+    action(&driver_a).await;
+    action(&driver_b).await;
+    authority.fence_owner_for_cleanup(&a).unwrap();
+    // A's original resources are still retained. B neither replaces nor waits
+    // for them; only the existing cleanup write gate serializes actual cleanup.
+    let during_cleanup = host
+        .reserve_desktop_open(&b, &open_b.id, open_b.payload_digest)
+        .await
+        .unwrap();
+    assert!(during_cleanup.slot.is_ok());
+    assert!(!during_cleanup.waited);
+    drop(during_cleanup);
+    driver_a.close().await;
+    drop(slot_a);
+    action(&driver_b).await;
+    driver_b.close().await;
+    drop(slot_b);
+}
+
+#[tokio::test]
+async fn desktop_open_cleanup_gate_deadline_preserves_original_reservation() {
+    let (host, _, _, b) = fixture().await;
+    let open = prepare(&host, &b, Duration::from_millis(100));
+    let writer = host.inner.execution_gate.clone().write_owned().await;
+    let waiting = host.reserve_desktop_open(&b, &open.id, open.payload_digest);
+    let started = Instant::now();
+    assert!(matches!(waiting.await, Err(CoordinatorError::Busy)));
+    assert!(started.elapsed() >= Duration::from_millis(90));
+    assert_eq!(
+        host.inspect_desktop(&b, &open.id, open.payload_digest, false)
+            .unwrap()
+            .state,
+        OperationState::Reserved
+    );
+    drop(writer);
+}
+
+#[tokio::test]
+async fn desktop_open_waits_for_cleanup_gate_without_holding_worker_or_job_slots() {
+    let (host, _, _, b) = fixture().await;
+    let open = prepare(&host, &b, Duration::from_secs(10));
+    let writer = host.inner.execution_gate.clone().write_owned().await;
+    let waiting = host.reserve_desktop_open(&b, &open.id, open.payload_digest);
+    tokio::pin!(waiting);
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    let worker_slot = desktop(&host.inner.state.lock().unwrap())
+        .unwrap()
+        .worker
+        .try_reserve_open()
+        .unwrap();
+    drop(worker_slot);
+    drop(writer);
+    let admission = waiting.await.unwrap();
+    assert!(
+        admission.waited,
+        "source facts must refresh after cleanup's write gate"
+    );
+    assert!(admission.slot.is_ok());
+}
+
+#[tokio::test]
+async fn desktop_refused_open_cancels_only_the_exact_reserved_resource() {
+    let (host, _authority, owner, other) = fixture().await;
+    let original = prepare(&host, &owner, Duration::from_secs(10));
+    assert!(
+        host.cancel_refused_desktop_open(&other, &original.id, original.payload_digest)
+            .is_err()
+    );
+    assert!(
+        host.cancel_refused_desktop_open(
+            &owner,
+            &original.id,
+            Sha256Digest::of_bytes(b"wrong-digest")
+        )
+        .is_err()
+    );
+    assert_eq!(
+        host.inspect_desktop(&owner, &original.id, original.payload_digest, false)
+            .unwrap()
+            .state,
+        OperationState::Reserved
+    );
+    let cancelled = host
+        .cancel_refused_desktop_open(&owner, &original.id, original.payload_digest)
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancelled.id, original.id);
+    assert_eq!(cancelled.payload_digest, original.payload_digest);
+    assert_eq!(cancelled.state, OperationState::Cancelled);
+    assert_eq!(cancelled.cancellation, Some(Cancellation::NotDispatched));
+    assert_eq!(cancelled.liveness, ExecutionLiveness::NotStarted);
+    assert_eq!(cancelled.output_drain, OutputDrain::NotOpened);
+    assert!(
+        host.cancel_refused_desktop_open(&owner, &original.id, original.payload_digest)
+            .unwrap()
+            .is_none()
+    );
+
+    let next = prepare(&host, &owner, Duration::from_secs(10));
+    assert_ne!(
+        next.id, original.id,
+        "a new explicit request has its own reservation"
+    );
+    let target = ResourceTarget {
+        operation_id: next.id.clone(),
+        payload_digest: next.payload_digest,
+    };
+    let action = {
+        let mut state = host.inner.state.lock().unwrap();
+        let admission = facts(&state, CapabilityId::DesktopWindowsRead).unwrap();
+        assert!(matches!(
+            state
+                .ledger
+                .dispatch(
+                    &owner,
+                    &next.id,
+                    next.payload_digest,
+                    &admission,
+                    host.now()
+                )
+                .unwrap(),
+            DispatchDisposition::ExecuteOnce(_)
+        ));
+        let context = state
+            .ledger
+            .inspect_context(&owner, &next.id, next.payload_digest)
+            .unwrap();
+        state
+            .ledger
+            .prepare_targeted(
+                &owner,
+                target.clone(),
+                context,
+                b"targeted-not-an-open".to_vec(),
+                host.now(),
+            )
+            .unwrap()
+    };
+    assert!(
+        host.cancel_refused_desktop_open(&owner, &action.id, action.payload_digest)
+            .is_err()
+    );
+    assert!(
+        host.cancel_refused_desktop_open(&owner, &next.id, next.payload_digest)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        host.inspect_desktop(&owner, &next.id, next.payload_digest, false)
+            .unwrap()
+            .state,
+        OperationState::Dispatched
+    );
+    host.inner
+        .state
+        .lock()
+        .unwrap()
+        .ledger
+        .mark_result_unknown(&next.id)
+        .unwrap();
+    assert!(
+        host.cancel_refused_desktop_open(&owner, &next.id, next.payload_digest)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        host.inspect_desktop(&owner, &next.id, next.payload_digest, false)
+            .unwrap()
+            .state,
+        OperationState::Unknown
+    );
+    assert_eq!(
+        host.inspect_desktop(&owner, &action.id, action.payload_digest, true)
+            .unwrap()
+            .state,
+        OperationState::Reserved
+    );
+}

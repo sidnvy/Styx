@@ -1,0 +1,1220 @@
+use super::GatewayExecProfile;
+#[path = "drain.rs"]
+mod drain;
+use crate::{
+    enrollment::shared::SharedEnrollment,
+    gateway::auth::VerifiedGatewayOwner,
+    host::protocol::wire::{Call, OwnerRef, Reply},
+};
+pub(crate) use drain::{EntryDrain, cleanup_control};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+use styx_contracts::identity::*;
+use styx_core::enrollment::{ConnectionLease, Lane};
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+pub enum RelayError {
+    #[error("unauthorized")]
+    Unauthorized,
+    #[error("offline")]
+    Offline,
+    /// Capacity/admission refusal before this request's frame was sent.
+    #[error("busy")]
+    Busy,
+    #[error("request not dispatched before deadline")]
+    NotSent,
+    #[error("invalid request")]
+    Invalid,
+    #[error("outcome unknown; do not replay")]
+    Unknown,
+    #[error("unsupported")]
+    Unsupported,
+}
+impl RelayError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Unauthorized => "unauthorized",
+            Self::Offline => "offline",
+            Self::Busy => "busy",
+            Self::NotSent => "not_dispatched",
+            Self::Invalid => "invalid",
+            Self::Unknown => "outcome_unknown",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct DeviceStatus {
+    pub host_settings: bool,
+    pub device_id: DeviceId,
+    pub label: String,
+    pub platform: String,
+    pub online: bool,
+    pub browser_online: bool,
+    pub computer_online: bool,
+    pub android_online: bool,
+    pub capability_generation: String,
+    pub host_generation: Option<HostGeneration>,
+    pub grant_revision: Option<u64>,
+    pub host_version: Option<String>,
+}
+pub(crate) struct Command {
+    pub call: Call,
+    pub result: oneshot::Sender<Result<Reply, RelayError>>,
+    pub gate: Option<Arc<Mutex<bool>>>,
+}
+pub(crate) struct Entry {
+    pub host_settings: bool,
+    pub device: DeviceId,
+    pub transport_generation: ConnectionGeneration,
+    pub host_connection: ConnectionGeneration,
+    pub host_generation: HostGeneration,
+    pub grant_revision: u64,
+    pub host_version: Option<String>,
+    pub profile: GatewayExecProfile,
+    pub tx: mpsc::Sender<Command>,
+    pub stop: CancellationToken,
+    pub live: AtomicBool,
+    pub transport_ended: AtomicBool,
+    pub admission: Mutex<bool>,
+    pub drain: Mutex<Option<EntryDrain>>,
+    pub drain_enabled: bool,
+    pub lease: tokio::sync::Mutex<Option<ConnectionLease>>,
+    // Initial authenticated transport admission only. If its lane was not
+    // negotiated, retain it solely for control until the physical WS ends.
+    pub bootstrap_lane: Lane,
+    pub bootstrap_lease: tokio::sync::Mutex<Option<ConnectionLease>>,
+    pub exec_feature: bool,
+    pub browser_feature: bool,
+    pub computer_feature: bool,
+    pub android_feature: bool,
+    pub browser_lease: tokio::sync::Mutex<Option<ConnectionLease>>,
+    pub computer_lease: tokio::sync::Mutex<Option<ConnectionLease>>,
+}
+impl Entry {
+    pub(crate) async fn control_lease_for(
+        &self,
+        lane: Lane,
+    ) -> tokio::sync::MutexGuard<'_, Option<ConnectionLease>> {
+        let business = self.lease_for(lane).await;
+        if business.is_some() || lane != self.bootstrap_lane {
+            return business;
+        }
+        drop(business);
+        self.bootstrap_lease.lock().await
+    }
+    pub(crate) async fn lease_for(
+        &self,
+        lane: Lane,
+    ) -> tokio::sync::MutexGuard<'_, Option<ConnectionLease>> {
+        match lane {
+            Lane::Exec => self.lease.lock().await,
+            Lane::Browser => self.browser_lease.lock().await,
+            Lane::Computer => self.computer_lease.lock().await,
+        }
+    }
+}
+#[derive(Clone, Copy)]
+enum ToolRoute {
+    Lane(Lane),
+    Android,
+}
+
+struct Binding {
+    owner: VerifiedGatewayOwner,
+    reference: OwnerRef,
+    // Immutable original Host/capability identity; never adopted from a new peer.
+    entry: Arc<Entry>,
+    route: Mutex<Arc<Entry>>,
+    rebind: tokio::sync::Mutex<()>,
+    revoked: Arc<Mutex<bool>>,
+    // Local transport drain waits for an admitted call to consume its receipt.
+    // Explicit owner/enrollment revocation never waits on this handoff.
+    receipts: tokio::sync::RwLock<()>,
+    ready: AtomicBool,
+    cleanup: Mutex<drain::BindingCleanup>,
+    cleanup_changed: tokio::sync::Notify,
+}
+impl Binding {
+    // Retain the original binding and its receipts until its exact transport
+    // ends (clean drain or abrupt peer loss) and a new Host incarnation takes
+    // over. Never fabricate confirmed cleanup/physically_settled facts.
+    fn retired_for(&self, entry: &Entry) -> bool {
+        self.entry.host_generation != entry.host_generation
+            && self.revoked.lock().is_ok_and(|revoked| *revoked)
+            && (self
+                .cleanup
+                .lock()
+                .is_ok_and(|cleanup| cleanup.result == Some(true) && cleanup.transport_joined)
+                || (self.entry.transport_ended.load(Ordering::Acquire)
+                    && self
+                        .route
+                        .lock()
+                        .is_ok_and(|route| route.transport_ended.load(Ordering::Acquire))))
+    }
+}
+#[derive(Clone)]
+pub struct BoundOwner {
+    inner: Arc<Binding>,
+}
+impl BoundOwner {
+    #[cfg(test)]
+    pub(crate) fn physically_settled(&self) -> bool {
+        self.inner
+            .cleanup
+            .lock()
+            .is_ok_and(|s| s.result == Some(true))
+    }
+    pub(crate) fn closed(&self) -> bool {
+        self.inner.revoked.lock().map_or(true, |r| *r)
+    }
+    pub fn device(&self) -> &DeviceId {
+        &self.inner.entry.device
+    }
+    pub fn owner_ref(&self) -> OwnerRef {
+        self.inner.reference.clone()
+    }
+    pub fn grant_revision(&self) -> u64 {
+        self.inner.entry.grant_revision
+    }
+    pub fn host_generation(&self) -> &HostGeneration {
+        &self.inner.entry.host_generation
+    }
+    pub fn capability_generation(&self) -> &str {
+        &self.inner.entry.profile.capability_generation
+    }
+    /// Original transport anchor, not a current-route claim after rebind.
+    pub fn transport_generation(&self) -> &ConnectionGeneration {
+        &self.inner.entry.transport_generation
+    }
+    /// Original transport anchor, not a current-route claim after rebind.
+    pub fn host_connection_generation(&self) -> &ConnectionGeneration {
+        &self.inner.entry.host_connection
+    }
+    pub fn defaults(&self) -> &GatewayExecProfile {
+        &self.inner.entry.profile
+    }
+}
+pub(crate) struct State {
+    pub entries: BTreeMap<DeviceId, Arc<Entry>>,
+    pub closing: bool,
+    pub tasks: Vec<(CancellationToken, tokio::task::JoinHandle<()>)>,
+}
+pub(crate) struct Inner {
+    pub shared: SharedEnrollment,
+    pub gateway: GatewayId,
+    pub epoch: GatewayEpoch,
+    pub state: Mutex<State>,
+    pub links: ActiveLinks,
+    bindings: Mutex<Vec<Arc<Binding>>>,
+    shutdown_lock: tokio::sync::Mutex<()>,
+    pub(crate) shutdown_failed: AtomicBool,
+    unconfirmed_drains: AtomicUsize,
+    opening: tokio::sync::Mutex<()>,
+    next_owner: std::sync::atomic::AtomicU64,
+}
+/// Track transport settlement without limiting the number of Hosts.
+#[derive(Default)]
+pub(crate) struct ActiveLinks {
+    active: Arc<AtomicUsize>,
+}
+#[derive(Debug)]
+pub(crate) struct LinkGuard {
+    active: Arc<AtomicUsize>,
+}
+impl Drop for LinkGuard {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+impl ActiveLinks {
+    pub(crate) fn admit(&self) -> LinkGuard {
+        self.active.fetch_add(1, Ordering::AcqRel);
+        LinkGuard {
+            active: self.active.clone(),
+        }
+    }
+}
+impl State {
+    /// Only already-finished tasks may be joined here. Retain panic evidence for
+    /// shutdown; dropping a running JoinHandle would detach an owned transport.
+    pub(crate) fn reap_finished(&mut self) -> bool {
+        use futures_util::FutureExt;
+        let mut joined = true;
+        self.tasks.retain_mut(|(_, task)| {
+            if !task.is_finished() {
+                return true;
+            }
+            joined &= matches!(task.now_or_never(), Some(Ok(())));
+            false
+        });
+        joined
+    }
+}
+#[derive(Clone)]
+pub struct RelayHandle {
+    pub(crate) inner: Arc<Inner>,
+}
+impl RelayHandle {
+    pub fn new(shared: SharedEnrollment, gateway: GatewayId, epoch: GatewayEpoch) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                shared,
+                gateway,
+                epoch,
+                state: Mutex::new(State {
+                    entries: BTreeMap::new(),
+                    closing: false,
+                    tasks: vec![],
+                }),
+                links: ActiveLinks::default(),
+                bindings: Mutex::new(vec![]),
+                shutdown_lock: tokio::sync::Mutex::new(()),
+                shutdown_failed: AtomicBool::new(false),
+                unconfirmed_drains: AtomicUsize::new(0),
+                opening: tokio::sync::Mutex::new(()),
+                next_owner: std::sync::atomic::AtomicU64::new(1),
+            }),
+        }
+    }
+    /// The physical connection count includes negotiation and transport settlement.
+    /// It does not count three capability lanes as three computers.
+    pub fn connection_count(&self) -> usize {
+        self.inner.links.active.load(Ordering::Acquire)
+    }
+    /// Fence bindings from an ended previous Host incarnation once a new
+    /// authenticated Host incarnation takes over the device slot. Preserves
+    /// `cleanup.result` so unconfirmed abrupt exits remain not physically settled.
+    pub(crate) fn retire_superseded_bindings(&self, entry: &Entry) {
+        let Ok(mut bindings) = self.inner.bindings.lock() else {
+            return;
+        };
+        bindings.retain(|binding| {
+            if binding.entry.device != entry.device
+                || binding.entry.host_generation == entry.host_generation
+            {
+                return true;
+            }
+            let ended = binding.entry.transport_ended.load(Ordering::Acquire)
+                && binding
+                    .route
+                    .lock()
+                    .is_ok_and(|route| route.transport_ended.load(Ordering::Acquire));
+            if !ended {
+                return true;
+            }
+            if let Ok(mut revoked) = binding.revoked.lock() {
+                *revoked = true;
+            }
+            // Drop from the active registry only once no background cleanup
+            // JoinHandle remains attached; retain otherwise for shutdown join.
+            !binding.cleanup.lock().is_ok_and(|c| c.job.is_none())
+        });
+    }
+    pub(crate) async fn authorize(&self, e: &Entry) -> Result<(), RelayError> {
+        self.authorize_for(e, Lane::Exec).await
+    }
+    pub(crate) async fn authorize_for(&self, e: &Entry, lane: Lane) -> Result<(), RelayError> {
+        if !e.live.load(Ordering::Acquire) || e.stop.is_cancelled() {
+            return Err(RelayError::Offline);
+        }
+        if (lane == Lane::Exec && !e.exec_feature)
+            || (lane == Lane::Browser && !e.browser_feature)
+            || (lane == Lane::Computer && !e.computer_feature)
+        {
+            return Err(RelayError::Unsupported);
+        }
+        if e.host_settings {
+            return self.control_lane(e).await.map(|_| ());
+        }
+        let held = e.lease_for(lane).await;
+        let lease = held.as_ref().ok_or(if lane == Lane::Exec {
+            RelayError::Offline
+        } else {
+            RelayError::Unauthorized
+        })?;
+        self.inner
+            .shared
+            .with(|s| s.authorize_host_frame(lease))
+            .await
+            .map_err(|_| RelayError::Unknown)?
+            .map_err(|_| RelayError::Unauthorized)
+    }
+    async fn authorize_route(&self, e: &Entry, route: ToolRoute) -> Result<(), RelayError> {
+        match route {
+            ToolRoute::Lane(lane) => self.authorize_for(e, lane).await,
+            ToolRoute::Android if e.android_feature && e.host_settings => {
+                self.control_lane(e).await.map(|_| ())
+            }
+            ToolRoute::Android => Err(RelayError::Unsupported),
+        }
+    }
+    /// Control messages have no execution capability. They may use either
+    /// currently authorized connection lane; business calls never fall through
+    /// from a denied Browser grant to an Exec grant.
+    pub(crate) async fn authorization_lane(
+        &self,
+        e: &Entry,
+        call: &Call,
+    ) -> Result<Lane, RelayError> {
+        if !drain::cleanup_control(call) && *e.admission.lock().map_err(|_| RelayError::Unknown)? {
+            return Err(RelayError::Unauthorized);
+        }
+        if call.is_android() {
+            self.authorize_route(e, ToolRoute::Android).await?;
+            self.control_lane(e).await
+        } else if matches!(
+            call,
+            Call::GetCapabilities
+                | Call::SetCapabilities { .. }
+                | Call::OwnerOpen { .. }
+                | Call::OwnerRevoke { .. }
+                | Call::OwnerCleanup { .. }
+                | Call::EnableTransportDrain
+                | Call::TransportDrainResult { .. }
+        ) {
+            self.control_lane(e).await
+        } else {
+            let lane = if call.is_computer() {
+                Lane::Computer
+            } else if call.is_browser() {
+                Lane::Browser
+            } else {
+                Lane::Exec
+            };
+            self.authorize_for(e, lane).await?;
+            if e.host_settings {
+                self.control_lane(e).await
+            } else {
+                Ok(lane)
+            }
+        }
+    }
+    pub(crate) async fn control_lane(&self, e: &Entry) -> Result<Lane, RelayError> {
+        if !e.live.load(Ordering::Acquire) || e.stop.is_cancelled() {
+            return Err(RelayError::Offline);
+        }
+        for lane in [Lane::Exec, Lane::Browser, Lane::Computer] {
+            let held = e.control_lease_for(lane).await;
+            let Some(lease) = held.as_ref() else {
+                continue;
+            };
+            if self
+                .inner
+                .shared
+                .with(|s| s.authorize_host_frame(lease))
+                .await
+                .map_err(|_| RelayError::Unknown)?
+                .is_ok()
+            {
+                return Ok(lane);
+            }
+        }
+        Err(RelayError::Unauthorized)
+    }
+    pub async fn devices(&self) -> Result<Vec<DeviceStatus>, RelayError> {
+        let profiles = self
+            .inner
+            .shared
+            .profiles()
+            .await
+            .map_err(|_| RelayError::Unknown)?;
+        let entries = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| RelayError::Unknown)?
+            .entries
+            .clone();
+        let mut devices = Vec::with_capacity(profiles.len());
+        for p in profiles {
+            let e = entries.get(&p.device_id).filter(|e| {
+                e.live.load(Ordering::Acquire)
+                    && e.profile.capability_generation == p.capability_generation
+            });
+            let online = match e {
+                Some(e) => self.authorize(e).await.is_ok(),
+                None => false,
+            };
+            let browser_online = match e {
+                Some(e) if e.host_settings || p.browser_approved => {
+                    self.authorize_for(e, Lane::Browser).await.is_ok()
+                }
+                _ => false,
+            };
+            let computer_online = match e {
+                Some(e) if e.host_settings || p.computer_approved => {
+                    self.authorize_for(e, Lane::Computer).await.is_ok()
+                }
+                _ => false,
+            };
+            let android_online = match e {
+                Some(e) if e.host_settings => {
+                    self.authorize_route(e, ToolRoute::Android).await.is_ok()
+                }
+                _ => false,
+            };
+            devices.push(DeviceStatus {
+                host_settings: e.is_some_and(|e| e.host_settings),
+                device_id: p.device_id,
+                label: p.label,
+                platform: p.platform,
+                online,
+                browser_online,
+                computer_online,
+                android_online,
+                capability_generation: p.capability_generation,
+                host_generation: e.map(|e| e.host_generation.clone()),
+                grant_revision: e.map(|e| e.grant_revision),
+                host_version: e.and_then(|e| e.host_version.clone()),
+            });
+        }
+        Ok(devices)
+    }
+    pub async fn host_capabilities(
+        &self,
+        device: &DeviceId,
+        patch: Option<crate::host::settings::CapabilityPatch>,
+    ) -> Result<crate::host::settings::SettingsReport, RelayError> {
+        let entry = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| RelayError::Unknown)?
+            .entries
+            .get(device)
+            .cloned()
+            .ok_or(RelayError::Offline)?;
+        if !entry.host_settings
+            || (!entry.android_feature && patch.is_some_and(|patch| patch.android.is_some()))
+        {
+            return Err(RelayError::Unsupported);
+        }
+        let call = patch.map_or(Call::GetCapabilities, |patch| Call::SetCapabilities {
+            patch,
+        });
+        match self.exchange(&entry, call, None).await? {
+            Reply::Capabilities { report } => Ok(report),
+            Reply::Error {
+                certainty: styx_contracts::error::ExecutionCertainty::Unknown,
+                ..
+            } => Err(RelayError::Unknown),
+            Reply::Error {
+                category: styx_contracts::error::ErrorCategory::Busy,
+                ..
+            } => Err(RelayError::Busy),
+            _ => Err(RelayError::Unsupported),
+        }
+    }
+    async fn exchange(
+        &self,
+        e: &Arc<Entry>,
+        call: Call,
+        gate: Option<Arc<Mutex<bool>>>,
+    ) -> Result<Reply, RelayError> {
+        self.authorization_lane(e, &call).await?;
+        Self::exchange_command(&e.tx, call, gate).await
+    }
+    async fn exchange_command(
+        queue: &mpsc::Sender<Command>,
+        call: Call,
+        gate: Option<Arc<Mutex<bool>>>,
+    ) -> Result<Reply, RelayError> {
+        let response_budget = call.response_budget();
+        if response_budget.is_none() {
+            let (tx, rx) = oneshot::channel();
+            let reservation = queue.reserve().await.map_err(|_| RelayError::Offline)?;
+            reservation.send(Command {
+                call,
+                result: tx,
+                gate,
+            });
+            return rx.await.unwrap_or(Err(RelayError::Unknown));
+        }
+        let response_budget = response_budget.expect("bounded non-computer call");
+        let (tx, rx) = oneshot::channel();
+        let until = tokio::time::Instant::now() + response_budget;
+        let command = Command {
+            call,
+            result: tx,
+            gate,
+        };
+        {
+            let reservation = tokio::time::timeout_at(until, queue.reserve())
+                .await
+                .map_err(|_| RelayError::NotSent)?
+                .map_err(|_| RelayError::Offline)?;
+            reservation.send(command);
+        }
+        let response_budget = until.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(response_budget, rx).await {
+            Ok(Ok(r)) => r,
+            _ => Err(RelayError::Unknown),
+        }
+    }
+    fn current_binding_entry(
+        &self,
+        binding: &Binding,
+        cleanup: bool,
+    ) -> Result<Arc<Entry>, RelayError> {
+        let current = {
+            let state = self.inner.state.lock().map_err(|_| RelayError::Unknown)?;
+            if state.closing && !cleanup {
+                return Err(RelayError::Offline);
+            }
+            state
+                .entries
+                .get(&binding.entry.device)
+                .cloned()
+                .ok_or(RelayError::Offline)?
+        };
+        let original_draining = if cleanup {
+            false
+        } else {
+            *binding
+                .entry
+                .admission
+                .lock()
+                .map_err(|_| RelayError::Unknown)?
+        };
+        let current_draining = if cleanup {
+            false
+        } else {
+            *current.admission.lock().map_err(|_| RelayError::Unknown)?
+        };
+        if original_draining || current_draining {
+            return Err(RelayError::Unauthorized);
+        }
+        let old = &binding.entry;
+        // Same Relay instance fixes Gateway ID/epoch. Metadata is not a grant:
+        // authorize_for/control_lane still prove the current Core connection.
+        if current.device != old.device
+            || current.host_generation != old.host_generation
+            || current.grant_revision != old.grant_revision
+            || current.profile.capability_generation != old.profile.capability_generation
+            || current.profile.device_id != old.profile.device_id
+            || current.profile.browser_approved != old.profile.browser_approved
+            || current.profile.computer_approved != old.profile.computer_approved
+            || current.profile.platform != old.profile.platform
+            || current.profile.cwd != old.profile.cwd
+            || current.profile.shell != old.profile.shell
+            || current.profile.allowed_shells != old.profile.allowed_shells
+            || current.profile.environment != old.profile.environment
+        {
+            return Err(RelayError::Unauthorized);
+        }
+        Ok(current)
+    }
+    fn active_binding(&self, binding: &Binding) -> Result<(), RelayError> {
+        if self.is_fenced(&binding.owner)?
+            || *binding.revoked.lock().map_err(|_| RelayError::Unknown)?
+            || !binding.ready.load(Ordering::Acquire)
+        {
+            return Err(RelayError::Unauthorized);
+        }
+        Ok(())
+    }
+    async fn route_binding(
+        &self,
+        binding: &Arc<Binding>,
+        lane: ToolRoute,
+    ) -> Result<Arc<Entry>, RelayError> {
+        self.active_binding(binding)?;
+        let current = self.current_binding_entry(binding, false)?;
+        if *current.admission.lock().map_err(|_| RelayError::Unknown)? {
+            return Err(RelayError::Unauthorized);
+        }
+        self.authorize_route(&current, lane).await?;
+        let already_confirmed = {
+            let route = binding.route.lock().map_err(|_| RelayError::Unknown)?;
+            Arc::ptr_eq(&route, &current)
+        };
+        if already_confirmed {
+            return Ok(current);
+        }
+        // Synchronous try-lock prevents an unbounded per-owner rebind queue.
+        // This is a Tokio guard; no std::MutexGuard is held across await.
+        let _admission = binding.rebind.try_lock().map_err(|_| RelayError::Busy)?;
+        self.active_binding(binding)?;
+        let current = self.current_binding_entry(binding, false)?;
+        self.authorize_route(&current, lane).await?;
+        let already_confirmed = {
+            let route = binding.route.lock().map_err(|_| RelayError::Unknown)?;
+            Arc::ptr_eq(&route, &current)
+        };
+        if !already_confirmed {
+            // Exact previously acknowledged owner only. Never mint a new epoch,
+            // resource or operation; this Host control is idempotent, not I/O replay.
+            let reply = self
+                .exchange(
+                    &current,
+                    Call::OwnerOpen {
+                        owner: binding.reference.clone(),
+                        grant_revision: current.grant_revision,
+                    },
+                    Some(binding.revoked.clone()),
+                )
+                .await?;
+            if !matches!(reply, Reply::OwnerOpened { owner: ref got, grant_revision }
+                if got == &binding.reference && grant_revision == current.grant_revision)
+            {
+                return Err(RelayError::Unauthorized);
+            }
+            self.active_binding(binding)?;
+            self.authorize_route(&current, lane).await?;
+            if !Arc::ptr_eq(&self.current_binding_entry(binding, false)?, &current) {
+                return Err(RelayError::Offline);
+            }
+            *binding.route.lock().map_err(|_| RelayError::Unknown)? = current.clone();
+        }
+        Ok(current)
+    }
+    async fn cleanup_binding_entry(&self, binding: &Binding) -> Result<Arc<Entry>, RelayError> {
+        // Cleanup follows an already fenced owner; do not call OwnerOpen and
+        // accidentally recreate authority. Same Host incarnation is mandatory.
+        if !binding.ready.load(Ordering::Acquire) {
+            return Err(RelayError::Unknown);
+        }
+        let current = self.current_binding_entry(binding, true)?;
+        self.control_lane(&current).await?;
+        Ok(current)
+    }
+    pub async fn bind(
+        &self,
+        owner: &VerifiedGatewayOwner,
+        device: &DeviceId,
+    ) -> Result<BoundOwner, RelayError> {
+        self.bind_for(owner, device, ToolRoute::Lane(Lane::Exec))
+            .await
+    }
+    pub async fn bind_browser(
+        &self,
+        owner: &VerifiedGatewayOwner,
+        device: &DeviceId,
+    ) -> Result<BoundOwner, RelayError> {
+        self.bind_for(owner, device, ToolRoute::Lane(Lane::Browser))
+            .await
+    }
+    pub async fn bind_computer(
+        &self,
+        owner: &VerifiedGatewayOwner,
+        device: &DeviceId,
+    ) -> Result<BoundOwner, RelayError> {
+        self.bind_for(owner, device, ToolRoute::Lane(Lane::Computer))
+            .await
+    }
+    pub async fn bind_android(
+        &self,
+        owner: &VerifiedGatewayOwner,
+        device: &DeviceId,
+    ) -> Result<BoundOwner, RelayError> {
+        self.bind_for(owner, device, ToolRoute::Android).await
+    }
+    async fn bind_for(
+        &self,
+        owner: &VerifiedGatewayOwner,
+        device: &DeviceId,
+        lane: ToolRoute,
+    ) -> Result<BoundOwner, RelayError> {
+        let _opening = self.inner.opening.lock().await;
+        if self.is_fenced(owner)? {
+            return Err(RelayError::Unauthorized);
+        }
+        let entry = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| RelayError::Unknown)?
+            .entries
+            .get(device)
+            .cloned()
+            .ok_or(RelayError::Offline)?;
+        self.authorize_route(&entry, lane).await?;
+        let existing = {
+            let bindings = self
+                .inner
+                .bindings
+                .lock()
+                .map_err(|_| RelayError::Unknown)?;
+            bindings
+                .iter()
+                .find(|binding| {
+                    binding.owner.owner_id() == owner.owner_id()
+                        && binding.owner.principal_fingerprint() == owner.principal_fingerprint()
+                        && binding.entry.device == *device
+                        && !binding.retired_for(&entry)
+                })
+                .cloned()
+        };
+        if let Some(binding) = existing {
+            if !binding.ready.load(Ordering::Acquire) {
+                return Err(RelayError::Busy);
+            }
+            self.route_binding(&binding, lane).await?;
+            return Ok(BoundOwner { inner: binding });
+        }
+        let reference = OwnerRef {
+            owner_id: owner.owner_id().clone(),
+            owner_epoch: crate::host::protocol::paired_owner_epoch(
+                &self.inner.epoch,
+                self.inner
+                    .next_owner
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                    .map_err(|_| RelayError::Busy)?,
+            ),
+        };
+        let binding = Arc::new(Binding {
+            owner: owner.clone(),
+            reference: reference.clone(),
+            entry: entry.clone(),
+            route: Mutex::new(entry.clone()),
+            rebind: tokio::sync::Mutex::new(()),
+            revoked: Arc::new(Mutex::new(false)),
+            receipts: tokio::sync::RwLock::new(()),
+            ready: AtomicBool::new(false),
+            cleanup: Mutex::new(drain::BindingCleanup::default()),
+            cleanup_changed: tokio::sync::Notify::new(),
+        });
+        // Reserve before await; cancelled bind never creates an untracked Host owner.
+        {
+            let admission = entry.admission.lock().map_err(|_| RelayError::Unknown)?;
+            if *admission {
+                return Err(RelayError::Unauthorized);
+            }
+            owner
+                .with_admission(|| {
+                    let mut b = self
+                        .inner
+                        .bindings
+                        .lock()
+                        .map_err(|_| RelayError::Unknown)?;
+                    if b.iter().any(|existing| {
+                        existing.owner.owner_id() == owner.owner_id()
+                            && existing.owner.principal_fingerprint()
+                                == owner.principal_fingerprint()
+                            && existing.entry.device == *device
+                            && !existing.retired_for(&entry)
+                    }) {
+                        return Err(RelayError::Busy);
+                    }
+                    b.push(binding.clone());
+                    Ok(())
+                })
+                .ok_or(RelayError::Unauthorized)??;
+        }
+        match self
+            .exchange(
+                &entry,
+                Call::OwnerOpen {
+                    owner: reference.clone(),
+                    grant_revision: entry.grant_revision,
+                },
+                Some(binding.revoked.clone()),
+            )
+            .await?
+        {
+            Reply::OwnerOpened {
+                owner: got,
+                grant_revision,
+            } if got == reference && grant_revision == entry.grant_revision => {
+                if self.is_fenced(owner)? {
+                    *binding.revoked.lock().map_err(|_| RelayError::Unknown)? = true;
+                    return Err(RelayError::Unauthorized);
+                }
+                let admission = entry.admission.lock().map_err(|_| RelayError::Unknown)?;
+                if *admission || *binding.revoked.lock().map_err(|_| RelayError::Unknown)? {
+                    return Err(RelayError::Unauthorized);
+                }
+                binding.ready.store(true, Ordering::Release);
+                Ok(BoundOwner { inner: binding })
+            }
+            _ => {
+                *binding.revoked.lock().map_err(|_| RelayError::Unknown)? = true;
+                Err(RelayError::Unauthorized)
+            }
+        }
+    }
+    pub async fn call(&self, b: &BoundOwner, call: Call) -> Result<Reply, RelayError> {
+        match self.call_inner(b, call).await {
+            Err(RelayError::Busy) => Ok(Reply::Error {
+                category: styx_contracts::error::ErrorCategory::Busy,
+                certainty: styx_contracts::error::ExecutionCertainty::NotDispatched,
+                cursor_may_be_consumed: false,
+            }),
+            result => result,
+        }
+    }
+    async fn call_inner(&self, b: &BoundOwner, call: Call) -> Result<Reply, RelayError> {
+        let _receipt = b
+            .inner
+            .receipts
+            .try_read()
+            .map_err(|_| RelayError::Unauthorized)?;
+        if self.is_fenced(&b.inner.owner)?
+            || *b.inner.revoked.lock().map_err(|_| RelayError::Unknown)?
+            || !b.inner.ready.load(Ordering::Acquire)
+        {
+            return Err(RelayError::Unauthorized);
+        }
+        {
+            let bindings = self
+                .inner
+                .bindings
+                .lock()
+                .map_err(|_| RelayError::Unknown)?;
+            if !bindings.iter().any(|x| Arc::ptr_eq(x, &b.inner)) {
+                return Err(RelayError::Unauthorized);
+            }
+        }
+        let lane = if call.is_android() {
+            ToolRoute::Android
+        } else if call.is_computer() {
+            ToolRoute::Lane(Lane::Computer)
+        } else if call.is_browser() {
+            ToolRoute::Lane(Lane::Browser)
+        } else {
+            ToolRoute::Lane(Lane::Exec)
+        };
+        let entry = self.route_binding(&b.inner, lane).await?;
+        let (owner, grant_revision) = match &call {
+            Call::Android {
+                owner,
+                grant_revision,
+                ..
+            }
+            | Call::BrowserSession {
+                owner,
+                grant_revision,
+                ..
+            }
+            | Call::DesktopSession {
+                owner,
+                grant_revision,
+                ..
+            }
+            | Call::ExecTask {
+                owner,
+                grant_revision,
+                ..
+            } => (owner, *grant_revision),
+            _ => return Err(RelayError::Unsupported),
+        };
+        if owner != &b.inner.reference || grant_revision != b.grant_revision() {
+            return Err(RelayError::Unauthorized);
+        }
+        let reply = self
+            .exchange(&entry, call, Some(b.inner.revoked.clone()))
+            .await?;
+        if self.is_fenced(&b.inner.owner)?
+            || *b.inner.revoked.lock().map_err(|_| RelayError::Unknown)?
+            || !b.inner.ready.load(Ordering::Acquire)
+        {
+            return Err(RelayError::Unauthorized);
+        }
+        self.authorize_route(&entry, lane).await?;
+        Ok(reply)
+    }
+    fn is_fenced(&self, owner: &VerifiedGatewayOwner) -> Result<bool, RelayError> {
+        Ok(owner.is_fenced())
+    }
+    pub fn fence_owner(&self, owner: &VerifiedGatewayOwner) -> Result<(), RelayError> {
+        owner.fence();
+        for b in self
+            .inner
+            .bindings
+            .lock()
+            .map_err(|_| RelayError::Unknown)?
+            .iter()
+        {
+            if b.owner.owner_id() == owner.owner_id()
+                && b.owner.principal_fingerprint() == owner.principal_fingerprint()
+            {
+                *b.revoked.lock().map_err(|_| RelayError::Unknown)? = true
+            }
+        }
+        Ok(())
+    }
+    pub async fn revoke(&self, owner: &VerifiedGatewayOwner) -> Result<(), RelayError> {
+        self.fence_owner(owner)?;
+        let bindings: Vec<_> = self
+            .inner
+            .bindings
+            .lock()
+            .map_err(|_| RelayError::Unknown)?
+            .iter()
+            .filter(|b| {
+                b.owner.owner_id() == owner.owner_id()
+                    && b.owner.principal_fingerprint() == owner.principal_fingerprint()
+            })
+            .cloned()
+            .collect();
+        for b in bindings {
+            *b.revoked.lock().map_err(|_| RelayError::Unknown)? = true;
+            let entry = self.cleanup_binding_entry(&b).await?;
+            let _ = self
+                .exchange(
+                    &entry,
+                    Call::OwnerRevoke {
+                        owner: b.reference.clone(),
+                    },
+                    None,
+                )
+                .await?;
+        }
+        Err(RelayError::Unknown)
+    }
+    pub async fn cleanup_owner(
+        &self,
+        owner: &VerifiedGatewayOwner,
+        budget: Duration,
+    ) -> Result<bool, RelayError> {
+        self.fence_owner(owner)?;
+        let until = tokio::time::Instant::now() + budget.min(Duration::from_secs(5));
+        let bindings: Vec<_> = self
+            .inner
+            .bindings
+            .lock()
+            .map_err(|_| RelayError::Unknown)?
+            .iter()
+            .filter(|b| {
+                b.owner.owner_id() == owner.owner_id()
+                    && b.owner.principal_fingerprint() == owner.principal_fingerprint()
+            })
+            .cloned()
+            .collect();
+        for b in bindings {
+            if !self.settle_binding(&b, until, None).await {
+                return Ok(false);
+            }
+        }
+        self.inner
+            .bindings
+            .lock()
+            .map_err(|_| RelayError::Unknown)?
+            .retain(|b| b.owner.owner_id() != owner.owner_id());
+        Ok(true)
+    }
+    pub fn fence_transport(&self) {
+        if let Ok(mut s) = self.inner.state.lock() {
+            s.closing = true;
+            for (stop, _) in &s.tasks {
+                stop.cancel()
+            }
+            for e in s.entries.values() {
+                e.live.store(false, Ordering::Release);
+                e.stop.cancel()
+            }
+        }
+    }
+    pub async fn shutdown(&self) -> Result<(), RelayError> {
+        let _join = self.inner.shutdown_lock.lock().await;
+        let jobs = {
+            let mut s = self.inner.state.lock().map_err(|_| RelayError::Unknown)?;
+            s.closing = true;
+            for e in s.entries.values() {
+                e.stop.cancel()
+            }
+            for (stop, _) in &s.tasks {
+                stop.cancel();
+            }
+            std::mem::take(&mut s.tasks)
+        };
+        let mut joined = !self.inner.shutdown_failed.load(Ordering::Acquire);
+        for (stop, job) in jobs {
+            stop.cancel();
+            joined &= job.await.is_ok();
+        }
+        let bindings = self
+            .inner
+            .bindings
+            .lock()
+            .map_err(|_| RelayError::Unknown)?
+            .clone();
+        for binding in bindings {
+            let job = binding
+                .cleanup
+                .lock()
+                .map_err(|_| RelayError::Unknown)?
+                .job
+                .take();
+            if let Some(job) = job {
+                joined &= job.await.is_ok();
+            }
+        }
+        if joined {
+            Ok(())
+        } else {
+            self.inner.shutdown_failed.store(true, Ordering::Release);
+            Err(RelayError::Unknown)
+        }
+    }
+}
+
+#[cfg(test)]
+mod command_queue_tests {
+    use super::*;
+
+    fn owner() -> OwnerRef {
+        OwnerRef {
+            owner_id: "queue-admission-fixture".try_into().unwrap(),
+            owner_epoch: "queue-admission-epoch".try_into().unwrap(),
+        }
+    }
+
+    fn open(revision: u64) -> Call {
+        Call::OwnerOpen {
+            owner: owner(),
+            grant_revision: revision,
+        }
+    }
+
+    fn acknowledge(command: Command, expected_revision: u64) {
+        let Call::OwnerOpen {
+            owner: received_owner,
+            grant_revision,
+        } = command.call
+        else {
+            panic!("the original queued command must be retained");
+        };
+        assert!(received_owner == owner());
+        assert_eq!(grant_revision, expected_revision);
+        assert!(
+            command
+                .result
+                .send(Ok(Reply::OwnerOpened {
+                    owner: received_owner,
+                    grant_revision,
+                }))
+                .is_ok(),
+            "the original exchange must still own its reply receiver"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_queue_preserves_both_original_exchanges_without_capacity_refusal() {
+        let (queue, mut receiver) = mpsc::channel(1);
+        let first = RelayHandle::exchange_command(&queue, open(7), None);
+        tokio::pin!(first);
+        assert!(futures_util::poll!(first.as_mut()).is_pending());
+        let second = RelayHandle::exchange_command(&queue, open(99), None);
+        tokio::pin!(second);
+        assert!(futures_util::poll!(second.as_mut()).is_pending());
+        assert_eq!(receiver.len(), 1);
+        acknowledge(receiver.try_recv().unwrap(), 7);
+        assert!(matches!(
+            first.await,
+            Ok(Reply::OwnerOpened {
+                grant_revision: 7,
+                ..
+            })
+        ));
+        assert!(futures_util::poll!(second.as_mut()).is_pending());
+        acknowledge(receiver.try_recv().unwrap(), 99);
+        assert!(matches!(
+            second.await,
+            Ok(Reply::OwnerOpened {
+                grant_revision: 99,
+                ..
+            })
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn closed_queue_is_offline_and_preserves_the_already_queued_reply() {
+        let (queue, mut receiver) = mpsc::channel(1);
+        let original = RelayHandle::exchange_command(&queue, open(7), None);
+        tokio::pin!(original);
+        assert!(futures_util::poll!(original.as_mut()).is_pending());
+        receiver.close();
+
+        let refused = RelayHandle::exchange_command(&queue, open(99), None).await;
+        assert!(matches!(refused, Err(RelayError::Offline)));
+        assert_eq!(receiver.len(), 1);
+        acknowledge(receiver.try_recv().unwrap(), 7);
+        assert!(matches!(
+            original.await,
+            Ok(Reply::OwnerOpened {
+                grant_revision: 7,
+                ..
+            })
+        ));
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn accepted_command_with_lost_reply_remains_unknown() {
+        let (queue, mut receiver) = mpsc::channel(1);
+        let exchange = RelayHandle::exchange_command(&queue, open(7), None);
+        tokio::pin!(exchange);
+        assert!(futures_util::poll!(exchange.as_mut()).is_pending());
+        // Acceptance happened; loss of its reply cannot prove non-dispatch.
+        drop(receiver.try_recv().unwrap());
+        assert!(!queue.is_closed());
+        assert!(matches!(exchange.await, Err(RelayError::Unknown)));
+    }
+}
+
+#[cfg(test)]
+mod connection_capacity_tests {
+    use super::*;
+    #[test]
+    fn connections_have_no_count_quota_and_drop_tracks_only_the_original_link() {
+        let links = ActiveLinks::default();
+        let mut admitted = (0..80).map(|_| links.admit()).collect::<Vec<_>>();
+        assert_eq!(links.active.load(Ordering::Acquire), 80);
+        drop(admitted.pop());
+        assert_eq!(links.active.load(Ordering::Acquire), 79);
+        let replacement = links.admit();
+        assert_eq!(links.active.load(Ordering::Acquire), 80);
+        drop(replacement);
+        drop(admitted);
+        assert_eq!(links.active.load(Ordering::Acquire), 0);
+    }
+    #[tokio::test]
+    async fn two_hundred_reconnections_track_live_links_and_reap_completed_tasks() {
+        let links = ActiveLinks::default();
+        // Other computers remain connected while one repeatedly disconnects.
+        let others = (0..31).map(|_| links.admit()).collect::<Vec<_>>();
+        let mut state = State {
+            entries: BTreeMap::new(),
+            closing: false,
+            tasks: vec![],
+        };
+        for _ in 0..200 {
+            assert!(state.reap_finished());
+            let slot = links.admit();
+            let stop = CancellationToken::new();
+            let stopped = stop.clone();
+            let job = tokio::spawn(async move {
+                let _slot = slot;
+                stopped.cancelled().await;
+            });
+            state.tasks.push((stop.clone(), job));
+            drop(links.admit());
+            stop.cancel();
+            while !state.tasks.last().unwrap().1.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(links.active.load(Ordering::Acquire), 31);
+        }
+        assert!(state.reap_finished());
+        assert!(state.tasks.is_empty());
+        drop(others);
+        assert_eq!(links.active.load(Ordering::Acquire), 0);
+    }
+}
+
+#[cfg(test)]
+#[path = "abrupt_rebind_tests.rs"]
+mod abrupt_rebind_tests;

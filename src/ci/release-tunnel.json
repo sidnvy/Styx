@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "version": "0.0.17",
+  "upstream": "https://github.com/openai/tunnel-client/releases/tag/v0.0.17",
+  "flavor": "runtime",
+  "platforms": {
+    "linux": {
+      "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.17/tunnel-client-runtime-v0.0.17-linux-amd64.zip",
+      "archive_sha256": "08e6f9a36be2026847256c682f3593f8b7e4edbaae5931a941c058642b226186",
+      "binary": "tunnel-client-runtime",
+      "members": {
+        "tunnel-client-runtime": "d34a6afa264239899ac6478691a1e2a8cb47e7ef6c1a124ce4db40c3e780d92a",
+        "LICENSE": "f4c1d7ba32ef5bcf5cf03e2eefec5825ebafedf50fa330a36700a49c605c1ef4",
+        "NOTICE": "1364c020d86ecf948b78b7c655175032068203d13aece70fb0bfe112d7802dc2",
+        "tunnel-client-runtime-v0.0.17-linux-amd64-licenses.txt": "228754b49354a9063282612d3f663edf78f0db16bc81fb6d5e1369ee6e8c325c",
+        "tunnel-client-runtime-v0.0.17-linux-amd64.spdx.json": "8475e1275a9fd0a0501650d1b1b63cbf15823d913268e348e569d5ee201680a9"
+      }
+    },
+    "macos": {
+      "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.17/tunnel-client-runtime-v0.0.17-darwin-arm64.zip",
+      "archive_sha256": "cd0baf7009712b73ddd3911fb7a2fc8aa1113a878030e0ca5c46338a34bf484f",
+      "binary": "tunnel-client-runtime",
+      "members": {
+        "tunnel-client-runtime": "d5100fa407cd965be25be428828e34202917fdaf5fcc9716e411bbae5de89769",
+        "LICENSE": "f4c1d7ba32ef5bcf5cf03e2eefec5825ebafedf50fa330a36700a49c605c1ef4",
+        "NOTICE": "1364c020d86ecf948b78b7c655175032068203d13aece70fb0bfe112d7802dc2",
+        "tunnel-client-runtime-v0.0.17-darwin-arm64-licenses.txt": "5acdab335f96235bb6f04d06e6327648a3ea7ba431d50772bca674f8e5a948e2",
+        "tunnel-client-runtime-v0.0.17-darwin-arm64.spdx.json": "16f67488b4ea4bd3fc493591d35923cac9855e1a8345fb46c5433c6dfc60f120"
+      }
+    },
+    "windows": {
+      "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.17/tunnel-client-runtime-v0.0.17-windows-amd64.zip",
+      "archive_sha256": "f5ff72ec1dec0bbcec06871c6b6e3de8ddd5968f1f30b433a2b61a9f4ca4391b",
+      "binary": "tunnel-client-runtime.exe",
+      "members": {
+        "tunnel-client-runtime.exe": "ecee4144706845cd6cc9b8d41fe4137ca9a19c7e33cfb60b2e7c7d8368c0a25c",
+        "LICENSE": "f4c1d7ba32ef5bcf5cf03e2eefec5825ebafedf50fa330a36700a49c605c1ef4",
+        "NOTICE": "1364c020d86ecf948b78b7c655175032068203d13aece70fb0bfe112d7802dc2",
+        "tunnel-client-runtime-v0.0.17-windows-amd64-licenses.txt": "65f2c97d95abfe805ce18fd63757186295e1bbf8e20ecedcb7cc173d3cade73f",
+        "tunnel-client-runtime-v0.0.17-windows-amd64.spdx.json": "0817f105772add0355e1cc5d93d9d53a7d28dcfd5d59c3e05a1fd8a8afc6a41b"
+      }
+    }
+  }
+}

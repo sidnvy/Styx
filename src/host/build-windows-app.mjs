@@ -1,0 +1,126 @@
+// Offline, fresh-target per-user Windows preview. No startup or registry mutation.
+import fs from 'node:fs';
+import path from 'node:path';
+import {createHash,createPublicKey,verify} from 'node:crypto';
+import {execFileSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const assert=(ok,code)=>{if(!ok)throw Error(code)};
+const rel=name=>typeof name==='string'&&name.length<512&&!name.includes('\\')&&!name.includes(':')&&!path.isAbsolute(name)&&name.split('/').every(x=>x&&x!=='.'&&x!=='..');
+function regular(file,directory=false){const st=fs.lstatSync(file);assert(!st.isSymbolicLink()&&(directory?st.isDirectory():st.isFile()),'redirected_package_input');const actual=fs.realpathSync(file),expected=path.resolve(file);assert(process.platform==='win32'?actual.toLowerCase()===expected.toLowerCase():actual===expected,'redirected_package_input');return st;}
+function copyExact(source,destination){const st=fs.lstatSync(source);assert(!st.isSymbolicLink(),'redirected_package_input');if(st.isDirectory()){fs.mkdirSync(destination,{recursive:true});for(const name of fs.readdirSync(source))copyExact(path.join(source,name),path.join(destination,name));}else{regular(source);fs.mkdirSync(path.dirname(destination),{recursive:true});fs.copyFileSync(source,destination,fs.constants.COPYFILE_EXCL);}}
+// Node's mode argument does not set a Windows DACL. Create the fresh staging
+// root with the same current-user/SYSTEM/Administrators policy as InstallGate;
+// its files and children then inherit only these rules. Existing paths and
+// parent ACLs are never adopted or changed, including a concurrent creator.
+export function windowsNativeOutputCommand(output,windowsDirectory=process.env.WINDIR??'C:\\Windows'){
+ assert(typeof output==='string'&&path.win32.isAbsolute(output)&&!output.includes('\0'),'absolute_package_paths_required');
+ const encodedPath=Buffer.from(output,'utf8').toString('base64');
+ const script=`$ErrorActionPreference='Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
+public static class StyxNativePackageDirectory {
+ [StructLayout(LayoutKind.Sequential)] struct Attributes { public int Length; public IntPtr Descriptor; public int InheritHandle; }
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateDirectoryW(string path,ref Attributes security);
+ public static void Create(string path) {
+  var user=WindowsIdentity.GetCurrent().User;
+  var acl=new DirectorySecurity();acl.SetOwner(user);acl.SetAccessRuleProtection(true,false);
+  foreach(var sid in new[]{user,new SecurityIdentifier("S-1-5-18"),new SecurityIdentifier("S-1-5-32-544")})
+   acl.AddAccessRule(new FileSystemAccessRule(sid,FileSystemRights.FullControl,InheritanceFlags.ContainerInherit|InheritanceFlags.ObjectInherit,PropagationFlags.None,AccessControlType.Allow));
+  byte[] descriptor=acl.GetSecurityDescriptorBinaryForm();IntPtr memory=Marshal.AllocHGlobal(descriptor.Length);
+  try {
+   Marshal.Copy(descriptor,0,memory,descriptor.Length);
+   var security=new Attributes{Length=Marshal.SizeOf(typeof(Attributes)),Descriptor=memory};
+   if(!CreateDirectoryW(path,ref security))throw new IOException("native_package_directory_create_error:"+Marshal.GetLastWin32Error());
+  } finally { Marshal.FreeHGlobal(memory); }
+ }
+}
+'@
+[StyxNativePackageDirectory]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPath}')))
+`;
+ return {executable:path.win32.join(windowsDirectory,'System32','WindowsPowerShell','v1.0','powershell.exe'),args:['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')]};
+}
+export function createNativeOutputDirectory(output){
+ if(process.platform!=='win32'){fs.mkdirSync(output,{mode:0o700});return;}
+ const command=windowsNativeOutputCommand(output);
+ try{execFileSync(command.executable,command.args,{stdio:'pipe',windowsHide:true});}
+ catch{throw Error('native_private_output_creation_failed');}
+}
+export function windowsExecutableArchitecture(file){regular(file);const fd=fs.openSync(file,'r');try{const header=Buffer.alloc(64);assert(fs.readSync(fd,header,0,64,0)===64&&header.toString('ascii',0,2)==='MZ','windows_pe_executable_required');const offset=header.readUInt32LE(0x3c),pe=Buffer.alloc(6);assert(offset>=64&&offset<=16*1024*1024&&fs.readSync(fd,pe,0,6,offset)===6&&pe.subarray(0,4).equals(Buffer.from([80,69,0,0])),'windows_pe_executable_required');const machine=pe.readUInt16LE(4);assert([0x8664,0xaa64].includes(machine),'supported_windows_machine_required');return machine===0x8664?'x64':'arm64';}finally{fs.closeSync(fd);}}
+function inventory(root,relative='',digest=hash,limits){return fs.readdirSync(path.join(root,relative),{withFileTypes:true}).flatMap(entry=>{const name=relative?relative+'/'+entry.name:entry.name;assert(!entry.isSymbolicLink(),'redirected_output_member');if(limits)assert(++limits.nodes<=8192&&name.split('/').length<=64,'native_tree_budget');if(entry.isDirectory())return inventory(root,name,digest,limits);assert(entry.isFile()&&rel(name),'nonregular_output_member');const file=path.join(root,...name.split('/'));return [{path:name,size:fs.statSync(file).size,sha256:digest(file)}];}).sort((a,b)=>a.path.localeCompare(b.path));}
+// Native staging verifies exact signed bytes and complete file closure. The
+// original Rust reader remains responsible for typed C08/platform ACL admission.
+// An unsigned outer package's hashes do not authenticate the initial CLI image.
+function nativeDigest(file){
+ const fd=fs.openSync(file,'r');try{const before=fs.fstatSync(fd,{bigint:true});assert(before.isFile()&&before.nlink===1n&&before.size<=1073741824n,'native_member_file_required');const h=createHash('sha256'),buffer=Buffer.alloc(1024*1024);let bytes=0,n;while((n=fs.readSync(fd,buffer,0,buffer.length,null))>0){bytes+=n;assert(bytes<=1073741824,'native_member_budget');h.update(buffer.subarray(0,n));}const after=fs.fstatSync(fd,{bigint:true});assert(['dev','ino','size','mtimeNs','ctimeNs'].every(k=>before[k]===after[k])&&BigInt(bytes)===after.size,'native_member_changed');return h.digest('hex');}finally{fs.closeSync(fd);}
+}
+function nativeImage(file){
+ regular(file);const fd=fs.openSync(file,'r');try{const mz=Buffer.alloc(64);assert(fs.readSync(fd,mz,0,64,0)===64&&mz.toString('ascii',0,2)==='MZ','native_windows_pe32_plus_required');const offset=mz.readUInt32LE(60),pe=Buffer.alloc(26);assert(offset>=64&&offset<=16*1024*1024&&fs.readSync(fd,pe,0,26,offset)===26&&pe.subarray(0,4).equals(Buffer.from([80,69,0,0]))&&pe.readUInt16LE(4)===0x8664&&pe.readUInt16LE(20)>=2&&pe.readUInt16LE(24)===0x20b&&(pe.readUInt16LE(22)&2)!==0&&(pe.readUInt16LE(22)&0x2000)===0,'native_windows_pe32_plus_required');}finally{fs.closeSync(fd);}
+}
+const nativeRelative=name=>rel(name)&&name.split('/').every(part=>!/[. ]$/.test(part)&&!/[<>"|?*\u0000-\u001f]/.test(part)&&!/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part));
+export function verifyNativeWindowsRuntimeInput(input,arch){
+ assert(input&&typeof input==='object'&&!Array.isArray(input)&&Object.keys(input).sort().join(',')==='expectedPublisher,payloadDir,publisherFile','complete_native_runtime_inputs_required');
+ for(const file of [input.payloadDir,input.publisherFile])assert(typeof file==='string'&&path.isAbsolute(file),'absolute_native_runtime_inputs_required');
+ assert(arch==='x64','native_windows_x64_required');assert(/^[a-f0-9]{64}$/.test(input.expectedPublisher),'native_external_publisher_required');regular(input.payloadDir,true);const pub=regular(input.publisherFile);assert(pub.nlink===1&&pub.size>0&&pub.size<=4096,'native_publisher_bound');
+ const pem=fs.readFileSync(input.publisherFile),key=createPublicKey(pem);assert(key.asymmetricKeyType==='ed25519'&&createHash('sha256').update(key.export({format:'der',type:'spki'})).digest('hex')===input.expectedPublisher,'native_publisher_pin_mismatch');
+ const mf=path.join(input.payloadDir,'manifest.json'),sf=path.join(input.payloadDir,'manifest.sig');const ms=regular(mf),ss=regular(sf);assert(ms.nlink===1&&ms.size>0&&ms.size<=1048576&&ss.nlink===1&&ss.size===64,'native_manifest_signature_bound');const raw=fs.readFileSync(mf),sig=fs.readFileSync(sf);assert(verify(null,raw,key,sig),'native_release_signature_invalid');const manifest=JSON.parse(raw);
+ const allowed=['schema','runtime_format','component','scope','minimum_reader','target','version','entrypoint','source','contracts','files','external_workers','worker_closures'];
+ assert(Object.keys(manifest).every(k=>allowed.includes(k))&&manifest.schema===2&&manifest.runtime_format==='native_rust_v1'&&manifest.component==='styx'&&manifest.scope==='runtime_candidate'&&manifest.minimum_reader==='native_runtime_v2'&&manifest.target==='x86_64-pc-windows-msvc'&&manifest.entrypoint==='bin/styx.exe','native_windows_c08_runtime_required');
+ assert(typeof manifest.version==='string'&&manifest.version.length>0&&manifest.version.length<=128&&manifest.source&&/^[a-f0-9]{40}$/.test(manifest.source.revision)&&/^[a-f0-9]{64}$/.test(manifest.source.inputs_sha256)&&manifest.contracts?.control===1&&manifest.contracts?.management_state===1,'native_source_contract_required');
+ assert(Array.isArray(manifest.files)&&manifest.files.length>0&&manifest.files.length<=4096&&Array.isArray(manifest.external_workers),'native_file_inventory_required');let total=0;const names=new Set(),ids=new Set();
+ for(const member of manifest.files){assert(Object.keys(member).sort().join(',')==='executable,path,sha256,size'&&nativeRelative(member.path)&&!['manifest.json','manifest.sig'].includes(member.path)&&!names.has(member.path.toLowerCase())&&Number.isSafeInteger(member.size)&&member.size>=0&&member.size<=1073741824&&/^[a-f0-9]{64}$/.test(member.sha256)&&typeof member.executable==='boolean','native_member_invalid');names.add(member.path.toLowerCase());total+=member.size;assert(total<=4*1024*1024*1024,'native_total_budget');const file=path.join(input.payloadDir,...member.path.split('/')),st=regular(file);assert(st.nlink===1&&st.size===member.size,'native_member_size_or_alias');const actual=fs.statSync(file,{bigint:true}),id=actual.dev+':'+actual.ino;assert(!ids.has(id),'native_member_alias');ids.add(id);if(member.executable)nativeImage(file);}
+ const actualRows=inventory(input.payloadDir,'',nativeDigest,{nodes:0}),expectedByName=new Map(manifest.files.map(m=>[m.path,m]));for(const row of actualRows){if(['manifest.json','manifest.sig'].includes(row.path))continue;const expected=expectedByName.get(row.path);assert(expected&&row.sha256===expected.sha256&&row.size===expected.size,'native_member_hash');}
+ const actual=actualRows.map(x=>x.path).sort(),expected=[...manifest.files.map(x=>x.path),'manifest.json','manifest.sig'].sort();assert(JSON.stringify(actual)===JSON.stringify(expected),'native_inventory_not_exact');
+ const allocated=new Set(['bin/styx.exe','LICENSE','source-inputs.json']),executable=new Set(['bin/styx.exe']),kinds=new Set(manifest.external_workers),closures=manifest.worker_closures??[];assert(kinds.size===manifest.external_workers.length&&kinds.size<=4&&Array.isArray(closures)&&closures.length===kinds.size,'native_worker_closure_required');const closed=new Set();
+ for(const closure of closures){const layout={codex_exec:['workers/codex-exec','codex.exe',['licenses/codex-LICENSE','licenses/codex-NOTICE']],browser_node22:['workers/browser-node22','node.exe',['licenses/node-LICENSE','provenance/node.json']],cua_native:['workers/cua-native','cua-driver.exe',['licenses/cua-LICENSE']],tunnel_client:['workers/tunnel-client','tunnel-client-runtime.exe',['LICENSE','NOTICE']]}[closure.kind];assert(layout&&kinds.has(closure.kind)&&!closed.has(closure.kind)&&typeof closure.version==='string'&&closure.version.length>0&&closure.version.length<=128&&/^[a-f0-9]{64}$/.test(closure.source_manifest_sha256)&&/^[a-f0-9]{64}$/.test(closure.source_publisher_spki_sha256)&&Array.isArray(closure.members)&&closure.members.length>0&&closure.members.length<=4096,'native_worker_descriptor_invalid');closed.add(closure.kind);const [prefix,binary,notices]=layout,entry=prefix+(closure.kind==='tunnel_client'?'/':'/bin/')+binary,required=[entry,...notices.map(n=>prefix+'/'+n)];if(closure.kind==='browser_node22')for(const pkg of ['@playwright/mcp','playwright','playwright-core','@modelcontextprotocol/sdk'])for(const name of ['package.json','LICENSE'])required.push(prefix+'/packages/styx-browser-provider/node_modules/'+pkg+'/'+name);assert(closure.entrypoint===entry&&required.every(n=>closure.members.includes(n)&&expectedByName.get(n)?.size>0),'native_worker_fixed_members_missing');executable.add(entry);for(const member of closure.members){assert(nativeRelative(member)&&!allocated.has(member)&&expectedByName.has(member)&&(required.includes(member)||(closure.kind==='browser_node22'&&member.startsWith(prefix+'/packages/styx-browser-provider/node_modules/'))),'native_worker_member_scope');allocated.add(member);}}
+ assert(manifest.files.every(m=>allocated.has(m.path)&&m.executable===executable.has(m.path))&&manifest.files.some(m=>m.path==='LICENSE'&&m.size>0&&!m.executable),'native_closed_runtime_members_required');
+ const cli=manifest.files.find(x=>x.path==='bin/styx.exe'),source=manifest.files.find(x=>x.path==='source-inputs.json');assert(cli?.executable===true&&cli.size>0&&source&&source.size>0&&source.executable===false&&source.sha256===manifest.source.inputs_sha256,'native_fixed_cli_or_source_missing');
+ return {manifest,manifestSha256:createHash('sha256').update(raw).digest('hex'),signatureSha256:createHash('sha256').update(sig).digest('hex'),publisherSha256:hash(input.publisherFile),cliSha256:cli.sha256,total};
+}
+function buildNativeWindowsApp({sourceRoot,sourceFiles,sourceRevision,sourceArchiveManifest,expectedSourceArchiveSha256,expectedSourceManifestSha256,output,nativeRuntime,arch,compile}){
+ for(const file of [sourceRoot,output])assert(typeof file==='string'&&path.isAbsolute(file),'absolute_package_paths_required');assert(!fs.existsSync(output),'fresh_package_output_required');regular(path.dirname(output),true);regular(sourceRoot,true);assert(typeof compile==='boolean'&&(!compile||process.platform==='win32'),'native_windows_compile_required');
+ const inside=(base,file)=>{const rel=path.relative(base,file);return rel===''||(!rel.startsWith('..'+path.sep)&&rel!=='..'&&!path.isAbsolute(rel));};for(const base of [sourceRoot,nativeRuntime?.payloadDir].filter(x=>typeof x==='string'))assert(!inside(base,output)&&!inside(output,base),'native_input_output_overlap');
+ const styxAppSources=['Styx.cs','NativeBootstrap.cs','CoreClient.cs','LocalAppControl.cs'];
+ const original=verifyNativeWindowsRuntimeInput(nativeRuntime,arch),selected=[...styxAppSources.map(name=>'host/windows/'+name),'host/windows/SessionProbe.cs','host/windows/PrivateStorage.cs','assets/brand/styx-logo.png','assets/brand/styx.ico','assets/brand/styx-custom-mcp-icon.png'];
+ if(sourceFiles!==undefined)assert(Array.isArray(sourceFiles)&&selected.every(name=>sourceFiles.includes(name)),'required_native_app_source_missing');const sources=Object.fromEntries(selected.map(name=>{const file=path.join(sourceRoot,...name.split('/'));regular(file);return [name,hash(file)];}));
+ // A compiled outer App must be bound to the same exact tracked archive as
+ // the signed runtime. This is provenance, not a replacement for Authenticode.
+ let sourceProvenance={status:'NOT_BOUND_COMPILE_REFUSED'};
+ if(compile||[sourceRevision,sourceArchiveManifest,expectedSourceArchiveSha256,expectedSourceManifestSha256].some(value=>value!==undefined)){
+  assert(/^[a-f0-9]{40}$/.test(sourceRevision??'')&&sourceRevision===original.manifest.source.revision&&typeof sourceArchiveManifest==='string'&&path.isAbsolute(sourceArchiveManifest)&&/^[a-f0-9]{64}$/.test(expectedSourceArchiveSha256??'')&&/^[a-f0-9]{64}$/.test(expectedSourceManifestSha256??''),'native_same_revision_source_inputs_required');
+  regular(sourceArchiveManifest);assert(fs.statSync(sourceArchiveManifest).size<=16*1024*1024,'native_source_manifest_bound');
+  const sourceRaw=fs.readFileSync(sourceArchiveManifest);assert(createHash('sha256').update(sourceRaw).digest('hex')===expectedSourceManifestSha256,'native_source_manifest_pin_mismatch');const sourceInput=JSON.parse(sourceRaw),archive=path.join(path.dirname(sourceArchiveManifest),'source.tar');regular(archive);
+  assert(sourceInput.sourceRevision===sourceRevision&&sourceInput.archiveSha256===expectedSourceArchiveSha256&&nativeDigest(archive)===expectedSourceArchiveSha256&&sourceInput.members&&typeof sourceInput.members==='object','native_source_archive_binding_mismatch');
+  for(const [name,digest] of Object.entries(sources))assert(sourceInput.members['src/'+name]===digest,'native_app_source_not_in_frozen_archive');
+  assert(sourceInput.members['src/host/build-windows-app.mjs']===hash(fileURLToPath(import.meta.url)),'native_app_builder_not_in_frozen_archive');
+  sourceProvenance={status:'SAME_REVISION_TRACKED_ARCHIVE_BOUND',sourceRevision,sourceArchiveSha256:expectedSourceArchiveSha256,sourceManifestSha256:createHash('sha256').update(sourceRaw).digest('hex')};
+ }
+ createNativeOutputDirectory(output);let complete=false;
+ try{
+  fs.mkdirSync(path.join(output,'native'));for(const name of [...original.manifest.files.map(x=>x.path),'manifest.json','manifest.sig'])copyExact(path.join(nativeRuntime.payloadDir,...name.split('/')),path.join(output,'native',...name.split('/')));copyExact(nativeRuntime.publisherFile,path.join(output,'native-publisher.pem'));
+  const copied=verifyNativeWindowsRuntimeInput({payloadDir:path.join(output,'native'),publisherFile:path.join(output,'native-publisher.pem'),expectedPublisher:nativeRuntime.expectedPublisher},arch);assert(copied.manifestSha256===original.manifestSha256&&copied.cliSha256===original.cliSha256,'native_copy_changed');
+  for(const name of selected)copyExact(path.join(sourceRoot,...name.split('/')),path.join(output,name==='assets/brand/styx-logo.png'?'styx-logo.png':path.basename(name)));
+  const manifest={schema:1,nativeRuntime:{schema:1,cli:'native/bin/styx.exe',cliSha256:copied.cliSha256,payload:'native',manifestSha256:copied.manifestSha256,publisher:'native-publisher.pem',publisherSpkiSha256:nativeRuntime.expectedPublisher}};
+  if(compile){
+   const version=original.manifest.version;
+   assert(typeof version==='string'&&/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?$/.test(version),'native_app_version_required');
+   const versionSource=path.join(output,'AssemblyInfo.cs');
+   fs.writeFileSync(versionSource,`[assembly: System.Reflection.AssemblyProduct("Styx")]\n[assembly: System.Reflection.AssemblyInformationalVersion(${JSON.stringify(version)})]\n[assembly: System.Reflection.AssemblyFileVersion(${JSON.stringify(version.split('-')[0]+'.0')})]\n`,{flag:'wx',mode:0o600});
+   const csc=path.join(process.env.WINDIR,'Microsoft.NET/Framework64/v4.0.30319/csc.exe');for(const [name,target,references] of [['Styx','winexe',['System.Windows.Forms.dll','System.Drawing.dll','System.Web.Extensions.dll']],['SessionProbe','exe',[]],['PrivateStorage','exe',['System.Web.Extensions.dll']]]){const filename=name==='Styx'?'StyxPreview.exe':name==='SessionProbe'?'StyxSessionProbe.exe':'StyxPrivateStorage.exe';const inputs=name==='Styx'?styxAppSources.map(s=>path.join(output,s)):[path.join(output,name+'.cs')];execFileSync(csc,['/nologo','/warn:4','/warnaserror+','/target:'+target,'/platform:anycpu','/optimize+',...(name==='Styx'?['/win32icon:'+path.join(output,'styx.ico')]:[]),...references.map(r=>'/reference:'+r),'/out:'+path.join(output,filename),...inputs,versionSource],{stdio:'pipe'});const key=name==='Styx'?'desktopApp':name==='SessionProbe'?'desktopProbe':'privateStorage';manifest[key]={path:filename,sha256:hash(path.join(output,filename))};}}
+  fs.writeFileSync(path.join(output,'windows-runtime.json'),JSON.stringify(manifest,null,2)+'\n',{flag:'wx',mode:0o600});
+  const after=verifyNativeWindowsRuntimeInput(nativeRuntime,arch);assert(after.manifestSha256===original.manifestSha256&&after.signatureSha256===original.signatureSha256&&after.publisherSha256===original.publisherSha256&&selected.every(name=>hash(path.join(sourceRoot,...name.split('/')))===sources[name]),'native_package_input_changed');
+  const receipt={schema:1,sourceRevision:sourceRevision??null,sourceProvenance,status:compile?'built_native_unsigned_development_app':'staged_native_compile_required',artifact:output,compiled:compile,arch,runtimeFormat:'native_rust_v1',sourceSha256:sources['host/windows/Styx.cs'],sourceFiles: sources,nativeManifestSha256:copied.manifestSha256,nativeCliSha256:copied.cliSha256,nativePublisherSpkiSha256:nativeRuntime.expectedPublisher,nativeMemberCount:original.manifest.files.length,nativeSignature:'exact_raw_ed25519_64_verified',nativeTypedReaderAdmission:'required_again_by_original_rust_bootstrap',nativePayloadBytes:original.total,coreManagementRuntime:'fixed_rust_cli_no_node_core',nodeRuntime:'only_signed_browser_worker_if_declared',packageAuthenticity:'unsigned_preview_consistency_only_not_os_signature_or_initial_cli_authentication',installer:'NOT_IMPLEMENTED_NATIVE_INSTALLER',legacyUpgrade:'NOT_IMPLEMENTED',desktopAcceptance:'NOT RUN',chatgptAcceptance:'NOT RUN',startupMutation:'NOT RUN',registryMutation:'NOT RUN',installation:'NOT RUN'};
+  fs.writeFileSync(path.join(output,'build-receipt.json'),JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});fs.writeFileSync(path.join(output,'INSTALL-README.txt'),'Native Rust development staging only. Unsigned outer package hashes establish consistency, not Windows publisher authentication.\r\nRust C08 signature and all payload members were checked using an explicit external publisher pin. Runtime bootstrap must reverify through the original Rust reader.\r\nNo Node Core/Host scripts, legacy installer, updater, service registration, autostart or installation are included. Browser Node may exist only in the signed worker closure.\r\nCompile with this builder on Windows before any isolated App run. Preserve original App/identity/TCC and publisher trust.\r\n',{flag:'wx',mode:0o600});
+  const packageManifest={schema:1,kind:'styx-windows-unsigned-preview',sourceRevision:sourceRevision??null,sourceProvenance,arch,compiled:compile,hostBundle:false,nativeRuntime:true,authenticity:'not_verified_unsigned_preview',files:inventory(output,'',nativeDigest,{nodes:0})};fs.writeFileSync(path.join(output,'windows-package.json'),JSON.stringify(packageManifest,null,2)+'\n',{flag:'wx',mode:0o600});complete=true;return {...receipt,packageManifestSha256:hash(path.join(output,'windows-package.json'))};
+ }finally{if(!complete)fs.rmSync(output,{recursive:true,force:true});}
+}
+export function buildWindowsApp({nativeRuntime,sourceRoot,sourceFiles,sourceRevision,sourceArchiveManifest,expectedSourceArchiveSha256,expectedSourceManifestSha256,output,arch='x64',compile=process.platform==='win32',...removedInputs}={}){
+ assert(nativeRuntime!==undefined,'native_runtime_required_for_product_app');
+ assert(Object.values(removedInputs).every(value=>value===undefined),'native_legacy_inputs_conflict');
+ return buildNativeWindowsApp({sourceRoot,sourceFiles,sourceRevision,sourceArchiveManifest,expectedSourceArchiveSha256,expectedSourceManifestSha256,output,nativeRuntime,arch,compile});
+}
+if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){try{const config=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));console.log(JSON.stringify(buildWindowsApp(config)));}catch(error){console.error(JSON.stringify({status:'FAIL',reason:/^[a-z_]+$/.test(error.message??'')?error.message:'windows_package_build_failed'}));process.exitCode=2;}}

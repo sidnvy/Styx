@@ -1,0 +1,14 @@
+{
+  "gateway_url": "https://gateway.private.example:8795",
+  "gateway_ca_file": "/private/trusted-gateway-ca.pem",
+  "storage_dir": "/home/operator/.local/share/styx/device",
+  "label": "My workstation",
+  "cwd": "/home/operator/styx-scratch",
+  "shell": "/bin/sh",
+  "exec_binary": "/home/operator/.local/share/styx/codex",
+  "computer_requested": true,
+  "computer_binary": "/home/operator/.local/share/styx/cua-driver",
+  "computer_env": {
+    "CUA_DRIVER_RS_ENABLE_WAYLAND": "1"
+  }
+}

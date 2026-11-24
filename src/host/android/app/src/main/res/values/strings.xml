@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_description">Allow your paired Styx Gateway to read the screen and perform the actions you request. Protected screens remain protected. You can stop the Host or disable this service at any time.</string>
+</resources>

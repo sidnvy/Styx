@@ -1,0 +1,19 @@
+node_modules/
+.env
+*.log
+coverage/
+.chat-codex/
+# Runtime credentials/config must stay outside the repository; defense in depth.
+.env.*
+!.env.example
+private/
+secrets/
+token
+runtime-key
+tunnel-authorization
+config.json
+audit.jsonl
+*.pem
+*.key
+
+/target/

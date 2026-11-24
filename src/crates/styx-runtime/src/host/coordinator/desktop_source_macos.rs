@@ -1,0 +1,527 @@
+//! Original App-owned source: actual facts/read acquisition, never descriptor grants.
+use crate::providers::cua::probe_diagnostic::{ProbeCause, ProbeDiagnostic, ProbeStage};
+use crate::{
+    providers::cua::{
+        MacProxySource,
+        macos_source::{NativeObservation, WindowReadEvidence},
+    },
+    session::ProviderEvidence,
+};
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
+use styx_contracts::{
+    capability::{Authorization, Availability, CapabilityId},
+    error::{ErrorCategory, Recovery},
+    identity::{AgentInstanceId, SessionId, Sha256Digest},
+    session::SessionIdentity,
+};
+use styx_core::session::RegistrationFacts;
+use tokio::{sync::Mutex as AsyncMutex, task::JoinHandle};
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum DesktopSourceError {
+    #[error("desktop source unavailable")]
+    Unavailable,
+    #[error("desktop source changed or ended")]
+    Fenced,
+    #[error("desktop source supervisor failed")]
+    Supervisor,
+}
+impl DesktopSourceError {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Unavailable => "desktop_source_unavailable",
+            Self::Fenced => "desktop_source_fenced",
+            Self::Supervisor => "desktop_source_supervisor_failed",
+        }
+    }
+}
+type Result<T> = std::result::Result<T, DesktopSourceError>;
+const OBSERVATION_TTL: Duration = Duration::from_secs(15);
+const REPROBE_INTERVAL: Duration = Duration::from_secs(5);
+struct Observed {
+    native: NativeObservation,
+    windows: Option<WindowReadEvidence>,
+    at: Instant,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct DesktopSourceStop {
+    pub observation_task_joined: bool,
+    pub original_probe_transport_drained: bool,
+}
+impl DesktopSourceStop {
+    pub(crate) fn complete(&self) -> bool {
+        self.observation_task_joined && self.original_probe_transport_drained
+    }
+}
+struct Inner {
+    source: Arc<MacProxySource>,
+    fenced: AtomicBool,
+    epoch: AtomicU64,
+    observations: Mutex<Option<Observed>>,
+    job: AsyncMutex<Option<JoinHandle<Result<Observed>>>>,
+    stop_job: AsyncMutex<Option<JoinHandle<Result<bool>>>>,
+    stopped: Mutex<Option<DesktopSourceStop>>,
+}
+impl Inner {
+    fn fence(&self) {
+        if !self.fenced.swap(true, Ordering::AcqRel) {
+            self.epoch.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+}
+#[derive(Clone)]
+pub(crate) struct DesktopSource {
+    inner: Arc<Inner>,
+}
+impl DesktopSource {
+    #[cfg(test)]
+    pub(crate) async fn start() -> Result<Self> {
+        Self::start_with_runtime_fault(None).await
+    }
+    pub(crate) async fn start_with_runtime_fault(
+        runtime_fault: Option<tokio::sync::watch::Sender<Option<(ProbeStage, ProbeCause)>>>,
+    ) -> Result<Self> {
+        let source =
+            MacProxySource::discover(tokio::time::Instant::now() + Duration::from_secs(10))
+                .await
+                .map_err(|_| DesktopSourceError::Unavailable)?;
+        if let Some(sender) = runtime_fault {
+            source.attach_runtime_fault(sender);
+        }
+        let value = Self {
+            inner: Arc::new(Inner {
+                source,
+                fenced: AtomicBool::new(false),
+                epoch: AtomicU64::new(1),
+                observations: Mutex::new(None),
+                job: AsyncMutex::new(None),
+                stop_job: AsyncMutex::new(None),
+                stopped: Mutex::new(None),
+            }),
+        };
+        // No SDK tool invocation before the Host has retained this source lane.
+        let source = value.inner.source.clone();
+        let mut slot = value.inner.job.lock().await;
+        *slot = Some(tokio::task::spawn_blocking(move || {
+            let native = source
+                .observe_preparation(Instant::now() + Duration::from_secs(10))
+                .map_err(|_| DesktopSourceError::Unavailable)?;
+            Ok(Observed {
+                native,
+                windows: None,
+                at: Instant::now(),
+            })
+        }));
+        let result = slot.as_mut().ok_or(DesktopSourceError::Supervisor)?.await;
+        slot.take();
+        drop(slot);
+        let observed = result.map_err(|_| DesktopSourceError::Supervisor)??;
+        *value
+            .inner
+            .observations
+            .lock()
+            .map_err(|_| DesktopSourceError::Supervisor)? = Some(observed);
+        Ok(value)
+    }
+    pub(crate) fn fenced(&self) -> bool {
+        self.inner.fenced.load(Ordering::Acquire) || self.inner.source.fenced()
+    }
+    pub(crate) fn epoch(&self) -> u64 {
+        self.inner.epoch.load(Ordering::Acquire)
+    }
+    /// Original-source fault facts remain readable after fencing. No authority.
+    pub(crate) fn startup_probe_diagnostic(&self) -> Option<ProbeDiagnostic> {
+        self.inner.source.probe_diagnostic()
+    }
+    /// Generic refresh fallback only; an earlier nested native fact wins.
+    /// The coordinator has no outer deadline, unlike the native probe worker.
+    pub(crate) fn remember_startup_coordinator_refusal(&self, started: Instant) {
+        self.inner
+            .source
+            .remember_probe_diagnostic(ProbeDiagnostic {
+                stage: ProbeStage::CoordinatorRefresh,
+                cause: ProbeCause::CoordinatorRefused,
+                elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                deadline_expired: false,
+            });
+    }
+    pub(crate) fn startup_initial_epoch_advanced(&self) -> bool {
+        self.inner.source.initial_epoch_advanced()
+    }
+    pub(crate) fn proxy_source(&self) -> Result<Arc<MacProxySource>> {
+        if self.fenced() || !self.inner.source.ready() {
+            return Err(DesktopSourceError::Fenced);
+        }
+        Ok(self.inner.source.clone())
+    }
+    pub(crate) async fn fresh(&self) -> Result<()> {
+        if self.fenced() {
+            return Err(DesktopSourceError::Fenced);
+        }
+        // Owners share the original native reader. An overlapping read waits
+        // for it; contention does not reject an unrelated conversation.
+        let mut slot = self.inner.job.lock().await;
+        if self.fenced() {
+            return Err(DesktopSourceError::Fenced);
+        }
+        // Rejoin a cancelled prior observation; its old facts are never reused.
+        if let Some(job) = slot.as_mut() {
+            let result = job.await;
+            slot.take();
+            match result {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) if !self.inner.source.fenced() => {
+                    *self
+                        .inner
+                        .observations
+                        .lock()
+                        .map_err(|_| DesktopSourceError::Supervisor)? = None;
+                    return Err(error);
+                }
+                _ => {
+                    self.inner.fence();
+                    return Err(DesktopSourceError::Supervisor);
+                }
+            }
+        }
+        // A rejoined initial job may have committed Ready before its caller
+        // disappeared, without publishing the returned windows in this cache.
+        // The source lifecycle owns qualification; a stale projection cannot
+        // reopen its initial claim. Discard old facts and take a strict read.
+        let initial_probe = !self.inner.source.ready();
+        if !initial_probe {
+            let recent_valid = self.inner.observations.lock().is_ok_and(|held| {
+                held.as_ref().is_some_and(|obs| {
+                    obs.windows.is_some()
+                        && obs.native.observed_unlocked()
+                        && obs.at.elapsed() < REPROBE_INTERVAL
+                })
+            });
+            if recent_valid && !self.fenced() {
+                return Ok(());
+            }
+        }
+        let source = self.inner.source.clone();
+        *slot = Some(tokio::task::spawn_blocking(move || {
+            let until = Instant::now() + Duration::from_secs(10);
+            let (native, windows) = if initial_probe {
+                source.observe_initial_with_windows(until)
+            } else {
+                source.observe_with_windows(until)
+            }
+            .map_err(|_| DesktopSourceError::Unavailable)?;
+            if !native.observed_unlocked() {
+                return Err(DesktopSourceError::Unavailable);
+            }
+            Ok(Observed {
+                native,
+                windows: Some(windows),
+                at: Instant::now(),
+            })
+        }));
+        let result = slot.as_mut().ok_or(DesktopSourceError::Supervisor)?.await;
+        slot.take();
+        match result {
+            Ok(Ok(facts)) if !self.fenced() => {
+                *self
+                    .inner
+                    .observations
+                    .lock()
+                    .map_err(|_| DesktopSourceError::Supervisor)? = Some(facts);
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                *self
+                    .inner
+                    .observations
+                    .lock()
+                    .map_err(|_| DesktopSourceError::Supervisor)? = None;
+                if self.inner.source.fenced() {
+                    self.inner.fence();
+                }
+                Err(error)
+            }
+            _ => {
+                self.inner.fence();
+                Err(DesktopSourceError::Supervisor)
+            }
+        }
+    }
+    fn with_observation<T>(&self, f: impl FnOnce(&Observed) -> Result<T>) -> Result<T> {
+        if self.fenced() {
+            self.remember_lookup_failure(ProbeCause::Fenced, Instant::now());
+            return Err(DesktopSourceError::Fenced);
+        }
+        let held = self.inner.observations.lock().map_err(|_| {
+            self.remember_lookup_failure(ProbeCause::MutexPoisoned, Instant::now());
+            DesktopSourceError::Supervisor
+        })?;
+        let value = held.as_ref().ok_or_else(|| {
+            self.remember_lookup_failure(ProbeCause::EvidenceMissing, Instant::now());
+            DesktopSourceError::Unavailable
+        })?;
+        if value.at.elapsed() > OBSERVATION_TTL {
+            self.remember_lookup_failure(ProbeCause::EvidenceExpired, value.at);
+            return Err(DesktopSourceError::Unavailable);
+        }
+        if !value.native.observed_unlocked() {
+            self.remember_lookup_failure(ProbeCause::Locked, value.at);
+            return Err(DesktopSourceError::Unavailable);
+        }
+        f(value)
+    }
+    fn remember_lookup_failure(&self, cause: ProbeCause, started: Instant) {
+        self.inner
+            .source
+            .remember_probe_diagnostic(ProbeDiagnostic::observed(
+                ProbeStage::EvidenceLookup,
+                cause,
+                started,
+                started + OBSERVATION_TTL,
+            ));
+    }
+    pub(crate) fn initial_facts(
+        &self,
+        agent_instance: AgentInstanceId,
+    ) -> Result<RegistrationFacts> {
+        self.with_observation(|value|{
+  let console=value.native.console_identity().ok_or(DesktopSourceError::Unavailable)?;
+  let material=format!("{}:{}:{}:{}",console.uid,console.audit_id,console.console_uuid,self.inner.source.fingerprint().to_hex());
+  Ok(RegistrationFacts{id:SessionId::try_from(format!("macos-{}",Sha256Digest::of_bytes(material.as_bytes()).to_hex())).map_err(|_|DesktopSourceError::Unavailable)?,identity:SessionIdentity::Macos{uid:console.uid,audit_session:u64::from(console.audit_id),console_instance:console.console_uuid,window_server_instance:None},agent_instance,protocol_version:1,provenance:"fixed signed App/daemon parent, exact kernel peer audit token and native console observation".into()})
+ })
+    }
+    pub(crate) fn provider_evidence(&self, capability: CapabilityId) -> Result<ProviderEvidence> {
+        self.with_observation(|value|{
+  // Empty list alone never grants TCC. Authorization is independently the
+  // original daemon AX/screen-recording observation; unsupported lanes stay so.
+  let (available,authorized)=native_capability_evidence(
+   capability,value.windows.is_some(),value.native.permissions.accessibility,
+   value.native.permissions.screen_recording,
+  );
+  Ok(ProviderEvidence{capability,provider:"macos-app-owned-native".try_into().map_err(|_|DesktopSourceError::Unavailable)?,availability:if available{Availability::Available}else{Availability::Unavailable},authorization:if authorized{Authorization::Granted}else if available{Authorization::Required}else{Authorization::Unknown},provenance:format!("same authenticated facts FD list_windows count={} sha256={}; separate original daemon TCC facts",value.windows.as_ref().map(|v|v.count).unwrap_or(0),value.windows.as_ref().map(|v|v.digest.to_hex()).unwrap_or_else(||"not_observed".into())),reason:if !available{Some(ErrorCategory::CapabilityUnsupported)}else if !authorized{Some(ErrorCategory::PermissionRequired)}else{None},recovery:if available&&authorized{Recovery::None}else{Recovery::Rediscover}})
+ })
+    }
+    pub(crate) async fn stop(&self) -> Result<DesktopSourceStop> {
+        self.inner.fence();
+        if let Some(value) = *self
+            .inner
+            .stopped
+            .lock()
+            .map_err(|_| DesktopSourceError::Supervisor)?
+        {
+            return Ok(value);
+        }
+        let mut probe = self.inner.job.lock().await;
+        if let Some(job) = probe.as_mut() {
+            let result = job.await;
+            probe.take();
+            let _ = result.map_err(|_| DesktopSourceError::Supervisor)?;
+        }
+        drop(probe);
+        let mut slot = self.inner.stop_job.lock().await;
+        if slot.is_none() {
+            let source = self.inner.source.clone();
+            *slot = Some(tokio::task::spawn_blocking(move || {
+                source
+                    .drain_source_probe(Instant::now() + Duration::from_secs(10))
+                    .map_err(|_| DesktopSourceError::Fenced)
+            }));
+        }
+        let result = slot.as_mut().ok_or(DesktopSourceError::Supervisor)?.await;
+        slot.take();
+        let drained = result.map_err(|_| DesktopSourceError::Supervisor)??;
+        let facts = DesktopSourceStop {
+            observation_task_joined: true,
+            original_probe_transport_drained: drained,
+        };
+        *self
+            .inner
+            .stopped
+            .lock()
+            .map_err(|_| DesktopSourceError::Supervisor)? = Some(facts);
+        Ok(facts)
+    }
+}
+
+pub(crate) fn source_stop_complete(report: &DesktopSourceStop) -> bool {
+    report.complete()
+}
+
+/// The pinned Mac element-click implementation performs AX actions and may
+/// restore key-window state. Its pointer/control capability intents therefore
+/// require the original daemon's Accessibility authorization and a successful
+/// current window probe, alongside the existing exact Host-owned AX target.
+/// This does not authorize unbound pointer/key routes: submit_desktop_action
+/// still rejects every mutating route without an exact click/write binding.
+fn native_capability_evidence(
+    capability: CapabilityId,
+    windows_observed: bool,
+    accessibility: bool,
+    screen_recording: bool,
+) -> (bool, bool) {
+    match capability {
+        CapabilityId::DesktopWindowsRead
+        | CapabilityId::DesktopPointer
+        | CapabilityId::DesktopWindowsControl => (windows_observed, accessibility),
+        CapabilityId::DesktopAccessibility => (true, accessibility),
+        CapabilityId::DesktopCapture => (true, screen_recording),
+        _ => (false, false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires owner-authorized installed Mac App; overlapping read-only observations"]
+    async fn installed_overlapping_source_reads_wait_and_continue_on_original_source() {
+        assert_eq!(
+            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
+            Ok("read-only")
+        );
+        let source = DesktopSource::start().await.expect("original_source");
+        let held = source.inner.job.lock().await;
+        let first = source.fresh();
+        let second = source.fresh();
+        tokio::pin!(first, second);
+        assert!(futures_util::poll!(&mut first).is_pending());
+        assert!(futures_util::poll!(&mut second).is_pending());
+        drop(held);
+        let (a, b) = tokio::join!(first, second);
+        assert_eq!(a, Ok(()));
+        assert_eq!(b, Ok(()));
+        // The same contention path is used by established window-state reads.
+        let (a, b) = tokio::join!(source.fresh(), source.fresh());
+        assert_eq!(a, Ok(()));
+        assert_eq!(b, Ok(()));
+        source.fresh().await.expect("same_source_continues");
+        assert!(
+            source
+                .stop()
+                .await
+                .expect("original_probe_cleanup")
+                .complete()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires owner-authorized installed Mac App; retained read-job reference, no input"]
+    async fn installed_qualification_rejoined_initial_job_takes_strict_read() {
+        assert_eq!(
+            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
+            Ok("read-only")
+        );
+        let source = DesktopSource::start()
+            .await
+            .expect("original_prepared_source");
+        let original = source.inner.source.clone();
+        // Retain the original job exactly as after its waiter disappeared
+        // before copying its completed observation into the cache.
+        *source.inner.job.lock().await = Some(tokio::task::spawn_blocking(move || {
+            let (native, windows) = original
+                .observe_initial_with_windows(Instant::now() + Duration::from_secs(15))
+                .map_err(|_| DesktopSourceError::Unavailable)?;
+            Ok(Observed {
+                native,
+                windows: Some(windows),
+                at: Instant::now(),
+            })
+        }));
+        assert!(
+            source
+                .inner
+                .observations
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .windows
+                .is_none()
+        );
+        let refreshed = source.fresh().await;
+        let ready_after_refresh = source.inner.source.ready();
+        let stopped = source.stop().await;
+        assert!(
+            refreshed.is_ok() && ready_after_refresh,
+            "rejoined_Ready_source_uses_new_strict_read_not_second_initial_claim"
+        );
+        assert!(stopped.expect("original_read_owner_stopped").complete());
+        eprintln!(
+            "MAC_QUALIFICATION_REJOIN retained_original_job=JOINED new_strict_read=PASS initial_replay=NONE original_drain=PASS input_dispatches=0"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires owner-authorized installed Mac App; read-only recovery on original source"]
+    async fn installed_transient_observation_failure_preserves_source_and_next_read() {
+        assert_eq!(
+            std::env::var("STYX_TEST_INSTALLED_MAC_SOURCE").as_deref(),
+            Ok("read-only")
+        );
+        let source = DesktopSource::start().await.expect("original_source");
+        source.fresh().await.expect("initial_native_read");
+        let epoch = source.epoch();
+        // A completed cancelled waiter may have observed a temporarily locked
+        // console or an expired complete read. Rejoining that result must deny
+        // this call, discard its old facts, and retain the original source.
+        *source.inner.job.lock().await = Some(tokio::task::spawn_blocking(|| {
+            Err(DesktopSourceError::Unavailable)
+        }));
+        assert_eq!(source.fresh().await, Err(DesktopSourceError::Unavailable));
+        assert!(!source.fenced());
+        assert_eq!(source.epoch(), epoch);
+        assert!(source.inner.observations.lock().unwrap().is_none());
+        source.fresh().await.expect("new_independent_native_read");
+        assert_eq!(source.epoch(), epoch);
+        assert!(
+            source
+                .stop()
+                .await
+                .expect("original_probe_cleanup")
+                .complete()
+        );
+    }
+
+    #[test]
+    fn mac_element_click_capabilities_require_current_window_probe_and_native_ax_permission() {
+        for capability in [
+            CapabilityId::DesktopWindowsRead,
+            CapabilityId::DesktopPointer,
+            CapabilityId::DesktopWindowsControl,
+        ] {
+            for windows in [false, true] {
+                for ax in [false, true] {
+                    assert_eq!(
+                        native_capability_evidence(capability, windows, ax, true),
+                        (windows, ax)
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            native_capability_evidence(CapabilityId::DesktopKeyboard, true, true, true),
+            (false, false)
+        );
+        // Original Cua implements a read-only desktop PNG independent of AX
+        // window observation. The same-daemon TCC result controls authorization;
+        // a missing OS grant remains permission-required, never invented.
+        assert_eq!(
+            native_capability_evidence(CapabilityId::DesktopCapture, true, true, true),
+            (true, true)
+        );
+        assert_eq!(
+            native_capability_evidence(CapabilityId::DesktopCapture, false, false, true),
+            (true, true)
+        );
+        assert_eq!(
+            native_capability_evidence(CapabilityId::DesktopCapture, true, true, false),
+            (true, false)
+        );
+    }
+}

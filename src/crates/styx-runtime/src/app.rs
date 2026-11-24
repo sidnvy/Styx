@@ -1,0 +1,1811 @@
+//! Private owned-child App composition. Local UI is an entry point, not an OS
+//! privilege or a second policy/configuration authority. No network listener,
+//! arbitrary call-supplied paths, legacy adoption or mutation replay lives here.
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod control_binding_tests;
+mod exit;
+mod gateway_ui;
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod join_retry_tests;
+mod local_gateway;
+mod login;
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod maintenance_integration_tests;
+mod network_interfaces;
+use crate::enrollment::pairing_link;
+mod plugin;
+mod role_retire;
+mod runtime_bootstrap;
+mod startup;
+pub(crate) mod startup_diagnostic;
+
+use crate::{
+    foreground::{self, ForegroundError, ForegroundOutcome},
+    management::{native, native_join},
+    store::{ConfigurationWriterGuard, ExecutionLeaseGuard, PrivateRoot},
+};
+use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::{
+    path::{Component, Path, PathBuf},
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
+use styx_contracts::native_management::{NativeAutostartDesired, NativeManager, NativeRunDesired};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    sync::{mpsc, watch},
+    task::JoinHandle,
+};
+use tokio_util::{
+    codec::{FramedRead, FramedWrite, LinesCodec},
+    sync::CancellationToken,
+};
+
+const FRAME_BYTES: usize = 2 * 1024 * 1024;
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct AppError(&'static str);
+impl AppError {
+    pub fn code(&self) -> &'static str {
+        self.0
+    }
+}
+
+/// Retained original App container and its one instance lease. The child root's
+/// configuration writer remains separate and is acquired ONLY by existing C07
+/// operations. Arc retains this owner; wire DATA cannot construct/replace it.
+/// This protects cooperative same-user lifecycle ownership, not against a
+/// malicious process already able to execute as the same OS account.
+struct AppContainer {
+    parent_path: PathBuf,
+    parent: PrivateRoot,
+    instance: ExecutionLeaseGuard,
+}
+pub(crate) struct HostScope {
+    settings: std::sync::Mutex<std::sync::Weak<crate::host::settings::HostSettings>>,
+    #[cfg(not(target_os = "android"))]
+    browser_cdp: std::sync::Mutex<std::sync::Weak<crate::host::browser_cdp::BrowserCdpStore>>,
+    container: Arc<AppContainer>,
+    state_dir: PathBuf,
+    root: OnceLock<PrivateRoot>,
+}
+impl HostScope {
+    pub(crate) fn publish_settings(&self, settings: &Arc<crate::host::settings::HostSettings>) {
+        *self.settings.lock().expect("Host settings publication") = Arc::downgrade(settings);
+    }
+    fn host_settings(&self) -> Option<Arc<crate::host::settings::HostSettings>> {
+        self.settings.lock().ok()?.upgrade()
+    }
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn publish_browser_cdp(
+        &self,
+        store: &Arc<crate::host::browser_cdp::BrowserCdpStore>,
+    ) {
+        *self
+            .browser_cdp
+            .lock()
+            .expect("Host browser CDP publication") = Arc::downgrade(store);
+    }
+    #[cfg(not(target_os = "android"))]
+    fn browser_cdp(&self) -> Option<Arc<crate::host::browser_cdp::BrowserCdpStore>> {
+        self.browser_cdp.lock().ok()?.upgrade()
+    }
+
+    pub(crate) fn open(state_dir: &Path) -> Result<Self, AppError> {
+        if !state_dir.is_absolute()
+            || state_dir.components().any(|p| {
+                !matches!(
+                    p,
+                    Component::Normal(_) | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            return Err(AppError("app_scope_invalid"));
+        }
+        let parent_path = state_dir
+            .parent()
+            .ok_or(AppError("app_scope_invalid"))?
+            .to_owned();
+        let parent = PrivateRoot::open(&parent_path).map_err(|_| AppError("app_scope_refused"))?;
+        // The container is never itself an active native configuration root.
+        parent
+            .ensure_absent(".styx-native-root-v1.json")
+            .map_err(|_| AppError("app_container_is_configuration"))?;
+        for name in ["state.json", "deployment.json"] {
+            parent
+                .ensure_absent(name)
+                .map_err(|_| AppError("app_container_is_configuration"))?;
+        }
+        let instance = parent
+            .try_execution_lease()
+            .map_err(|_| AppError("app_instance_busy"))?;
+        let container = Arc::new(AppContainer {
+            parent_path,
+            parent,
+            instance,
+        });
+        crate::management::role_retire::check_app_retire_journal(
+            &container.parent,
+            &container.parent_path,
+        )
+        .map_err(|_| AppError("app_role_retire_unknown"))?;
+        Self::in_container(container, state_dir.to_owned())
+    }
+    fn in_container(container: Arc<AppContainer>, state_dir: PathBuf) -> Result<Self, AppError> {
+        if state_dir.parent() != Some(container.parent_path.as_path()) {
+            return Err(AppError("app_scope_invalid"));
+        }
+        let name = state_dir.file_name().ok_or(AppError("app_scope_invalid"))?;
+        let root = OnceLock::new();
+        if container.parent.ensure_absent(Path::new(name)).is_err() {
+            let original =
+                PrivateRoot::open(&state_dir).map_err(|_| AppError("app_scope_refused"))?;
+            root.set(original)
+                .map_err(|_| AppError("app_scope_changed"))?;
+        }
+        let result = Self {
+            settings: std::sync::Mutex::new(std::sync::Weak::new()),
+            #[cfg(not(target_os = "android"))]
+            browser_cdp: std::sync::Mutex::new(std::sync::Weak::new()),
+            container,
+            state_dir,
+            root,
+        };
+        result.validate()?;
+        Ok(result)
+    }
+    /// A fixed sibling under the SAME original App instance lease. Neither the
+    /// wire caller nor a second App process can choose or acquire another owner.
+    fn gateway_sibling(&self) -> Result<Self, AppError> {
+        self.validate()?;
+        let state_dir = self.container.parent_path.join("gateway");
+        if state_dir == self.state_dir {
+            return Err(AppError("app_role_scope_conflict"));
+        }
+        Self::in_container(self.container.clone(), state_dir)
+    }
+    pub(crate) fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+    pub(crate) fn validate(&self) -> Result<(), AppError> {
+        self.container
+            .instance
+            .validate()
+            .map_err(|_| AppError("app_instance_changed"))?;
+        let parent = PrivateRoot::open(&self.container.parent_path)
+            .map_err(|_| AppError("app_scope_changed"))?;
+        if parent.identity() != self.container.parent.identity() {
+            return Err(AppError("app_scope_changed"));
+        }
+        for name in [".styx-native-root-v1.json", "state.json", "deployment.json"] {
+            parent
+                .ensure_absent(name)
+                .map_err(|_| AppError("app_scope_changed"))?;
+        }
+        match self.root.get() {
+            Some(original) => {
+                let current = PrivateRoot::open(&self.state_dir)
+                    .map_err(|_| AppError("app_scope_changed"))?;
+                if current.identity() != original.identity() {
+                    return Err(AppError("app_scope_changed"));
+                }
+            }
+            None => self
+                .container
+                .parent
+                .ensure_absent(Path::new(
+                    self.state_dir
+                        .file_name()
+                        .ok_or(AppError("app_scope_invalid"))?,
+                ))
+                .map_err(|_| AppError("app_scope_changed"))?,
+        }
+        Ok(())
+    }
+    /// A join attempt owns its child handles until transport settlement. The
+    /// App binds its long-lived scope only after that operation returns.
+    pub(crate) fn scope_for_join(&self) -> Result<Arc<Self>, AppError> {
+        self.validate()?;
+        if self.root.get().is_some() {
+            return Err(AppError("app_join_already_exists"));
+        }
+        Ok(Arc::new(Self::in_container(
+            self.container.clone(),
+            self.state_dir.clone(),
+        )?))
+    }
+    pub(crate) fn unsent_join_inputs(&self) -> Vec<PathBuf> {
+        [
+            "app-join-input-v1.json",
+            "app-join-ca-v1.pem",
+            "app-join-invitation-v1",
+        ]
+        .into_iter()
+        .map(|name| self.container.parent_path.join(name))
+        .collect()
+    }
+    pub(crate) fn bind(&self) -> Result<(), AppError> {
+        if self.root.get().is_none() {
+            let root =
+                PrivateRoot::open(&self.state_dir).map_err(|_| AppError("app_scope_changed"))?;
+            self.root
+                .set(root)
+                .map_err(|_| AppError("app_scope_changed"))?;
+        }
+        self.validate()
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyInput {}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum Operation {
+    HostCapabilities,
+    HostBrowserCdp,
+    Computers,
+    InviteComputer,
+    RevokeComputer,
+    TunnelStatus,
+    TunnelSave,
+    PluginRead,
+    PluginSave,
+    PluginExport,
+    StartupStatus,
+    Status,
+    NetworkInterfaces,
+    CreateLocal,
+    ResumeLocal,
+    RequestJoin,
+    InspectJoin,
+    Join,
+    ClaimJoin,
+    InspectHost,
+    Connect,
+    Disconnect,
+    QuitAdmission,
+    RetireRole,
+    AppLifecycle,
+    AppLogin,
+    AppLoginResult,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Request {
+    schema: u16,
+    id: u32,
+    operation: Operation,
+    input: Box<serde_json::value::RawValue>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InspectJoinInput {
+    #[serde(deserialize_with = "secret_string")]
+    link: zeroize::Zeroizing<String>,
+}
+fn secret_string<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<zeroize::Zeroizing<String>, D::Error> {
+    String::deserialize(d).map(zeroize::Zeroizing::new)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct JoinInput {
+    approved_gateway_origin: String,
+    approved_ca_sha256: Option<String>,
+    label: String,
+    #[serde(default = "exec_default")]
+    exec: bool,
+    computer: bool,
+    browser: bool,
+    browser_channel: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct LocalInput {
+    tunnel: Option<SetupTunnel>,
+    label: String,
+    #[serde(default = "exec_default")]
+    exec: bool,
+    computer: bool,
+    browser: bool,
+    browser_channel: Option<String>,
+    #[serde(default = "local_port")]
+    port: u16,
+    #[serde(default)]
+    lan_address: Option<String>,
+    #[serde(default)]
+    allow_remote_hosts: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SetupTunnel {
+    tunnel_id: String,
+    #[serde(deserialize_with = "secret_string")]
+    api_key: zeroize::Zeroizing<String>,
+}
+fn exec_default() -> bool {
+    true
+}
+impl LocalInput {
+    fn desktop(input: &serde_json::value::RawValue) -> Result<Self, AppError> {
+        let value: Self = decode_input(input)?;
+        let tunnel = value
+            .tunnel
+            .as_ref()
+            .ok_or(AppError("app_setup_tunnel_required"))?;
+        foreground::tunnel::validate_configuration(&tunnel.tunnel_id, Some(&tunnel.api_key))
+            .map_err(|error| AppError(error.code()))?;
+        Ok(value)
+    }
+}
+fn local_port() -> u16 {
+    22022
+}
+fn validate_choice(choice: &JoinInput) -> Result<(), AppError> {
+    if choice.label.trim().is_empty()
+        || choice.label.len() > 128
+        || choice.label.chars().any(char::is_control)
+        || choice
+            .browser_channel
+            .as_deref()
+            .is_some_and(|v| !matches!(v, "chrome" | "msedge" | "chromium"))
+    {
+        return Err(AppError("app_input_invalid"));
+    }
+    Ok(())
+}
+fn now_ms() -> Result<u64, AppError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .ok_or(AppError("app_clock_unavailable"))
+}
+fn decode_input<T: serde::de::DeserializeOwned>(
+    value: &serde_json::value::RawValue,
+) -> Result<T, AppError> {
+    serde_json::from_str(value.get()).map_err(|_| AppError("app_input_invalid"))
+}
+#[derive(Clone, Serialize)]
+struct ConnectionStatus {
+    status: &'static str,
+    #[serde(rename = "execConnection")]
+    exec_connection: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint: Option<&'static str>,
+    #[serde(
+        rename = "computerStartupError",
+        skip_serializing_if = "Option::is_none"
+    )]
+    computer_error: Option<&'static str>,
+    #[cfg(target_os = "macos")]
+    #[serde(
+        rename = "computerStartupProbe",
+        skip_serializing_if = "Option::is_none"
+    )]
+    computer_probe: Option<crate::providers::cua::probe_diagnostic::ProbeDiagnostic>,
+    #[cfg(target_os = "macos")]
+    #[serde(
+        rename = "computerInitialEpochAdvanced",
+        skip_serializing_if = "Option::is_none"
+    )]
+    computer_initial_epoch_advanced: Option<bool>,
+}
+impl ConnectionStatus {
+    fn stopped_with_reason(reason: &'static str) -> Self {
+        match reason {
+            "gateway_wss_admission_refused" | "gateway_pairing_revoked" => {
+                let mut status = Self::pairing_refused();
+                status.error = Some(reason);
+                status
+            }
+            _ => Self {
+                error: Some(reason),
+                ..Self::stopped()
+            },
+        }
+    }
+    fn pairing_refused() -> Self {
+        Self {
+            status: "stopped",
+            exec_connection: "disconnected",
+            error: Some("gateway_wss_admission_refused"),
+            computer_error: None,
+            #[cfg(target_os = "macos")]
+            computer_probe: None,
+            #[cfg(target_os = "macos")]
+            computer_initial_epoch_advanced: None,
+            hint: Some(
+                "The Gateway refused this identity. Change this computer's role and pair again.",
+            ),
+        }
+    }
+
+    fn stopped() -> Self {
+        Self {
+            status: "stopped",
+            exec_connection: "disconnected",
+            error: None,
+            hint: None,
+            computer_error: None,
+            #[cfg(target_os = "macos")]
+            computer_probe: None,
+            #[cfg(target_os = "macos")]
+            computer_initial_epoch_advanced: None,
+        }
+    }
+    fn unknown() -> Self {
+        Self {
+            status: "unknown",
+            exec_connection: "unknown",
+            error: None,
+            hint: None,
+            computer_error: None,
+            #[cfg(target_os = "macos")]
+            computer_probe: None,
+            #[cfg(target_os = "macos")]
+            computer_initial_epoch_advanced: None,
+        }
+    }
+}
+struct RunningHost {
+    // Same protected enrollment/configuration snapshot for this original role.
+    // App component intent is not an OS permission or a remote operation grant.
+    desktop_intent: Option<Arc<crate::store::native_host_snapshot::NativeHostSnapshot>>,
+    cancel: CancellationToken,
+    worker: JoinHandle<Result<ForegroundOutcome, ForegroundError>>,
+    events: JoinHandle<()>,
+    #[cfg(target_os = "macos")]
+    computer_runtime_fault: watch::Receiver<
+        Option<(
+            crate::providers::cua::probe_diagnostic::ProbeStage,
+            crate::providers::cua::probe_diagnostic::ProbeCause,
+        )>,
+    >,
+    // Dropping a waiter can signal cleanup, but can never issue a joined receipt.
+    _cancel_on_drop: tokio_util::sync::DropGuard,
+}
+enum RetainedFailure {
+    Join(native_join::JoinError),
+    Management(native::NativeManagementError),
+    Bootstrap(crate::management::native_gateway::BootstrapError),
+}
+impl RetainedFailure {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::Join(e) => e.code(),
+            Self::Management(e) => e.code(),
+            Self::Bootstrap(e) => e.code(),
+        }
+    }
+}
+struct HostApp {
+    retire_failure: Option<crate::management::role_retire::RetireError>,
+    local_gateway: Option<local_gateway::LocalGateway>,
+    resume_local_available: bool,
+    deployment_file: PathBuf,
+    configuration: Option<native::NativeManagementReport>,
+    runtime_selection_file: Option<PathBuf>,
+    inspected_join: Option<pairing_link::InspectedLink>,
+    enrollment: Option<Value>,
+    // A verified false may disable optional desktop work; it cannot authorize Exec.
+    native_computer_requested: Option<bool>,
+    // Original signed object retained across adjacent enrollment/start boundaries.
+    native_runtime: Option<Arc<crate::release::VerifiedNativeRelease>>,
+    // Retain the exact input writer after any partial publication, too.
+    input_writer: Option<ConfigurationWriterGuard>,
+    running: Option<RunningHost>,
+    observed: watch::Receiver<ConnectionStatus>,
+    status: watch::Sender<ConnectionStatus>,
+    cleanup: Option<ForegroundOutcome>,
+    retained: Option<RetainedFailure>,
+    join_retry: Option<(&'static str, &'static str)>,
+    unknown: bool,
+    quit_ticket: Option<String>,
+    login: login::Login,
+    startup_diagnostic: Option<startup_diagnostic::StartupDiagnostic>,
+    startup_profile: Option<Arc<crate::store::native_host_snapshot::NativeHostSnapshot>>,
+    // Last owner drops only after role workers, retained failures and writers.
+    scope: Arc<HostScope>,
+}
+impl HostApp {
+    async fn open(state_dir: &Path, deployment_file: &Path) -> Result<Self, AppError> {
+        Self::open_with_selection(state_dir, deployment_file, None).await
+    }
+    async fn open_with_selection(
+        state_dir: &Path,
+        deployment_file: &Path,
+        selection: Option<PathBuf>,
+    ) -> Result<Self, AppError> {
+        if !deployment_file.is_absolute() {
+            return Err(AppError("app_deployment_invalid"));
+        }
+        let diagnostic = startup_diagnostic::StartupDiagnostic::from_env();
+        if let Some(d) = &diagnostic {
+            d.report("app_scope_open_begin");
+        }
+        // For a native desktop App, the installed bundle owns executable
+        // code. The persisted C07 runtime selection records prior enrollment
+        // history; it must not choose an older worker after the App is upgraded.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let app_runtime = if let Some(path) = selection.as_ref() {
+            let pinned = runtime_bootstrap::SelectionPin::open(path)?;
+            let runtime = Arc::new(
+                crate::release::load_selected(&pinned.selection).map_err(|e| AppError(e.code()))?,
+            );
+            pinned.validate()?;
+            Some(runtime)
+        } else {
+            None
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let app_runtime = None;
+        let scope = Arc::new(HostScope::open(state_dir)?);
+        if let Some(d) = &diagnostic {
+            d.report("app_scope_open_ready");
+        }
+        let (status, observed) = watch::channel(ConnectionStatus::stopped());
+        let mut app = Self {
+            retire_failure: None,
+            local_gateway: None,
+            resume_local_available: false,
+            scope,
+            deployment_file: deployment_file.to_owned(),
+            configuration: None,
+            runtime_selection_file: selection,
+            inspected_join: None,
+            enrollment: None,
+            native_computer_requested: None,
+            native_runtime: app_runtime,
+            input_writer: None,
+            running: None,
+            observed,
+            status,
+            cleanup: None,
+            retained: None,
+            join_retry: None,
+            unknown: false,
+            quit_ticket: None,
+            login: login::Login::default(),
+            startup_diagnostic: diagnostic,
+            startup_profile: None,
+        };
+        if app.scope.root.get().is_some() {
+            if app.try_ready_startup().await? {
+                return Ok(app);
+            }
+            if let Some(d) = &app.startup_diagnostic {
+                d.report("app_configuration_read_begin");
+            }
+            if let Err(error) = app.read_configuration().await {
+                if app.retained.is_none() {
+                    return Err(error);
+                }
+                app.unknown = true;
+                app.enrollment = Some(json!({"status":"incomplete","error":error.code()}));
+                return Ok(app);
+            }
+            if let Some(d) = &app.startup_diagnostic {
+                d.report("app_configuration_read_ready");
+            }
+            {
+                if let Some(d) = &app.startup_diagnostic {
+                    d.report("app_enrollment_inspect_begin");
+                }
+                let inspect = if let Some(bundle) = app.native_runtime.clone() {
+                    native_join::inspect_for_app_retained(app.scope.clone(), bundle).await
+                } else {
+                    native_join::inspect_for_app(app.scope.clone()).await
+                };
+                match inspect {
+                    Ok(report) => {
+                        app.native_computer_requested = Some(report.computer_requested);
+                        app.native_runtime = Some(report.verified_runtime.clone());
+                        app.enrollment = Some(
+                            serde_json::to_value(report)
+                                .map_err(|_| AppError("app_response_invalid"))?,
+                        )
+                    }
+                    Err(error) => {
+                        let code = app.join_error(error).code();
+                        app.unknown = true;
+                        app.enrollment = Some(json!({"status":"incomplete","error":code}));
+                    }
+                }
+            }
+        }
+        if let Some(d) = &app.startup_diagnostic {
+            d.report("app_open_ready");
+        }
+        Ok(app)
+    }
+    async fn open_native(state_dir: &Path, selection: &Path) -> Result<Self, AppError> {
+        if !selection.is_absolute() {
+            return Err(AppError("app_runtime_selection_invalid"));
+        }
+        let deployment = state_dir
+            .parent()
+            .ok_or(AppError("app_scope_invalid"))?
+            .join("app-join-input-v1.json");
+        let mut app =
+            Self::open_with_selection(state_dir, &deployment, Some(selection.to_owned())).await?;
+        // A committed original Host-only root is not a fresh split App setup.
+        // Its original remote Gateway and pairing are never reconstructed.
+        let gateway_scope = Arc::new(app.scope.gateway_sibling()?);
+        if gateway_scope.root.get().is_some() {
+            let gateway = match app.load_local_gateway(gateway_scope).await {
+                Ok(gateway) => gateway,
+                Err(error) => {
+                    app.unknown = true;
+                    app.enrollment = Some(json!({"status":"incomplete","error":error.code()}));
+                    return Ok(app);
+                }
+            };
+            // Existing local setup must retain the original Host enrollment.
+            // Missing/partial phases remain inspectable but never auto-paired.
+            // Association inspection is not runtime admission: an originally
+            // paired, Stopped Host must remain reopenable and normally quitable.
+            // No credentials or execution-capable Stopped snapshot escape.
+            let host_scope = app.scope.clone();
+            let bundle = app.native_runtime.clone();
+            let binding = tokio::task::spawn_blocking(move || match bundle {
+                Some(runtime) => crate::store::native_host_snapshot::NativeHostSnapshot::inspect_gateway_binding_for_app_retained(
+                    host_scope.state_dir(),
+                    host_scope.clone(),
+                    runtime,
+                ),
+                None => crate::store::native_host_snapshot::NativeHostSnapshot::inspect_gateway_binding_for_app(
+                    host_scope.state_dir(),
+                    host_scope.clone(),
+                ),
+            })
+            .await
+            .map_err(|_| AppError("app_host_binding_reader_failed"))?;
+            if let Ok(binding) = binding {
+                if binding.gateway_origin() != gateway.origin
+                    || binding.anchor_sha256().to_hex() != gateway.ca_sha
+                {
+                    app.unknown = true;
+                }
+            } else {
+                app.unknown = true;
+                match app.check_pre_invite_local().await {
+                    Ok(()) => {
+                        app.resume_local_available = true;
+                        app.enrollment = Some(
+                            json!({"status":"local_setup_pre_invite","can_resume_local":true}),
+                        );
+                    }
+                    Err(error) => {
+                        app.enrollment = Some(
+                            json!({"status":"incomplete","error":error.code(),"can_resume_local":false}),
+                        );
+                    }
+                }
+            }
+            app.local_gateway = Some(gateway);
+        } else if app
+            .scope
+            .container
+            .parent
+            .ensure_absent("app-local-gateway-input-v1.json")
+            .is_err()
+        {
+            app.unknown = true;
+        }
+        Ok(app)
+    }
+    async fn record_join(&mut self, report: native_join::JoinReport) -> Result<Value, AppError> {
+        self.read_configuration().await?;
+        self.native_computer_requested = Some(report.computer_requested);
+        self.native_runtime = Some(report.verified_runtime.clone());
+        let value = serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))?;
+        self.enrollment = Some(value.clone());
+        Ok(value)
+    }
+    async fn finish_join(&mut self) -> Result<Value, AppError> {
+        if self.running.is_some() {
+            return Err(AppError("app_role_busy"));
+        }
+        self.read_configuration().await?;
+        let report = native_join::claim_for_app(self.scope.clone(), self.native_runtime.clone())
+            .await
+            .map_err(|e| self.join_error(e))?;
+        let value = self.record_join(report).await?;
+        // A connection failure is reported in status. Enrollment already completed.
+        if value["status"] == "ready_to_connect" {
+            let _ = self.connect_host().await;
+        }
+        Ok(value)
+    }
+    fn prepare_join_input(&mut self, choice: JoinInput) -> Result<(), AppError> {
+        self.available()?;
+        if self.scope.root.get().is_some() || self.input_writer.is_some() {
+            return Err(AppError("app_join_already_exists"));
+        }
+        validate_choice(&choice)?;
+        let inspected = self
+            .inspected_join
+            .take()
+            .ok_or(AppError("app_join_not_inspected"))?;
+        let ca_sha = inspected
+            .preview()
+            .ca_sha256
+            .clone()
+            .ok_or(AppError("app_system_trust_not_supported"))?;
+        let accepted = inspected
+            .approve(
+                &choice.approved_gateway_origin,
+                choice.approved_ca_sha256.as_deref(),
+                now_ms()?,
+            )
+            .map_err(|e| AppError(e.code()))?;
+        let (origin, invitation, ca, _) = accepted.into_parts();
+        let ca = ca.ok_or(AppError("app_system_trust_not_supported"))?;
+        self.write_join_input(choice, origin, ca_sha, invitation, ca)
+    }
+    fn write_join_input(
+        &mut self,
+        choice: JoinInput,
+        origin: String,
+        ca_sha: String,
+        invitation: zeroize::Zeroizing<String>,
+        ca: String,
+    ) -> Result<(), AppError> {
+        validate_choice(&choice)?;
+        let selection = self
+            .runtime_selection_file
+            .as_ref()
+            .ok_or(AppError("app_join_input_unavailable"))?;
+        // OS/user launch context only. RPC cannot choose arbitrary executables,
+        // working directories, runtime payloads or trust files.
+        #[cfg(windows)]
+        let (home, shell) = (
+            std::env::var_os("USERPROFILE").map(PathBuf::from),
+            std::env::var_os("SystemRoot")
+                // Match the existing enrollment shell policy on every Gateway OS.
+                .map(|p| {
+                    PathBuf::from(p)
+                        .join("System32")
+                        .join("WindowsPowerShell")
+                        .join("v1.0")
+                        .join("powershell.exe")
+                }),
+        );
+        #[cfg(not(windows))]
+        let (home, shell) = (
+            std::env::var_os("HOME").map(PathBuf::from),
+            Some(PathBuf::from("/bin/sh")),
+        );
+        let home = home
+            .filter(|p| p.is_absolute() && p.is_dir())
+            .ok_or(AppError("app_home_unavailable"))?;
+        let shell = shell
+            .filter(|p| p.is_absolute() && p.is_file())
+            .ok_or(AppError("app_shell_unavailable"))?;
+        let parent = &self.scope.container.parent_path;
+        let mut browser = json!({"enabled":choice.browser});
+        if let Some(channel) = choice.browser_channel {
+            browser["channel"] = json!(channel);
+        }
+        let deployment = serde_json::to_vec(&json!({
+            "schema":1,"mode":"join-existing",
+            "gateway":{"url":origin,"caFile":parent.join("app-join-ca-v1.pem"),"expectedCaSha256":ca_sha},
+            "host":{"label":choice.label,"cwd":home,"shell":shell,"exec":{"enabled":choice.exec},"computer":choice.computer,"browser":browser},
+            "runtimeSelectionFile":selection,"invitationFile":parent.join("app-join-invitation-v1")
+        })).map_err(|_| AppError("app_input_invalid"))?;
+        self.scope.validate()?;
+        if self.input_writer.is_none() {
+            self.input_writer = Some(
+                self.scope
+                    .container
+                    .parent
+                    .try_configuration_writer()
+                    .map_err(|_| AppError("app_input_writer_busy"))?,
+            );
+        }
+        let result = self.scope.container.parent.create_app_join_inputs(
+            self.input_writer
+                .as_ref()
+                .ok_or(AppError("app_input_writer_busy"))?,
+            &deployment,
+            invitation.as_bytes(),
+            ca.as_bytes(),
+        );
+        if result.is_err() || self.scope.validate().is_err() {
+            self.unknown = true;
+            return Err(AppError("app_join_input_unknown"));
+        }
+        Ok(())
+    }
+    fn available(&self) -> Result<(), AppError> {
+        self.available_for(false)
+    }
+    fn available_for(&self, local_exit: bool) -> Result<(), AppError> {
+        self.scope.validate()?;
+        if let Some(error) = &self.retained {
+            return Err(AppError(error.code()));
+        }
+        if self.unknown || (!local_exit && self.remote_cleanup_unconfirmed()) {
+            return Err(AppError("app_cleanup_unknown"));
+        }
+        if self.local_gateway.as_ref().is_some_and(|gateway| {
+            if local_exit {
+                gateway.local_exit_fenced()
+            } else {
+                gateway.is_fenced()
+            }
+        }) {
+            return Err(AppError("app_gateway_fenced"));
+        }
+        if self.quit_ticket.is_some() {
+            return Err(AppError("app_quit_admitted"));
+        }
+        Ok(())
+    }
+    fn management_error(&mut self, e: native::NativeManagementError) -> AppError {
+        let code = e.code();
+        if e.exit_code() == 4 {
+            self.retained = Some(RetainedFailure::Management(e));
+        }
+        AppError(code)
+    }
+    fn join_error(&mut self, e: native_join::JoinError) -> AppError {
+        let code = e.code();
+        self.join_retry = None;
+        if e.retryable() {
+            // The original operation archived the root and fixed inputs, and
+            // released every root pin. Keep the same App instance/container.
+            self.input_writer = None;
+            self.configuration = None;
+            self.enrollment = None;
+            self.inspected_join = None;
+            self.native_computer_requested = None;
+            self.native_runtime = None;
+            self.startup_profile = None;
+            self.join_retry = e.hint().map(|hint| (code, hint));
+        } else if e.exit_code() == 4 {
+            self.retained = Some(RetainedFailure::Join(e));
+        }
+        AppError(code)
+    }
+    async fn read_configuration(&mut self) -> Result<(), AppError> {
+        self.scope.validate()?;
+        // Never call a path-only writer while our original role is still live.
+        if self.running.is_some() {
+            return Err(AppError("app_role_busy"));
+        }
+        let report = native::inspect_for_app(self.scope.clone())
+            .await
+            .map_err(|e| self.management_error(e))?;
+        if report.desired.gateway.is_some()
+            || !report.desired.host.is_some_and(|d| {
+                d.manager == NativeManager::AppManaged
+                    && d.autostart == NativeAutostartDesired::Disabled
+            })
+            || report.desired.gateway.is_some_and(|d| {
+                d.manager != NativeManager::AppManaged
+                    || d.autostart != NativeAutostartDesired::Disabled
+            })
+        {
+            return Err(AppError("app_manager_refused"));
+        }
+        if report.admission_fenced {
+            return Err(AppError("app_transaction_fenced"));
+        }
+        self.configuration = Some(report);
+        Ok(())
+    }
+    async fn resume_desired_running(&mut self) -> Result<(), AppError> {
+        if self.running.is_some() || self.unknown {
+            return Ok(());
+        }
+        if let Some(profile) = self.startup_profile.clone() {
+            if tokio::task::spawn_blocking(move || profile.revalidate())
+                .await
+                .map_err(|_| AppError("app_startup_observation_failed"))?
+                .is_err()
+            {
+                self.unknown = true;
+                return Err(AppError("app_startup_observation_changed"));
+            }
+        } else {
+            self.read_configuration().await?;
+        }
+        // Each role retains its own durable intent. Gateway resume must not
+        // promote a stopped Gateway or depend on the local Host being enabled.
+        if let Some(gateway) = &mut self.local_gateway {
+            gateway.resume_if_desired_running().await?;
+        }
+        if matches!(
+            self.observed.borrow().error,
+            Some("gateway_wss_admission_refused" | "gateway_pairing_revoked")
+        ) {
+            return Ok(());
+        }
+        let wanted = self
+            .configuration
+            .as_ref()
+            .and_then(|report| report.desired.host)
+            .is_some_and(|host| host.run == NativeRunDesired::Running);
+        if !wanted {
+            return Ok(());
+        }
+        // Resume observes Running; it must never overwrite a newer Stopped
+        // intent. Original Host admission rechecks canonical Running itself.
+        self.start_host().await
+    }
+    async fn connect_host(&mut self) -> Result<(), AppError> {
+        if matches!(
+            self.observed.borrow().error,
+            Some("gateway_wss_admission_refused" | "gateway_pairing_revoked")
+        ) {
+            return Err(AppError("app_gateway_access_refused"));
+        }
+        if self.running.is_none() {
+            self.set_desired(NativeRunDesired::Running).await?;
+            self.start_host().await?;
+        }
+        Ok(())
+    }
+    async fn start_host(&mut self) -> Result<(), AppError> {
+        if self.running.is_none() {
+            let diagnostic = self.startup_diagnostic.clone();
+            if let Some(d) = &diagnostic {
+                d.report("app_connect_host");
+            }
+            if let Some(d) = &diagnostic {
+                d.report("app_host_desired_ready");
+            }
+            let startup_profile = self.startup_profile.take();
+            let desktop_intent = if self.native_computer_requested == Some(false) {
+                // The original native seed explicitly declined Computer. Starting
+                // Exec still loads and verifies its own complete Host profile below.
+                None
+            } else if startup_profile.is_some() {
+                // Metadata only. Actual Host execution still loads and validates
+                // canonical Running through its existing independent port.
+                startup_profile
+            } else {
+                let intent_scope = self.scope.clone();
+                let runtime = self.native_runtime.clone();
+                tokio::task::spawn_blocking(move || {
+                    use crate::store::native_host_snapshot::NativeHostSnapshot;
+                    // Reuse the original formal release, with its existing full
+                    // selection/member revalidation; never a receipt/path cache.
+                    let snapshot = match runtime {
+                        Some(runtime) => NativeHostSnapshot::open_for_app_retained(
+                            intent_scope.state_dir(),
+                            intent_scope.clone(),
+                            runtime,
+                        ),
+                        None => NativeHostSnapshot::open_for_app(
+                            intent_scope.state_dir(),
+                            intent_scope.clone(),
+                        ),
+                    };
+                    snapshot.ok().map(Arc::new)
+                })
+                .await
+                .ok()
+                .flatten()
+            };
+            if let Some(d) = &diagnostic {
+                d.report("app_desktop_intent_ready");
+            }
+            // Missing desktop facts disable that optional component;
+            // they cannot prevent the independent Exec Host starting.
+            let cancel = CancellationToken::new();
+            let worker_cancel = cancel.clone();
+            let scope = self.scope.clone();
+            let (events, mut received) = mpsc::channel::<foreground::ForegroundEvent>(16);
+            let status = self.status.clone();
+            let event_task = tokio::spawn(async move {
+                while let Some(event) = received.recv().await {
+                    // Computer initialization is independent of Exec transport.
+                    // Retain its fixed failure code for this original Host; later
+                    // connection events must not erase that optional-lane failure.
+                    // A closed diagnostic fact, never readiness or permission.
+                    #[cfg(target_os = "macos")]
+                    if event.event == "computer_initial_probe" {
+                        status.send_modify(|value| {
+                            value.computer_initial_epoch_advanced = match event.reason {
+                                Some("initial_console_epoch_advanced") => Some(true),
+                                Some("initial_console_epoch_unchanged") => Some(false),
+                                _ => None,
+                            };
+                        });
+                        continue;
+                    }
+                    if event.event == "computer_unavailable" {
+                        status.send_modify(|value| {
+                            value.computer_error =
+                                Some(event.reason.unwrap_or("computer_bootstrap_failed"));
+                            #[cfg(target_os = "macos")]
+                            {
+                                value.computer_probe = event.computer_probe;
+                            }
+                        });
+                        continue;
+                    }
+                    let computer_error = status.borrow().computer_error;
+                    #[cfg(target_os = "macos")]
+                    let computer_probe = status.borrow().computer_probe;
+                    #[cfg(target_os = "macos")]
+                    let computer_initial_epoch_advanced =
+                        status.borrow().computer_initial_epoch_advanced;
+
+                    let status_value = match event.event {
+                        "connected" => ConnectionStatus {
+                            status: "connected",
+                            exec_connection: "connected",
+                            error: None,
+                            hint: None,
+                            computer_error,
+                            #[cfg(target_os = "macos")]
+                            computer_probe,
+                            #[cfg(target_os = "macos")]
+                            computer_initial_epoch_advanced,
+                        },
+                        "connecting" | "reconnecting" => ConnectionStatus {
+                            status: "started",
+                            exec_connection: "connecting",
+                            error: None,
+                            hint: None,
+                            computer_error,
+                            #[cfg(target_os = "macos")]
+                            computer_probe,
+                            #[cfg(target_os = "macos")]
+                            computer_initial_epoch_advanced,
+                        },
+                        "disconnected" => ConnectionStatus {
+                            status: "started",
+                            exec_connection: "disconnected",
+                            error: None,
+                            hint: None,
+                            computer_error,
+                            #[cfg(target_os = "macos")]
+                            computer_probe,
+                            #[cfg(target_os = "macos")]
+                            computer_initial_epoch_advanced,
+                        },
+                        _ => continue,
+                    };
+                    status.send_replace(status_value);
+                }
+            });
+            self.status.send_replace(ConnectionStatus {
+                status: "started",
+                exec_connection: "connecting",
+                error: None,
+                hint: None,
+                computer_error: None,
+                #[cfg(target_os = "macos")]
+                computer_probe: None,
+                #[cfg(target_os = "macos")]
+                computer_initial_epoch_advanced: None,
+            });
+            let verified_runtime = self.native_runtime.clone();
+            #[cfg(target_os = "macos")]
+            let (computer_runtime_fault_tx, computer_runtime_fault) = watch::channel(None);
+            if let Some(d) = &diagnostic {
+                d.report("app_host_worker_scheduled");
+            }
+            let worker = tokio::spawn(async move {
+                if let Some(d) = &diagnostic {
+                    d.report("app_host_worker_started");
+                }
+                foreground::host_run_for_app(
+                    scope,
+                    worker_cancel,
+                    events,
+                    verified_runtime,
+                    #[cfg(target_os = "macos")]
+                    computer_runtime_fault_tx,
+                )
+                .await
+            });
+            let cancel_on_drop = cancel.clone().drop_guard();
+            self.running = Some(RunningHost {
+                desktop_intent,
+                cancel,
+                worker,
+                events: event_task,
+                #[cfg(target_os = "macos")]
+                computer_runtime_fault,
+                _cancel_on_drop: cancel_on_drop,
+            });
+        }
+        Ok(())
+    }
+    async fn settle_all(&mut self) -> Result<(), AppError> {
+        let host = self.settle().await;
+        let gateway = match &mut self.local_gateway {
+            Some(gateway) => gateway.settle().await,
+            None => Ok(()),
+        };
+        if gateway.is_err()
+            && self
+                .local_gateway
+                .as_ref()
+                .is_some_and(|g| g.local_exit_fenced())
+        {
+            self.unknown = true;
+        }
+        host.and(gateway)?;
+        Ok(())
+    }
+    async fn set_desired(&mut self, run: NativeRunDesired) -> Result<(), AppError> {
+        self.set_desired_for(run, false).await
+    }
+    async fn set_desired_for(
+        &mut self,
+        run: NativeRunDesired,
+        local_stop: bool,
+    ) -> Result<(), AppError> {
+        if local_stop
+            && (run != NativeRunDesired::Stopped
+                || self
+                    .cleanup
+                    .as_ref()
+                    .is_some_and(|c| !c.local_stop_complete()))
+        {
+            return Err(AppError("app_cleanup_unknown"));
+        }
+        self.available_for(local_stop)?;
+        self.read_configuration().await?;
+        let report = self
+            .configuration
+            .as_ref()
+            .ok_or(AppError("app_not_configured"))?;
+        if report.desired.host.is_some_and(|h| h.run == run) {
+            return Ok(());
+        }
+        let change = native::NativeDesiredChange {
+            component: native::NativeComponent::Host,
+            run,
+            transaction_id: uuid::Uuid::new_v4()
+                .to_string()
+                .try_into()
+                .expect("UUID identity"),
+            sequence: report
+                .revision
+                .checked_add(1)
+                .ok_or(AppError("app_revision_exhausted"))?,
+        };
+        let plan = native::plan_for_app(self.scope.clone(), change)
+            .await
+            .map_err(|e| self.management_error(e))?;
+        self.scope.validate()?;
+        let report = native::apply_for_app(self.scope.clone(), &plan.plan_file)
+            .await
+            .map_err(|e| self.management_error(e))?;
+        if report.admission_fenced {
+            self.unknown = true;
+            return Err(AppError("app_transaction_fenced"));
+        }
+        self.configuration = Some(report);
+        Ok(())
+    }
+    async fn settle(&mut self) -> Result<(), AppError> {
+        self.settle_host(false).await
+    }
+    async fn settle_host(&mut self, local_exit: bool) -> Result<(), AppError> {
+        if let Some(role) = self.running.take() {
+            role.cancel.cancel();
+            let outcome = role.worker.await;
+            let events = role.events.await;
+            match outcome {
+                Ok(Ok(outcome)) => {
+                    let complete = outcome.is_complete() && events.is_ok();
+                    let locally_joined = outcome.local_stop_complete() && events.is_ok();
+                    let stop_reason = outcome.stop_reason;
+                    self.cleanup = Some(outcome);
+                    if locally_joined
+                        && !self.unknown
+                        && let Some(reason) = stop_reason
+                    {
+                        self.status
+                            .send_replace(ConnectionStatus::stopped_with_reason(reason));
+                        return Ok(());
+                    }
+                    if complete || (local_exit && locally_joined) {
+                        self.status.send_replace(ConnectionStatus::stopped());
+                    } else {
+                        self.unknown |= !locally_joined;
+                        self.status.send_replace(ConnectionStatus::unknown());
+                        let cause = if locally_joined {
+                            "remote_transport_drain_unconfirmed"
+                        } else {
+                            "foreground_cleanup_incomplete"
+                        };
+                        eprintln!(
+                            "{}",
+                            json!({"schema":1,"event":"app_role_failed","cause":cause,"events_joined":events.is_ok()})
+                        );
+                        return Err(AppError("app_cleanup_unknown"));
+                    }
+                }
+                failed => {
+                    // Preserve a fixed diagnostic cause; never print native
+                    // output, credentials, paths or an arbitrary error display.
+                    let cause = match &failed {
+                        Ok(Err(error)) => error.code(),
+                        Ok(Ok(_)) => "foreground_cleanup_incomplete",
+                        Err(_) => "foreground_worker_failed",
+                    };
+                    eprintln!(
+                        "{}",
+                        json!({"schema":1,"event":"app_role_failed","cause":cause,"events_joined":events.is_ok()})
+                    );
+                    self.unknown = true;
+                    self.status.send_replace(ConnectionStatus::unknown());
+                    return Err(AppError("app_cleanup_unknown"));
+                }
+            }
+        }
+        if self.unknown || (!local_exit && self.remote_cleanup_unconfirmed()) {
+            return Err(AppError("app_cleanup_unknown"));
+        }
+        Ok(())
+    }
+    async fn reap(&mut self) -> Result<(), AppError> {
+        if self
+            .running
+            .as_ref()
+            .is_some_and(|r| r.worker.is_finished())
+        {
+            self.settle().await?;
+        }
+        Ok(())
+    }
+    fn admission_fenced(&self) -> bool {
+        self.unknown
+            || self.retained.is_some()
+            || self.quit_ticket.is_some()
+            || self
+                .local_gateway
+                .as_ref()
+                .is_some_and(|gateway| gateway.local_exit_fenced())
+    }
+    async fn desktop_component_requested(&self) -> bool {
+        if self.admission_fenced() {
+            return false;
+        }
+        let Some(role) = &self.running else {
+            return false;
+        };
+        if role.cancel.is_cancelled() || role.worker.is_finished() {
+            return false;
+        }
+        if let Some(settings) = self.scope.host_settings() {
+            return settings.current().computer;
+        }
+        let Some(original) = role.desktop_intent.clone() else {
+            return false;
+        };
+        // Never acquire a replacement profile on a status request. Original
+        // private file/namespace identities and bytes must still match; only
+        // the successful pairing self-response supplies computer_approved.
+        let requested = tokio::task::spawn_blocking(move || {
+            original.seed().computer_requested
+                && original.ready().computer_approved
+                && original.revalidate().is_ok()
+        })
+        .await
+        .unwrap_or(false);
+        requested && !role.cancel.is_cancelled() && !role.worker.is_finished()
+    }
+    async fn snapshot(&self) -> Value {
+        let computer_requested = self.desktop_component_requested().await;
+        let configuration = self.configuration.as_ref();
+        let mut supported = vec![
+            "appLifecycle",
+            "appLogin",
+            "appLoginResult",
+            "startupStatus",
+            "status",
+            "networkInterfaces",
+            "quitAdmission",
+        ];
+        supported.extend([
+            "createLocal",
+            "resumeLocal",
+            "inspectJoin",
+            "join",
+            "requestJoin",
+            "claimJoin",
+            "inspectHost",
+            "connect",
+            "disconnect",
+            "retireRole",
+        ]);
+        if self.local_gateway.is_some() && !self.admission_fenced() {
+            supported.extend([
+                "pluginRead",
+                "pluginSave",
+                "pluginExport",
+                "computers",
+                "inviteComputer",
+                "revokeComputer",
+                "tunnelStatus",
+                "tunnelSave",
+            ]);
+        }
+        if self.running.is_some() && self.scope.host_settings().is_some() {
+            supported.push("hostCapabilities");
+        }
+        #[cfg(not(target_os = "android"))]
+        let browser_cdp_store = if self.running.is_some() {
+            self.scope.browser_cdp()
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "android"))]
+        if browser_cdp_store.is_some() {
+            supported.push("hostBrowserCdp");
+        }
+        #[cfg(not(target_os = "android"))]
+        let browser_cdp = match browser_cdp_store {
+            Some(store) => tokio::task::spawn_blocking(move || store.status(None).ok())
+                .await
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        #[cfg(target_os = "android")]
+        let browser_cdp: Option<()> = None;
+        let foreground = serde_json::to_value(&*self.observed.borrow())
+            .expect("closed foreground status serializes");
+        #[cfg(target_os = "macos")]
+        let foreground = {
+            let mut value = foreground;
+            // Read only the original Host's cached, closed fault projection.
+            // No source observation, native call or recovery is performed here.
+            if let Some((stage, cause)) = self
+                .running
+                .as_ref()
+                .and_then(|running| *running.computer_runtime_fault.borrow())
+            {
+                value["computerRuntimeFirstFault"] = json!({"stage":stage,"cause":cause});
+            }
+            value
+        };
+        json!({"schema":1,"capabilities":self.scope.host_settings().map(|s| s.report()),"browserCdp":browser_cdp,"configuration":configuration,"foreground":foreground,"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
+    }
+    async fn dispatch(
+        &mut self,
+        operation: Operation,
+        input: Box<serde_json::value::RawValue>,
+    ) -> Result<Value, AppError> {
+        if matches!(
+            operation,
+            Operation::CreateLocal
+                | Operation::ResumeLocal
+                | Operation::InspectJoin
+                | Operation::Join
+                | Operation::RequestJoin
+                | Operation::ClaimJoin
+                | Operation::Connect
+                | Operation::RetireRole
+        ) {
+            self.scope.validate()?;
+            crate::management::role_retire::check_app_retire_journal(
+                &self.scope.container.parent,
+                &self.scope.container.parent_path,
+            )
+            .map_err(|_| AppError("app_role_retire_unknown"))?;
+        }
+        if !matches!(
+            operation,
+            Operation::HostCapabilities
+                | Operation::HostBrowserCdp
+                | Operation::InviteComputer
+                | Operation::RevokeComputer
+                | Operation::TunnelSave
+                | Operation::PluginSave
+                | Operation::PluginExport
+                | Operation::RetireRole
+                | Operation::InspectJoin
+                | Operation::Join
+                | Operation::CreateLocal
+                | Operation::ResumeLocal
+                | Operation::AppLifecycle
+                | Operation::AppLogin
+                | Operation::AppLoginResult
+        ) {
+            let _: EmptyInput = decode_input(&input)?;
+        }
+        if matches!(operation, Operation::NetworkInterfaces) {
+            self.scope.validate()?;
+            return tokio::task::spawn_blocking(network_interfaces::snapshot)
+                .await
+                .map_err(|_| AppError("app_network_interfaces_unavailable"))?;
+        }
+        // Only unchanged reads may retain the startup observation. Every
+        // explicit operation re-enters its existing mutable coordinator.
+        if !matches!(
+            operation,
+            Operation::Status
+                | Operation::StartupStatus
+                | Operation::AppLifecycle
+                | Operation::PluginRead
+        ) {
+            self.startup_profile = None;
+        }
+        if matches!(operation, Operation::QuitAdmission) {
+            return self.admit_quit().await;
+        }
+        self.reap().await?;
+        match operation {
+            Operation::HostCapabilities => {
+                let patch: crate::host::settings::CapabilityPatch = decode_input(&input)?;
+                let settings = self
+                    .scope
+                    .host_settings()
+                    .ok_or(AppError("host_not_running"))?;
+                let report = settings
+                    .update(patch)
+                    .await
+                    .map_err(|_| AppError("host_settings_not_applied"))?;
+                return serde_json::to_value(report)
+                    .map_err(|_| AppError("host_settings_not_applied"));
+            }
+            Operation::HostBrowserCdp => {
+                #[cfg(target_os = "android")]
+                {
+                    let _ = &input;
+                    return Err(AppError("host_not_running"));
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    return apply_browser_cdp_patch(&self.scope, &input).await;
+                }
+            }
+            Operation::Computers
+            | Operation::InviteComputer
+            | Operation::RevokeComputer
+            | Operation::TunnelStatus
+            | Operation::TunnelSave => {
+                return self.gateway_ui_request(operation, input).await;
+            }
+            Operation::PluginRead | Operation::PluginSave | Operation::PluginExport => {
+                return self.plugin_request(operation, input).await;
+            }
+            Operation::AppLifecycle => return self.login_read(input),
+            Operation::AppLogin => return self.login_authorize(input),
+            Operation::AppLoginResult => return self.login_complete(input),
+            _ => (),
+        }
+        if matches!(operation, Operation::Status | Operation::StartupStatus) {
+            self.scope.validate()?;
+            if matches!(operation, Operation::StartupStatus) {
+                // Reopen reconnects a role the user left running, without
+                // re-pairing. Pause (Disconnect) records Stopped and is kept.
+                // A failure is visible in the snapshot; it is not this read's error.
+                let _ = self.resume_desired_running().await;
+            }
+            return Ok(self.snapshot().await);
+        }
+        if matches!(operation, Operation::RetireRole) {
+            return self.retire_role(decode_input(&input)?).await;
+        }
+        if matches!(operation, Operation::ResumeLocal) {
+            self.resume_local(LocalInput::desktop(&input)?).await?;
+            self.connect_host().await?;
+            return Ok(self.snapshot().await);
+        }
+        let disconnecting = matches!(operation, Operation::Disconnect);
+        if disconnecting {
+            self.settle_host(true).await?;
+        }
+        self.available_for(disconnecting)?;
+        match operation {
+            Operation::ResumeLocal => Err(AppError("app_local_checkpoint_refused")),
+            Operation::CreateLocal => {
+                let choice = LocalInput::desktop(&input)?;
+                self.create_local(choice).await?;
+                self.connect_host().await?;
+                Ok(self.snapshot().await)
+            }
+            Operation::InspectJoin => {
+                if self.scope.root.get().is_some() || self.input_writer.is_some() {
+                    return Err(AppError("app_join_already_exists"));
+                }
+                // Clear the previous secret even when replacement input is invalid.
+                self.inspected_join = None;
+                let input: InspectJoinInput = decode_input(&input)?;
+                let inspected = pairing_link::resolve(&input.link, now_ms()?)
+                    .await
+                    .map_err(|e| AppError(e.code()))?;
+                let preview = inspected.preview();
+                self.inspected_join = Some(inspected);
+                Ok(json!({"inspectionId":uuid::Uuid::new_v4().to_string(),"preview":preview}))
+            }
+            Operation::RequestJoin | Operation::Join => {
+                if matches!(operation, Operation::RequestJoin)
+                    && self.runtime_selection_file.is_some()
+                {
+                    return Err(AppError("app_join_inspection_required"));
+                }
+                let preapproved = matches!(operation, Operation::Join)
+                    && self
+                        .inspected_join
+                        .as_ref()
+                        .is_some_and(|link| link.preapproved);
+                if matches!(operation, Operation::Join) {
+                    let choice: JoinInput = decode_input(&input)?;
+                    validate_choice(&choice)?;
+                    self.bootstrap_runtime_selection(false).await?;
+                    self.prepare_join_input(choice)?;
+                }
+                if self.running.is_some() || self.scope.root.get().is_some() {
+                    return Err(AppError("app_join_already_exists"));
+                }
+                let report =
+                    native_join::request_for_app(self.scope.clone(), &self.deployment_file)
+                        .await
+                        .map_err(|e| self.join_error(e))?;
+                self.native_runtime = Some(report.verified_runtime.clone());
+                if preapproved {
+                    self.finish_join().await
+                } else {
+                    self.record_join(report).await
+                }
+            }
+            Operation::ClaimJoin => self.finish_join().await,
+            Operation::InspectHost => {
+                if self.running.is_some() {
+                    return Err(AppError("app_role_busy"));
+                }
+                self.read_configuration().await?;
+                let report = foreground::inspect_for_app(self.scope.clone())
+                    .await
+                    .map_err(|e| AppError(e.code()))?;
+                serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))
+            }
+            Operation::Connect => {
+                if let Some(gateway) = &mut self.local_gateway {
+                    gateway.start().await?;
+                }
+                self.connect_host().await?;
+                Ok(self.snapshot().await)
+            }
+            Operation::Disconnect => {
+                self.settle_host(true).await?;
+                self.record_pause_uncertainty(&uuid::Uuid::new_v4().simple().to_string())
+                    .await?;
+                self.set_desired_for(NativeRunDesired::Stopped, true)
+                    .await?;
+                Ok(self.snapshot().await)
+            }
+            Operation::QuitAdmission
+            | Operation::HostCapabilities
+            | Operation::HostBrowserCdp
+            | Operation::Computers
+            | Operation::InviteComputer
+            | Operation::RevokeComputer
+            | Operation::TunnelStatus
+            | Operation::TunnelSave
+            | Operation::PluginRead
+            | Operation::PluginSave
+            | Operation::PluginExport
+            | Operation::RetireRole
+            | Operation::AppLifecycle
+            | Operation::AppLogin
+            | Operation::AppLoginResult
+            | Operation::StartupStatus
+            | Operation::Status
+            | Operation::NetworkInterfaces => unreachable!(),
+        }
+    }
+}
+
+/// Closed bounded request/response protocol over the actual owned child's pipe.
+/// It is distinct from the Linux read-only socket and is not exposed remotely.
+/// EOF/output loss stops and joins only this App's role, leaving durable desired
+/// state and independent CLI/services unchanged. No request is automatically retried.
+pub async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    state_dir: &Path,
+    deployment_file: &Path,
+    read: R,
+    write: W,
+    cancel: CancellationToken,
+) -> Result<(), AppError> {
+    serve_app(
+        HostApp::open(state_dir, deployment_file).await?,
+        read,
+        write,
+        cancel,
+    )
+    .await
+}
+
+/// Native UI bootstrap: selection is a protected, fixed launcher input, never RPC data.
+pub async fn serve_native<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    state_dir: &Path,
+    runtime_selection_file: &Path,
+    read: R,
+    write: W,
+    cancel: CancellationToken,
+) -> Result<(), AppError> {
+    serve_app(
+        HostApp::open_native(state_dir, runtime_selection_file).await?,
+        read,
+        write,
+        cancel,
+    )
+    .await
+}
+
+async fn serve_app<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    mut app: HostApp,
+    read: R,
+    write: W,
+    cancel: CancellationToken,
+) -> Result<(), AppError> {
+    let mut input = FramedRead::new(read, LinesCodec::new_with_max_length(FRAME_BYTES));
+    let mut output = FramedWrite::new(write, LinesCodec::new_with_max_length(FRAME_BYTES));
+    let mut previous_id = 0;
+    let mut transport_error = None;
+    loop {
+        let line = tokio::select! {_=cancel.cancelled()=>break, line=input.next()=>line};
+        let Some(Ok(line)) = line else {
+            if line.is_some() {
+                transport_error = Some(AppError("app_frame_invalid"));
+            }
+            break;
+        };
+        let line = zeroize::Zeroizing::new(line);
+        let request: Request = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(_) => {
+                transport_error = Some(AppError("app_frame_invalid"));
+                break;
+            }
+        };
+        if request.schema != 1
+            || request.id == 0
+            || request.id <= previous_id
+            || request.id > i32::MAX as u32
+        {
+            transport_error = Some(AppError("app_correlation_invalid"));
+            break;
+        }
+        previous_id = request.id;
+        // Do not select/drop this future on disconnect or cancellation: an
+        // already dispatched enrollment/configuration operation must settle.
+        let result = app.dispatch(request.operation, request.input).await;
+        let response = match result {
+            Ok(result) => json!({"id":request.id,"ok":true,"result":result}),
+            Err(error) => {
+                let mut response = json!({"id":request.id,"ok":false,"error":error.code(),"retirement":app.retire_failure.as_ref().map(|error| &error.report)});
+                if let Some((code, hint)) = app.join_retry
+                    && code == error.code()
+                {
+                    response["hint"] = json!(hint);
+                    response["retryable"] = json!(true);
+                    response["uncertain"] = json!(false);
+                }
+                response
+            }
+        };
+        let encoded =
+            serde_json::to_string(&response).map_err(|_| AppError("app_response_invalid"));
+        let written = match encoded {
+            Ok(value) => tokio::time::timeout(Duration::from_secs(10), output.send(value))
+                .await
+                .is_ok_and(|r| r.is_ok()),
+            Err(_) => false,
+        };
+        if !written {
+            transport_error = Some(AppError("app_output_unavailable"));
+            break;
+        }
+    }
+    app.settle_for_quit().await?;
+    if app.quit_ticket.is_none() {
+        app.record_exit_uncertainty(&uuid::Uuid::new_v4().simple().to_string())
+            .await?;
+    }
+    if app.retained.is_some() {
+        return Err(AppError("app_operation_unknown"));
+    }
+    if let Some(error) = transport_error {
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+async fn apply_browser_cdp_patch(
+    scope: &HostScope,
+    input: &serde_json::value::RawValue,
+) -> Result<Value, AppError> {
+    let patch: crate::host::browser_cdp::BrowserCdpPatch = decode_input(input)?;
+    let cdp = scope.browser_cdp().ok_or(AppError("host_not_running"))?;
+    let (_cfg, applied) = cdp.update(patch).await.map_err(|err| match err {
+        styx_contracts::error::ErrorCategory::InvalidRequest => AppError("app_input_invalid"),
+        _ => AppError("host_settings_not_applied"),
+    })?;
+    let status = tokio::task::spawn_blocking(move || cdp.status(None))
+        .await
+        .map_err(|_| AppError("host_settings_not_applied"))?
+        .map_err(|_| AppError("host_settings_not_applied"))?;
+    Ok(json!({"applied": applied, "browserCdp": status}))
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+mod tests {
+    use super::*;
+
+    fn private_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        dir
+    }
+
+    #[tokio::test]
+    async fn host_browser_cdp_ipc_parses_updates_and_rejects_remote_endpoints() {
+        let parent = private_dir();
+        let state_dir = parent.path().join("host");
+        let scope = HostScope::open(&state_dir).unwrap();
+        let raw_enable = serde_json::value::RawValue::from_string(
+            json!({"enabled": true, "endpoint": "http://127.0.0.1:9222/"}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            apply_browser_cdp_patch(&scope, &raw_enable)
+                .await
+                .unwrap_err()
+                .code(),
+            "host_not_running"
+        );
+
+        std::fs::create_dir(&state_dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let store = crate::host::browser_cdp::BrowserCdpStore::open(&state_dir).unwrap();
+        scope.publish_browser_cdp(&store);
+
+        let request: Request = serde_json::from_str(
+            r#"{"schema":1,"id":7,"operation":"hostBrowserCdp","input":{"enabled":true,"endpoint":"http://LOCALHOST:9222/"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(request.operation, Operation::HostBrowserCdp));
+        let ok = apply_browser_cdp_patch(&scope, &request.input)
+            .await
+            .unwrap();
+        assert_eq!(ok["applied"], json!(true));
+        assert_eq!(ok["browserCdp"]["enabled"], json!(true));
+        assert_eq!(ok["browserCdp"]["endpoint"], json!("http://localhost:9222"));
+
+        let remote: Request = serde_json::from_str(
+            r#"{"schema":1,"id":8,"operation":"hostBrowserCdp","input":{"enabled":true,"endpoint":"http://192.168.1.50:9222"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            apply_browser_cdp_patch(&scope, &remote.input)
+                .await
+                .unwrap_err()
+                .code(),
+            "app_input_invalid"
+        );
+        assert_eq!(
+            store.current().unwrap().endpoint.as_deref(),
+            Some("http://localhost:9222")
+        );
+    }
+}
