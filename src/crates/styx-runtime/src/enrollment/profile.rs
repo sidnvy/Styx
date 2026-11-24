@@ -334,13 +334,13 @@ mod android_platform_tests {
     #[test]
     fn android_identity_has_no_fictitious_desktop_shell() {
         let device = DeviceId::try_from("styx-0123456789abcdef01234567").unwrap();
-        assert!(fields(&device, "Pixel 7 Pro", "android", "", "", "test-key").is_ok());
+        assert!(fields(&device, "Test Phone", "android", "", "", "test-key").is_ok());
         assert!(matches!(
-            fields(&device, "Pixel 7 Pro", "android", "/tmp", "", "test-key"),
+            fields(&device, "Test Phone", "android", "/tmp", "", "test-key"),
             Err(ProfileError::Cwd)
         ));
         assert!(matches!(
-            fields(&device, "Pixel 7 Pro", "android", "", "/bin/sh", "test-key"),
+            fields(&device, "Test Phone", "android", "", "/bin/sh", "test-key"),
             Err(ProfileError::Shell)
         ));
     }

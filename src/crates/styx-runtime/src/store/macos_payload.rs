@@ -416,7 +416,7 @@ impl PinnedImage {
 mod tests;
 
 // SDK: Security.framework/Headers/SecCode.h, SecCodeCopySigningInformation
-// and kSecCodeInfoUnique. Installed Xcode SDK declaration was read on pho.
+// and kSecCodeInfoUnique. Verified against installed macOS Xcode SDK headers.
 // security-framework 3.7/sys 2.17 omit this narrow API. All CF ownership and
 // runtime type checks remain in mature core-foundation wrappers.
 #[allow(unsafe_code)]

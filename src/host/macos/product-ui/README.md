@@ -63,7 +63,6 @@ and bounded ZIP responses. Permission and edit-menu tests host the actual views;
 they inject permission observations and use a private pasteboard. Original-child
 pipe, process-exit, Cua lifetime and AppKit quit tests remain separate.
 
-Run affected native tests on PilotMac with the persistent project tools and
+Run affected native tests on a macOS host with the persistent project tools and
 cache. Compilation, self-tests, live GUI behavior, system permissions and account
-acceptance are distinct evidence. `NATIVE_VALIDATION.md` is a dated historical
-record, not a description of the current source or installed App.
+acceptance are distinct evidence.

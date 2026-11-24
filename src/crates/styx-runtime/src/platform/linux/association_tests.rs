@@ -342,7 +342,7 @@ fn approved_uwsm_main_updates_do_not_expand_other_source_authority() {
 
 #[test]
 fn monitor_read_accepts_explicit_unassigned_special_workspace_without_inventing_id() {
-    // Shape observed from the authenticated niuda compositor after user reboot.
+    // Shape observed from an authenticated Linux Wayland compositor after user reboot.
     // This regression is a parser check, not native desktop acceptance.
     let original = serde_json::json!([{
         "id":0,"name":"HEADLESS-1","width":1920,"height":1080,"scale":1,

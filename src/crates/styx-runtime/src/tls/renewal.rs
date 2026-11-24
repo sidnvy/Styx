@@ -137,7 +137,7 @@ mod tests {
             ca.private_key,
             ca.anchor_pin.clone(),
             "https://127.0.0.1:22022".into(),
-            vec!["10.0.38.8".parse().unwrap()],
+            vec!["10.203.0.8".parse().unwrap()],
         )
         .unwrap();
         let renewal = server.renewal.as_ref().unwrap();
