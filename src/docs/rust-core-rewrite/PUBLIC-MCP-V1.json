@@ -6,7 +6,7 @@
     "name": "styx-vnext",
     "version": "0.1.0"
   },
-  "instructions": "Exec tasks belong to the selected Host runtime, not a conversation. Closing a conversation or reconnecting Gateway leaves them running. Use list_execution_tasks on that Host to recover a task ID, write_stdin with the same environment_id to read or continue it, and stop_execution_task to stop an authorized task. Quitting Host stops its tasks; they are not resumed on relaunch. Unknown action outcomes must be inspected, never automatically replayed. One conversation may use multiple Hosts. Use list_execution_environments to resolve a named device, then send its environment_id with each action. If multiple Hosts are paired and the target is unclear, ask which Host to use. Only a single paired Host is selected by default. An offline selected Host never falls back to another device. Prefer browser_* over Desktop computer tools for web pages and web applications; reserve desktop_list_tools/desktop_call for native desktop applications, OS dialogs, or non-browser UI because desktop automation shares the host screen and input focus. Use Exec for CLI/process work. The agent chooses the tool; failed calls never trigger local automatic fallback. Browser element targets belong to this chat and current observation: use browser_snapshot without filename to get fresh targets after navigation, tab changes, human interaction or reconnection. Default to exec_command for Git/GitHub clone, downloads (curl/wget), file operations, builds, tests and other CLI/development work. Interactive foreground or TTY sessions managed by exec_command/write_stdin are Exec sessions. Do not open Terminal or another desktop terminal through Spotlight, launchers or computer tools to paste these commands. If Exec fails, is disconnected, or reports authentication, permission or sandbox errors, check get_execution_environment_status, resolve the specific Exec issue or report the blocker; never use a desktop terminal to bypass it. Desktop automation uses the target Host native CUA MCP directly through desktop_list_tools and desktop_call. Call desktop_list_tools(environment_id) to see that Host native tool catalog and instructions (or pass names for full native schemas), and call desktop_call(environment_id, tool, arguments) with verbatim native tool names and arguments (including get_guide, list_windows, get_window_state, click, set_value, type_text, press_key, scroll, run_steps, and check_permissions). Native tool outputs, images, structuredContent, and refusals are returned verbatim; inspect unknown transport outcomes instead of replaying. Use the app bundle identifier or observed PID when localized app names do not match. An explicitly requested GUI workflow may use computer tools; this does not authorize bypassing an Exec restriction. Do not replace desktop tools with osascript, AppleScript/System Events, JXA or shell-driven input automation, including when a computer tool fails. Those paths have separate macOS permissions and can expose a node authorization prompt. For computer_snapshot_required or stale element references, observe again and use the new references; never reuse another conversation's references. For a permission or connection error, check get_execution_environment_status and report the specific missing permission or connection. Do not reset permissions or request additional Node/System Events access as a desktop fallback. Only use application scripting when the user explicitly requests that scripting workflow, explain its separate Automation permission before the first invocation, and let the user grant it through macOS. Styx desktop permission does not authorize that separate path. Host capability settings belong to the selected Host. For an authorized request to change them, use set_execution_environment_capabilities with only the requested fields. Disabling stops existing tasks of that capability; other capabilities and device pairing remain active. Read get_execution_environment_status after an incomplete or unknown update; do not automatically resend. Configured is not proof of native OS permission or executor readiness. Isolated managed Browser windows are the default: Browser opens a dedicated visible window on the selected Host's signed-in desktop that retains sign-ins across conversations, browser closure and Host restart, and is separate from the user's everyday browser unless local CDP attachment is explicitly enabled on that Host. Only when the Host owner opts into local CDP attachment does list_browser_sessions expose existing-browser (mode: cdp, attached_existing_browser: true), which must be selected explicitly via browser_session_id: existing-browser (or take_over_browser_session) to access existing tabs and logins; omitting browser_session_id always uses or creates an isolated managed profile so concurrent web tasks do not conflict and never implicitly attaches to existing-browser. For login, MFA or manual interaction, identify the Host/window, stop Browser actions and wait for the user to finish. Then list/select the intended tab and use browser_snapshot without filename before continuing with the same browser_session_id. Human page edits and native tab selection are not fully tracked by old element references. At the first Browser use in a new conversation, call list_browser_sessions and reuse the intended session by browser_session_id. A saved or available profile can be resumed directly; an active session belonging to another conversation requires take_over_browser_session when the user asks to continue that existing browser. Transfer preserves its tabs and page state, changes the current operator, and requires a fresh snapshot. Never silently displace an active operator. Omitted browser_session_id reuses this caller's default managed session or the sole available managed profile; multiple available managed profiles require selection, and independent concurrent sessions still use separate managed profiles. Keep browser_session_id and environment_id with subsequent calls. Explicit browser_close, disabling Browser, device revocation received by Host, or Host exit ends managed contexts while preserving their profiles; on existing-browser (cdp), browser_close detaches without closing the user's external browser or tabs. Host restart lists saved managed profiles without restoring old callers, page references, actions or page memory; the next explicit Browser action opens the selected session. Unknown operations must not be automatically replayed. Android Hosts expose android_observe, android_act and android_run_steps through their independent Android capability. Use fresh observation_id and node_id values from that caller before input; screenshots are returned as MCP image content. Missing AccessibilityService permission or a locked device must be reported as such. Unknown Android action or batch outcomes must be inspected, never automatically replayed.",
+  "instructions": "Exec tasks belong to the selected Host runtime, not a conversation. Closing a conversation or reconnecting Gateway leaves them running. Use list_execution_tasks on that Host to recover a task ID, write_stdin with the same environment_id to read or continue it, and stop_execution_task to stop an authorized task. Quitting Host stops its tasks; they are not resumed on relaunch. Unknown action outcomes must be inspected, never automatically replayed. One conversation may use multiple Hosts. Use list_execution_environments to resolve a named device, then send its environment_id with each action. If multiple Hosts are paired and the target is unclear, ask which Host to use. Only a single paired Host is selected by default. An offline selected Host never falls back to another device. Prefer browser_* over Desktop computer tools for web pages and web applications; reserve desktop_list_tools/desktop_call for native desktop applications, OS dialogs, or non-browser UI because desktop automation shares the host screen and input focus. Use Exec for CLI/process work. The agent chooses the tool; failed calls never trigger local automatic fallback. Browser element targets belong to this chat and current observation: use browser_snapshot without filename to get fresh targets after navigation, tab changes, human interaction or reconnection. Default to exec_command for Git/GitHub clone, downloads (curl/wget), file operations, builds, tests and other CLI/development work. Interactive foreground or TTY sessions managed by exec_command/write_stdin are Exec sessions. Do not open Terminal or another desktop terminal through Spotlight, launchers or computer tools to paste these commands. If Exec fails, is disconnected, or reports authentication, permission or sandbox errors, check get_execution_environment_status, resolve the specific Exec issue or report the blocker; never use a desktop terminal to bypass it. Desktop automation uses the target Host native CUA MCP directly through desktop_list_tools and desktop_call. Call desktop_list_tools(environment_id) to see that Host native tool catalog and instructions (or pass names for full native schemas), and call desktop_call(environment_id, tool, arguments) with verbatim native tool names and arguments (including get_guide, list_windows, get_window_state, click, set_value, type_text, press_key, scroll, run_steps, and check_permissions). Native tool outputs, images, structuredContent, and refusals are returned verbatim; inspect unknown transport outcomes instead of replaying. Use the app bundle identifier or observed PID when localized app names do not match. An explicitly requested GUI workflow may use computer tools; this does not authorize bypassing an Exec restriction. Do not replace desktop tools with osascript, AppleScript/System Events, JXA or shell-driven input automation, including when a computer tool fails. Those paths have separate macOS permissions and can expose a node authorization prompt. For computer_snapshot_required or stale element references, observe again and use the new references; never reuse another conversation's references. For a permission or connection error, check get_execution_environment_status and report the specific missing permission or connection. Do not reset permissions or request additional Node/System Events access as a desktop fallback. Only use application scripting when the user explicitly requests that scripting workflow, explain its separate Automation permission before the first invocation, and let the user grant it through macOS. Styx desktop permission does not authorize that separate path. Host capability settings belong to the selected Host. For an authorized request to change them, use set_execution_environment_capabilities with only the requested fields. Disabling stops existing tasks of that capability; other capabilities and device pairing remain active. Read get_execution_environment_status after an incomplete or unknown update; do not automatically resend. Configured is not proof of native OS permission or executor readiness. Isolated managed Browser windows are the default: Browser opens a dedicated visible window on the selected Host's signed-in desktop that retains sign-ins across conversations, browser closure and Host restart, and is separate from the user's everyday browser unless local CDP attachment is explicitly enabled on that Host. Only when the Host owner opts into local CDP attachment does list_browser_sessions expose existing-browser (mode: cdp, attached_existing_browser: true), which must be selected explicitly via browser_session_id: existing-browser (or take_over_browser_session) to access existing tabs and logins; omitting browser_session_id always uses or creates an isolated managed profile so concurrent web tasks do not conflict and never implicitly attaches to existing-browser. For login, MFA or manual interaction, identify the Host/window, stop Browser actions and wait for the user to finish. Then list/select the intended tab and use browser_snapshot without filename before continuing with the same browser_session_id. Human page edits and native tab selection are not fully tracked by old element references. At the first Browser use in a new conversation, call list_browser_sessions and reuse the intended session by browser_session_id. A saved or available profile can be resumed directly; an active session belonging to another conversation requires take_over_browser_session when the user asks to continue that existing browser. Transfer preserves its tabs and page state, changes the current operator, and requires a fresh snapshot. Never silently displace an active operator. Omitted browser_session_id reuses this caller's default managed session or claims an available idle managed profile (or creates a new isolated managed profile when none is idle); pass browser_session_id: new to explicitly open an independent isolated managed session alongside an open one. Always pass the returned browser_session_id and environment_id on subsequent calls for the same task. Explicit browser_close, disabling Browser, device revocation received by Host, or Host exit ends managed contexts while preserving their profiles; on existing-browser (cdp), browser_close detaches without closing the user's external browser or tabs. Host restart lists saved managed profiles without restoring old callers, page references, actions or page memory; the next explicit Browser action opens the selected session. Unknown operations must not be automatically replayed. Android Hosts expose android_observe, android_act and android_run_steps through their independent Android capability. Use fresh observation_id and node_id values from that caller before input; screenshots are returned as MCP image content. Missing AccessibilityService permission or a locked device must be reported as such. Unknown Android action or batch outcomes must be inspected, never automatically replayed.",
   "tools": [
     {
       "name": "exec_command",
@@ -194,7 +194,7 @@
       "annotations": {
         "title": "Close browser",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -219,7 +219,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -232,7 +232,7 @@
       "annotations": {
         "title": "Resize browser window",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -268,7 +268,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -305,7 +305,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -317,7 +317,7 @@
       "annotations": {
         "title": "Handle a dialog",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -409,7 +409,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -418,7 +418,7 @@
       "annotations": {
         "title": "Emulate media features",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -451,7 +451,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -463,7 +463,7 @@
       "annotations": {
         "title": "Evaluate JavaScript",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -487,7 +487,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -496,7 +496,7 @@
       "annotations": {
         "title": "Upload files",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -538,7 +538,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -550,7 +550,7 @@
       "annotations": {
         "title": "Drop files or data onto an element",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -579,7 +579,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -648,7 +648,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -660,7 +660,7 @@
       "annotations": {
         "title": "Fill form",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -681,7 +681,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -693,7 +693,7 @@
       "annotations": {
         "title": "Press a key",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -730,7 +730,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -743,7 +743,7 @@
       "annotations": {
         "title": "Type text",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -764,7 +764,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -776,7 +776,7 @@
       "annotations": {
         "title": "Navigate to a URL",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -793,7 +793,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -802,7 +802,7 @@
       "annotations": {
         "title": "Go back",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -832,7 +832,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -881,7 +881,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -944,7 +944,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -989,7 +989,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1050,7 +1050,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -1062,7 +1062,7 @@
       "annotations": {
         "title": "Click",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -1095,7 +1095,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -1108,7 +1108,7 @@
       "annotations": {
         "title": "Drag mouse",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -1133,7 +1133,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -1145,7 +1145,7 @@
       "annotations": {
         "title": "Hover mouse",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -1177,7 +1177,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -1190,7 +1190,7 @@
       "annotations": {
         "title": "Select option",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -1225,7 +1225,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "required": [
@@ -1237,7 +1237,7 @@
       "annotations": {
         "title": "Manage tabs",
         "readOnlyHint": false,
-        "destructiveHint": true,
+        "destructiveHint": false,
         "openWorldHint": true
       }
     },
@@ -1266,7 +1266,7 @@
           },
           "browser_session_id": {
             "type": "string",
-            "description": "Saved or running Host Browser session ID from list_browser_sessions. Reuse the intended signed-in profile. Omit to use this conversation's default or the sole available profile; an active session owned by another conversation requires explicit takeover."
+            "description": "Saved or running Host Browser session ID from list_browser_sessions, or \"new\" to open an independent isolated managed session. Reuse the returned browser_session_id on follow-up calls for the same task; omit to use this caller's default or claim an available idle/new managed profile. An active session owned by another conversation requires explicit takeover."
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",

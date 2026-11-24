@@ -20,6 +20,11 @@ use styx_core::operations::OwnerLease;
 use tokio::sync::Mutex as AsyncMutex;
 
 const MAX_BROWSER_RESULT_BYTES: usize = 128 * 1024;
+const NEW_SESSION_ID: &str = "new";
+
+fn is_public_mcp_subject(owner: &OwnerRef) -> bool {
+    owner.owner_id.as_str().starts_with("public-mcp-subject:")
+}
 
 type Caller = (OwnerId, OwnerEpoch);
 type Cell = Arc<AsyncMutex<Session>>;
@@ -148,6 +153,32 @@ fn result(value: Value) -> Result<CallToolResult, &'static str> {
     }
     serde_json::to_writer(&mut Bound(0), &value).map_err(|_| "outcome_unknown")?;
     serde_json::from_value(value).map_err(|_| "outcome_unknown")
+}
+
+fn attach_session_id_to_content(result: &mut CallToolResult, id: &str) {
+    if result.is_error == Some(true) {
+        return;
+    }
+    let header = format!("### Browser Session\n- browser_session_id: {id}");
+    if result.content.iter().any(|block| {
+        block.as_text().is_some_and(|text| {
+            text.text.starts_with(&header)
+                || serde_json::from_str::<Value>(&text.text)
+                    .ok()
+                    .and_then(|value| value.get("browser_session_id").cloned())
+                    .is_some()
+        })
+    }) {
+        return;
+    }
+    match result.content.first_mut() {
+        Some(ContentBlock::Text(text)) => {
+            text.text = format!("{header}\n\n{}", text.text);
+        }
+        _ => {
+            result.content.insert(0, ContentBlock::text(header));
+        }
+    }
 }
 
 impl Engine<'_> {
@@ -312,44 +343,37 @@ impl Engine<'_> {
         }
         Ok(())
     }
-    fn resolve(
+    fn has_open_default(state: &Registry, owner: &OwnerRef) -> bool {
+        let Some(default_id) = state.defaults.get(&caller(owner)) else {
+            return false;
+        };
+        let Some(cell) = state.sessions.get(default_id) else {
+            return false;
+        };
+        match cell.try_lock() {
+            Err(_) => true,
+            Ok(session) => session.mode == SessionMode::Managed && session.phase != Phase::Saved,
+        }
+    }
+    fn claim_or_create_managed(
         &self,
+        state: &mut Registry,
         owner: &OwnerRef,
-        id: Option<String>,
-        create: bool,
+        preserve_open_default: bool,
     ) -> Result<(String, Cell), &'static str> {
-        // Serialize claiming with the existing caller fence, without retaining
-        // caller access over async work or persisting a second lifecycle record.
-        let _caller = self.active_caller(owner)?;
-        let mut state = self.state().registry.lock().expect("Browser sessions");
-        if let Some(id) = id.or_else(|| state.defaults.get(&caller(owner)).cloned()) {
-            return state
-                .sessions
-                .get(&id)
-                .cloned()
-                .map(|cell| (id, cell))
-                .ok_or("browser_session_not_found");
-        }
-        if !create {
-            return Err("browser_not_open");
-        }
         // Reuse an available signed-in profile instead of silently creating an
         // empty one after a conversation ends or the Host restarts. An active
-        // operator is never displaced; independent conversations can still open
-        // independent profiles, and explicit takeover keeps its existing meaning.
-        let available: Vec<_> = state
-            .sessions
-            .iter()
-            .filter_map(|(id, cell)| {
-                let session = cell.try_lock().ok()?;
-                (session.mode == SessionMode::Managed
-                    && session.operator.is_none()
-                    && session.phase != Phase::Unknown
-                    && session.cleanup.is_none())
-                .then(|| (id.clone(), cell.clone()))
-            })
-            .collect();
-        if let [(id, cell)] = available.as_slice() {
+        // operator is never displaced; independent concurrent conversations
+        // claim distinct idle profiles or create a new isolated profile.
+        let claimed = state.sessions.iter().find_map(|(id, cell)| {
+            let session = cell.try_lock().ok()?;
+            (session.mode == SessionMode::Managed
+                && session.operator.is_none()
+                && session.phase != Phase::Unknown
+                && session.cleanup.is_none())
+            .then(|| (id.clone(), cell.clone()))
+        });
+        if let Some((id, cell)) = claimed {
             let mut session = cell.try_lock().map_err(|_| "busy")?;
             if session.operator.is_some() {
                 return Err("busy");
@@ -361,11 +385,11 @@ impl Engine<'_> {
                     .map_err(|_| "busy")?;
             }
             session.operator = Some(owner.clone());
-            state.defaults.insert(caller(owner), id.clone());
-            return Ok((id.clone(), cell.clone()));
-        }
-        if available.len() > 1 {
-            return Err("browser_session_selection_required");
+            drop(session);
+            if !(preserve_open_default && Self::has_open_default(state, owner)) {
+                state.defaults.insert(caller(owner), id.clone());
+            }
+            return Ok((id, cell));
         }
         let id = uuid::Uuid::new_v4().simple().to_string();
         let cell = Arc::new(AsyncMutex::new(self.new_session(
@@ -375,9 +399,59 @@ impl Engine<'_> {
             Some(owner.clone()),
             Phase::New,
         )?));
+        let update_default = !(preserve_open_default && Self::has_open_default(state, owner));
         state.sessions.insert(id.clone(), cell.clone());
-        state.defaults.insert(caller(owner), id.clone());
+        if update_default {
+            state.defaults.insert(caller(owner), id.clone());
+        }
         Ok((id, cell))
+    }
+    fn resolve(
+        &self,
+        owner: &OwnerRef,
+        id: Option<String>,
+        create: bool,
+        action_name: Option<&str>,
+    ) -> Result<(String, Cell), &'static str> {
+        // Serialize claiming with the existing caller fence, without retaining
+        // caller access over async work or persisting a second lifecycle record.
+        let _caller = self.active_caller(owner)?;
+        let mut state = self.state().registry.lock().expect("Browser sessions");
+        if id.as_deref() == Some(NEW_SESSION_ID) {
+            if !create {
+                return Err("browser_session_not_found");
+            }
+            return self.claim_or_create_managed(&mut state, owner, true);
+        }
+        if let Some(explicit_id) = id {
+            return state
+                .sessions
+                .get(&explicit_id)
+                .cloned()
+                .map(|cell| (explicit_id, cell))
+                .ok_or("browser_session_not_found");
+        }
+        if let Some(default_id) = state.defaults.get(&caller(owner)).cloned() {
+            let cell = state
+                .sessions
+                .get(&default_id)
+                .cloned()
+                .ok_or("browser_session_not_found")?;
+            if is_public_mcp_subject(owner) && create && action_name == Some("browser_navigate") {
+                let should_isolate = match cell.try_lock() {
+                    Err(_) => true,
+                    Ok(session) => session.phase != Phase::Saved,
+                };
+                if should_isolate {
+                    return self.claim_or_create_managed(&mut state, owner, true);
+                }
+            }
+            return Ok((default_id, cell));
+        }
+        if !create {
+            return Err("browser_not_open");
+        }
+        self.claim_or_create_managed(&mut state, owner, true)
     }
     async fn cleanup_session_resources(&self, session: &mut Session) -> Result<(), &'static str> {
         if session.phase == Phase::Saved && session.target.is_none() && session.cleanup.is_none() {
@@ -556,7 +630,7 @@ impl Engine<'_> {
                 success(json!({"sessions":sessions}))
             }
             BrowserSessionCommand::TakeOver { session_id } => {
-                let (id, cell) = match self.resolve(&owner, Some(session_id), false) {
+                let (id, cell) = match self.resolve(&owner, Some(session_id), false, None) {
                     Ok(v) => v,
                     Err(e) => return failure(e, false),
                 };
@@ -623,7 +697,8 @@ impl Engine<'_> {
                     return failure("invalid_arguments", false);
                 }
                 let close = action.is_close();
-                let (id, cell) = match self.resolve(&owner, session_id, !close) {
+                let (id, cell) = match self.resolve(&owner, session_id, !close, Some(name.as_str()))
+                {
                     Ok(v) => v,
                     Err(e) => return failure(e, false),
                 };
@@ -658,12 +733,10 @@ impl Engine<'_> {
                         }
                         session.operator = Some(owner.clone());
                         if session_mode == SessionMode::Managed {
-                            self.state()
-                                .registry
-                                .lock()
-                                .expect("Browser sessions")
-                                .defaults
-                                .insert(caller(&owner), id.clone());
+                            let mut state = self.state().registry.lock().expect("Browser sessions");
+                            if !Self::has_open_default(&state, &owner) {
+                                state.defaults.insert(caller(&owner), id.clone());
+                            }
                         }
                     } else if session.operator.as_ref() != Some(&owner) {
                         return failure("browser_session_transferred", false);
@@ -714,6 +787,9 @@ impl Engine<'_> {
                 let metadata = result.structured_content.get_or_insert_with(|| json!({}));
                 if metadata.is_object() {
                     metadata["browser_session_id"] = json!(id);
+                }
+                if !close {
+                    attach_session_id_to_content(&mut result, &id);
                 }
                 result
             }
