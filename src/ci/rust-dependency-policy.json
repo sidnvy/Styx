@@ -445,7 +445,7 @@
     },
     "store::platform::tests::macos_raw_reads_and_distinct_leases_native": {
       "kind": "explicit_native_macos_filesystem",
-      "input": "STYX_TEST_MACOS_STORE_ROOT absolute fresh leaf; actual pho only",
+      "input": "STYX_TEST_MACOS_STORE_ROOT absolute fresh leaf; actual macOS host only",
       "required_for": "Darwin raw bytes/ACL/descriptor replacement and independent kernel leases/birth; not App, TCC, executor, journal or installation acceptance"
     },
     "store::platform::tests::macos_store_child": {
@@ -459,12 +459,12 @@
     },
     "store::platform::payload_backend::tests::macos_payload_inventory_identity_acl_and_bounds_native": {
       "kind": "explicit_macos_private_native_image_fixture",
-      "input": "pho fresh STYX_TEST_MACOS_PAYLOAD_ROOT and original read-only STYX_TEST_MACOS_PAYLOAD_EXECUTABLE",
+      "input": "macOS fresh STYX_TEST_MACOS_PAYLOAD_ROOT and original read-only STYX_TEST_MACOS_PAYLOAD_EXECUTABLE",
       "required_for": "native Darwin inventory, exact raw/hash/CDHash and ACL/alias/replacement/bounds; not process launch, Host readiness or installed signed package"
     },
     "platform::macos_spawn::tests::actual_suspended_image_barrier_wrong_cdhash_and_original_wait": {
       "kind": "explicit_macos_native_suspended_spawn_fixture",
-      "input": "pho fresh nonexisting STYX_TEST_MACOS_SPAWN_ROOT; only test-owned copied image may be ad-hoc signed",
+      "input": "macOS fresh nonexisting STYX_TEST_MACOS_SPAWN_ROOT; only test-owned copied image may be ad-hoc signed",
       "required_for": "zero effects before resume/wrongCDHash, once after correct resume, retained cancellation and original actual wait; not Codex/Host/App/TCC or final platform acceptance"
     },
     "platform::macos_spawn::tests::suspended_fixture_child": {

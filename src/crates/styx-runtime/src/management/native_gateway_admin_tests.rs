@@ -327,7 +327,7 @@ fn computers_inventory_normalizes_platforms_and_refuses_unbounded_labels() {
     assert!(computers_body(&serde_json::to_vec(&rows).unwrap()).is_err());
 
     let android_rows = json!([
-        {"device_id":"styx-android","label":"TB320FC","platform":"android","status":"approved",
+        {"device_id":"styx-android","label":"Test Tablet","platform":"android","status":"approved",
          "host_version":"0.8.1-rc.7",
          "connections":{"exec":false,"browser":false,"computer":false,"android":true}},
         {"device_id":"styx-badver","label":"Desk","platform":"linux","status":"approved",

@@ -1684,7 +1684,7 @@ mod tests {
             &json!({
                 "iss": "https://team.cloudflareaccess.com",
                 "aud": ["aud-123456"],
-                "sub": "sidnvy@gmail.com",
+                "sub": "owner@example.test",
                 "iat": now - 5,
                 "exp": now + 300
             }),
