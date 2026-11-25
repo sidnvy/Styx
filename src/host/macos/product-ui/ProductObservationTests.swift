@@ -122,7 +122,7 @@ import Combine
     current["gateway"] = .object(["lan": .object(["enabled": .bool(true)])])
     current["capabilities"] = .object(["configured": .object(["exec": .bool(true), "browser": .bool(false), "computer": .bool(false)]), "applied": .bool(true)])
     current["browserCdp"] = .object(["enabled": .bool(false)])
-    current["supportedOperations"] = .array(["computers", "hostCapabilities", "hostBrowserCdp", "inviteComputer"].map(ProductJSON.string))
+    current["supportedOperations"] = .array(["computers", "hostCapabilities", "hostBrowserCdp", "hostBrowserExtension", "inviteComputer"].map(ProductJSON.string))
     var hubCalls: [(String, [String: ProductJSON])] = [], invitationFails = false
     let savedTunnel: ProductJSON = .object(["status": .string("running"), "transport": .string("ready"), "tunnelId": .string("tunnel_fixture1234")])
     let hub = ProductModel(testRequest: { operation, input in
@@ -141,6 +141,11 @@ import Combine
             let next: ProductJSON = .object(["enabled": .bool(true), "endpoint": .string("http://127.0.0.1:9222")])
             current["browserCdp"] = next
             return .object(["applied": .bool(true), "browserCdp": next])
+        case "hostBrowserExtension":
+            guard input == ["action": .string("install")] else { throw ProductCoreError.invalidResponse }
+            let next: ProductJSON = .object(["enabled": .bool(true), "extensionInstalled": .bool(true), "extensionConnected": .bool(true), "extensionId": .string("cncjpfhbbnibdjkcheeimdfklfiknibl"), "extensionPath": .string("/tmp/styx/browser-extension"), "extensionBrowser": .string("Chrome/158.0.0.0")])
+            current["browserCdp"] = next
+            return .object(["applied": .bool(true), "browserCdp": next])
         case "inviteComputer":
             if invitationFails { throw ProductOwnedCoreRejection(response: .object(["error": .string("native_management_unknown_inspect")])) }
             return .object(["link": .string("styx://isolated-invitation"), "expiresAt": .number(Date().addingTimeInterval(300).timeIntervalSince1970 * 1000)])
@@ -154,6 +159,8 @@ import Combine
     hub.setBrowserCdp(enabled: true, endpoint: "http://127.0.0.1:9222"); hub.setBrowserCdp(enabled: true, endpoint: "http://127.0.0.1:9222")
     try await settled(hub)
     try require(hubCalls.filter { $0.0 == "hostBrowserCdp" }.count == 1 && hub.status["browserCdp"]["enabled"].bool && hub.browserCdpEndpointDraft == "http://127.0.0.1:9222" && !hub.browserCdpDraftEdited, "Browser CDP change was duplicated or failed to sync the Rust observation")
+    hub.setBrowserExtension(action: "install"); try await settled(hub)
+    try require(hubCalls.filter { $0.0 == "hostBrowserExtension" }.count == 1 && hub.status["browserCdp"]["extensionInstalled"].bool && hub.status["browserCdp"]["extensionConnected"].bool, "Browser extension bridge install failed to sync the Rust observation")
     hub.beginDeviceInvitation(); hub.beginDeviceInvitation(); try await settled(hub)
     hub.beginDeviceInvitation()
     try require(hubCalls.filter { $0.0 == "inviteComputer" }.count == 1 && hub.createdInvitation["link"].string != nil, "A valid invitation was regenerated when its surface reopened")

@@ -610,7 +610,33 @@ namespace StyxNative {
      var cdpToggle=new CheckBox {Text=StyxContext.UI("Attach to existing browser (CDP, advanced)"),Checked=Json.Yes(owner.CurrentStatus,"browserCdp","enabled"),Width=490,Height=32,Margin=new Padding(0,8,0,0)};
      content.Controls.Add(cdpToggle);
      cdpToggle.CheckedChanged+=async(sender,args)=>{cdpToggle.Enabled=false;try{var result=await owner.Call("hostBrowserCdp",Json.Obj("enabled",cdpToggle.Checked));await owner.RefreshAfterMutation();if(!Json.Yes(result,"applied"))Feedback("Settings have not fully applied. Refresh to check their status.");}catch(Exception){Feedback("The setting result is unconfirmed. Refresh the status before trying again.");}finally{if(!cdpToggle.IsDisposed)cdpToggle.Enabled=true;}};
-     Explain("Off by default; concurrent Browser tasks still use isolated windows by default. When enabled, ChatGPT only attaches to your existing Chrome/Edge/Chromium tabs and sign-ins when explicitly selecting existing-browser. Supports chrome://inspect/#remote-debugging auto-discovery or an optional local loopback URL (such as http://127.0.0.1:9222).",105);
+     Explain("Off by default; concurrent Browser tasks still use isolated windows by default. When enabled, ChatGPT only attaches to your existing Chrome/Edge/Chromium tabs and sign-ins when explicitly selecting existing-browser. Installing the Chrome Extension bridge below avoids repeated remote debugging prompts; chrome://inspect/#remote-debugging auto-discovery and optional loopback URLs remain supported.",105);
+     if(owner.Supports("hostBrowserExtension")){
+      bool extInstalled=Json.Yes(owner.CurrentStatus,"browserCdp","extensionInstalled");
+      bool extConnected=Json.Yes(owner.CurrentStatus,"browserCdp","extensionConnected");
+      string extBrowser=Json.Str(owner.CurrentStatus,"browserCdp","extensionBrowser");
+      string extPath=Json.Str(owner.CurrentStatus,"browserCdp","extensionPath");
+      string extId=Json.Str(owner.CurrentStatus,"browserCdp","extensionId");
+      string extSummary=extConnected?"Chrome Extension bridge: Connected"+(String.IsNullOrEmpty(extBrowser)?"":" ("+extBrowser+")"):(extInstalled?"Chrome Extension bridge: Installed (load unpacked in chrome://extensions from the folder below)":"Chrome Extension bridge: Not installed");
+      StyxContext.Text(content,extSummary,45);
+      if(!String.IsNullOrEmpty(extId))StyxContext.Text(content,"Extension ID: "+extId,25);
+      if(!String.IsNullOrEmpty(extPath))StyxContext.Text(content,extPath,40);
+      Action(extInstalled?"Reinstall Chrome Extension Bridge":"Install Chrome Extension Bridge",async()=>{
+       var result=await owner.Call("hostBrowserExtension",Json.Obj("action","install"));
+       await owner.RefreshAfterMutation();
+       if(!Json.Yes(result,"applied"))Feedback("Chrome Extension bridge installation did not complete.");
+      });
+      if(!String.IsNullOrEmpty(extPath)){
+       Action("Open Extension Folder",()=>{if(Directory.Exists(extPath))Process.Start("explorer.exe",extPath);return Task.FromResult(0);},false);
+      }
+      if(extInstalled){
+       Action("Uninstall Chrome Extension Bridge",async()=>{
+        var result=await owner.Call("hostBrowserExtension",Json.Obj("action","uninstall"));
+        await owner.RefreshAfterMutation();
+        if(!Json.Yes(result,"applied"))Feedback("Chrome Extension bridge uninstall did not complete.");
+       });
+      }
+     }
      string detected=Json.Str(owner.CurrentStatus,"browserCdp","detectedEndpoint");
      if(!String.IsNullOrEmpty(detected))StyxContext.Text(content,StyxContext.UI("Detected local debugging endpoint: ")+detected,40);
      StyxContext.Text(content,"Optional loopback CDP URL (blank for auto-detect, e.g. http://127.0.0.1:9222)",25);
@@ -839,14 +865,15 @@ namespace StyxNative {
     owner.ApplyPreparationResult(existing);ShowPage("overview");
     if(page=="welcome")throw new Exception("native_retained_role_navigation_offered_fresh_setup");
    }
-   owner.ApplyPreparationResult(Json.Obj("mode","rust_host","configuration",Json.Obj("status","retained"),"status",Json.Obj(),"capabilities",Json.Obj("configured",Json.Obj("exec",true,"browser",true,"computer",false),"applied",true),"browserCdp",Json.Obj("enabled",true,"endpoint","http://127.0.0.1:9222","detectedEndpoint","ws://127.0.0.1:9333/devtools/browser/self-test"),"supportedOperations",new object[]{"hostCapabilities","hostBrowserCdp"}));
+   owner.ApplyPreparationResult(Json.Obj("mode","rust_host","configuration",Json.Obj("status","retained"),"status",Json.Obj(),"capabilities",Json.Obj("configured",Json.Obj("exec",true,"browser",true,"computer",false),"applied",true),"browserCdp",Json.Obj("enabled",true,"endpoint","http://127.0.0.1:9222","detectedEndpoint","ws://127.0.0.1:9333/devtools/browser/self-test","extensionInstalled",true,"extensionConnected",false,"extensionId","cncjpfhbbnibdjkcheeimdfklfiknibl","extensionPath",@"C:\temp\styx\browser-extension"),"supportedOperations",new object[]{"hostCapabilities","hostBrowserCdp","hostBrowserExtension"}));
    ShowPage("overview");
-   bool hasCdpToggle=false,hasCdpBox=false;
+   bool hasCdpToggle=false,hasCdpBox=false,hasExtButton=false;
    foreach(Control control in content.Controls){
     var cb=control as CheckBox;if(cb!=null&&cb.Text==StyxContext.UI("Attach to existing browser (CDP, advanced)"))hasCdpToggle=cb.Checked;
     var tb=control as TextBox;if(tb!=null&&tb.AccessibleName=="Optional loopback CDP URL")hasCdpBox=tb.Text=="http://127.0.0.1:9222";
+    var btn=control as Button;if(btn!=null&&btn.Text=="Reinstall Chrome Extension Bridge")hasExtButton=true;
    }
-   if(!hasCdpToggle||!hasCdpBox)throw new Exception("native_browser_cdp_controls_missing");
+   if(!hasCdpToggle||!hasCdpBox||!hasExtButton)throw new Exception("native_browser_cdp_controls_missing");
    owner.ApplyPreparationResult(previousStatus);
    Feedback("");ShowPage("welcome");Show();CreateControl();PerformLayout();Application.DoEvents();using(var image=new Bitmap(Width,Height)){DrawToBitmap(image,new Rectangle(0,0,Width,Height));image.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"native-settings.png"));}}
  }

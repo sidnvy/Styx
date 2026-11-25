@@ -8,19 +8,17 @@ computer.
 
 ## Changes
 
-Styx `0.8.2` builds on the `0.8.1` Stable baseline with Public MCP OAuth resilience, refined cross-platform brand artwork, and repository cleanup:
+Styx `0.8.3` adds the **Styx Chrome Extension Bridge** for zero-flag existing Chrome automation and hardens `existing-browser` CDP reliability on top of the `0.8.2` baseline:
 
-- **Public MCP OAuth & JWKS resilience (`styx-runtime`)**:
-  - Added bounded 24-hour stale-JWKS cache fallback on transient JWKS fetch failures so live OAuth MCP sessions are not needlessly rejected during upstream JWKS hiccups.
-  - Added fixed-category authentication rejection telemetry (`missing_header`, `malformed_bearer`, `invalid_jwt`, `jwks_unavailable`, `origin_forbidden`) and RFC 6750 `WWW-Authenticate: Bearer` responses on `401`.
-- **Refined brand artwork across all platforms**:
-  - Updated the borderless Styx orb and wave source assets, `styx-logo.png` (`512x512`), `styx-custom-mcp-icon.png` (`128x128`, under 10 KB for ChatGPT Custom MCP), multi-resolution Windows `styx.ico`, macOS `BrandGlyph` full-bleed extraction, and all 25 Android launcher/adaptive/status icons.
-- **Repository & documentation cleanup**:
-  - Streamlined public documentation, removed obsolete rewrite harnesses and pre-rewrite JSON specs, and sanitized test fixtures.
-- **Core `0.8.x` platform & capability baseline**:
-  - Bounded Linux `systemd` `service_scope` shutdown loop (`20s` limit with fixed-category `cleanup_unknown` diagnostics) and clean reinstall of previously `failed` units (`native_service::install()`).
-  - Opt-in local Browser CDP attachment (`existing-browser`, default off, 25s CDP attach / 35s RPC budget) alongside persistent isolated Chromium profiles and concurrent multi-profile session isolation.
-  - Non-destructive Google Gemini Web and ChatGPT Custom MCP compatibility across Exec, Browser, Computer Use, and Android capabilities.
+- **Styx Chrome Extension Bridge (`styx-runtime`, `styx`, macOS & Windows Host UI)**:
+  - Bundled Manifest V3 Chrome extension (`src/providers/browser-extension/`, pinned ID `cncjpfhbbnibdjkcheeimdfklfiknibl`) communicating over Native Messaging (`com.styx.browser_bridge`) and a Host loopback WebSocket CDP relay (`/devtools/browser/<uuid>`) for Playwright `connectOverCDP`.
+  - Enables `existing-browser` automation in an ordinary Chrome profile without launching Chrome with `--remote-debugging-port` or clicking repeated remote-debugging prompts, while preserving automatic fallback to `DevToolsActivePort` when CDP endpoints are configured or connected directly.
+  - Added `styx host browser-extension status|install|uninstall` CLI commands and **Install / Reveal / Uninstall Extension Bridge** controls in macOS and Windows Host Settings, plus `extensionInstalled` / `extensionConnected` / `extensionPath` fields in `browser-cdp status`.
+- **Existing-browser CDP & session reliability fixes (`styx-runtime`)**:
+  - Added `"cdp_unavailable"` to the browser reference fact allowlist so pre-attach CDP refusals and timeouts surface cleanly instead of triggering `ProtocolMismatch` / `Phase::Unknown`.
+  - Recovered `StaleObservation` snapshots on live Chrome tabs cleanly without poisoning `Phase::Ready`, and cleaned up unattached CDP workers after `CapabilityUnsupported` retries so subsequent `existing-browser` attempts return cleanly to `Phase::Saved`.
+- **Previous `0.8.2` & `0.8.x` baseline**:
+  - Public MCP OAuth resilience (bounded 24-hour stale-JWKS fallback, fixed-category auth rejection telemetry, RFC 6750 `WWW-Authenticate: Bearer`), refined cross-platform brand artwork, bounded Linux `systemd` `service_scope` shutdown loop (`20s` limit), opt-in local Browser CDP alongside persistent isolated profiles, and non-destructive Google Gemini Web and ChatGPT Custom MCP compatibility.
 
 All existing Gateway MCP tool names, Host identities, device pairings, browser
 profiles, and Android/Windows/macOS release signing identities remain unchanged.

@@ -215,6 +215,14 @@ enum Command {
         #[arg(long, value_enum)]
         role: NativeComponentArg,
     },
+    #[cfg(not(target_os = "android"))]
+    #[command(name = "__browser-extension-bridge", hide = true)]
+    BrowserExtensionBridge {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _chrome_args: Vec<String>,
+    },
     /// Explicit native user-service lifecycle; never enables linger or sudo.
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     Service {
@@ -467,6 +475,37 @@ enum HostCommand {
     BrowserCdp {
         #[command(subcommand)]
         command: HostBrowserCdpCommand,
+    },
+    /// Install, inspect, or remove the local Chrome Extension bridge.
+    #[cfg(not(target_os = "android"))]
+    BrowserExtension {
+        #[command(subcommand)]
+        command: HostBrowserExtensionCommand,
+    },
+}
+#[cfg(not(target_os = "android"))]
+#[derive(Subcommand)]
+enum HostBrowserExtensionCommand {
+    /// Show Chrome Extension bridge installation state and extension ID/path.
+    Status {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Extract extension files and register Chrome/Edge/Chromium Native Messaging manifests.
+    Install {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove Native Messaging manifests and launcher script cleanly.
+    Uninstall {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
     },
 }
 #[cfg(not(target_os = "android"))]
@@ -2341,14 +2380,83 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                     (None, Some(detected)) => {
                         println!("Browser CDP attach: enabled (auto-detected: {detected})");
                     }
+                    (None, None) if status.extension_installed => {
+                        println!(
+                            "Browser CDP attach: enabled (Chrome Extension ID: {}; load unpacked from {} if not yet added)",
+                            status.extension_id.as_deref().unwrap_or_default(),
+                            status.extension_path.as_deref().unwrap_or_default()
+                        );
+                    }
                     (None, None) => {
                         println!(
-                            "Browser CDP attach: enabled (auto-detect; open chrome://inspect/#remote-debugging in Chrome/Edge/Chromium or pass --endpoint http://127.0.0.1:9222)"
+                            "Browser CDP attach: enabled (install Chrome Extension bridge via `styx host browser-extension install --state-dir ...`, open chrome://inspect/#remote-debugging, or pass --endpoint http://127.0.0.1:9222)"
                         );
                     }
                 }
             } else {
                 println!("Browser CDP attach: disabled");
+            }
+            ExitCode::SUCCESS
+        }
+        #[cfg(not(target_os = "android"))]
+        Command::BrowserExtensionBridge { state_dir, .. } => {
+            if styx_runtime::host::browser_extension::native_host::run_native_messaging_bridge(
+                &state_dir,
+            )
+            .await
+            .is_err()
+            {
+                ExitCode::from(2)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        Command::Host {
+            command: HostCommand::BrowserExtension { command },
+        } => {
+            use styx_runtime::host::browser_extension::{
+                install as ext_install, status as ext_status, uninstall as ext_uninstall,
+            };
+            let (state_dir, op, json) = match command {
+                HostBrowserExtensionCommand::Status { state_dir, json } => (state_dir, None, json),
+                HostBrowserExtensionCommand::Install { state_dir, json } => {
+                    (state_dir, Some(true), json)
+                }
+                HostBrowserExtensionCommand::Uninstall { state_dir, json } => {
+                    (state_dir, Some(false), json)
+                }
+            };
+            let result = match op {
+                None => ext_status(&state_dir, None),
+                Some(true) => match std::env::current_exe() {
+                    Ok(exe) => ext_install(&state_dir, &exe),
+                    Err(_) => Err(styx_contracts::error::ErrorCategory::CapabilityUnsupported),
+                },
+                Some(false) => ext_uninstall(&state_dir),
+            };
+            let Ok(st) = result else {
+                return error("host_browser_extension_unavailable");
+            };
+            if json {
+                let body = serde_json::json!({
+                    "applied": true,
+                    "extension": st,
+                });
+                if write_json(&body).is_err() {
+                    return error("output_unavailable");
+                }
+            } else if st.installed {
+                println!(
+                    "Chrome Extension bridge: installed (ID: {}, path: {})",
+                    st.extension_id,
+                    st.extension_path.as_deref().unwrap_or_default()
+                );
+            } else {
+                println!(
+                    "Chrome Extension bridge: not installed (extension ID: {})",
+                    st.extension_id
+                );
             }
             ExitCode::SUCCESS
         }

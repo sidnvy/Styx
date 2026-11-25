@@ -26,9 +26,55 @@ struct ProductHostCapabilitySettings: View {
                     Text(productText("连接现有浏览器（CDP，高级）", "Attach to existing browser (CDP, advanced)"))
                 }.disabled(model.busy).accessibilityIdentifier("styx-capability-browser-cdp")
                 Text(productText(
-                    "默认关闭；开启“操作浏览器”时仍默认新建隔离窗口以支持多任务并行。开启后，AI 仅在显式选择 existing-browser 时才连接你本机已有 Chrome/Edge/Chromium 的标签页与登录态。支持 Chrome 144+ 在 chrome://inspect/#remote-debugging 开启远程调试后自动发现，或填写本机环回地址（如 http://127.0.0.1:9222）。",
-                    "Off by default; concurrent Browser tasks still use isolated windows by default. When enabled, the assistant only attaches to your existing local Chrome/Edge/Chromium tabs and sign-ins when it explicitly selects existing-browser. Supports Chrome 144+ auto-discovery via chrome://inspect/#remote-debugging or an optional local loopback URL (such as http://127.0.0.1:9222)."
+                    "默认关闭；开启“操作浏览器”时仍默认新建隔离窗口以支持多任务并行。开启后，AI 仅在显式选择 existing-browser 时才连接你本机已有 Chrome/Edge/Chromium 的标签页与登录态。推荐使用下方 Chrome 扩展桥接实现免弹窗持久连接，也支持 chrome://inspect/#remote-debugging 自动发现或填写本机环回地址（如 http://127.0.0.1:9222）。",
+                    "Off by default; concurrent Browser tasks still use isolated windows by default. When enabled, the assistant only attaches to your existing local Chrome/Edge/Chromium tabs and sign-ins when it explicitly selects existing-browser. Using the Chrome Extension bridge below avoids repeated remote debugging prompts; chrome://inspect/#remote-debugging auto-discovery and optional loopback URLs remain supported."
                 )).font(.caption).foregroundStyle(.secondary)
+                if model.nativeSupportsOperation("hostBrowserExtension") {
+                    let extInstalled = model.status["browserCdp"]["extensionInstalled"].bool
+                    let extConnected = model.status["browserCdp"]["extensionConnected"].bool
+                    let extBrowser = model.status["browserCdp"]["extensionBrowser"].string
+                    let extPath = model.status["browserCdp"]["extensionPath"].string
+                    let extId = model.status["browserCdp"]["extensionId"].string
+                    VStack(alignment: .leading, spacing: 4) {
+                        if extConnected {
+                            Text(productText(
+                                "Chrome 扩展桥接：已连接（\(extBrowser ?? "Chrome")）",
+                                "Chrome Extension bridge: Connected (\(extBrowser ?? "Chrome"))"
+                            )).font(.caption).foregroundStyle(.green)
+                        } else if extInstalled {
+                            Text(productText(
+                                "Chrome 扩展桥接：已安装主机清单（打开 chrome://extensions → 开启开发者模式 → 加载已解压的扩展程序，或启用已安装的 Styx Bridge 扩展）",
+                                "Chrome Extension bridge: Native host installed (open chrome://extensions, enable Developer mode, and load unpacked from the folder below)"
+                            )).font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Text(productText(
+                                "Chrome 扩展桥接：未安装",
+                                "Chrome Extension bridge: Not installed"
+                            )).font(.caption).foregroundStyle(.secondary)
+                        }
+                        if let extId = extId, !extId.isEmpty {
+                            Text("Extension ID: \(extId)").font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                        }
+                        if let extPath = extPath, !extPath.isEmpty {
+                            Text(extPath).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                        }
+                        HStack(spacing: 8) {
+                            Button(productText(extInstalled ? "重装扩展桥接" : "安装 Chrome 扩展桥接", extInstalled ? "Reinstall Extension Bridge" : "Install Chrome Extension Bridge")) {
+                                model.setBrowserExtension(action: "install")
+                            }.disabled(model.busy)
+                            if extPath != nil {
+                                Button(productText("打开扩展目录", "Reveal Extension Folder")) {
+                                    model.revealBrowserExtensionFolder()
+                                }.disabled(model.busy)
+                            }
+                            if extInstalled {
+                                Button(productText("卸载扩展桥接", "Uninstall")) {
+                                    model.setBrowserExtension(action: "uninstall")
+                                }.disabled(model.busy)
+                            }
+                        }
+                    }.padding(.vertical, 2)
+                }
                 if let detected = model.status["browserCdp"]["detectedEndpoint"].string, !detected.isEmpty {
                     Text(productText("已检测到本机调试端口：\(detected)", "Detected local debugging endpoint: \(detected)"))
                         .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)

@@ -4,6 +4,8 @@ pub mod bootstrap;
 #[cfg(not(target_os = "android"))]
 pub mod browser_cdp;
 #[cfg(not(target_os = "android"))]
+pub mod browser_extension;
+#[cfg(not(target_os = "android"))]
 pub(crate) mod browser_sessions;
 pub(crate) mod callers;
 pub mod coordinator;

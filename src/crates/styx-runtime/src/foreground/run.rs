@@ -838,6 +838,20 @@ async fn run_owned(
             scope.publish_browser_cdp(cdp);
         }
     }
+    #[cfg(not(target_os = "android"))]
+    let browser_extension = match crate::host::browser_extension::BrowserExtensionBridge::start(
+        admitted.profile.host_base_dir(),
+    )
+    .await
+    {
+        Ok(bridge) => {
+            if let Some(scope) = &settings_scope {
+                scope.publish_browser_extension(&bridge);
+            }
+            Some(bridge)
+        }
+        Err(_) => None,
+    };
     // Install before exposing any paired connection. A failed installation
     // follows the same owned Host cleanup below; never early-drop the executor.
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -857,6 +871,7 @@ async fn run_owned(
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     let browser: Option<Arc<dyn crate::host::protocol::browser::BrowserBootstrap>> = {
         let retained = admitted.clone();
+        let ext = browser_extension.clone();
         let source = tokio::task::spawn_blocking(move || {
             retained.validate_ownership().map_err(|_| {
                 super::browser::BrowserPreparationError::new(
@@ -864,7 +879,7 @@ async fn run_owned(
                     styx_contracts::error::ErrorCategory::StateConflict,
                 )
             })?;
-            super::browser::prepare_browser_bootstrap(retained.profile.clone())
+            super::browser::prepare_browser_bootstrap(retained.profile.clone(), ext)
         })
         .await;
         match source {
@@ -1215,6 +1230,10 @@ async fn run_owned(
     #[cfg(not(target_os = "android"))]
     if let Some(cdp) = &browser_cdp {
         cdp.clear_disconnect_hook();
+    }
+    #[cfg(not(target_os = "android"))]
+    if let Some(ext) = &browser_extension {
+        ext.shutdown().await;
     }
     event(&events, &cancel, "stopping", &device, None);
     let mut outcome = ForegroundOutcome {

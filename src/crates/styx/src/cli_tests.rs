@@ -898,4 +898,16 @@ async fn cli_host_browser_cdp_status_enable_validate_and_disable() {
         .unwrap();
     assert!(!after.enabled);
     assert!(after.endpoint.is_none());
+
+    let ext_status_cli = Cli::try_parse_from([
+        "styx",
+        "host",
+        "browser-extension",
+        "status",
+        "--state-dir",
+        &state_arg,
+        "--json",
+    ])
+    .unwrap();
+    assert_eq!(run(ext_status_cli).await, ExitCode::SUCCESS);
 }

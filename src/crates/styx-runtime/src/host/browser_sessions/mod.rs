@@ -764,7 +764,7 @@ impl Engine<'_> {
                             session.operator = operator;
                         }
                     }
-                    self.execute(&mut session, action, &name).await
+                    self.execute(&id, &mut session, action, &name).await
                 };
                 if !close
                     && session.cleanup.is_none()
@@ -807,7 +807,13 @@ impl Engine<'_> {
             )
             .await
     }
-    async fn execute(&self, s: &mut Session, action: BrowserAction, name: &str) -> CallToolResult {
+    async fn execute(
+        &self,
+        id: &str,
+        s: &mut Session,
+        action: BrowserAction,
+        name: &str,
+    ) -> CallToolResult {
         if s.phase == Phase::Unknown {
             return failure("outcome_unknown", true);
         }
@@ -900,28 +906,40 @@ impl Engine<'_> {
             }
         };
         let operation_id = action.operation_id.clone();
-        match self
+        let reply = self
             .exchange(
                 s,
                 BrowserCommand::DispatchAction { action },
                 action_timeout(name, s.mode),
             )
+            .await;
+        self.finish_action(id, s, &operation_id, digest, &target, reply)
             .await
-        {
+    }
+    async fn finish_action(
+        &self,
+        id: &str,
+        s: &mut Session,
+        operation_id: &OperationId,
+        digest: Sha256Digest,
+        target: &ResourceTarget,
+        reply: BrowserReply,
+    ) -> CallToolResult {
+        match reply {
             BrowserReply::Action {
                 snapshot,
                 dispatch,
                 result: Some(value),
-                cause: None,
+                cause: None | Some(ErrorCategory::StaleObservation),
                 ..
             } if dispatch == "acknowledged"
                 && matches!(
                     snapshot.state,
                     OperationState::Succeeded | OperationState::Failed
                 )
-                && snapshot.operation_id == operation_id
+                && snapshot.operation_id == *operation_id
                 && snapshot.payload_digest == digest
-                && snapshot.target.as_ref() == Some(&target) =>
+                && snapshot.target.as_ref() == Some(target) =>
             {
                 match result(value) {
                     Ok(result) => {
@@ -938,11 +956,24 @@ impl Engine<'_> {
                 ..
             } if dispatch == "not_dispatched"
                 && snapshot.state == OperationState::Failed
-                && snapshot.operation_id == operation_id
+                && snapshot.operation_id == *operation_id
                 && snapshot.payload_digest == digest
-                && snapshot.target.as_ref() == Some(&target) =>
+                && snapshot.target.as_ref() == Some(target) =>
             {
-                s.phase = Phase::Ready;
+                if s.mode == SessionMode::Cdp && cause == Some(ErrorCategory::CapabilityUnsupported)
+                {
+                    let operator = s.operator.clone();
+                    let _ = self.close(id, s).await;
+                    if s.phase == Phase::Saved
+                        && operator
+                            .as_ref()
+                            .is_some_and(|op| self.active_caller(op).is_ok())
+                    {
+                        s.operator = operator;
+                    }
+                } else {
+                    s.phase = Phase::Ready;
+                }
                 refusal(&BrowserReply::Error {
                     category: cause.unwrap_or(ErrorCategory::CapabilityUnsupported),
                     certainty: ExecutionCertainty::NotDispatched,

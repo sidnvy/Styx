@@ -115,6 +115,8 @@ impl HostApp {
             settings: std::sync::Mutex::new(std::sync::Weak::new()),
             #[cfg(not(target_os = "android"))]
             browser_cdp: std::sync::Mutex::new(std::sync::Weak::new()),
+            #[cfg(not(target_os = "android"))]
+            browser_extension: std::sync::Mutex::new(std::sync::Weak::new()),
             container: container.clone(),
             state_dir: state_dir.clone(),
             root: OnceLock::new(),

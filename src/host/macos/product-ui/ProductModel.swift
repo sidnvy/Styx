@@ -631,6 +631,17 @@ enum ProductWorkflowError: Error { case computerPermissionRecoveryRequired, role
             if endpoint != nil { browserCdpDraftEdited = false }
         }
     }
+    func setBrowserExtension(action: String) {
+        perform { [self] in
+            let result = try await client.native("hostBrowserExtension", ["action": .string(action)])
+            guard result["applied"].bool else { throw ProductCoreError.rejected }
+        }
+    }
+    func revealBrowserExtensionFolder() {
+        guard let raw = status["browserCdp"]["extensionPath"].string, raw.hasPrefix("/") else { return }
+        let url = URL(fileURLWithPath: raw, isDirectory: true)
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
     func resumeForeground() {
         guard nativeSupportsOperation("connect") else { return }
         perform { [self] in _ = try await client.native("connect") }

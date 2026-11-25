@@ -28,7 +28,7 @@ pub(super) fn fact(result: &CallToolResult) -> Result<NativeFact> {
         || fact
             .reason
             .as_deref()
-            .is_some_and(|r| !matches!(r, "stale" | "invalid"))
+            .is_some_and(|r| !matches!(r, "stale" | "invalid" | "cdp_unavailable"))
     {
         return Err(BrowserError::ProtocolMismatch);
     }
