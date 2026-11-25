@@ -101,11 +101,15 @@ test('extension-bridge WS worker attaches to browser, reuses cookies/tabs, and d
   while (Date.now() - startedAt < 20000) {
     assert.equal(chrome.exitCode, null, 'external browser exited prematurely');
     if (fs.existsSync(devToolsFile)) {
-      const lines = fs.readFileSync(devToolsFile, 'utf8').trim().split(/\r?\n/).filter(Boolean);
-      if (lines.length >= 1 && /^[1-9][0-9]*$/.test(lines[0])) {
-        cdpPort = Number(lines[0]);
-        cdpWsPath = lines[1] || '/devtools/browser';
-        break;
+      try {
+        const lines = fs.readFileSync(devToolsFile, 'utf8').trim().split(/\r?\n/).filter(Boolean);
+        if (lines.length >= 1 && /^[1-9][0-9]*$/.test(lines[0])) {
+          cdpPort = Number(lines[0]);
+          cdpWsPath = lines[1] || '/devtools/browser';
+          break;
+        }
+      } catch (err) {
+        if (!['EBUSY', 'EACCES', 'EPERM', 'ENOENT'].includes(err?.code)) throw err;
       }
     }
     await new Promise(resolve => setTimeout(resolve, 100));
