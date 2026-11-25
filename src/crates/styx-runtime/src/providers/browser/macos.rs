@@ -4,14 +4,6 @@ use super::*;
 use crate::platform::{macos_process_tree::ProcessTree, macos_spawn};
 use std::{ffi::OsString, fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt};
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct OriginalBrowserProcess {
-    pub schema: u8,
-    pub pid: u32,
-    pub original_child_closed: bool,
-}
-
 enum Started {
     Running(macos_spawn::RunningChild),
     Refused(Option<macos_spawn::SuspendedChild>),
@@ -44,21 +36,12 @@ pub(super) async fn start(live: &mut Live, config: &OwnedBrowserConfig) -> Resul
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&path)
             .map_err(|_| BrowserError::SpawnFailed)?;
-        let payload = match &config.cdp_endpoint {
-            Some(endpoint) => serde_json::json!({
-                "schema": 1,
-                "output_dir": config.output_dir,
-                "workspace_dir": config.workspace_dir,
-                "cdp_endpoint": endpoint,
-            }),
-            None => serde_json::json!({
-                "schema": 1,
-                "profile_dir": config.profile_dir,
-                "output_dir": config.output_dir,
-                "workspace_dir": config.workspace_dir,
-                "browser_executable": config.browser_binary,
-            }),
-        };
+        let payload = serde_json::json!({
+            "schema": 1,
+            "output_dir": config.output_dir,
+            "workspace_dir": config.workspace_dir,
+            "cdp_endpoint": config.cdp_endpoint,
+        });
         let bytes = serde_json::to_vec(&payload).map_err(|_| BrowserError::InvalidRequest)?;
         file.write_all(&bytes)
             .and_then(|_| file.sync_all())

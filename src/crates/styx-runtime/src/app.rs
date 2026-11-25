@@ -66,8 +66,6 @@ struct AppContainer {
 pub(crate) struct HostScope {
     settings: std::sync::Mutex<std::sync::Weak<crate::host::settings::HostSettings>>,
     #[cfg(not(target_os = "android"))]
-    browser_cdp: std::sync::Mutex<std::sync::Weak<crate::host::browser_cdp::BrowserCdpStore>>,
-    #[cfg(not(target_os = "android"))]
     browser_extension:
         std::sync::Mutex<std::sync::Weak<crate::host::browser_extension::BrowserExtensionBridge>>,
     container: Arc<AppContainer>,
@@ -80,20 +78,6 @@ impl HostScope {
     }
     fn host_settings(&self) -> Option<Arc<crate::host::settings::HostSettings>> {
         self.settings.lock().ok()?.upgrade()
-    }
-    #[cfg(not(target_os = "android"))]
-    pub(crate) fn publish_browser_cdp(
-        &self,
-        store: &Arc<crate::host::browser_cdp::BrowserCdpStore>,
-    ) {
-        *self
-            .browser_cdp
-            .lock()
-            .expect("Host browser CDP publication") = Arc::downgrade(store);
-    }
-    #[cfg(not(target_os = "android"))]
-    fn browser_cdp(&self) -> Option<Arc<crate::host::browser_cdp::BrowserCdpStore>> {
-        self.browser_cdp.lock().ok()?.upgrade()
     }
     #[cfg(not(target_os = "android"))]
     pub(crate) fn publish_browser_extension(
@@ -166,8 +150,6 @@ impl HostScope {
         }
         let result = Self {
             settings: std::sync::Mutex::new(std::sync::Weak::new()),
-            #[cfg(not(target_os = "android"))]
-            browser_cdp: std::sync::Mutex::new(std::sync::Weak::new()),
             #[cfg(not(target_os = "android"))]
             browser_extension: std::sync::Mutex::new(std::sync::Weak::new()),
             container,
@@ -265,7 +247,6 @@ struct EmptyInput {}
 #[serde(rename_all = "camelCase")]
 enum Operation {
     HostCapabilities,
-    HostBrowserCdp,
     HostBrowserExtension,
     Computers,
     InviteComputer,
@@ -1363,24 +1344,19 @@ impl HostApp {
             supported.push("hostCapabilities");
         }
         #[cfg(not(target_os = "android"))]
-        let browser_cdp_store = if self.running.is_some() {
-            self.scope.browser_cdp()
+        let browser_extension = if self.running.is_some() {
+            self.scope.browser_extension()
         } else {
             None
         };
         #[cfg(not(target_os = "android"))]
-        if browser_cdp_store.is_some() {
-            supported.push("hostBrowserCdp");
+        if browser_extension.is_some() {
             supported.push("hostBrowserExtension");
         }
         #[cfg(not(target_os = "android"))]
-        let browser_extension = self.scope.browser_extension();
-        #[cfg(not(target_os = "android"))]
-        let browser_cdp = match browser_cdp_store {
-            Some(store) => tokio::task::spawn_blocking(move || {
-                store
-                    .status_with_extension(None, browser_extension.as_deref())
-                    .ok()
+        let browser_extension_status = match browser_extension {
+            Some(ext) => tokio::task::spawn_blocking(move || {
+                crate::host::browser_extension::status(ext.state_dir(), Some(ext.as_ref())).ok()
             })
             .await
             .ok()
@@ -1388,7 +1364,7 @@ impl HostApp {
             None => None,
         };
         #[cfg(target_os = "android")]
-        let browser_cdp: Option<()> = None;
+        let browser_extension_status: Option<()> = None;
         let foreground = serde_json::to_value(&*self.observed.borrow())
             .expect("closed foreground status serializes");
         #[cfg(target_os = "macos")]
@@ -1405,7 +1381,7 @@ impl HostApp {
             }
             value
         };
-        json!({"schema":1,"capabilities":self.scope.host_settings().map(|s| s.report()),"browserCdp":browser_cdp,"configuration":configuration,"foreground":foreground,"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
+        json!({"schema":1,"capabilities":self.scope.host_settings().map(|s| s.report()),"browserExtension":browser_extension_status,"configuration":configuration,"foreground":foreground,"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
     }
     async fn dispatch(
         &mut self,
@@ -1433,7 +1409,7 @@ impl HostApp {
         if !matches!(
             operation,
             Operation::HostCapabilities
-                | Operation::HostBrowserCdp
+                | Operation::HostBrowserExtension
                 | Operation::InviteComputer
                 | Operation::RevokeComputer
                 | Operation::TunnelSave
@@ -1484,17 +1460,6 @@ impl HostApp {
                     .map_err(|_| AppError("host_settings_not_applied"))?;
                 return serde_json::to_value(report)
                     .map_err(|_| AppError("host_settings_not_applied"));
-            }
-            Operation::HostBrowserCdp => {
-                #[cfg(target_os = "android")]
-                {
-                    let _ = &input;
-                    return Err(AppError("host_not_running"));
-                }
-                #[cfg(not(target_os = "android"))]
-                {
-                    return apply_browser_cdp_patch(&self.scope, &input).await;
-                }
             }
             Operation::HostBrowserExtension => {
                 #[cfg(target_os = "android")]
@@ -1626,7 +1591,6 @@ impl HostApp {
             }
             Operation::QuitAdmission
             | Operation::HostCapabilities
-            | Operation::HostBrowserCdp
             | Operation::HostBrowserExtension
             | Operation::Computers
             | Operation::InviteComputer
@@ -1764,26 +1728,6 @@ async fn serve_app<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 }
 
 #[cfg(not(target_os = "android"))]
-async fn apply_browser_cdp_patch(
-    scope: &HostScope,
-    input: &serde_json::value::RawValue,
-) -> Result<Value, AppError> {
-    let patch: crate::host::browser_cdp::BrowserCdpPatch = decode_input(input)?;
-    let cdp = scope.browser_cdp().ok_or(AppError("host_not_running"))?;
-    let (_cfg, applied) = cdp.update(patch).await.map_err(|err| match err {
-        styx_contracts::error::ErrorCategory::InvalidRequest => AppError("app_input_invalid"),
-        _ => AppError("host_settings_not_applied"),
-    })?;
-    let ext = scope.browser_extension();
-    let status =
-        tokio::task::spawn_blocking(move || cdp.status_with_extension(None, ext.as_deref()))
-            .await
-            .map_err(|_| AppError("host_settings_not_applied"))?
-            .map_err(|_| AppError("host_settings_not_applied"))?;
-    Ok(json!({"applied": applied, "browserCdp": status}))
-}
-
-#[cfg(not(target_os = "android"))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BrowserExtensionInput {
@@ -1799,29 +1743,30 @@ async fn apply_browser_extension_action(
     if !matches!(parsed.action.as_str(), "install" | "uninstall") {
         return Err(AppError("app_input_invalid"));
     }
-    let cdp = scope.browser_cdp().ok_or(AppError("host_not_running"))?;
-    let ext = scope.browser_extension();
+    let ext = scope
+        .browser_extension()
+        .ok_or(AppError("host_not_running"))?;
     let action = parsed.action;
     let status = tokio::task::spawn_blocking(move || {
         match action.as_str() {
             "install" => {
                 let exe =
                     std::env::current_exe().map_err(|_| AppError("host_settings_not_applied"))?;
-                crate::host::browser_extension::install(cdp.state_dir(), &exe)
+                crate::host::browser_extension::install(ext.state_dir(), &exe)
                     .map_err(|_| AppError("host_settings_not_applied"))?;
             }
             "uninstall" => {
-                crate::host::browser_extension::uninstall(cdp.state_dir())
+                crate::host::browser_extension::uninstall(ext.state_dir())
                     .map_err(|_| AppError("host_settings_not_applied"))?;
             }
             _ => return Err(AppError("app_input_invalid")),
         }
-        cdp.status_with_extension(None, ext.as_deref())
+        crate::host::browser_extension::status(ext.state_dir(), Some(ext.as_ref()))
             .map_err(|_| AppError("host_settings_not_applied"))
     })
     .await
     .map_err(|_| AppError("host_settings_not_applied"))??;
-    Ok(json!({"applied": true, "browserCdp": status}))
+    Ok(json!({"applied": true, "browserExtension": status}))
 }
 
 #[cfg(all(test, not(target_os = "android")))]
@@ -1839,16 +1784,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_browser_cdp_ipc_parses_updates_and_rejects_remote_endpoints() {
+    async fn host_browser_extension_ipc_requires_running_bridge_and_rejects_unknown_action() {
         let parent = private_dir();
         let state_dir = parent.path().join("host");
         let scope = HostScope::open(&state_dir).unwrap();
-        let raw_enable = serde_json::value::RawValue::from_string(
-            json!({"enabled": true, "endpoint": "http://127.0.0.1:9222/"}).to_string(),
+        let install_req: Request = serde_json::from_str(
+            r#"{"schema":1,"id":7,"operation":"hostBrowserExtension","input":{"action":"install"}}"#,
         )
         .unwrap();
+        assert!(matches!(
+            install_req.operation,
+            Operation::HostBrowserExtension
+        ));
         assert_eq!(
-            apply_browser_cdp_patch(&scope, &raw_enable)
+            apply_browser_extension_action(&scope, &install_req.input)
                 .await
                 .unwrap_err()
                 .code(),
@@ -1861,36 +1810,10 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let store = crate::host::browser_cdp::BrowserCdpStore::open(&state_dir).unwrap();
-        scope.publish_browser_cdp(&store);
-
-        let request: Request = serde_json::from_str(
-            r#"{"schema":1,"id":7,"operation":"hostBrowserCdp","input":{"enabled":true,"endpoint":"http://LOCALHOST:9222/"}}"#,
-        )
-        .unwrap();
-        assert!(matches!(request.operation, Operation::HostBrowserCdp));
-        let ok = apply_browser_cdp_patch(&scope, &request.input)
+        let bridge = crate::host::browser_extension::BrowserExtensionBridge::start(&state_dir)
             .await
             .unwrap();
-        assert_eq!(ok["applied"], json!(true));
-        assert_eq!(ok["browserCdp"]["enabled"], json!(true));
-        assert_eq!(ok["browserCdp"]["endpoint"], json!("http://localhost:9222"));
-
-        let remote: Request = serde_json::from_str(
-            r#"{"schema":1,"id":8,"operation":"hostBrowserCdp","input":{"enabled":true,"endpoint":"http://192.168.1.50:9222"}}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            apply_browser_cdp_patch(&scope, &remote.input)
-                .await
-                .unwrap_err()
-                .code(),
-            "app_input_invalid"
-        );
-        assert_eq!(
-            store.current().unwrap().endpoint.as_deref(),
-            Some("http://localhost:9222")
-        );
+        scope.publish_browser_extension(&bridge);
 
         let bad_ext: Request = serde_json::from_str(
             r#"{"schema":1,"id":9,"operation":"hostBrowserExtension","input":{"action":"unknown"}}"#,
@@ -1904,5 +1827,6 @@ mod tests {
                 .code(),
             "app_input_invalid"
         );
+        bridge.shutdown().await;
     }
 }

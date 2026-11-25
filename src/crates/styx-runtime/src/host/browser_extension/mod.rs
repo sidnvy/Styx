@@ -5,7 +5,7 @@ pub mod native_host;
 #[cfg(test)]
 mod tests;
 
-pub use cdp_relay::BrowserExtensionBridge;
+pub use cdp_relay::{BrowserExtensionBridge, CdpSessionScope};
 
 use crate::store::PrivateRoot;
 use serde::{Deserialize, Serialize};
@@ -18,8 +18,11 @@ use styx_contracts::error::ErrorCategory;
 
 pub const NATIVE_HOST_NAME: &str = "com.styx.browser_bridge";
 pub const EXTENSION_ID: &str = "cncjpfhbbnibdjkcheeimdfklfiknibl";
+pub const BROWSER_SESSION_ID: &str = "existing-browser";
+pub const BROWSER_OWNER_PREFIX: &str = "host-browser-ext-";
 const EXTENSION_DIR: &str = "browser-extension";
 const BRIDGE_FILE: &str = "browser-extension-bridge.json";
+const MAX_ENDPOINT_LEN: usize = 512;
 
 #[cfg(unix)]
 const LAUNCHER_NAME: &str = "browser-extension-host.sh";
@@ -98,11 +101,81 @@ struct BridgeEndpoint {
     token: String,
 }
 
+#[cfg(any(windows, test))]
+pub(crate) fn strip_windows_verbatim_prefix(raw: &str) -> String {
+    if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        raw.to_owned()
+    }
+}
+
+fn valid_devtools_ws_path(path: &str) -> bool {
+    if path == "/devtools/browser" {
+        return true;
+    }
+    let Some(suffix) = path.strip_prefix("/devtools/browser/") else {
+        return false;
+    };
+    !suffix.is_empty()
+        && suffix != "."
+        && suffix != ".."
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+/// Validates and canonicalizes a loopback-only Chrome DevTools WebSocket URL
+/// minted by the Host Extension Bridge.
+pub fn validate_loopback_ws_endpoint(raw: &str) -> Result<String, ErrorCategory> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use url::{Host, Url};
+
+    if raw.chars().any(char::is_control) {
+        return Err(ErrorCategory::InvalidRequest);
+    }
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_ENDPOINT_LEN {
+        return Err(ErrorCategory::InvalidRequest);
+    }
+    let parsed = Url::parse(trimmed).map_err(|_| ErrorCategory::InvalidRequest)?;
+    if parsed.scheme() != "ws"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ErrorCategory::InvalidRequest);
+    }
+    let port = parsed
+        .port()
+        .filter(|port| *port > 0)
+        .ok_or(ErrorCategory::InvalidRequest)?;
+    let host = match parsed.host() {
+        Some(Host::Ipv4(ip)) if ip == Ipv4Addr::LOCALHOST => "127.0.0.1",
+        Some(Host::Ipv6(ip)) if ip == Ipv6Addr::LOCALHOST => "[::1]",
+        Some(Host::Domain(domain)) if domain.eq_ignore_ascii_case("localhost") => "localhost",
+        _ => return Err(ErrorCategory::InvalidRequest),
+    };
+    let path = parsed.path();
+    if !valid_devtools_ws_path(path) {
+        return Err(ErrorCategory::InvalidRequest);
+    }
+    Ok(format!("ws://{host}:{port}{path}"))
+}
+
 fn native_manifest_json(launcher: &Path) -> Result<Vec<u8>, ErrorCategory> {
+    let launcher_raw = launcher.to_string_lossy();
+    #[cfg(windows)]
+    let launcher_path_str = strip_windows_verbatim_prefix(&launcher_raw);
+    #[cfg(not(windows))]
+    let launcher_path_str = launcher_raw.into_owned();
     let manifest = serde_json::json!({
         "name": NATIVE_HOST_NAME,
         "description": "Styx Browser Bridge",
-        "path": launcher.to_string_lossy(),
+        "path": launcher_path_str,
         "type": "stdio",
         "allowed_origins": [format!("chrome-extension://{EXTENSION_ID}/")],
     });
@@ -167,8 +240,10 @@ fn launcher_script_bytes(styx_binary: &Path, state_dir: &Path) -> Result<Vec<u8>
     }
     #[cfg(windows)]
     {
+        let clean_bin = strip_windows_verbatim_prefix(bin_str);
+        let clean_state = strip_windows_verbatim_prefix(state_str);
         Ok(format!(
-            "@echo off\r\n\"{bin_str}\" __browser-extension-bridge --state-dir \"{state_str}\"\r\n"
+            "@echo off\r\n\"{clean_bin}\" __browser-extension-bridge --state-dir \"{clean_state}\"\r\n"
         )
         .into_bytes())
     }

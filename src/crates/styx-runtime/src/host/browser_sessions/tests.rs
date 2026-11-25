@@ -1,6 +1,9 @@
 use super::operations::BrowserBootstrap;
 use super::*;
-use crate::host::coordinator::HostCoordinator;
+use crate::host::{
+    browser_extension::{BROWSER_SESSION_ID, CdpSessionScope},
+    coordinator::HostCoordinator,
+};
 use crate::providers::browser::OwnedBrowserConfig;
 use std::{
     os::unix::fs::PermissionsExt,
@@ -15,26 +18,24 @@ struct Bootstrap {
     prepared: AtomicUsize,
 }
 impl operations::BrowserBootstrap for Bootstrap {
-    fn saved_profiles(&self) -> Result<Vec<String>, styx_contracts::error::ErrorCategory> {
-        Ok(Vec::new())
-    }
-
     fn release_profile(&self, _: &OwnerLease) {}
-    fn prepare_profile(&self, _: &OwnerLease) -> Result<OwnedBrowserConfig, ErrorCategory> {
+    fn prepare_profile(
+        &self,
+        _: &OwnerLease,
+        _: CdpSessionScope,
+    ) -> Result<OwnedBrowserConfig, ErrorCategory> {
         if self.prepared.fetch_add(1, Ordering::SeqCst) != 0 {
             return Err(ErrorCategory::CapabilityUnsupported);
         }
         let unused = std::fs::canonicalize("/usr/bin/true").unwrap();
         Ok(OwnedBrowserConfig {
             node_binary: unused.clone(),
-            worker_entry: unused.clone(),
-            browser_binary: unused,
-            cdp_endpoint: None,
+            worker_entry: unused,
+            cdp_endpoint: "ws://127.0.0.1:9222/devtools/browser/fixture".to_owned(),
             workspace_dir: self.root.join("workspace"),
-            profile_dir: self.root.join("profile"),
             output_dir: self.root.join("output"),
             // Expire the actual read-only preflight before it starts a command.
-            // No browser is started; its registered empty resource is cleaned normally.
+            // No worker is started; its registered empty resource is cleaned normally.
             rpc_timeout: Duration::from_nanos(1),
         })
     }
@@ -50,6 +51,25 @@ impl Drop for Bootstrap {
         std::fs::remove_dir_all(&self.root).unwrap();
     }
 }
+
+struct UnsupportedBootstrap;
+impl operations::BrowserBootstrap for UnsupportedBootstrap {
+    fn release_profile(&self, _: &OwnerLease) {}
+    fn prepare_profile(
+        &self,
+        _: &OwnerLease,
+        _: CdpSessionScope,
+    ) -> Result<OwnedBrowserConfig, ErrorCategory> {
+        Err(ErrorCategory::CapabilityUnsupported)
+    }
+    fn validate_before_spawn(&self) -> Result<(), ErrorCategory> {
+        Ok(())
+    }
+    fn validate_control(&self) -> Result<(), ErrorCategory> {
+        Ok(())
+    }
+}
+
 fn facts(capability: CapabilityId) -> AdmissionFacts {
     AdmissionFacts {
         device_id: "browser-session-preflight".try_into().unwrap(),
@@ -95,7 +115,12 @@ fn register_caller(
         },
     );
 }
-
+fn named_caller(name: &str) -> OwnerRef {
+    OwnerRef {
+        owner_id: name.try_into().unwrap(),
+        owner_epoch: format!("{name}-epoch").try_into().unwrap(),
+    }
+}
 fn error(result: &CallToolResult) -> Value {
     assert_eq!(result.is_error, Some(true));
     let value = serde_json::to_value(result).unwrap();
@@ -114,7 +139,7 @@ async fn known_preflight_refusal_releases_the_resource_and_allows_a_new_request(
     let root = std::env::temp_dir().join(format!("styx-browser-session-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-    for name in ["workspace", "profile", "output"] {
+    for name in ["workspace", "output"] {
         let dir = root.join(name);
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -153,13 +178,16 @@ async fn known_preflight_refusal_releases_the_resource_and_allows_a_new_request(
         .as_str()
         .unwrap()
         .to_owned();
+    assert!(
+        id.starts_with("bg-"),
+        "expected background session ID, got {id}"
+    );
     let cell = engine.state().registry.lock().unwrap().sessions[&id].clone();
     {
         let session = cell.lock().await;
-        assert!(session.phase == Phase::New);
+        assert!(session.phase == Phase::Saved);
         assert!(session.target.is_none());
     }
-    // The first public refusal already released the registered, never-spawned resource.
     let retained = authority
         .collect_provider_retention(Duration::from_secs(1))
         .await
@@ -179,8 +207,6 @@ async fn known_preflight_refusal_releases_the_resource_and_allows_a_new_request(
         "the failed request was not replayed"
     );
 
-    // Only this explicit new public request re-enters preparation. Its chosen
-    // bootstrap refusal keeps the test independent of any installed browser.
     let second = engine.handle(owner.clone(), tabs(Some(id.clone()))).await;
     assert_eq!(error(&second)["error"], "capability_unsupported");
     assert_eq!(error(&second)["uncertain"], false);
@@ -198,30 +224,8 @@ async fn known_preflight_refusal_releases_the_resource_and_allows_a_new_request(
     assert_ne!(closed.is_error, Some(true));
 }
 
-struct SavedBootstrap(Vec<String>);
-impl operations::BrowserBootstrap for SavedBootstrap {
-    fn saved_profiles(&self) -> Result<Vec<String>, ErrorCategory> {
-        Ok(self.0.clone())
-    }
-    fn release_profile(&self, _: &OwnerLease) {}
-    fn prepare_profile(&self, _: &OwnerLease) -> Result<OwnedBrowserConfig, ErrorCategory> {
-        Err(ErrorCategory::CapabilityUnsupported)
-    }
-    fn validate_before_spawn(&self) -> Result<(), ErrorCategory> {
-        Ok(())
-    }
-    fn validate_control(&self) -> Result<(), ErrorCategory> {
-        Ok(())
-    }
-}
-
-fn saved_host(
-    ids: Vec<String>,
-) -> (
-    HostCoordinator,
-    crate::host::coordinator::HostAuthority,
-    Arc<operations::BrowserInputs>,
-) {
+#[tokio::test]
+async fn extension_bridge_session_is_default_transferable_and_rejects_unknown_ids() {
     let (host, authority) = HostCoordinator::new_without_executor(
         OperationLedger::new(uuid::Uuid::new_v4().to_string().try_into().unwrap()),
         facts(CapabilityId::ExecRun),
@@ -232,21 +236,7 @@ fn saved_host(
         .unwrap();
     let inputs = host
         .browser_sessions()
-        .inputs(Arc::new(SavedBootstrap(ids)));
-    (host, authority, inputs)
-}
-
-fn named_caller(name: &str) -> OwnerRef {
-    OwnerRef {
-        owner_id: name.try_into().unwrap(),
-        owner_epoch: format!("{name}-epoch").try_into().unwrap(),
-    }
-}
-
-#[tokio::test]
-async fn saved_profile_resumes_without_restoring_caller_access_or_execution() {
-    let id = uuid::Uuid::new_v4().simple().to_string();
-    let (host, authority, inputs) = saved_host(vec![id.clone()]);
+        .inputs(Arc::new(UnsupportedBootstrap));
     let engine = Engine {
         port: BrowserPort {
             coordinator: &host,
@@ -254,234 +244,165 @@ async fn saved_profile_resumes_without_restoring_caller_access_or_execution() {
             inputs: &inputs,
         },
     };
-    let a = named_caller("a");
-    let b = named_caller("b");
+    let a = named_caller("ext-a");
+    let b = named_caller("ext-b");
     register_caller(&host, &authority, &a);
     register_caller(&host, &authority, &b);
+
     let listed = engine.handle(a.clone(), BrowserSessionCommand::List).await;
-    let saved = &listed.structured_content.as_ref().unwrap()["sessions"][0];
-    assert_eq!(saved["browser_session_id"], id);
-    assert_eq!(saved["status"], "saved");
-    assert_eq!(saved["current_operator"], false);
-    assert_eq!(saved["available"], true);
-    let old_lease = engine
-        .resolve(&a, None, true, None)
-        .unwrap()
-        .1
-        .lock()
-        .await
-        .lease
-        .clone();
-    let (parallel_id, _) = engine.resolve(&b, None, true, None).unwrap();
-    assert_ne!(
-        parallel_id, id,
-        "claim is atomic before the first action obtains its session lock"
-    );
-    let transfer = engine
+    let sessions = listed.structured_content.as_ref().unwrap()["sessions"]
+        .as_array()
+        .unwrap();
+    assert_eq!(sessions.len(), 1);
+    let entry = &sessions[0];
+    assert_eq!(entry["browser_session_id"], BROWSER_SESSION_ID);
+    assert_eq!(entry["mode"], "extension_existing");
+    assert_eq!(entry["attached_existing_browser"], true);
+    assert_eq!(entry["profile_persistent"], false);
+    assert_eq!(entry["available"], true);
+    assert_eq!(entry["current_operator"], false);
+
+    // Unknown explicit IDs are rejected cleanly.
+    for unknown_id in ["other-session", "missing-id"] {
+        let refused = engine
+            .handle(a.clone(), tabs(Some(unknown_id.to_owned())))
+            .await;
+        assert_eq!(error(&refused)["error"], "browser_session_not_found");
+        let rejected_takeover = engine
+            .handle(
+                a.clone(),
+                BrowserSessionCommand::TakeOver {
+                    session_id: unknown_id.to_owned(),
+                },
+            )
+            .await;
+        assert_eq!(
+            error(&rejected_takeover)["error"],
+            "browser_session_not_found"
+        );
+    }
+
+    // `new` is never valid for takeover.
+    let new_takeover = engine
         .handle(
             a.clone(),
             BrowserSessionCommand::TakeOver {
-                session_id: id.clone(),
+                session_id: "new".to_owned(),
             },
         )
         .await;
-    assert_ne!(transfer.is_error, Some(true));
-    assert_eq!(
-        transfer.structured_content.as_ref().unwrap()["status"],
-        "saved"
-    );
+    assert_eq!(error(&new_takeover)["error"], "browser_session_not_found");
 
-    // A different conversation cannot use a selected active profile implicitly.
-    assert_eq!(
-        error(&engine.handle(b.clone(), tabs(Some(id.clone()))).await)["error"],
-        "browser_session_transferred"
-    );
-    let (independent, _) = engine.resolve(&b, None, true, None).unwrap();
-    assert_ne!(
-        independent, id,
-        "parallel independent Browser sessions remain available"
-    );
-
-    // Explicit conversation cleanup makes the existing profile available again.
-    let (_, busy_cell) = engine.resolve(&a, Some(id.clone()), false, None).unwrap();
-    let in_flight = busy_cell.lock().await;
-    host.remote_access()
-        .lock()
+    // Omitting `browser_session_id` gives each independent caller its own parallel Tab Group session.
+    let a_call = engine.handle(a.clone(), tabs(None)).await;
+    let a_bg_id = a_call.structured_content.as_ref().unwrap()["browser_session_id"]
+        .as_str()
         .unwrap()
-        .owners
-        .remove(&caller(&a));
-    host.browser_sessions().forget_caller(&a);
-    drop(in_flight);
-    let c = named_caller("c");
-    register_caller(&host, &authority, &c);
-    let listed = engine.handle(c.clone(), BrowserSessionCommand::List).await;
-    let released = listed.structured_content.as_ref().unwrap()["sessions"]
+        .to_owned();
+    assert!(a_bg_id.starts_with("bg-"));
+    assert_eq!(error(&a_call)["error"], "capability_unsupported");
+
+    let b_call = engine.handle(b.clone(), tabs(None)).await;
+    let b_bg_id = b_call.structured_content.as_ref().unwrap()["browser_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(b_bg_id.starts_with("bg-"));
+    assert_ne!(a_bg_id, b_bg_id);
+
+    let listed_parallel = engine.handle(a.clone(), BrowserSessionCommand::List).await;
+    let parallel_sessions = listed_parallel.structured_content.as_ref().unwrap()["sessions"]
         .as_array()
-        .unwrap()
-        .iter()
-        .find(|item| item["browser_session_id"] == id)
         .unwrap();
-    assert_eq!(
-        released["available"], true,
-        "in-flight caller cleanup is observed after its action ends"
-    );
-    assert_eq!(engine.resolve(&c, None, true, None).unwrap().0, id);
-    let resumed = engine
+    assert_eq!(parallel_sessions.len(), 3);
+    assert!(parallel_sessions.iter().any(|s| {
+        s["browser_session_id"] == a_bg_id
+            && s["mode"] == "extension_tab_group"
+            && s["tab_group_title"] == "Styx · 1"
+    }));
+    assert!(parallel_sessions.iter().any(|s| {
+        s["browser_session_id"] == b_bg_id
+            && s["mode"] == "extension_tab_group"
+            && s["tab_group_title"] == "Styx · 2"
+    }));
+
+    // Explicit `existing-browser` remains single-operator with explicit takeover.
+    let a_shared = engine
+        .handle(a.clone(), tabs(Some(BROWSER_SESSION_ID.to_owned())))
+        .await;
+    assert_eq!(error(&a_shared)["error"], "capability_unsupported");
+
+    let b_blocked = engine
+        .handle(b.clone(), tabs(Some(BROWSER_SESSION_ID.to_owned())))
+        .await;
+    assert_eq!(error(&b_blocked)["error"], "browser_session_transferred");
+
+    let taken = engine
         .handle(
-            c.clone(),
+            b.clone(),
             BrowserSessionCommand::TakeOver {
-                session_id: id.clone(),
+                session_id: BROWSER_SESSION_ID.to_owned(),
             },
         )
         .await;
-    assert_eq!(
-        resumed.structured_content.as_ref().unwrap()["current_operator"],
-        true
-    );
+    let taken_body = taken.structured_content.as_ref().unwrap();
+    assert_eq!(taken_body["browser_session_id"], BROWSER_SESSION_ID);
+    assert_eq!(taken_body["mode"], "extension_existing");
+    assert_eq!(taken_body["attached_existing_browser"], true);
+    assert_eq!(taken_body["profile_persistent"], false);
+    assert_eq!(taken_body["current_operator"], true);
 
+    let a_blocked = engine
+        .handle(a.clone(), tabs(Some(BROWSER_SESSION_ID.to_owned())))
+        .await;
+    assert_eq!(error(&a_blocked)["error"], "browser_session_transferred");
+
+    // Closing `existing-browser` releases operator ownership and resets to saved without disturbing `bg-...`.
     let closed = engine
         .handle(
-            c,
+            b.clone(),
             BrowserSessionCommand::Action {
-                session_id: Some(id.clone()),
+                session_id: Some(BROWSER_SESSION_ID.to_owned()),
                 name: "browser_close".into(),
-                arguments: Default::default(),
+                arguments: serde_json::from_value(json!({})).unwrap(),
             },
         )
         .await;
-    assert_eq!(
-        closed.structured_content.as_ref().unwrap()["profile_preserved"],
-        true
-    );
-    assert!(
-        engine
-            .state()
-            .registry
-            .lock()
-            .unwrap()
-            .sessions
-            .contains_key(&id)
-    );
+    let closed_body = closed.structured_content.as_ref().unwrap();
+    assert_eq!(closed_body["closed"], true);
+    assert_eq!(closed_body["detached"], true);
+    assert_eq!(closed_body["profile_persistent"], false);
 
-    let listed = engine.handle(b.clone(), BrowserSessionCommand::List).await;
-    let retained = listed.structured_content.as_ref().unwrap()["sessions"]
+    // Caller A can close its `bg-...` session independently while `existing-browser` stays available.
+    let closed_a_bg = engine
+        .handle(
+            a.clone(),
+            BrowserSessionCommand::Action {
+                session_id: Some(a_bg_id.clone()),
+                name: "browser_close".into(),
+                arguments: serde_json::from_value(json!({})).unwrap(),
+            },
+        )
+        .await;
+    assert_ne!(closed_a_bg.is_error, Some(true));
+
+    let listed_after = engine.handle(a, BrowserSessionCommand::List).await;
+    let after_arr = listed_after.structured_content.as_ref().unwrap()["sessions"]
         .as_array()
-        .unwrap()
-        .iter()
-        .find(|item| item["browser_session_id"] == id)
         .unwrap();
-    assert_eq!(
-        retained["available"], true,
-        "closing a saved profile releases its operator"
+    assert!(!after_arr.iter().any(|s| s["browser_session_id"] == a_bg_id));
+    assert!(after_arr.iter().any(|s| s["browser_session_id"] == b_bg_id));
+    assert!(
+        after_arr
+            .iter()
+            .find(|s| s["browser_session_id"] == BROWSER_SESSION_ID)
+            .unwrap()["available"]
+            == true
     );
-
-    // A new Host discovers only the stable profile ID. It has no old operator,
-    // old action, resource, cleanup handle, or restored lease.
-    let (next_host, next_authority, next_inputs) = saved_host(vec![id.clone()]);
-    let next = Engine {
-        port: BrowserPort {
-            coordinator: &next_host,
-            authority: &next_authority,
-            inputs: &next_inputs,
-        },
-    };
-    register_caller(&next_host, &next_authority, &b);
-    let listed = next.handle(b.clone(), BrowserSessionCommand::List).await;
-    assert_eq!(
-        listed.structured_content.as_ref().unwrap()["sessions"][0]["current_operator"],
-        false
-    );
-    let (selected, cell) = next.resolve(&b, None, true, None).unwrap();
-    assert_eq!(selected, id);
-    let session = cell.lock().await;
-    assert!(session.operator.as_ref() == Some(&b));
-    assert!(session.target.is_none());
-    assert!(session.cleanup.is_none());
-    assert!(session.phase == Phase::Saved);
-    assert_ne!(session.lease, old_lease);
 }
 
 #[tokio::test]
-async fn several_saved_profiles_allocate_distinct_idle_or_new_sessions_for_concurrent_callers() {
-    let mut ids = vec![
-        uuid::Uuid::new_v4().simple().to_string(),
-        uuid::Uuid::new_v4().simple().to_string(),
-    ];
-    ids.sort();
-    let (host, authority, inputs) = saved_host(ids.clone());
-    let engine = Engine {
-        port: BrowserPort {
-            coordinator: &host,
-            authority: &authority,
-            inputs: &inputs,
-        },
-    };
-    let a = named_caller("a");
-    let b = named_caller("b");
-    let c = named_caller("c");
-    register_caller(&host, &authority, &a);
-    register_caller(&host, &authority, &b);
-    register_caller(&host, &authority, &c);
-
-    let first = engine.handle(a.clone(), tabs(None)).await;
-    let first_id = first.structured_content.as_ref().unwrap()["browser_session_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert_eq!(first_id, ids[0]);
-    assert_eq!(engine.state().registry.lock().unwrap().sessions.len(), 2);
-
-    let second = engine.handle(b.clone(), tabs(None)).await;
-    let second_id = second.structured_content.as_ref().unwrap()["browser_session_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert_eq!(second_id, ids[1]);
-    assert_ne!(second_id, first_id);
-    assert_eq!(engine.state().registry.lock().unwrap().sessions.len(), 2);
-
-    let third = engine.handle(c.clone(), tabs(None)).await;
-    let third_id = third.structured_content.as_ref().unwrap()["browser_session_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert_ne!(third_id, first_id);
-    assert_ne!(third_id, second_id);
-    assert_eq!(engine.state().registry.lock().unwrap().sessions.len(), 3);
-}
-
-struct PausedProfiles {
-    id: String,
-    started: tokio::sync::Notify,
-    resume: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
-}
-impl operations::BrowserBootstrap for PausedProfiles {
-    fn saved_profiles(&self) -> Result<Vec<String>, ErrorCategory> {
-        self.started.notify_one();
-        self.resume
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap()
-            .blocking_recv()
-            .unwrap();
-        Ok(vec![self.id.clone()])
-    }
-    fn release_profile(&self, _: &OwnerLease) {}
-    fn prepare_profile(&self, _: &OwnerLease) -> Result<OwnedBrowserConfig, ErrorCategory> {
-        panic!("a caller closed during discovery must not launch Browser")
-    }
-    fn validate_before_spawn(&self) -> Result<(), ErrorCategory> {
-        Ok(())
-    }
-    fn validate_control(&self) -> Result<(), ErrorCategory> {
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn caller_closed_during_profile_discovery_cannot_reclaim_a_saved_profile() {
-    let id = uuid::Uuid::new_v4().simple().to_string();
+async fn caller_cleanup_releases_extension_session_operator_on_next_list() {
     let (host, authority) = HostCoordinator::new_without_executor(
         OperationLedger::new(uuid::Uuid::new_v4().to_string().try_into().unwrap()),
         facts(CapabilityId::ExecRun),
@@ -490,13 +411,9 @@ async fn caller_closed_during_profile_discovery_cannot_reclaim_a_saved_profile()
     authority
         .configure_browser(facts(CapabilityId::Browser))
         .unwrap();
-    let (resume, resumed) = tokio::sync::oneshot::channel();
-    let source = Arc::new(PausedProfiles {
-        id: id.clone(),
-        started: tokio::sync::Notify::new(),
-        resume: Mutex::new(Some(resumed)),
-    });
-    let inputs = host.browser_sessions().inputs(source.clone());
+    let inputs = host
+        .browser_sessions()
+        .inputs(Arc::new(UnsupportedBootstrap));
     let engine = Engine {
         port: BrowserPort {
             coordinator: &host,
@@ -504,52 +421,44 @@ async fn caller_closed_during_profile_discovery_cannot_reclaim_a_saved_profile()
             inputs: &inputs,
         },
     };
-    let a = named_caller("closed-during-discovery");
+    let a = named_caller("cleanup-a");
+    let b = named_caller("cleanup-b");
     register_caller(&host, &authority, &a);
-    let request = engine.handle(a.clone(), tabs(None));
-    tokio::pin!(request);
-    tokio::select! {
-        _ = source.started.notified() => {},
-        result = &mut request => panic!("discovery unexpectedly completed: {result:?}"),
+    register_caller(&host, &authority, &b);
+
+    let (_, cell) = engine
+        .resolve(&a, Some(BROWSER_SESSION_ID.to_owned()))
+        .unwrap();
+    {
+        let mut session = cell.lock().await;
+        session.operator = Some(a.clone());
     }
+    let in_flight = cell.lock().await;
     host.remote_access()
         .lock()
         .unwrap()
         .owners
         .remove(&caller(&a));
     host.browser_sessions().forget_caller(&a);
-    resume.send(()).unwrap();
-    assert_eq!(error(&request.await)["error"], "unauthorized");
-    assert!(
-        !engine
-            .state()
-            .registry
-            .lock()
-            .unwrap()
-            .defaults
-            .contains_key(&caller(&a))
-    );
-    let b = named_caller("next-conversation");
-    register_caller(&host, &authority, &b);
-    let listed = engine.handle(b.clone(), BrowserSessionCommand::List).await;
+    drop(in_flight);
+
+    let listed = engine.handle(b, BrowserSessionCommand::List).await;
     assert_eq!(
         listed.structured_content.as_ref().unwrap()["sessions"][0]["available"],
         true
     );
-    assert_eq!(engine.resolve(&b, None, true, None).unwrap().0, id);
 }
 
 #[tokio::test]
-async fn closed_or_exited_browser_context_recovers_to_saved_profile_on_next_request() {
+async fn closed_or_exited_browser_context_recovers_to_saved_on_next_request() {
     let root = std::env::temp_dir().join(format!("styx-browser-recover-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-    for name in ["workspace", "profile", "output"] {
+    for name in ["workspace", "output"] {
         let dir = root.join(name);
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let id = uuid::Uuid::new_v4().simple().to_string();
     let source = Arc::new(Bootstrap {
         root,
         prepared: AtomicUsize::new(0),
@@ -573,15 +482,18 @@ async fn closed_or_exited_browser_context_recovers_to_saved_profile_on_next_requ
     let a = named_caller("recover-after-exit");
     register_caller(&host, &authority, &a);
 
-    let (resolved_id, cell) = engine.resolve(&a, None, true, None).unwrap();
-    assert_ne!(resolved_id, id);
+    let (resolved_id, cell) = engine
+        .resolve(&a, Some(BROWSER_SESSION_ID.to_owned()))
+        .unwrap();
+    assert_eq!(resolved_id, BROWSER_SESSION_ID);
 
-    // Prepare an open operation on the session's lease, then simulate an open
-    // resource whose worker has exited before the next action is dispatched.
     let old_lease = {
         let mut session = cell.lock().await;
+        session.operator = Some(a.clone());
         let lease = session.lease.clone();
-        let config = source.prepare_profile(&lease).unwrap();
+        let config = source
+            .prepare_profile(&lease, CdpSessionScope::SharedExisting)
+            .unwrap();
         authority.register_browser_profile(&lease, config).unwrap();
         let context = PreparedContext {
             device_id: host.bootstrap_identity().0.clone(),
@@ -597,9 +509,6 @@ async fn closed_or_exited_browser_context_recovers_to_saved_profile_on_next_requ
             operation_id: snapshot.id.clone(),
             payload_digest: snapshot.payload_digest,
         };
-        // The fixture refuses browser startup without launching a browser.
-        // Then simulate the provider's explicit context-closed observation,
-        // so the session recovery path can be exercised independently of GUI.
         match host
             .dispatch_browser_open(&lease, &target.operation_id, target.payload_digest)
             .await
@@ -618,9 +527,7 @@ async fn closed_or_exited_browser_context_recovers_to_saved_profile_on_next_requ
         lease
     };
 
-    let outcome = engine
-        .handle(a.clone(), tabs(Some(resolved_id.clone())))
-        .await;
+    let outcome = engine.handle(a.clone(), tabs(Some(resolved_id))).await;
     assert_eq!(error(&outcome)["error"], "capability_unsupported");
     assert_eq!(error(&outcome)["uncertain"], false);
 
@@ -629,340 +536,6 @@ async fn closed_or_exited_browser_context_recovers_to_saved_profile_on_next_requ
     assert!(session.target.is_none());
     assert!(session.cleanup.is_none());
     assert_ne!(session.lease, old_lease);
-}
-
-struct CdpToggleBootstrap {
-    saved: Vec<String>,
-    cdp: std::sync::Mutex<crate::host::browser_cdp::BrowserCdpConfig>,
-}
-
-impl operations::BrowserBootstrap for CdpToggleBootstrap {
-    fn cdp_config(&self) -> Result<crate::host::browser_cdp::BrowserCdpConfig, ErrorCategory> {
-        Ok(self.cdp.lock().unwrap().clone())
-    }
-    fn saved_profiles(&self) -> Result<Vec<String>, ErrorCategory> {
-        Ok(self.saved.clone())
-    }
-    fn release_profile(&self, _: &OwnerLease) {}
-    fn prepare_profile(&self, _: &OwnerLease) -> Result<OwnedBrowserConfig, ErrorCategory> {
-        Err(ErrorCategory::CapabilityUnsupported)
-    }
-    fn validate_before_spawn(&self) -> Result<(), ErrorCategory> {
-        Ok(())
-    }
-    fn validate_control(&self) -> Result<(), ErrorCategory> {
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn cdp_coexist_mode_is_opt_in_explicit_isolated_by_default_and_transferable() {
-    use crate::host::browser_cdp::{BrowserCdpConfig, CDP_SESSION_ID};
-    let managed_id = uuid::Uuid::new_v4().simple().to_string();
-    let source = Arc::new(CdpToggleBootstrap {
-        saved: vec![managed_id.clone()],
-        cdp: std::sync::Mutex::new(BrowserCdpConfig::default()),
-    });
-    let (host, authority) = HostCoordinator::new_without_executor(
-        OperationLedger::new(uuid::Uuid::new_v4().to_string().try_into().unwrap()),
-        facts(CapabilityId::ExecRun),
-    )
-    .unwrap();
-    authority
-        .configure_browser(facts(CapabilityId::Browser))
-        .unwrap();
-    let inputs = host.browser_sessions().inputs(source.clone());
-    let engine = Engine {
-        port: BrowserPort {
-            coordinator: &host,
-            authority: &authority,
-            inputs: &inputs,
-        },
-    };
-    let a = named_caller("cdp-a");
-    let b = named_caller("cdp-b");
-    register_caller(&host, &authority, &a);
-    register_caller(&host, &authority, &b);
-
-    // 1. Default OFF: `existing-browser` is hidden and explicit selection is refused.
-    let listed_off = engine.handle(a.clone(), BrowserSessionCommand::List).await;
-    let sessions_off = listed_off.structured_content.as_ref().unwrap()["sessions"]
-        .as_array()
-        .unwrap();
-    assert_eq!(sessions_off.len(), 1);
-    assert_eq!(sessions_off[0]["browser_session_id"], managed_id);
-    assert_eq!(sessions_off[0]["mode"], "managed");
-    assert_eq!(sessions_off[0]["attached_existing_browser"], false);
-    assert_eq!(sessions_off[0]["profile_persistent"], true);
-
-    let refused_off = engine
-        .handle(a.clone(), tabs(Some(CDP_SESSION_ID.to_owned())))
-        .await;
-    assert_eq!(error(&refused_off)["error"], "browser_session_not_found");
-
-    // 2. Opt-in ON: `existing-browser` appears alongside managed profile.
-    *source.cdp.lock().unwrap() = BrowserCdpConfig {
-        enabled: true,
-        endpoint: Some("http://127.0.0.1:9222".to_owned()),
-    };
-    let listed_on = engine.handle(a.clone(), BrowserSessionCommand::List).await;
-    let sessions_on = listed_on.structured_content.as_ref().unwrap()["sessions"]
-        .as_array()
-        .unwrap();
-    let cdp_entry = sessions_on
-        .iter()
-        .find(|s| s["browser_session_id"] == CDP_SESSION_ID)
-        .expect("existing-browser exposed when CDP enabled");
-    assert_eq!(cdp_entry["mode"], "cdp");
-    assert_eq!(cdp_entry["attached_existing_browser"], true);
-    assert_eq!(cdp_entry["profile_persistent"], false);
-    assert_eq!(cdp_entry["available"], true);
-
-    // Explicitly claim `existing-browser` as caller A (even though PrepareOpen returns
-    // capability_unsupported on this fixture, caller A now owns `existing-browser` without
-    // setting `defaults` to it).
-    let a_explicit = engine
-        .handle(a.clone(), tabs(Some(CDP_SESSION_ID.to_owned())))
-        .await;
-    assert_eq!(error(&a_explicit)["error"], "capability_unsupported");
-    assert!(
-        !engine
-            .state()
-            .registry
-            .lock()
-            .unwrap()
-            .defaults
-            .values()
-            .any(|v| v == CDP_SESSION_ID)
-    );
-
-    // 3. Caller B omitting `browser_session_id` picks/creates isolated managed profile concurrently,
-    //    and Caller A omitting `browser_session_id` ALSO never implicitly attaches to `existing-browser`.
-    let b_implicit = engine.handle(b.clone(), tabs(None)).await;
-    assert_eq!(
-        b_implicit.structured_content.as_ref().unwrap()["browser_session_id"],
-        managed_id
-    );
-    let a_implicit = engine.handle(a.clone(), tabs(None)).await;
-    let a_managed_id = a_implicit.structured_content.as_ref().unwrap()["browser_session_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert_ne!(a_managed_id, CDP_SESSION_ID);
-    assert_ne!(a_managed_id, managed_id);
-
-    // 4. Caller B cannot act on `existing-browser` while A owns it until explicit take_over.
-    let b_blocked = engine
-        .handle(b.clone(), tabs(Some(CDP_SESSION_ID.to_owned())))
-        .await;
-    assert_eq!(error(&b_blocked)["error"], "browser_session_transferred");
-
-    let taken = engine
-        .handle(
-            b.clone(),
-            BrowserSessionCommand::TakeOver {
-                session_id: CDP_SESSION_ID.to_owned(),
-            },
-        )
-        .await;
-    let taken_body = taken.structured_content.as_ref().unwrap();
-    assert_eq!(taken_body["browser_session_id"], CDP_SESSION_ID);
-    assert_eq!(taken_body["mode"], "cdp");
-    assert_eq!(taken_body["attached_existing_browser"], true);
-    assert_eq!(taken_body["profile_persistent"], false);
-    assert_ne!(
-        engine.state().registry.lock().unwrap().defaults[&caller(&b)],
-        CDP_SESSION_ID
-    );
-
-    let a_blocked = engine
-        .handle(a.clone(), tabs(Some(CDP_SESSION_ID.to_owned())))
-        .await;
-    assert_eq!(error(&a_blocked)["error"], "browser_session_transferred");
-
-    // 5. Explicit browser_close on `existing-browser` detaches cleanly; disabling hides it without
-    //    disrupting managed profiles.
-    let closed = engine
-        .handle(
-            b.clone(),
-            BrowserSessionCommand::Action {
-                session_id: Some(CDP_SESSION_ID.to_owned()),
-                name: "browser_close".into(),
-                arguments: serde_json::from_value(json!({})).unwrap(),
-            },
-        )
-        .await;
-    let closed_body = closed.structured_content.as_ref().unwrap();
-    assert_eq!(closed_body["closed"], true);
-    assert_eq!(closed_body["detached"], true);
-    assert_eq!(closed_body["profile_persistent"], false);
-
-    *source.cdp.lock().unwrap() = BrowserCdpConfig::default();
-    let listed_disabled = engine.handle(b.clone(), BrowserSessionCommand::List).await;
-    let sessions_disabled = listed_disabled.structured_content.as_ref().unwrap()["sessions"]
-        .as_array()
-        .unwrap();
-    assert!(
-        sessions_disabled
-            .iter()
-            .all(|s| s["browser_session_id"] != CDP_SESSION_ID)
-    );
-    assert!(
-        sessions_disabled
-            .iter()
-            .any(|s| s["browser_session_id"] == managed_id)
-    );
-    let after_disable = engine
-        .handle(b, tabs(Some(CDP_SESSION_ID.to_owned())))
-        .await;
-    assert_eq!(error(&after_disable)["error"], "browser_session_not_found");
-}
-
-#[tokio::test]
-async fn explicit_new_and_public_mcp_subject_navigate_isolate_concurrent_sessions_and_ignore_cdp() {
-    use crate::host::browser_cdp::{BrowserCdpConfig, CDP_SESSION_ID};
-    let saved_id = uuid::Uuid::new_v4().simple().to_string();
-    let source = Arc::new(CdpToggleBootstrap {
-        saved: vec![saved_id.clone()],
-        cdp: std::sync::Mutex::new(BrowserCdpConfig {
-            enabled: true,
-            endpoint: Some("http://127.0.0.1:9222".into()),
-        }),
-    });
-    let (host, authority) = HostCoordinator::new_without_executor(
-        OperationLedger::new(uuid::Uuid::new_v4().to_string().try_into().unwrap()),
-        facts(CapabilityId::ExecRun),
-    )
-    .unwrap();
-    authority
-        .configure_browser(facts(CapabilityId::Browser))
-        .unwrap();
-    let inputs = host.browser_sessions().inputs(source.clone());
-    let engine = Engine {
-        port: BrowserPort {
-            coordinator: &host,
-            authority: &authority,
-            inputs: &inputs,
-        },
-    };
-    let gemini_owner = OwnerRef {
-        owner_id: "public-mcp-subject:gemini-user".try_into().unwrap(),
-        owner_epoch: "epoch-1".try_into().unwrap(),
-    };
-    register_caller(&host, &authority, &gemini_owner);
-
-    // Populate saved managed profiles and `existing-browser` (`mode: cdp`) via List first.
-    let listed = engine
-        .handle(gemini_owner.clone(), BrowserSessionCommand::List)
-        .await;
-    assert_eq!(
-        listed.structured_content.as_ref().unwrap()["sessions"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-
-    // 1. First omitted-ID action claims the saved managed profile (never CDP `existing-browser`),
-    //    sets it as default, and mark it Ready as if opened in conversation 1.
-    let (first_id, first_cell) = engine
-        .resolve(&gemini_owner, None, true, Some("browser_navigate"))
-        .unwrap();
-    assert_eq!(first_id, saved_id);
-    assert_ne!(first_id, CDP_SESSION_ID);
-    {
-        let mut s = first_cell.lock().await;
-        s.phase = Phase::Ready;
-    }
-
-    // 2. Explicit `"new"` allocates a distinct isolated session while preserving the open default,
-    //    and rejects TakeOver("new") / browser_close("new").
-    let (new_id, _) = engine
-        .resolve(
-            &gemini_owner,
-            Some("new".into()),
-            true,
-            Some("browser_tabs"),
-        )
-        .unwrap();
-    assert_ne!(new_id, first_id);
-    assert_ne!(new_id, CDP_SESSION_ID);
-    assert_eq!(
-        engine.state().registry.lock().unwrap().defaults[&caller(&gemini_owner)],
-        first_id
-    );
-    let rejected_takeover = engine
-        .handle(
-            gemini_owner.clone(),
-            BrowserSessionCommand::TakeOver {
-                session_id: "new".into(),
-            },
-        )
-        .await;
-    assert_eq!(
-        error(&rejected_takeover)["error"],
-        "browser_session_not_found"
-    );
-    let rejected_close = engine
-        .handle(
-            gemini_owner.clone(),
-            BrowserSessionCommand::Action {
-                session_id: Some("new".into()),
-                name: "browser_close".into(),
-                arguments: serde_json::from_value(json!({})).unwrap(),
-            },
-        )
-        .await;
-    assert_eq!(error(&rejected_close)["error"], "browser_session_not_found");
-
-    // 3. Same `public-mcp-subject:` owner calling `browser_navigate` with `browser_session_id: None`
-    //    while `first_id` is Ready/open automatically receives a separate isolated session instead of
-    //    overwriting `first_id`.
-    let (second_nav_id, _) = engine
-        .resolve(&gemini_owner, None, true, Some("browser_navigate"))
-        .unwrap();
-    assert_ne!(second_nav_id, first_id);
-    assert_ne!(second_nav_id, new_id);
-    assert_ne!(second_nav_id, CDP_SESSION_ID);
-
-    // Follow-up non-navigate action with explicit `first_id` stays bound to `first_id`.
-    let (followup_first, _) = engine
-        .resolve(
-            &gemini_owner,
-            Some(first_id.clone()),
-            true,
-            Some("browser_snapshot"),
-        )
-        .unwrap();
-    assert_eq!(followup_first, first_id);
-
-    // Closing `second_nav_id` leaves `first_id` intact in Ready phase.
-    let closed_second = engine
-        .handle(
-            gemini_owner.clone(),
-            BrowserSessionCommand::Action {
-                session_id: Some(second_nav_id.clone()),
-                name: "browser_close".into(),
-                arguments: serde_json::from_value(json!({})).unwrap(),
-            },
-        )
-        .await;
-    assert_eq!(
-        closed_second.structured_content.as_ref().unwrap()["closed"],
-        true
-    );
-    let closed_text: Value =
-        serde_json::from_str(&closed_second.content[0].as_text().unwrap().text).unwrap();
-    assert_eq!(closed_text["closed"], true);
-    assert_eq!(closed_text["browser_session_id"], second_nav_id);
-    assert!(first_cell.lock().await.phase == Phase::Ready);
-    assert!(
-        *source.cdp.lock().unwrap()
-            == BrowserCdpConfig {
-                enabled: true,
-                endpoint: Some("http://127.0.0.1:9222".into()),
-            }
-    );
 }
 
 #[test]
@@ -1004,32 +577,45 @@ fn attach_session_id_to_content_surfaces_id_without_mutating_errors_or_existing_
 }
 
 #[test]
-fn cdp_session_actions_use_extended_prepare_timeout_for_interactive_attach() {
+fn action_timeout_uses_extended_prepare_timeout_and_result_accepts_large_snapshots() {
     assert_eq!(
-        action_timeout("browser_tabs", SessionMode::Cdp),
+        action_timeout("browser_tabs"),
         BROWSER_WAIT_PREPARE_TIMEOUT_MS
     );
     assert_eq!(
-        action_timeout("browser_snapshot", SessionMode::Cdp),
+        action_timeout("browser_snapshot"),
         BROWSER_WAIT_PREPARE_TIMEOUT_MS
     );
-    assert_eq!(action_timeout("browser_tabs", SessionMode::Managed), 5_000);
+
+    // Regression: >128 KB snapshots (such as Telegram Web) must be accepted up to 8 MB.
+    let large_text = "x".repeat(300 * 1024);
+    let ok = result(json!({
+        "isError": false,
+        "content": [{"type": "text", "text": large_text}]
+    }))
+    .unwrap();
+    assert_ne!(ok.is_error, Some(true));
+
+    let oversized = "y".repeat(MAX_BROWSER_RESULT_BYTES + 1024);
     assert_eq!(
-        action_timeout("browser_navigate", SessionMode::Managed),
-        BROWSER_WAIT_PREPARE_TIMEOUT_MS
+        result(json!({
+            "isError": false,
+            "content": [{"type": "text", "text": oversized}]
+        }))
+        .unwrap_err(),
+        "outcome_unknown"
     );
 }
 
 #[tokio::test]
-async fn cdp_not_dispatched_cleans_up_unattached_worker_and_preserves_retryable_session() {
-    use crate::host::browser_cdp::{BrowserCdpConfig, CDP_SESSION_ID};
+async fn not_dispatched_cleans_up_unattached_worker_and_preserves_retryable_session() {
     let root = std::env::temp_dir().join(format!(
-        "styx-browser-cdp-not-dispatched-{}",
+        "styx-browser-not-dispatched-{}",
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir(&root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-    for name in ["workspace", "profile", "output"] {
+    for name in ["workspace", "output"] {
         let dir = root.join(name);
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -1039,7 +625,7 @@ async fn cdp_not_dispatched_cleans_up_unattached_worker_and_preserves_retryable_
         prepared: AtomicUsize::new(0),
     });
     let (host, authority) = HostCoordinator::new_without_executor(
-        OperationLedger::new("browser-cdp-not-dispatched".try_into().unwrap()),
+        OperationLedger::new("browser-not-dispatched".try_into().unwrap()),
         facts(CapabilityId::ExecRun),
     )
     .unwrap();
@@ -1054,20 +640,21 @@ async fn cdp_not_dispatched_cleans_up_unattached_worker_and_preserves_retryable_
             inputs: &inputs,
         },
     };
-    let a = named_caller("cdp-retry");
+    let a = named_caller("ext-retry");
     register_caller(&host, &authority, &a);
 
     let mut session = engine
         .new_session(
-            CDP_SESSION_ID,
-            SessionMode::Cdp,
-            Some(Some("http://127.0.0.1:9222".to_owned())),
+            BROWSER_SESSION_ID.to_owned(),
+            CdpSessionScope::SharedExisting,
             Some(a.clone()),
             Phase::Saved,
         )
         .unwrap();
     let old_lease = session.lease.clone();
-    let config = source.prepare_profile(&old_lease).unwrap();
+    let config = source
+        .prepare_profile(&old_lease, CdpSessionScope::SharedExisting)
+        .unwrap();
     authority
         .register_browser_profile(&old_lease, config)
         .unwrap();
@@ -1099,25 +686,24 @@ async fn cdp_not_dispatched_cleans_up_unattached_worker_and_preserves_retryable_
     session.phase = Phase::Unknown;
 
     let op_id = OperationId {
-        host_generation: "browser-cdp-not-dispatched".try_into().unwrap(),
-        owner_epoch: "cdp-retry-epoch".try_into().unwrap(),
+        host_generation: "browser-not-dispatched".try_into().unwrap(),
+        owner_epoch: "ext-retry-epoch".try_into().unwrap(),
         sequence: 1,
     };
-    let digest = Sha256Digest::of_bytes(b"cdp-tabs-list");
+    let digest = Sha256Digest::of_bytes(b"ext-tabs-list");
     let cell = Arc::new(AsyncMutex::new(session));
     {
         let mut registry = engine.state().registry.lock().unwrap();
         registry
             .sessions
-            .insert(CDP_SESSION_ID.to_owned(), cell.clone());
-        registry.cdp_endpoint = Some(Some("http://127.0.0.1:9222".to_owned()));
+            .insert(BROWSER_SESSION_ID.to_owned(), cell.clone());
     }
 
     let res = {
         let mut guard = cell.lock().await;
         engine
             .finish_action(
-                CDP_SESSION_ID,
+                BROWSER_SESSION_ID,
                 &mut guard,
                 &op_id,
                 digest,
@@ -1148,15 +734,21 @@ async fn cdp_not_dispatched_cleans_up_unattached_worker_and_preserves_retryable_
     assert!(guard.cleanup.is_none());
     assert_ne!(guard.lease, old_lease);
     assert!(guard.operator.as_ref() == Some(&a));
-    drop(guard);
-
-    // Ensure BrowserCdpConfig type stays cleanly referenced alongside status check.
-    let _ = BrowserCdpConfig::default();
 }
 
 #[tokio::test]
-async fn acknowledged_stale_snapshot_returns_result_without_poisoning_session() {
-    let (host, authority, inputs) = saved_host(vec![]);
+async fn acknowledged_stale_snapshot_and_clean_tool_error_do_not_poison_session() {
+    let (host, authority) = HostCoordinator::new_without_executor(
+        OperationLedger::new(uuid::Uuid::new_v4().to_string().try_into().unwrap()),
+        facts(CapabilityId::ExecRun),
+    )
+    .unwrap();
+    authority
+        .configure_browser(facts(CapabilityId::Browser))
+        .unwrap();
+    let inputs = host
+        .browser_sessions()
+        .inputs(Arc::new(UnsupportedBootstrap));
     let engine = Engine {
         port: BrowserPort {
             coordinator: &host,
@@ -1167,9 +759,13 @@ async fn acknowledged_stale_snapshot_returns_result_without_poisoning_session() 
     let a = named_caller("stale-snapshot");
     register_caller(&host, &authority, &a);
 
-    let id = "session-stale-snapshot";
     let mut session = engine
-        .new_session(id, SessionMode::Cdp, None, Some(a), Phase::Unknown)
+        .new_session(
+            BROWSER_SESSION_ID.to_owned(),
+            CdpSessionScope::SharedExisting,
+            Some(a),
+            Phase::Unknown,
+        )
         .unwrap();
     let target = ResourceTarget {
         operation_id: OperationId {
@@ -1189,7 +785,7 @@ async fn acknowledged_stale_snapshot_returns_result_without_poisoning_session() 
 
     let res = engine
         .finish_action(
-            id,
+            BROWSER_SESSION_ID,
             &mut session,
             &op_id,
             digest,
@@ -1220,6 +816,41 @@ async fn acknowledged_stale_snapshot_returns_result_without_poisoning_session() 
             .unwrap()
             .text
             .contains("[ref=unavailable]")
+    );
+    assert!(session.phase == Phase::Ready);
+
+    // Clean Playwright MCP tool error (`isError: true`, acknowledged) returns the
+    // upstream tool error and keeps session Ready instead of wedging to Phase::Unknown.
+    let err_res = engine
+        .finish_action(
+            BROWSER_SESSION_ID,
+            &mut session,
+            &op_id,
+            digest,
+            &target,
+            BrowserReply::Action {
+                snapshot: Snapshot {
+                    operation_id: op_id.clone(),
+                    payload_digest: digest,
+                    target: Some(target.clone()),
+                    state: OperationState::Succeeded,
+                    liveness: ExecutionLiveness::Running,
+                    output_drain: OutputDrain::Open,
+                },
+                dispatch: "acknowledged".into(),
+                result: Some(json!({
+                    "isError": true,
+                    "content": [{"type": "text", "text": "Tab 99 not found"}]
+                })),
+                cause: None,
+                cleanup_complete: None,
+            },
+        )
+        .await;
+    assert_eq!(err_res.is_error, Some(true));
+    assert_eq!(
+        err_res.content[0].as_text().unwrap().text,
+        "Tab 99 not found"
     );
     assert!(session.phase == Phase::Ready);
 }

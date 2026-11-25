@@ -8,19 +8,19 @@ computer.
 
 ## Changes
 
-Styx `0.8.3` adds the **Styx Chrome Extension Bridge** for zero-flag existing Chrome automation and hardens `existing-browser` CDP reliability on top of the `0.8.2` baseline:
+Styx `0.8.4` adds **Codex-style Chrome Tab Groups** and **parallel non-focus-stealing background browser automation**, and retires the deprecated direct-CDP and dedicated managed-profile browser paths on top of the `0.8.3` baseline:
 
-- **Styx Chrome Extension Bridge (`styx-runtime`, `styx`, macOS & Windows Host UI)**:
-  - Bundled Manifest V3 Chrome extension (`src/providers/browser-extension/`, pinned ID `cncjpfhbbnibdjkcheeimdfklfiknibl`) communicating over Native Messaging (`com.styx.browser_bridge`) and a Host loopback WebSocket CDP relay (`/devtools/browser/<uuid>`) for Playwright `connectOverCDP`.
-  - Enables `existing-browser` automation in an ordinary Chrome profile without launching Chrome with `--remote-debugging-port` or clicking repeated remote-debugging prompts, while preserving automatic fallback to `DevToolsActivePort` when CDP endpoints are configured or connected directly.
-  - Added `styx host browser-extension status|install|uninstall` CLI commands and **Install / Reveal / Uninstall Extension Bridge** controls in macOS and Windows Host Settings, plus `extensionInstalled` / `extensionConnected` / `extensionPath` fields in `browser-cdp status`.
-- **Existing-browser CDP & session reliability fixes (`styx-runtime`)**:
-  - Added `"cdp_unavailable"` to the browser reference fact allowlist so pre-attach CDP refusals and timeouts surface cleanly instead of triggering `ProtocolMismatch` / `Phase::Unknown`.
-  - Recovered `StaleObservation` snapshots on live Chrome tabs cleanly without poisoning `Phase::Ready`, and cleaned up unattached CDP workers after `CapabilityUnsupported` retries so subsequent `existing-browser` attempts return cleanly to `Phase::Saved`.
-- **Linux Computer Use (CUA) source stability (`styx-runtime`)**:
-  - Canonicalized systemd unit dependency lists (`Conflicts`, `BindsTo`, `Wants`, `OnSuccess`, `OnFailure`) when comparing Linux desktop session leases so `systemd --user daemon-reload` hash reordering no longer triggers false `desktop_source_fenced` / `computer_not_dispatched` disconnects.
-- **Previous `0.8.2` & `0.8.x` baseline**:
-  - Public MCP OAuth resilience (bounded 24-hour stale-JWKS fallback, fixed-category auth rejection telemetry, RFC 6750 `WWW-Authenticate: Bearer`), refined cross-platform brand artwork, bounded Linux `systemd` `service_scope` shutdown loop (`20s` limit), opt-in local Browser CDP alongside persistent isolated profiles, and non-destructive Google Gemini Web and ChatGPT Custom MCP compatibility.
+- **Codex-style Chrome Tab Groups & Parallel Background Browser Automation (`styx-runtime`, `browser-extension`)**:
+  - Default / `"new"` browser actions open isolated background sessions (`bg-<id>`) inside labeled Chrome Tab Groups (`Styx · 1`, `Styx · 2`, …) in your existing Chrome profile (up to 16 parallel sessions across conversations).
+  - Zero focus stealing: background tabs are created with `active: false`, `Page.bringToFront` / `Target.activateTarget` are suppressed, `Emulation.setFocusEmulationEnabled({ enabled: true })` keeps background tabs interactive for `browser_click` / `browser_fill_form` / `browser_type` / `browser_select_option`, and an on-demand temporary screencast capturer enables background `browser_take_screenshot` without activating tabs or stealing OS window focus.
+  - Explicit `browser_session_id: "existing-browser"` connects to your already-open Chrome tabs (filtering out isolated Tab Group tabs) with single-operator `take_over_browser_session` handoff and non-destructive `browser_close` detach.
+  - Bundled Manifest V3 extension updated to `0.2.0` (`tabGroups` permission added; pinned extension ID `cncjpfhbbnibdjkcheeimdfklfiknibl` unchanged).
+- **Retired deprecated direct-CDP & dedicated managed browser profiles (`styx-runtime`, `styx`, `browser-worker`, macOS & Windows Host UI)**:
+  - Removed legacy `--remote-debugging-port` / `DevToolsActivePort` direct-CDP attachment (`browser_cdp`), legacy managed/dedicated browser profile launches, and superseded CLI/GUI settings controls in favor of the single Styx Chrome Extension Bridge (`styx host browser-extension status|install|uninstall`).
+- **Browser reliability & cross-platform fixes (`styx-runtime`)**:
+  - Increased browser IPC output ceiling (`MAX_BROWSER_RESULT_BYTES = 8 MB`), prevented clean Playwright MCP tool errors from poisoning active sessions, restricted navigation epoch bumps to main-frame navigations, extended CDP relay RPC timeout to 30s, and stripped Windows `\\?\` verbatim prefixes when writing Native Messaging host manifests.
+- **Previous `0.8.3` & `0.8.x` baseline**:
+  - Initial Styx Chrome Extension Bridge release (`com.styx.browser_bridge` + loopback CDP relay), existing-browser CDP stability fixes, Linux CUA systemd lease dependency canonicalization, Public MCP OAuth resilience, bounded Linux `systemd` `service_scope` shutdown loop, and cross-platform artwork.
 
 All existing Gateway MCP tool names, Host identities, device pairings, browser
 profiles, and Android/Windows/macOS release signing identities remain unchanged.

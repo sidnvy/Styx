@@ -64,10 +64,8 @@ type Result<T> = std::result::Result<T, BrowserError>;
 pub struct OwnedBrowserConfig {
     pub node_binary: PathBuf,
     pub worker_entry: PathBuf,
-    pub browser_binary: PathBuf,
-    pub cdp_endpoint: Option<String>,
+    pub cdp_endpoint: String,
     pub workspace_dir: PathBuf,
-    pub profile_dir: PathBuf,
     pub output_dir: PathBuf,
     pub rpc_timeout: Duration,
     #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -172,8 +170,6 @@ struct Live {
     launch_unconfirmed: bool,
     #[cfg(target_os = "macos")]
     process_tree: Option<crate::platform::macos_process_tree::ProcessTree>,
-    #[cfg(target_os = "macos")]
-    original_browser_process: Option<macos::OriginalBrowserProcess>,
     client: Option<RunningService<RoleClient, BrowserClient>>,
     stderr: Option<JoinHandle<()>>,
     client_close: Option<JoinHandle<bool>>,
@@ -462,7 +458,6 @@ impl OwnedBrowserConfig {
             &self.node_binary,
             &self.worker_entry,
             &self.workspace_dir,
-            &self.profile_dir,
             &self.output_dir,
         ] {
             if path.as_os_str().len() > 4096
@@ -472,49 +467,28 @@ impl OwnedBrowserConfig {
                 return Err(BrowserError::InvalidRequest);
             }
         }
-        match &self.cdp_endpoint {
-            Some(endpoint) => {
-                if !self.browser_binary.as_os_str().is_empty() {
-                    return Err(BrowserError::InvalidRequest);
-                }
-                let canonical = crate::host::browser_cdp::validate_cdp_endpoint(endpoint)
-                    .map_err(|_| BrowserError::InvalidRequest)?;
-                if &canonical != endpoint {
-                    return Err(BrowserError::InvalidRequest);
-                }
-            }
-            None => {
-                if self.browser_binary.as_os_str().len() > 4096
-                    || !self.browser_binary.is_absolute()
-                    || canonical_path(&self.browser_binary)? != self.browser_binary
-                {
-                    return Err(BrowserError::InvalidRequest);
-                }
-            }
+        let canonical =
+            crate::host::browser_extension::validate_loopback_ws_endpoint(&self.cdp_endpoint)
+                .map_err(|_| BrowserError::InvalidRequest)?;
+        if canonical != self.cdp_endpoint {
+            return Err(BrowserError::InvalidRequest);
         }
-        for path in [&self.profile_dir, &self.output_dir] {
-            crate::store::PrivateRoot::open(path).map_err(|_| BrowserError::PermissionDenied)?;
-        }
-        for (a, b) in [
-            (&self.workspace_dir, &self.profile_dir),
-            (&self.workspace_dir, &self.output_dir),
-            (&self.profile_dir, &self.output_dir),
-        ] {
-            if a.starts_with(b) || b.starts_with(a) {
-                return Err(BrowserError::InvalidRequest);
-            }
+        crate::store::PrivateRoot::open(&self.output_dir)
+            .map_err(|_| BrowserError::PermissionDenied)?;
+        if self.workspace_dir.starts_with(&self.output_dir)
+            || self.output_dir.starts_with(&self.workspace_dir)
+        {
+            return Err(BrowserError::InvalidRequest);
         }
         Ok(())
     }
     fn digest(&self) -> Result<Sha256Digest> {
         let bytes = serde_json::to_vec(&(
-            "styx.browser.open.config.v1",
+            "styx.browser.open.config.v2",
             &self.node_binary,
             &self.worker_entry,
-            &self.browser_binary,
             &self.cdp_endpoint,
             &self.workspace_dir,
-            &self.profile_dir,
             &self.output_dir,
             self.rpc_timeout.as_millis(),
             #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -624,8 +598,6 @@ impl BrowserOpenSlot {
                 launch_unconfirmed: false,
                 #[cfg(target_os = "macos")]
                 process_tree: None,
-                #[cfg(target_os = "macos")]
-                original_browser_process: None,
                 client: None,
                 stderr: None,
                 client_close: None,
@@ -667,20 +639,57 @@ impl BrowserOpenSlot {
         let started = Instant::now();
         let until = started + config.rpc_timeout;
         #[cfg(target_os = "linux")]
-        let desktop_environment = if config.cdp_endpoint.is_some() {
-            Vec::new()
-        } else {
-            // Keep this read under the registered resource's cancellation owner.
-            // No Browser process has been dispatched if desktop startup is unavailable.
-            let environment = tokio::select! {
-                _ = resource.stop.cancelled() => Err(BrowserError::Unknown),
-                result = crate::providers::linux_scope::browser_desktop_environment(Some(until)) => result.map_err(BrowserError::from),
-            };
-            match environment {
-                Ok(environment) => environment,
+        let mut prepared_linux = {
+            let preflight = async {
+                tokio::task::yield_now().await;
+                if Instant::now() >= until {
+                    return Err(BrowserError::Unsupported);
+                }
+                let node = pin(&config.node_binary, &mut live.pins)?;
+                let worker = pin(&config.worker_entry, &mut live.pins)?;
+                use std::os::unix::fs::OpenOptionsExt;
+                let config_file = config
+                    .output_dir
+                    .join(format!("worker-{}.json", uuid::Uuid::new_v4()));
+                let mut file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&config_file)
+                    .map_err(|_| BrowserError::SpawnFailed)?;
+                let payload = serde_json::json!({
+                    "schema": 1,
+                    "output_dir": config.output_dir,
+                    "workspace_dir": config.workspace_dir,
+                    "cdp_endpoint": config.cdp_endpoint,
+                });
+                let bytes =
+                    serde_json::to_vec(&payload).map_err(|_| BrowserError::InvalidRequest)?;
+                use std::io::Write;
+                file.write_all(&bytes)
+                    .and_then(|_| file.sync_all())
+                    .map_err(|_| BrowserError::SpawnFailed)?;
+                live.config_file = config_file;
+                let cfg = fd_path(&file);
+                live.pins.push(file);
+                let (command, scope) = LinuxOwnedScope::command(ScopeCommand::browser(
+                    node,
+                    worker,
+                    cfg,
+                    config.workspace_dir.clone(),
+                    config.output_dir.clone(),
+                    Vec::new(),
+                )?)?;
+                live.scope = Some(scope);
+                Ok(command)
+            }
+            .await;
+            match preflight {
+                Ok(command) => Some(command),
                 Err(cause) => {
-                    // This registered resource has no child or I/O to stop. Record
-                    // its normal cleanup result before returning the known refusal.
+                    // Nothing has been spawned yet; record normal empty cleanup and
+                    // surface the exact preflight refusal as NotDispatched.
                     cleanup(&mut live, config.rpc_timeout).await;
                     return Err(BrowserOpenFailure {
                         operation,
@@ -694,36 +703,7 @@ impl BrowserOpenSlot {
         let result = async {
             #[cfg(target_os = "linux")]
             {
-            let node = pin(&config.node_binary, &mut live.pins)?;
-            let worker = pin(&config.worker_entry, &mut live.pins)?;
-            use std::os::unix::fs::OpenOptionsExt;
-            let config_file = config.output_dir.join(format!("worker-{}.json",uuid::Uuid::new_v4()));
-            let mut file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&config_file).map_err(|_|BrowserError::SpawnFailed)?;
-            let payload = match &config.cdp_endpoint {
-                Some(endpoint) => serde_json::json!({
-                    "schema": 1,
-                    "output_dir": config.output_dir,
-                    "workspace_dir": config.workspace_dir,
-                    "cdp_endpoint": endpoint,
-                }),
-                None => {
-                    let browser = pin(&config.browser_binary, &mut live.pins)?;
-                    serde_json::json!({
-                        "schema": 1,
-                        "profile_dir": config.profile_dir,
-                        "output_dir": config.output_dir,
-                        "workspace_dir": config.workspace_dir,
-                        "browser_executable": browser,
-                    })
-                }
-            };
-            let bytes = serde_json::to_vec(&payload).map_err(|_|BrowserError::InvalidRequest)?;
-            use std::io::Write;
-            file.write_all(&bytes).and_then(|_|file.sync_all()).map_err(|_|BrowserError::SpawnFailed)?;
-            live.config_file = config_file;
-            let cfg = fd_path(&file);live.pins.push(file);
-            let (mut command, scope) = LinuxOwnedScope::command(ScopeCommand::browser(node,worker,cfg,config.workspace_dir.clone(),config.output_dir.clone(),desktop_environment)?)?;
-            live.scope = Some(scope);
+            let mut command = prepared_linux.take().ok_or(BrowserError::Unknown)?;
             live.child = Some(command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn().map_err(|_|BrowserError::SpawnFailed)?);
             tokio::select! {
                 _=resource.stop.cancelled()=>return Err(BrowserError::Unknown),
@@ -1024,8 +1004,6 @@ impl BrowserActionSlot {
             epoch: u64,
             ready: bool,
             closed: bool,
-            #[cfg(target_os = "macos")]
-            mac_process: Option<macos::OriginalBrowserProcess>,
         }
         let observed_state = match observed {
             Some(Ok(Ok(CallToolResponse::Complete(value)))) if value.is_error != Some(true) => {
@@ -1043,28 +1021,6 @@ impl BrowserActionSlot {
             // dispatched. Fence this executor rather than infer a false Ready.
             return refuse(BrowserError::ProtocolMismatch);
         };
-        #[cfg(target_os = "macos")]
-        if let Some(process) = observed_state.mac_process {
-            if process.schema != 1
-                || process.pid == 0
-                || process.pid > i32::MAX as u32
-                || self
-                    .state
-                    .original_browser_process
-                    .as_ref()
-                    .is_some_and(|old| {
-                        old.pid != process.pid
-                            || (old.original_child_closed && !process.original_child_closed)
-                    })
-            {
-                self.state.uncertain = true;
-                self.state.references.invalidate();
-                return refuse(BrowserError::ProtocolMismatch);
-            }
-            // Worker-local ChildProcess observations, not OS authority, a grant,
-            // a kernel PID handle, or proof of detached helper termination.
-            self.state.original_browser_process = Some(process);
-        }
         if observed_state.closed {
             self.state.references.invalidate();
             self.state.context_closed = true;
@@ -1189,55 +1145,81 @@ impl BrowserActionSlot {
                     }
                     Ok(native)
                         if native.dispatched
+                            && native.reason.is_none()
                             && (if ready {
                                 native.before == epoch
                             } else {
                                 native.before >= epoch
-                            })
-                            && result.is_error != Some(true) =>
+                            }) =>
                     {
-                        let valid_close = !action.is_close()
-                            || result
-                                .structured_content
-                                .as_ref()
-                                .and_then(|v| v.get("styx_context_closed"))
-                                .and_then(serde_json::Value::as_bool)
-                                == Some(true);
-                        if action.is_close() && valid_close {
-                            self.state.context_closed = true;
-                        }
-                        if native.before != native.after {
+                        if result.is_error == Some(true) {
                             self.state.references.invalidate();
-                        }
-                        // A lazy first snapshot may itself create the context
-                        // and change epoch. It completed as a read, but cannot
-                        // mint stable refs. Return ACK + stale warning and scrub
-                        // native refs; do not retry or poison a healthy context.
-                        let refs = finish_reference_result(
-                            &mut self.state,
-                            self.captured_reference_revision,
-                            completion_link.as_deref(),
-                            &mut result,
-                            snapshot,
-                            &native,
-                        );
-                        let stale_snapshot = refs.as_ref().is_ok_and(|stale| *stale);
-                        if valid_close && refs.is_ok() {
-                            (
-                                BrowserActionEvidence::Acknowledged,
-                                Some(result),
-                                stale_snapshot.then_some(BrowserError::StaleObservation),
-                            )
+                            if action.is_close() {
+                                (
+                                    BrowserActionEvidence::Unknown,
+                                    None,
+                                    Some(BrowserError::ProtocolMismatch),
+                                )
+                            } else {
+                                let refs = finish_reference_result(
+                                    &mut self.state,
+                                    self.captured_reference_revision,
+                                    completion_link.as_deref(),
+                                    &mut result,
+                                    false,
+                                    &native,
+                                );
+                                match refs {
+                                    Ok(_) => {
+                                        (BrowserActionEvidence::Acknowledged, Some(result), None)
+                                    }
+                                    Err(err) => (BrowserActionEvidence::Unknown, None, Some(err)),
+                                }
+                            }
                         } else {
-                            (
-                                BrowserActionEvidence::Unknown,
-                                None,
-                                Some(if valid_close {
-                                    refs.err().unwrap_or(BrowserError::Unknown)
-                                } else {
-                                    BrowserError::ProtocolMismatch
-                                }),
-                            )
+                            let valid_close = !action.is_close()
+                                || result
+                                    .structured_content
+                                    .as_ref()
+                                    .and_then(|v| v.get("styx_context_closed"))
+                                    .and_then(serde_json::Value::as_bool)
+                                    == Some(true);
+                            if action.is_close() && valid_close {
+                                self.state.context_closed = true;
+                            }
+                            if native.before != native.after {
+                                self.state.references.invalidate();
+                            }
+                            // A lazy first snapshot may itself create the context
+                            // and change epoch. It completed as a read, but cannot
+                            // mint stable refs. Return ACK + stale warning and scrub
+                            // native refs; do not retry or poison a healthy context.
+                            let refs = finish_reference_result(
+                                &mut self.state,
+                                self.captured_reference_revision,
+                                completion_link.as_deref(),
+                                &mut result,
+                                snapshot,
+                                &native,
+                            );
+                            let stale_snapshot = refs.as_ref().is_ok_and(|stale| *stale);
+                            if valid_close && refs.is_ok() {
+                                (
+                                    BrowserActionEvidence::Acknowledged,
+                                    Some(result),
+                                    stale_snapshot.then_some(BrowserError::StaleObservation),
+                                )
+                            } else {
+                                (
+                                    BrowserActionEvidence::Unknown,
+                                    None,
+                                    Some(if valid_close {
+                                        refs.err().unwrap_or(BrowserError::Unknown)
+                                    } else {
+                                        BrowserError::ProtocolMismatch
+                                    }),
+                                )
+                            }
                         }
                     }
                     _ => (

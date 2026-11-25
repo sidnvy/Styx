@@ -8,10 +8,11 @@ Product architecture and runtime ownership follow [REFACTOR-PLAN.md](REFACTOR-PL
 
 Each deployment has one Gateway paired with one or more Hosts over outbound mTLS/WSS. Desktop packages on macOS, Windows, and Linux support **Host-only** or **Gateway + Host**; headless Linux packages run **Gateway-only**; Android packages run **Host-only**.
 
-### Browser Lifecycle & Coexistence
+### Browser Lifecycle
 
-- Isolated managed Browser launches a visible dedicated Chromium window per profile on the selected Host desktop. Profiles persist across conversation changes, context closure, and Host restarts and are reused by `browser_session_id` or explicit takeover (`take_over_browser_session`).
-- Opt-in local Chrome CDP attachment (`existing-browser`, disabled by default via local Host setting `browser-cdp.json`) allows explicit attachment without interfering with default isolated profiles, and detaches non-destructively on `browser_close`.
+- Browser automation connects exclusively to the user's real Chrome/Edge/Chromium browser on the selected Host via the Styx MV3 Chrome Extension Bridge, sharing the user's real cookies and signed-in sessions without dedicated Playwright profiles or direct `chrome://inspect` / loopback `http://` CDP attachment.
+- By default (when `browser_session_id` is omitted or `"new"`), each conversation opens an isolated background Chrome Tab Group (`Styx · N`) so parallel browser operations across conversations run concurrently without switching tabs or stealing OS window focus. Passing `browser_session_id: "existing-browser"` targets the user's already-open browser tabs directly (also non-focus-stealing).
+- Sessions belong to the Host runtime (`browser_sessions`), preserve sign-ins across chat cleanup, require explicit `take_over_browser_session` when another conversation owns the operator slot, and detach non-destructively on `browser_close` without closing Chrome or other parallel sessions.
 
 ### Legacy Compatibility Cut
 

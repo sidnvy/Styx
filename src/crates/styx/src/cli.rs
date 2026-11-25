@@ -470,12 +470,6 @@ enum HostCommand {
         #[arg(long)]
         state_dir: PathBuf,
     },
-    /// Read or update local opt-in CDP browser attachment settings.
-    #[cfg(not(target_os = "android"))]
-    BrowserCdp {
-        #[command(subcommand)]
-        command: HostBrowserCdpCommand,
-    },
     /// Install, inspect, or remove the local Chrome Extension bridge.
     #[cfg(not(target_os = "android"))]
     BrowserExtension {
@@ -504,35 +498,6 @@ enum HostBrowserExtensionCommand {
     Uninstall {
         #[arg(long)]
         state_dir: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-}
-#[cfg(not(target_os = "android"))]
-#[derive(Subcommand)]
-enum HostBrowserCdpCommand {
-    /// Show local opt-in CDP attachment configuration and auto-detected endpoint.
-    Status {
-        #[arg(long)]
-        state_dir: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Enable local opt-in CDP attachment (auto-discovers DevToolsActivePort unless --endpoint is set).
-    Enable {
-        #[arg(long)]
-        state_dir: PathBuf,
-        #[arg(long)]
-        endpoint: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Disable local opt-in CDP attachment.
-    Disable {
-        #[arg(long)]
-        state_dir: PathBuf,
-        #[arg(long)]
-        clear_endpoint: bool,
         #[arg(long)]
         json: bool,
     },
@@ -2311,92 +2276,6 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 }
                 Err(error_value) => error(error_value.code()),
             }
-        }
-        #[cfg(not(target_os = "android"))]
-        Command::Host {
-            command: HostCommand::BrowserCdp { command },
-        } => {
-            use styx_runtime::host::browser_cdp::{BrowserCdpPatch, BrowserCdpStore};
-            let (state_dir, patch, json) = match command {
-                HostBrowserCdpCommand::Status { state_dir, json } => (state_dir, None, json),
-                HostBrowserCdpCommand::Enable {
-                    state_dir,
-                    endpoint,
-                    json,
-                } => (
-                    state_dir,
-                    Some(BrowserCdpPatch {
-                        enabled: Some(true),
-                        endpoint: endpoint.map(Some),
-                    }),
-                    json,
-                ),
-                HostBrowserCdpCommand::Disable {
-                    state_dir,
-                    clear_endpoint,
-                    json,
-                } => (
-                    state_dir,
-                    Some(BrowserCdpPatch {
-                        enabled: Some(false),
-                        endpoint: if clear_endpoint { Some(None) } else { None },
-                    }),
-                    json,
-                ),
-            };
-            let store = match BrowserCdpStore::open(&state_dir) {
-                Ok(store) => store,
-                Err(_) => return error("host_browser_cdp_unavailable"),
-            };
-            let mut applied = true;
-            if let Some(patch) = patch {
-                match store.update(patch).await {
-                    Ok((_cfg, ok)) => applied = ok,
-                    Err(styx_contracts::error::ErrorCategory::InvalidRequest) => {
-                        return error("host_browser_cdp_endpoint_invalid");
-                    }
-                    Err(_) => return error("host_browser_cdp_unavailable"),
-                }
-            }
-            let Ok(status) = store.status(None) else {
-                return error("host_browser_cdp_unavailable");
-            };
-            if json {
-                let body = serde_json::json!({
-                    "applied": applied,
-                    "browserCdp": status,
-                });
-                if write_json(&body).is_err() {
-                    return error("output_unavailable");
-                }
-            } else if status.enabled {
-                match (
-                    status.endpoint.as_deref(),
-                    status.detected_endpoint.as_deref(),
-                ) {
-                    (Some(endpoint), _) => {
-                        println!("Browser CDP attach: enabled (endpoint: {endpoint})");
-                    }
-                    (None, Some(detected)) => {
-                        println!("Browser CDP attach: enabled (auto-detected: {detected})");
-                    }
-                    (None, None) if status.extension_installed => {
-                        println!(
-                            "Browser CDP attach: enabled (Chrome Extension ID: {}; load unpacked from {} if not yet added)",
-                            status.extension_id.as_deref().unwrap_or_default(),
-                            status.extension_path.as_deref().unwrap_or_default()
-                        );
-                    }
-                    (None, None) => {
-                        println!(
-                            "Browser CDP attach: enabled (install Chrome Extension bridge via `styx host browser-extension install --state-dir ...`, open chrome://inspect/#remote-debugging, or pass --endpoint http://127.0.0.1:9222)"
-                        );
-                    }
-                }
-            } else {
-                println!("Browser CDP attach: disabled");
-            }
-            ExitCode::SUCCESS
         }
         #[cfg(not(target_os = "android"))]
         Command::BrowserExtensionBridge { state_dir, .. } => {

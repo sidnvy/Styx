@@ -5,80 +5,89 @@ import os from 'node:os';
 import path from 'node:path';
 import { readConfiguration } from './config.mjs';
 
-test('trusted startup scope accepts exact private directories and rejects aliases, extra authorities and shared profile', () => {
+test('trusted startup scope accepts canonical extension-bridge WS configs and rejects managed/http/unsafe fields', () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'styx-browser-config-')));
   fs.chmodSync(root, 0o700);
   try {
-    const config = { schema: 1 };
-    for (const [key, folder] of [['profile_dir', 'profile'], ['output_dir', 'output'], ['workspace_dir', 'workspace']]) {
-      config[key] = path.join(root, folder); fs.mkdirSync(config[key], { mode: 0o700 });
-    }
-    // Executable validation only. No shell or native browser is run by this test.
-    const executable = path.join(root, 'browser-placeholder'); fs.writeFileSync(executable, 'not executed', { mode: 0o700 });
-    config.browser_executable = executable;
+    const outputDir = path.join(root, 'output');
+    const workspaceDir = path.join(root, 'workspace');
+    fs.mkdirSync(outputDir, { mode: 0o700 });
+    fs.mkdirSync(workspaceDir, { mode: 0o700 });
     const file = path.join(root, 'startup.json');
     const write = value => fs.writeFileSync(file, JSON.stringify(value), { mode: 0o600 });
-    write(config); assert.deepEqual(readConfiguration(file), config);
-    if (process.platform === 'linux') {
-      // Owned kernel FD from a non-parent PID: the scope launcher may reparent
-      // Node. Source authority is Rust's fixed factory, not worker PPID guesses.
-      const fd = fs.openSync(file, 'r');
-      const executableFd = fs.openSync(executable, 'r');
-      try {
-        assert.notEqual(process.pid, process.ppid);
-        assert.deepEqual(readConfiguration(`/proc/${process.pid}/fd/${fd}`), config);
-        write({ ...config, browser_executable: `/proc/${process.pid}/fd/${executableFd}` });
-        assert.equal(readConfiguration(file).browser_executable, `/proc/${process.pid}/fd/${executableFd}`);
-      } finally { fs.closeSync(fd); fs.closeSync(executableFd); }
+
+    const base = {
+      schema: 1,
+      output_dir: outputDir,
+      workspace_dir: workspaceDir,
+    };
+
+    for (const valid of [
+      'ws://127.0.0.1:9333/devtools/browser',
+      'ws://localhost:9222/devtools/browser/abc-123_4.5',
+      'ws://[::1]:9222/devtools/browser/session-1',
+    ]) {
+      const cfg = { ...base, cdp_endpoint: valid };
+      write(cfg);
+      assert.deepEqual(readConfiguration(file), cfg);
+      if (process.platform === 'linux') {
+        const fd = fs.openSync(file, 'r');
+        try {
+          assert.notEqual(process.pid, process.ppid);
+          assert.deepEqual(readConfiguration(`/proc/${process.pid}/fd/${fd}`), cfg);
+        } finally {
+          fs.closeSync(fd);
+        }
+      }
     }
 
-    write({ ...config, owner: 'forged-authority' }); assert.throws(() => readConfiguration(file));
-    write({ ...config, profile_dir: config.workspace_dir }); assert.throws(() => readConfiguration(file));
-    write({ ...config, browser_executable: 'relative-browser' }); assert.throws(() => readConfiguration(file));
-    const alias = path.join(root, 'alias'); fs.symlinkSync(config.profile_dir, alias, 'dir');
-    write({ ...config, profile_dir: alias }); assert.throws(() => readConfiguration(file));
-    write(config); const linked = path.join(root, 'linked.json'); fs.linkSync(file, linked);
-    assert.throws(() => readConfiguration(file)); fs.unlinkSync(linked);
+    const validCfg = { ...base, cdp_endpoint: 'ws://127.0.0.1:9222/devtools/browser/test' };
+    write({ ...validCfg, owner: 'forged-authority' }); assert.throws(() => readConfiguration(file));
+    write({ ...validCfg, output_dir: workspaceDir }); assert.throws(() => readConfiguration(file));
+    const alias = path.join(root, 'alias');
+    fs.symlinkSync(outputDir, alias, 'dir');
+    write({ ...validCfg, output_dir: alias }); assert.throws(() => readConfiguration(file));
+    write(validCfg);
+    const linked = path.join(root, 'linked.json');
+    fs.linkSync(file, linked);
+    assert.throws(() => readConfiguration(file));
+    fs.unlinkSync(linked);
     fs.writeFileSync(file, 'x'.repeat(16385)); assert.throws(() => readConfiguration(file));
     if (process.platform !== 'win32') {
-      write(config); fs.chmodSync(config.profile_dir, 0o755); assert.throws(() => readConfiguration(file));
+      write(validCfg);
+      fs.chmodSync(outputDir, 0o755);
+      assert.throws(() => readConfiguration(file));
+      fs.chmodSync(outputDir, 0o700);
     }
 
-    // Opt-in CDP configuration validates strict loopback URLs and forbids mixed managed fields.
-    const cdpBase = {
-      schema: 1,
-      output_dir: config.output_dir,
-      workspace_dir: config.workspace_dir,
-    };
-    for (const valid of [
-      'http://127.0.0.1:9222',
-      'http://localhost:9222/',
-      'ws://[::1]:9222/devtools/browser/abc-123_4.5',
-      'ws://127.0.0.1:9333/devtools/browser',
-    ]) {
-      const cdpConfig = { ...cdpBase, cdp_endpoint: valid };
-      write(cdpConfig);
-      assert.deepEqual(readConfiguration(file), cdpConfig);
-    }
+    // Legacy managed and http:// direct-CDP shapes are rejected.
+    write({ ...validCfg, profile_dir: path.join(root, 'profile') });
+    assert.throws(() => readConfiguration(file));
+    write({ ...validCfg, browser_executable: '/usr/bin/true' });
+    assert.throws(() => readConfiguration(file));
+    write({ ...base, profile_dir: outputDir, browser_executable: '/usr/bin/true' });
+    assert.throws(() => readConfiguration(file));
+
     for (const invalid of [
       '',
+      'http://127.0.0.1:9222',
+      'http://localhost:9222/',
       'https://127.0.0.1:9222',
-      'http://192.168.1.5:9222',
-      'http://example.com:9222',
-      'http://user@127.0.0.1:9222',
-      'http://127.0.0.1:9222?token=abc',
-      'http://127.0.0.1:9222#frag',
-      'http://127.0.0.1',
-      'http://127.0.0.1:9222/json/version',
+      'wss://127.0.0.1:9222/devtools/browser',
+      'ws://192.168.1.5:9222/devtools/browser',
+      'ws://example.com:9222/devtools/browser',
+      'ws://user@127.0.0.1:9222/devtools/browser',
+      'ws://127.0.0.1:9222/devtools/browser?token=abc',
+      'ws://127.0.0.1:9222/devtools/browser#frag',
+      'ws://127.0.0.1/devtools/browser',
       'ws://127.0.0.1:9222/other',
+      'ws://127.0.0.1:9222/devtools/browser/..',
       'ws://127.0.0.1:9222/devtools/browser/../secret',
     ]) {
-      write({ ...cdpBase, cdp_endpoint: invalid });
+      write({ ...base, cdp_endpoint: invalid });
       assert.throws(() => readConfiguration(file), `expected rejection for ${invalid}`);
     }
-    write({ ...cdpBase, cdp_endpoint: 'http://127.0.0.1:9222', profile_dir: config.profile_dir });
-    assert.throws(() => readConfiguration(file));
-    write({ ...cdpBase, cdp_endpoint: 'http://127.0.0.1:9222', browser_executable: executable });
-    assert.throws(() => readConfiguration(file));
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

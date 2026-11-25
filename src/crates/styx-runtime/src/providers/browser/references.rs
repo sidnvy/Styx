@@ -25,10 +25,12 @@ pub(super) fn fact(result: &CallToolResult) -> Result<NativeFact> {
         || fact.after < fact.before
         || fact.before > 9_007_199_254_740_991
         || fact.after > 9_007_199_254_740_991
-        || fact
-            .reason
-            .as_deref()
-            .is_some_and(|r| !matches!(r, "stale" | "invalid" | "cdp_unavailable"))
+        || fact.reason.as_deref().is_some_and(|r| {
+            !matches!(
+                r,
+                "stale" | "invalid" | "cdp_unavailable" | "result_unconfirmed"
+            )
+        })
     {
         return Err(BrowserError::ProtocolMismatch);
     }

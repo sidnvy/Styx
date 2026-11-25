@@ -172,12 +172,9 @@ async fn actual_snapshot_refs_navigation_tabs_owner_and_reopen_batch() {
             OwnedBrowserConfig {
                 node_binary: std::env::var_os("STYX_TEST_BROWSER_NODE").unwrap().into(),
                 worker_entry: std::env::var_os("STYX_TEST_BROWSER_WORKER").unwrap().into(),
-                browser_binary: std::env::var_os("STYX_TEST_BROWSER_EXECUTABLE")
-                    .unwrap()
-                    .into(),
-                cdp_endpoint: None,
+                cdp_endpoint: std::env::var("STYX_TEST_BROWSER_CDP_ENDPOINT")
+                    .unwrap_or_else(|_| "ws://127.0.0.1:9222/devtools/browser/fixture".into()),
                 workspace_dir: root.join("workspace"),
-                profile_dir: root.join("profile"),
                 output_dir: root.join("output"),
                 rpc_timeout: Duration::from_secs(10),
             },

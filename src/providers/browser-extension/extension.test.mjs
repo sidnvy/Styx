@@ -35,6 +35,11 @@ function createFakeChrome(tabsList) {
   const posted = [];
   const attached = new Set();
   const sentCommands = [];
+  const windowUpdates = [];
+  const tabUpdates = [];
+  const groupUpdates = [];
+  let nextTabId = 99;
+  let nextGroupId = 500;
   let failOnDisconnect = null;
 
   const port = {
@@ -65,7 +70,14 @@ function createFakeChrome(tabsList) {
         return tabsList;
       },
       async create(opts) {
-        const created = { id: 99, url: opts.url, title: 'New', active: true, windowId: 1 };
+        const created = {
+          id: nextTabId++,
+          url: opts.url,
+          title: 'New',
+          active: opts.active === true,
+          windowId: 1,
+          groupId: -1,
+        };
         tabsList.push(created);
         return created;
       },
@@ -74,17 +86,35 @@ function createFakeChrome(tabsList) {
         if (idx >= 0) tabsList.splice(idx, 1);
       },
       async update(tabId, props) {
+        tabUpdates.push({ tabId, props });
         const tab = tabsList.find(t => t.id === tabId);
         if (tab) Object.assign(tab, props);
         return tab;
+      },
+      async group(opts) {
+        const groupId = typeof opts.groupId === 'number' ? opts.groupId : nextGroupId++;
+        for (const tabId of opts.tabIds || []) {
+          const tab = tabsList.find(t => t.id === tabId);
+          if (tab) tab.groupId = groupId;
+        }
+        return groupId;
       },
       onCreated: { addListener: cb => listeners.tabCreated.push(cb) },
       onUpdated: { addListener: cb => listeners.tabUpdated.push(cb) },
       onRemoved: { addListener: cb => listeners.tabRemoved.push(cb) },
       onActivated: { addListener() {} },
     },
+    tabGroups: {
+      async update(groupId, props) {
+        groupUpdates.push({ groupId, props });
+        return { id: groupId, ...props };
+      },
+    },
     windows: {
-      async update() { return {}; },
+      async update(windowId, props) {
+        windowUpdates.push({ windowId, props });
+        return {};
+      },
     },
     debugger: {
       async attach(target, version) {
@@ -115,6 +145,9 @@ function createFakeChrome(tabsList) {
     posted,
     attached,
     sentCommands,
+    windowUpdates,
+    tabUpdates,
+    groupUpdates,
     listeners,
     emitPort(msg) {
       for (const cb of listeners.portMessage) cb(msg);
@@ -132,7 +165,7 @@ test('manifest has deterministic extension ID, minimal permissions, and icons ex
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
   assert.equal(manifest.manifest_version, 3);
   assert.equal(computeExtensionIdFromKey(manifest.key), EXPECTED_EXTENSION_ID);
-  assert.deepEqual(manifest.permissions, ['debugger', 'tabs', 'nativeMessaging', 'alarms']);
+  assert.deepEqual(manifest.permissions, ['debugger', 'tabs', 'tabGroups', 'nativeMessaging', 'alarms']);
   for (const rel of ['icons/icon16.png', 'icons/icon48.png', 'icons/icon128.png', 'popup.html', 'popup.js', 'background.js']) {
     assert.ok(fs.existsSync(path.join(dir, rel)), `missing ${rel}`);
   }
@@ -193,6 +226,40 @@ test('background controller connects, filters chrome:// tabs, forwards RPCs/even
     method: 'Page.bringToFront',
     params: {},
   });
+  assert.equal(fake.tabUpdates.length, 0);
+  assert.equal(fake.windowUpdates.length, 0);
+
+  // Background Tab Group creation defaults to active:false, assigns group title/color, and excludes isolated tabs from excludeIsolated queries.
+  fake.emitPort({
+    id: 12,
+    method: 'tabs.create',
+    params: {
+      url: 'https://example.org/bg',
+      isolated: true,
+      groupTitle: 'Styx · 1',
+      groupColor: 'blue',
+    },
+  });
+  await new Promise(r => setImmediate(r));
+  const createReply = JSON.parse(JSON.stringify(fake.posted.at(-1)));
+  assert.equal(createReply.id, 12);
+  assert.equal(createReply.result.tab.active, false);
+  assert.equal(createReply.result.tab.isolated, true);
+  assert.equal(createReply.result.groupId, 500);
+  assert.deepEqual(JSON.parse(JSON.stringify(fake.groupUpdates.at(-1))), {
+    groupId: 500,
+    props: { title: 'Styx · 1', color: 'blue' },
+  });
+
+  fake.emitPort({ id: 13, method: 'tabs.list', params: { excludeIsolated: true } });
+  await new Promise(r => setImmediate(r));
+  const listFiltered = JSON.parse(JSON.stringify(fake.posted.at(-1)));
+  assert.deepEqual(listFiltered.result.tabs.map(t => t.id), [2]);
+
+  fake.emitPort({ id: 14, method: 'tabs.activate', params: { tabId: 2 } });
+  await new Promise(r => setImmediate(r));
+  assert.equal(fake.windowUpdates.length, 0);
+  assert.equal(fake.tabUpdates.length, 0);
 
   // Extension events forward to bridge while Host is connected.
   for (const cb of fake.listeners.debuggerEvent) cb({ tabId: 2 }, 'Page.loadEventFired', { timestamp: 1 });

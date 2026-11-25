@@ -40,13 +40,16 @@ function parseBrowserVersion(userAgent) {
   return "Chrome/Extension-Bridge";
 }
 
-function normalizeTab(tab) {
+function normalizeTab(tab, isolated = false) {
   return {
     id: tab.id,
     url: tab.url || tab.pendingUrl || "about:blank",
     title: tab.title || "",
     active: Boolean(tab.active),
     windowId: tab.windowId,
+    groupId: typeof tab.groupId === "number" ? tab.groupId : -1,
+    openerTabId: typeof tab.openerTabId === "number" ? tab.openerTabId : null,
+    isolated: Boolean(isolated),
   };
 }
 
@@ -65,7 +68,9 @@ function createExtensionController(chromeApi, env = {}) {
   let lastError = null;
   let reconnectTimer = null;
   let reconnectAttempt = 0;
+  let creatingIsolatedCount = 0;
   const attachedTabs = new Set();
+  const isolatedTabIds = new Set();
 
   function postToBridge(message) {
     if (!port) {
@@ -90,11 +95,53 @@ function createExtensionController(chromeApi, env = {}) {
     postToBridge({ event, params });
   }
 
-  async function listAttachableTabs() {
+  async function listAttachableTabs(options = {}) {
+    const excludeIsolated = Boolean(options.excludeIsolated);
     const tabs = await chromeApi.tabs.query({});
     return tabs
       .filter((tab) => typeof tab.id === "number" && isAttachableUrl(tab.url || tab.pendingUrl))
-      .map(normalizeTab);
+      .filter((tab) => !excludeIsolated || !isolatedTabIds.has(tab.id))
+      .map((tab) => normalizeTab(tab, isolatedTabIds.has(tab.id)));
+  }
+
+  async function assignTabGroup(tabId, params = {}) {
+    if (typeof tabId !== "number" || typeof chromeApi.tabs?.group !== "function") {
+      return -1;
+    }
+    const existingGroupId =
+      typeof params.groupId === "number" && params.groupId >= 0 ? params.groupId : null;
+    const hasTitleOrColor =
+      typeof params.groupTitle === "string" || typeof params.groupColor === "string";
+    if (existingGroupId === null && !hasTitleOrColor) {
+      return -1;
+    }
+    try {
+      const groupOpts =
+        existingGroupId !== null
+          ? { tabIds: [tabId], groupId: existingGroupId }
+          : { tabIds: [tabId] };
+      const groupId = await chromeApi.tabs.group(groupOpts);
+      if (
+        existingGroupId === null &&
+        typeof groupId === "number" &&
+        hasTitleOrColor &&
+        typeof chromeApi.tabGroups?.update === "function"
+      ) {
+        const updateProps = {};
+        if (typeof params.groupTitle === "string" && params.groupTitle.length > 0) {
+          updateProps.title = params.groupTitle;
+        }
+        if (typeof params.groupColor === "string" && params.groupColor.length > 0) {
+          updateProps.color = params.groupColor;
+        }
+        if (Object.keys(updateProps).length > 0) {
+          await chromeApi.tabGroups.update(groupId, updateProps).catch(() => {});
+        }
+      }
+      return typeof groupId === "number" ? groupId : -1;
+    } catch {
+      return -1;
+    }
   }
 
   async function sendHello() {
@@ -145,26 +192,61 @@ function createExtensionController(chromeApi, env = {}) {
       let result;
       switch (method) {
         case "tabs.list": {
-          result = { tabs: await listAttachableTabs() };
+          result = {
+            tabs: await listAttachableTabs({ excludeIsolated: Boolean(params.excludeIsolated) }),
+          };
           break;
         }
         case "tabs.create": {
-          const tab = await chromeApi.tabs.create({
-            url: typeof params.url === "string" && params.url.length > 0 ? params.url : "about:blank",
-          });
-          result = { tab: normalizeTab(tab) };
+          const isIsolated = Boolean(params.isolated);
+          if (isIsolated) {
+            creatingIsolatedCount += 1;
+          }
+          let tab;
+          let groupId = -1;
+          try {
+            tab = await chromeApi.tabs.create({
+              url:
+                typeof params.url === "string" && params.url.length > 0 ? params.url : "about:blank",
+              active: params.active === true,
+            });
+            if (isIsolated && typeof tab?.id === "number") {
+              isolatedTabIds.add(tab.id);
+            }
+            if (typeof tab?.id === "number") {
+              groupId = await assignTabGroup(tab.id, params);
+            }
+          } finally {
+            if (isIsolated) {
+              creatingIsolatedCount = Math.max(0, creatingIsolatedCount - 1);
+            }
+          }
+          const resolvedGroupId =
+            groupId >= 0 ? groupId : typeof tab?.groupId === "number" ? tab.groupId : -1;
+          result = {
+            tab: normalizeTab({ ...tab, groupId: resolvedGroupId }, isolatedTabIds.has(tab?.id)),
+            groupId: resolvedGroupId,
+          };
+          break;
+        }
+        case "tabs.group": {
+          if (params.isolated && typeof params.tabId === "number") {
+            isolatedTabIds.add(params.tabId);
+          }
+          const groupId = await assignTabGroup(params.tabId, params);
+          result = { groupId };
           break;
         }
         case "tabs.remove": {
           await chromeApi.tabs.remove(params.tabId);
           attachedTabs.delete(params.tabId);
+          isolatedTabIds.delete(params.tabId);
           result = { ok: true };
           break;
         }
         case "tabs.activate": {
-          const tab = await chromeApi.tabs.update(params.tabId, { active: true });
-          if (tab && typeof tab.windowId === "number" && chromeApi.windows?.update) {
-            await chromeApi.windows.update(tab.windowId, { focused: true }).catch(() => {});
+          if (params.activate === true && typeof params.tabId === "number") {
+            await chromeApi.tabs.update(params.tabId, { active: true }).catch(() => {});
           }
           result = { ok: true };
           break;
@@ -182,6 +264,7 @@ function createExtensionController(chromeApi, env = {}) {
           break;
         }
         case "debugger.detachAll": {
+          isolatedTabIds.clear();
           result = await detachAllTabs();
           break;
         }
@@ -194,9 +277,6 @@ function createExtensionController(chromeApi, env = {}) {
             params.method,
             params.params ?? {},
           );
-          if (params.method === "Page.bringToFront") {
-            await chromeApi.tabs.update(params.tabId, { active: true }).catch(() => {});
-          }
           break;
         }
         default: {
@@ -223,6 +303,7 @@ function createExtensionController(chromeApi, env = {}) {
         lastError = null;
         void sendHello();
       } else {
+        isolatedTabIds.clear();
         void detachAllTabs();
       }
       return;
@@ -273,6 +354,7 @@ function createExtensionController(chromeApi, env = {}) {
           port = null;
           hostConnected = false;
         }
+        isolatedTabIds.clear();
         void detachAllTabs();
         scheduleReconnect();
       });
@@ -311,18 +393,26 @@ function createExtensionController(chromeApi, env = {}) {
 
     chromeApi.tabs.onCreated.addListener((tab) => {
       if (typeof tab?.id === "number" && isAttachableUrl(tab.url || tab.pendingUrl)) {
-        emitEvent("chrome.tabs.onCreated", [normalizeTab(tab)]);
+        emitEvent("chrome.tabs.onCreated", [
+          normalizeTab(tab, isolatedTabIds.has(tab.id) || creatingIsolatedCount > 0),
+        ]);
       }
     });
 
     chromeApi.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       if (typeof tabId === "number" && changeInfo?.url && isAttachableUrl(changeInfo.url)) {
-        emitEvent("chrome.tabs.onUpdated", [normalizeTab({ ...tab, id: tabId, url: changeInfo.url })]);
+        emitEvent("chrome.tabs.onUpdated", [
+          normalizeTab(
+            { ...tab, id: tabId, url: changeInfo.url },
+            isolatedTabIds.has(tabId) || creatingIsolatedCount > 0,
+          ),
+        ]);
       }
     });
 
     chromeApi.tabs.onRemoved.addListener((tabId) => {
       attachedTabs.delete(tabId);
+      isolatedTabIds.delete(tabId);
       emitEvent("chrome.tabs.onRemoved", [tabId]);
     });
 

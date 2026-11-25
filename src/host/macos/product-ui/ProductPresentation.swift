@@ -60,7 +60,7 @@ enum ProductCapabilityKind {
         switch self {
         case .cli: return productText("运行命令和脚本", "Run commands and scripts")
         case .computer: return productText("查看屏幕、点击和输入", "View the screen, click and type")
-        case .browser: return productText("在可见窗口中操作网页，也可手动登录", "Use websites in a visible window and sign in yourself")
+        case .browser: return productText("通过 Chrome 扩展桥接操作你本机的 Chrome 标签页与登录态", "Control your Chrome tabs and sign-ins via the Styx Extension Bridge")
         }
     }
     var symbol: String {
