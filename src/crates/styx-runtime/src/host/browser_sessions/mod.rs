@@ -1,13 +1,18 @@
-//! Host-owned Browser contexts; a conversation holds only the current operator slot.
-//! Transfers reuse the existing worker, profile, tabs and Core resource identity.
+//! Host-owned Browser sessions backed by the Chrome Extension Bridge (`existing-browser`
+//! for shared user tabs and parallel `bg-...` Tab Group sessions for background work).
+//! Transfers reuse a session's Core resource identity.
 pub(crate) mod operations;
-use crate::host::{coordinator::OwnerCleanupHandle, protocol::wire::*};
+use crate::host::{
+    browser_extension::{BROWSER_OWNER_PREFIX, BROWSER_SESSION_ID, CdpSessionScope},
+    coordinator::OwnerCleanupHandle,
+    protocol::wire::*,
+};
 use crate::providers::browser_contract::BrowserAction;
 use operations::{BrowserCommand, BrowserPort, BrowserReply};
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -19,20 +24,15 @@ use styx_contracts::{
 use styx_core::operations::OwnerLease;
 use tokio::sync::Mutex as AsyncMutex;
 
-const MAX_BROWSER_RESULT_BYTES: usize = 128 * 1024;
-const NEW_SESSION_ID: &str = "new";
-
-fn is_public_mcp_subject(owner: &OwnerRef) -> bool {
-    owner.owner_id.as_str().starts_with("public-mcp-subject:")
-}
+const MAX_BROWSER_RESULT_BYTES: usize = styx_contracts::DESKTOP_BROWSER_FRAME_BYTES;
+const MAX_TAB_GROUP_SESSIONS: usize = 16;
+const TAB_GROUP_COLORS: &[&str] = &["blue", "cyan", "purple", "green", "orange", "pink"];
 
 type Caller = (OwnerId, OwnerEpoch);
 type Cell = Arc<AsyncMutex<Session>>;
 #[derive(Default)]
 pub(crate) struct State {
     registry: Mutex<Registry>,
-    restored: tokio::sync::OnceCell<()>,
-    cdp_sync: AsyncMutex<()>,
     inputs: std::sync::OnceLock<Arc<operations::BrowserInputs>>,
 }
 impl State {
@@ -46,7 +46,7 @@ impl State {
     }
     pub(crate) fn forget_caller(&self, owner: &OwnerRef) {
         let mut registry = self.registry.lock().expect("Browser sessions");
-        registry.defaults.remove(&caller(owner));
+        registry.owner_default.remove(&caller(owner));
         for cell in registry.sessions.values() {
             if let Ok(mut session) = cell.try_lock()
                 && session.operator.as_ref() == Some(owner)
@@ -59,17 +59,12 @@ impl State {
 #[derive(Default)]
 struct Registry {
     sessions: BTreeMap<String, Cell>,
-    defaults: BTreeMap<Caller, String>,
-    cdp_endpoint: Option<Option<String>>,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SessionMode {
-    Managed,
-    Cdp,
+    owner_default: HashMap<Caller, String>,
+    next_group_seq: u64,
 }
 struct Session {
-    mode: SessionMode,
-    cdp_endpoint_key: Option<Option<String>>,
+    id: String,
+    scope: CdpSessionScope,
     operator: Option<OwnerRef>,
     lease: OwnerLease,
     target: Option<ResourceTarget>,
@@ -79,7 +74,6 @@ struct Session {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Saved,
-    New,
     Ready,
     Unknown,
 }
@@ -126,17 +120,8 @@ fn not_dispatched(reply: &BrowserReply) -> bool {
         }
     )
 }
-fn action_timeout(name: &str, mode: SessionMode) -> u32 {
-    if mode == SessionMode::Cdp
-        || matches!(
-            name,
-            "browser_navigate" | "browser_navigate_back" | "browser_wait_for"
-        )
-    {
-        BROWSER_WAIT_PREPARE_TIMEOUT_MS
-    } else {
-        5_000
-    }
+fn action_timeout(_name: &str) -> u32 {
+    BROWSER_WAIT_PREPARE_TIMEOUT_MS
 }
 fn result(value: Value) -> Result<CallToolResult, &'static str> {
     struct Bound(usize);
@@ -209,23 +194,14 @@ impl Engine<'_> {
     }
     fn new_session(
         &self,
-        id: &str,
-        mode: SessionMode,
-        cdp_endpoint_key: Option<Option<String>>,
+        id: String,
+        scope: CdpSessionScope,
         operator: Option<OwnerRef>,
         phase: Phase,
     ) -> Result<Session, &'static str> {
-        // The profile ID survives restart; caller access and execution identity do not.
+        // Each Host Extension Bridge session owns an independent Core lease/incarnation.
         let incarnation = uuid::Uuid::new_v4().simple().to_string();
-        let owner_id = match mode {
-            SessionMode::Managed => format!("host-browser-{id}-{incarnation}"),
-            SessionMode::Cdp => {
-                format!(
-                    "{}{incarnation}",
-                    crate::host::browser_cdp::CDP_OWNER_PREFIX
-                )
-            }
-        };
+        let owner_id = format!("{BROWSER_OWNER_PREFIX}{incarnation}");
         let lease = self
             .port
             .authority
@@ -238,8 +214,8 @@ impl Engine<'_> {
             )
             .map_err(|_| "capacity_busy")?;
         Ok(Session {
-            mode,
-            cdp_endpoint_key,
+            id,
+            scope,
             operator,
             lease,
             target: None,
@@ -247,213 +223,106 @@ impl Engine<'_> {
             cleanup: None,
         })
     }
-    async fn restore_profiles(&self) -> Result<(), &'static str> {
-        self.state()
-            .restored
-            .get_or_try_init(|| async {
-                let profiles = self
-                    .port
-                    .saved_profiles()
-                    .await
-                    .map_err(|_| "browser_profile_unavailable")?;
-                let mut registry = self.state().registry.lock().expect("Browser sessions");
-                for id in profiles {
-                    if let std::collections::btree_map::Entry::Vacant(entry) =
-                        registry.sessions.entry(id.clone())
-                    {
-                        let session =
-                            self.new_session(&id, SessionMode::Managed, None, None, Phase::Saved)?;
-                        entry.insert(Arc::new(AsyncMutex::new(session)));
-                    }
-                }
-                Ok(())
-            })
-            .await
-            .map(|_| ())
-    }
-    async fn sync_cdp_session(&self) -> Result<(), &'static str> {
-        use crate::host::browser_cdp::CDP_SESSION_ID;
-        let _sync_guard = self.state().cdp_sync.lock().await;
-        let cfg = self
-            .port
-            .cdp_config()
-            .await
-            .map_err(|_| "browser_profile_unavailable")?;
-        if !cfg.enabled {
-            let removed = {
-                let mut registry = self.state().registry.lock().expect("Browser sessions");
-                if registry.cdp_endpoint.is_none()
-                    && !registry.sessions.contains_key(CDP_SESSION_ID)
-                {
-                    return Ok(());
-                }
-                registry.cdp_endpoint = None;
-                registry.defaults.retain(|_, v| v != CDP_SESSION_ID);
-                registry.sessions.remove(CDP_SESSION_ID)
-            };
-            if let Some(cell) = removed {
-                let mut session = cell.lock().await;
-                session.operator = None;
-                let _ = self.cleanup_session_resources(&mut session).await;
-                session.phase = Phase::Unknown;
-            }
-            return Ok(());
+    fn ensure_shared_existing_in(&self, registry: &mut Registry) -> Result<Cell, &'static str> {
+        if let Some(cell) = registry.sessions.get(BROWSER_SESSION_ID).cloned() {
+            return Ok(cell);
         }
-
-        let desired = cfg.endpoint;
-        let existing = {
-            let mut registry = self.state().registry.lock().expect("Browser sessions");
-            if registry.cdp_endpoint.as_ref() == Some(&desired)
-                && registry.sessions.contains_key(CDP_SESSION_ID)
-            {
-                return Ok(());
-            }
-            if let Some(cell) = registry.sessions.get(CDP_SESSION_ID).cloned() {
-                registry.defaults.retain(|_, v| v != CDP_SESSION_ID);
-                Some(cell)
-            } else {
-                let session = self.new_session(
-                    CDP_SESSION_ID,
-                    SessionMode::Cdp,
-                    Some(desired.clone()),
-                    None,
-                    Phase::Saved,
-                )?;
-                registry.sessions.insert(
-                    CDP_SESSION_ID.to_owned(),
-                    Arc::new(AsyncMutex::new(session)),
-                );
-                registry.cdp_endpoint = Some(desired.clone());
-                None
-            }
-        };
-        if let Some(cell) = existing {
-            let mut session = cell.lock().await;
-            self.cleanup_session_resources(&mut session).await?;
-            *session = self.new_session(
-                CDP_SESSION_ID,
-                SessionMode::Cdp,
-                Some(desired.clone()),
-                None,
-                Phase::Saved,
-            )?;
-            self.state()
-                .registry
-                .lock()
-                .expect("Browser sessions")
-                .cdp_endpoint = Some(desired);
-        }
-        Ok(())
-    }
-    fn has_open_default(state: &Registry, owner: &OwnerRef) -> bool {
-        let Some(default_id) = state.defaults.get(&caller(owner)) else {
-            return false;
-        };
-        let Some(cell) = state.sessions.get(default_id) else {
-            return false;
-        };
-        match cell.try_lock() {
-            Err(_) => true,
-            Ok(session) => session.mode == SessionMode::Managed && session.phase != Phase::Saved,
-        }
-    }
-    fn claim_or_create_managed(
-        &self,
-        state: &mut Registry,
-        owner: &OwnerRef,
-        preserve_open_default: bool,
-    ) -> Result<(String, Cell), &'static str> {
-        // Reuse an available signed-in profile instead of silently creating an
-        // empty one after a conversation ends or the Host restarts. An active
-        // operator is never displaced; independent concurrent conversations
-        // claim distinct idle profiles or create a new isolated profile.
-        let claimed = state.sessions.iter().find_map(|(id, cell)| {
-            let session = cell.try_lock().ok()?;
-            (session.mode == SessionMode::Managed
-                && session.operator.is_none()
-                && session.phase != Phase::Unknown
-                && session.cleanup.is_none())
-            .then(|| (id.clone(), cell.clone()))
-        });
-        if let Some((id, cell)) = claimed {
-            let mut session = cell.try_lock().map_err(|_| "busy")?;
-            if session.operator.is_some() {
-                return Err("busy");
-            }
-            if let Some(target) = &session.target {
-                self.port
-                    .coordinator
-                    .invalidate_browser_session_references(&session.lease, target)
-                    .map_err(|_| "busy")?;
-            }
-            session.operator = Some(owner.clone());
-            drop(session);
-            if !(preserve_open_default && Self::has_open_default(state, owner)) {
-                state.defaults.insert(caller(owner), id.clone());
-            }
-            return Ok((id, cell));
-        }
-        let id = uuid::Uuid::new_v4().simple().to_string();
         let cell = Arc::new(AsyncMutex::new(self.new_session(
-            &id,
-            SessionMode::Managed,
+            BROWSER_SESSION_ID.to_owned(),
+            CdpSessionScope::SharedExisting,
             None,
-            Some(owner.clone()),
-            Phase::New,
+            Phase::Saved,
         )?));
-        let update_default = !(preserve_open_default && Self::has_open_default(state, owner));
-        state.sessions.insert(id.clone(), cell.clone());
-        if update_default {
-            state.defaults.insert(caller(owner), id.clone());
+        registry
+            .sessions
+            .insert(BROWSER_SESSION_ID.to_owned(), cell.clone());
+        Ok(cell)
+    }
+    fn create_tab_group_session_in(
+        &self,
+        registry: &mut Registry,
+        owner: &OwnerRef,
+    ) -> Result<(String, Cell), &'static str> {
+        let bg_count = registry
+            .sessions
+            .keys()
+            .filter(|id| id.as_str() != BROWSER_SESSION_ID)
+            .count();
+        if bg_count >= MAX_TAB_GROUP_SESSIONS {
+            return Err("capacity_busy");
         }
+        let seq = registry.next_group_seq + 1;
+        let title = format!("Styx · {seq}");
+        let color = TAB_GROUP_COLORS[((seq - 1) as usize) % TAB_GROUP_COLORS.len()].to_owned();
+        let id = format!("bg-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        let session = self.new_session(
+            id.clone(),
+            CdpSessionScope::TabGroup { title, color },
+            Some(owner.clone()),
+            Phase::Saved,
+        )?;
+        registry.next_group_seq = seq;
+        let cell = Arc::new(AsyncMutex::new(session));
+        registry.sessions.insert(id.clone(), cell.clone());
+        registry.owner_default.insert(caller(owner), id.clone());
         Ok((id, cell))
     }
     fn resolve(
         &self,
         owner: &OwnerRef,
         id: Option<String>,
-        create: bool,
-        action_name: Option<&str>,
     ) -> Result<(String, Cell), &'static str> {
-        // Serialize claiming with the existing caller fence, without retaining
-        // caller access over async work or persisting a second lifecycle record.
         let _caller = self.active_caller(owner)?;
-        let mut state = self.state().registry.lock().expect("Browser sessions");
-        if id.as_deref() == Some(NEW_SESSION_ID) {
-            if !create {
-                return Err("browser_session_not_found");
+        let mut registry = self.state().registry.lock().expect("Browser sessions");
+        match id.as_deref() {
+            Some(BROWSER_SESSION_ID) => {
+                let cell = self.ensure_shared_existing_in(&mut registry)?;
+                Ok((BROWSER_SESSION_ID.to_owned(), cell))
             }
-            return self.claim_or_create_managed(&mut state, owner, true);
-        }
-        if let Some(explicit_id) = id {
-            return state
-                .sessions
-                .get(&explicit_id)
-                .cloned()
-                .map(|cell| (explicit_id, cell))
-                .ok_or("browser_session_not_found");
-        }
-        if let Some(default_id) = state.defaults.get(&caller(owner)).cloned() {
-            let cell = state
-                .sessions
-                .get(&default_id)
-                .cloned()
-                .ok_or("browser_session_not_found")?;
-            if is_public_mcp_subject(owner) && create && action_name == Some("browser_navigate") {
-                let should_isolate = match cell.try_lock() {
-                    Err(_) => true,
-                    Ok(session) => session.phase != Phase::Saved,
-                };
-                if should_isolate {
-                    return self.claim_or_create_managed(&mut state, owner, true);
+            Some("new") => self.create_tab_group_session_in(&mut registry, owner),
+            Some(explicit_id) => {
+                let cell = registry
+                    .sessions
+                    .get(explicit_id)
+                    .cloned()
+                    .ok_or("browser_session_not_found")?;
+                Ok((explicit_id.to_owned(), cell))
+            }
+            None => {
+                if let Some(default_id) = registry.owner_default.get(&caller(owner)).cloned()
+                    && let Some(cell) = registry.sessions.get(&default_id).cloned()
+                {
+                    return Ok((default_id, cell));
                 }
+                self.create_tab_group_session_in(&mut registry, owner)
             }
-            return Ok((default_id, cell));
         }
-        if !create {
-            return Err("browser_not_open");
+    }
+    fn resolve_for_takeover(
+        &self,
+        owner: &OwnerRef,
+        session_id: String,
+    ) -> Result<(String, Cell), &'static str> {
+        let _caller = self.active_caller(owner)?;
+        let mut registry = self.state().registry.lock().expect("Browser sessions");
+        if session_id == BROWSER_SESSION_ID {
+            let cell = self.ensure_shared_existing_in(&mut registry)?;
+            return Ok((BROWSER_SESSION_ID.to_owned(), cell));
         }
-        self.claim_or_create_managed(&mut state, owner, true)
+        let cell = registry
+            .sessions
+            .get(&session_id)
+            .cloned()
+            .ok_or("browser_session_not_found")?;
+        Ok((session_id, cell))
+    }
+    fn remove_session_entry(&self, id: &str) {
+        if id == BROWSER_SESSION_ID {
+            return;
+        }
+        let mut registry = self.state().registry.lock().expect("Browser sessions");
+        registry.sessions.remove(id);
+        registry.owner_default.retain(|_, v| v != id);
     }
     async fn cleanup_session_resources(&self, session: &mut Session) -> Result<(), &'static str> {
         if session.phase == Phase::Saved && session.target.is_none() && session.cleanup.is_none() {
@@ -484,64 +353,50 @@ impl Engine<'_> {
         }
         Ok(())
     }
-    fn close_payload(id: &str, is_cdp: bool) -> Value {
-        if is_cdp {
-            json!({
-                "browser_session_id": id,
-                "closed": true,
-                "detached": true,
-                "profile_persistent": false,
-                "profile_preserved": false,
-            })
-        } else {
-            json!({"browser_session_id": id, "closed": true, "profile_preserved": true})
-        }
+    fn close_payload(id: &str) -> Value {
+        json!({
+            "browser_session_id": id,
+            "closed": true,
+            "detached": true,
+            "profile_persistent": false,
+            "profile_preserved": false,
+        })
     }
     async fn close(&self, id: &str, session: &mut Session) -> CallToolResult {
-        let is_cdp = session.mode == SessionMode::Cdp;
-        let endpoint_key = session.cdp_endpoint_key.clone();
         if session.phase == Phase::Saved && session.target.is_none() {
             session.operator = None;
-            return success(Self::close_payload(id, is_cdp));
+            return success(Self::close_payload(id));
         }
         if self.cleanup_session_resources(session).await.is_err() {
             return failure("outcome_unknown", true);
         }
-        if is_cdp
-            && !self
-                .state()
-                .registry
-                .lock()
-                .expect("Browser sessions")
-                .sessions
-                .contains_key(id)
-        {
-            session.operator = None;
-            session.phase = Phase::Unknown;
-            return success(Self::close_payload(id, true));
-        }
-        *session = match self.new_session(id, session.mode, endpoint_key, None, Phase::Saved) {
+        *session = match self.new_session(
+            session.id.clone(),
+            session.scope.clone(),
+            None,
+            Phase::Saved,
+        ) {
             Ok(saved) => saved,
             Err(code) => return failure(code, false),
         };
-        success(Self::close_payload(id, is_cdp))
+        success(Self::close_payload(id))
     }
-    /// Capability shutdown already proved physical exit. Reclaim that context's
-    /// local owner/profile on the next request, without starting a browser.
+    /// Capability shutdown already proved physical exit. Reclaim exited local
+    /// owners/sessions on the next request without disturbing active parallel sessions.
     async fn collect_closed(&self) {
-        let entries: Vec<_> = self
-            .state()
-            .registry
-            .lock()
-            .expect("Browser sessions")
-            .sessions
-            .iter()
-            .map(|(id, c)| (id.clone(), c.clone()))
-            .collect();
+        let entries: Vec<(String, Cell)> = {
+            let registry = self.state().registry.lock().expect("Browser sessions");
+            registry
+                .sessions
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        let mut remove_ids = Vec::new();
         for (id, cell) in entries {
-            let Ok(mut s) = cell.try_lock() else { continue };
-            // A caller can finish while profile discovery or an action is
-            // pending. Its existing fenced/removed owner record is authoritative.
+            let Ok(mut s) = cell.try_lock() else {
+                continue;
+            };
             if s.operator
                 .as_ref()
                 .is_some_and(|operator| self.active_caller(operator).is_err())
@@ -569,8 +424,10 @@ impl Engine<'_> {
                 })
             {
                 let operator = s.operator.clone();
-                let _ = self.close(&id, &mut s).await;
-                if s.phase == Phase::Saved
+                let res = self.close(&id, &mut s).await;
+                if res.is_error != Some(true) && id != BROWSER_SESSION_ID {
+                    remove_ids.push(id);
+                } else if s.phase == Phase::Saved
                     && operator
                         .as_ref()
                         .is_some_and(|op| self.active_caller(op).is_ok())
@@ -579,112 +436,146 @@ impl Engine<'_> {
                 }
             }
         }
+        for id in remove_ids {
+            self.remove_session_entry(&id);
+        }
     }
     pub(crate) async fn handle(
         &self,
         owner: OwnerRef,
         command: BrowserSessionCommand,
     ) -> CallToolResult {
-        if let Err(code) = self.restore_profiles().await {
-            return failure(code, false);
-        }
-        if let Err(code) = self.sync_cdp_session().await {
-            return failure(code, false);
-        }
         self.collect_closed().await;
         if self.active_caller(&owner).is_err() {
             return failure("unauthorized", false);
         }
         match command {
             BrowserSessionCommand::List => {
-                let entries: Vec<_> = self
-                    .state()
-                    .registry
-                    .lock()
-                    .expect("Browser sessions")
-                    .sessions
-                    .iter()
-                    .map(|(id, c)| (id.clone(), c.clone()))
-                    .collect();
-                let mut sessions = Vec::new();
+                let entries: Vec<(String, Cell)> = {
+                    let mut registry = self.state().registry.lock().expect("Browser sessions");
+                    if let Err(code) = self.ensure_shared_existing_in(&mut registry) {
+                        return failure(code, false);
+                    }
+                    registry
+                        .sessions
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                };
+                let mut list = Vec::with_capacity(entries.len());
                 for (id, cell) in entries {
-                    sessions.push(match cell.try_lock() {
+                    let item = match cell.try_lock() {
                         Ok(session) => {
-                            let is_cdp = session.mode == SessionMode::Cdp;
-                            json!({
+                            let (mode, title, color) = match &session.scope {
+                                CdpSessionScope::SharedExisting => {
+                                    ("extension_existing", None, None)
+                                }
+                                CdpSessionScope::TabGroup { title, color } => (
+                                    "extension_tab_group",
+                                    Some(title.as_str()),
+                                    Some(color.as_str()),
+                                ),
+                            };
+                            let mut obj = json!({
                                 "browser_session_id": id,
-                                "mode": if is_cdp { "cdp" } else { "managed" },
-                                "attached_existing_browser": is_cdp,
+                                "mode": mode,
+                                "attached_existing_browser": true,
                                 "current_operator": session.operator.as_ref() == Some(&owner),
-                                "profile_persistent": !is_cdp,
+                                "profile_persistent": false,
                                 "available": session.operator.is_none() && session.phase != Phase::Unknown && session.cleanup.is_none(),
                                 "status": match session.phase {
                                     Phase::Saved => "saved",
-                                    Phase::New => "not_opened",
                                     Phase::Ready => "open",
                                     Phase::Unknown => "outcome_unknown",
                                 },
+                            });
+                            if let (Some(t), Some(c)) = (title, color) {
+                                obj["tab_group_title"] = json!(t);
+                                obj["tab_group_color"] = json!(c);
+                            }
+                            obj
+                        }
+                        Err(_) => {
+                            let mode = if id == BROWSER_SESSION_ID {
+                                "extension_existing"
+                            } else {
+                                "extension_tab_group"
+                            };
+                            json!({
+                                "browser_session_id": id,
+                                "mode": mode,
+                                "attached_existing_browser": true,
+                                "status": "busy",
                             })
                         }
-                        Err(_) => json!({"browser_session_id": id, "status": "busy"}),
-                    });
+                    };
+                    list.push(item);
                 }
-                success(json!({"sessions":sessions}))
+                success(json!({ "sessions": list }))
             }
             BrowserSessionCommand::TakeOver { session_id } => {
-                let (id, cell) = match self.resolve(&owner, Some(session_id), false, None) {
+                let (id, cell) = match self.resolve_for_takeover(&owner, session_id) {
                     Ok(v) => v,
                     Err(e) => return failure(e, false),
                 };
-                let Ok(mut s) = cell.try_lock() else {
-                    return failure("busy", false);
-                };
-                let _caller = match self.active_caller(&owner) {
-                    Ok(guard) => guard,
-                    Err(code) => return failure(code, false),
-                };
-                if s.mode == SessionMode::Cdp
-                    && self
-                        .state()
-                        .registry
-                        .lock()
-                        .expect("Browser sessions")
-                        .sessions
-                        .get(&id)
-                        .is_none_or(|current| !Arc::ptr_eq(current, &cell))
-                {
-                    return failure("browser_session_not_found", false);
-                }
-                if s.cleanup.is_some() {
-                    return failure("outcome_unknown", true);
-                }
-                if s.operator.as_ref() != Some(&owner) {
-                    if let Some(target) = &s.target
-                        && self
-                            .port
-                            .coordinator
-                            .invalidate_browser_session_references(&s.lease, target)
-                            .is_err()
-                    {
+                let (mode, title, color, status) = {
+                    let Ok(mut s) = cell.try_lock() else {
                         return failure("busy", false);
+                    };
+                    let _caller = match self.active_caller(&owner) {
+                        Ok(guard) => guard,
+                        Err(code) => return failure(code, false),
+                    };
+                    if s.cleanup.is_some() {
+                        return failure("outcome_unknown", true);
                     }
-                    s.operator = Some(owner.clone());
+                    if s.operator.as_ref() != Some(&owner) {
+                        if let Some(target) = &s.target
+                            && self
+                                .port
+                                .coordinator
+                                .invalidate_browser_session_references(&s.lease, target)
+                                .is_err()
+                        {
+                            return failure("busy", false);
+                        }
+                        s.operator = Some(owner.clone());
+                    }
+                    let (mode, title, color) = match &s.scope {
+                        CdpSessionScope::SharedExisting => ("extension_existing", None, None),
+                        CdpSessionScope::TabGroup { title, color } => (
+                            "extension_tab_group",
+                            Some(title.clone()),
+                            Some(color.clone()),
+                        ),
+                    };
+                    let status = match s.phase {
+                        Phase::Saved => "saved",
+                        Phase::Ready => "open",
+                        Phase::Unknown => "outcome_unknown",
+                    };
+                    (mode, title, color, status)
+                };
+                {
+                    let mut registry = self.state().registry.lock().expect("Browser sessions");
+                    if registry.sessions.contains_key(&id) {
+                        registry.owner_default.insert(caller(&owner), id.clone());
+                    }
                 }
-                // An old operator's default remains bound to this ID and is
-                // refused; an implicit action must never take the context back.
-                // Never make `existing-browser` the caller's implicit default.
-                if s.mode == SessionMode::Managed {
-                    self.state()
-                        .registry
-                        .lock()
-                        .expect("Browser sessions")
-                        .defaults
-                        .insert(caller(&owner), id.clone());
+                let mut payload = json!({
+                    "browser_session_id": id,
+                    "mode": mode,
+                    "attached_existing_browser": true,
+                    "current_operator": true,
+                    "profile_persistent": false,
+                    "status": status,
+                    "refresh_snapshot": true,
+                });
+                if let (Some(t), Some(c)) = (title, color) {
+                    payload["tab_group_title"] = json!(t);
+                    payload["tab_group_color"] = json!(c);
                 }
-                let is_cdp = s.mode == SessionMode::Cdp;
-                success(
-                    json!({"browser_session_id":id,"mode":if is_cdp {"cdp"} else {"managed"},"attached_existing_browser":is_cdp,"current_operator":true,"profile_persistent":!is_cdp,"status":match s.phase {Phase::Saved=>"saved",Phase::New=>"not_opened",Phase::Ready=>"open",Phase::Unknown=>"outcome_unknown"},"refresh_snapshot":true}),
-                )
+                success(payload)
             }
             BrowserSessionCommand::Action {
                 session_id,
@@ -699,30 +590,16 @@ impl Engine<'_> {
                     return failure("invalid_arguments", false);
                 }
                 let close = action.is_close();
-                let (id, cell) = match self.resolve(&owner, session_id, !close, Some(name.as_str()))
-                {
+                let (id, cell) = match self.resolve(&owner, session_id) {
                     Ok(v) => v,
                     Err(e) => return failure(e, false),
                 };
                 let mut session = cell.lock().await;
-                let session_mode = session.mode;
                 {
                     let _caller = match self.active_caller(&owner) {
                         Ok(guard) => guard,
                         Err(code) => return failure(code, false),
                     };
-                    if session_mode == SessionMode::Cdp
-                        && self
-                            .state()
-                            .registry
-                            .lock()
-                            .expect("Browser sessions")
-                            .sessions
-                            .get(&id)
-                            .is_none_or(|current| !Arc::ptr_eq(current, &cell))
-                    {
-                        return failure("browser_session_not_found", false);
-                    }
                     if session.operator.is_none() {
                         if let Some(target) = &session.target
                             && self
@@ -734,18 +611,17 @@ impl Engine<'_> {
                             return failure("busy", false);
                         }
                         session.operator = Some(owner.clone());
-                        if session_mode == SessionMode::Managed {
-                            let mut state = self.state().registry.lock().expect("Browser sessions");
-                            if !Self::has_open_default(&state, &owner) {
-                                state.defaults.insert(caller(&owner), id.clone());
-                            }
-                        }
                     } else if session.operator.as_ref() != Some(&owner) {
                         return failure("browser_session_transferred", false);
                     }
                 }
                 let mut result = if close {
-                    self.close(&id, &mut session).await
+                    let closed = self.close(&id, &mut session).await;
+                    drop(session);
+                    if closed.is_error != Some(true) && id != BROWSER_SESSION_ID {
+                        self.remove_session_entry(&id);
+                    }
+                    closed
                 } else {
                     if session.cleanup.is_none()
                         && session.target.as_ref().is_some_and(|target| {
@@ -764,26 +640,34 @@ impl Engine<'_> {
                             session.operator = operator;
                         }
                     }
-                    self.execute(&id, &mut session, action, &name).await
-                };
-                if !close
-                    && session.cleanup.is_none()
-                    && session.target.as_ref().is_some_and(|target| {
-                        self.port
-                            .coordinator
-                            .browser_session_exited(&session.lease, target)
-                    })
-                {
-                    let operator = session.operator.clone();
-                    let _ = self.close(&id, &mut session).await;
-                    if session.phase == Phase::Saved
-                        && operator
-                            .as_ref()
-                            .is_some_and(|op| self.active_caller(op).is_ok())
+                    let res = self.execute(&id, &mut session, action, &name).await;
+                    if !close
+                        && session.cleanup.is_none()
+                        && session.target.as_ref().is_some_and(|target| {
+                            self.port
+                                .coordinator
+                                .browser_session_exited(&session.lease, target)
+                        })
                     {
-                        // Keep the first outcome. An action may have taken effect
-                        // before its worker exited; repeating it is not safe.
-                        session.operator = operator;
+                        let operator = session.operator.clone();
+                        let _ = self.close(&id, &mut session).await;
+                        if session.phase == Phase::Saved
+                            && operator
+                                .as_ref()
+                                .is_some_and(|op| self.active_caller(op).is_ok())
+                        {
+                            // Keep the first outcome. An action may have taken effect
+                            // before its worker exited; repeating it is not safe.
+                            session.operator = operator;
+                        }
+                    }
+                    drop(session);
+                    res
+                };
+                if !close {
+                    let mut registry = self.state().registry.lock().expect("Browser sessions");
+                    if registry.sessions.contains_key(&id) {
+                        registry.owner_default.insert(caller(&owner), id.clone());
                     }
                 }
                 let metadata = result.structured_content.get_or_insert_with(|| json!({}));
@@ -817,12 +701,14 @@ impl Engine<'_> {
         if s.phase == Phase::Unknown {
             return failure("outcome_unknown", true);
         }
-        if matches!(s.phase, Phase::New | Phase::Saved) {
+        if s.phase == Phase::Saved {
             s.phase = Phase::Unknown; // Dropped waiters never cause automatic replay.
             let reply = self
                 .exchange(
                     s,
-                    BrowserCommand::PrepareOpen,
+                    BrowserCommand::PrepareOpen {
+                        scope: s.scope.clone(),
+                    },
                     BROWSER_WAIT_PREPARE_TIMEOUT_MS,
                 )
                 .await;
@@ -837,7 +723,7 @@ impl Engine<'_> {
                 }
                 other => {
                     if not_dispatched(&other) {
-                        s.phase = Phase::New;
+                        s.phase = Phase::Saved;
                     }
                     return refusal(&other);
                 }
@@ -864,7 +750,7 @@ impl Engine<'_> {
                 other => {
                     if not_dispatched(&other) {
                         s.target = None;
-                        s.phase = Phase::New;
+                        s.phase = Phase::Saved;
                     }
                     return refusal(&other);
                 }
@@ -884,7 +770,7 @@ impl Engine<'_> {
                     target: target.clone(),
                     action: raw,
                 },
-                action_timeout(name, s.mode),
+                action_timeout(name),
             )
             .await;
         let action = match reply {
@@ -910,7 +796,7 @@ impl Engine<'_> {
             .exchange(
                 s,
                 BrowserCommand::DispatchAction { action },
-                action_timeout(name, s.mode),
+                action_timeout(name),
             )
             .await;
         self.finish_action(id, s, &operation_id, digest, &target, reply)
@@ -960,8 +846,7 @@ impl Engine<'_> {
                 && snapshot.payload_digest == digest
                 && snapshot.target.as_ref() == Some(target) =>
             {
-                if s.mode == SessionMode::Cdp && cause == Some(ErrorCategory::CapabilityUnsupported)
-                {
+                if cause == Some(ErrorCategory::CapabilityUnsupported) {
                     let operator = s.operator.clone();
                     let _ = self.close(id, s).await;
                     if s.phase == Phase::Saved

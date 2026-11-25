@@ -109,26 +109,6 @@ pub(crate) fn fresh_private_directory(parent: &Path) -> Result<PrivateDirectory>
     Ok(result)
 }
 
-/// Reuse the store's existing private child creator; saved profiles keep their
-/// original ACL and contents instead of being replaced for each caller.
-pub(crate) fn open_or_create_private_directory(
-    parent: &Path,
-    name: &str,
-) -> Result<PrivateDirectory> {
-    canonical_path(parent)?;
-    let parent_root = PrivateRoot::open(parent).map_err(|_| BrowserError::PermissionDenied)?;
-    let root = parent_root
-        .open_or_create_private_child(name)
-        .map_err(|_| BrowserError::PermissionDenied)?;
-    let result = PrivateDirectory {
-        path: parent.join(name),
-        root,
-        parent: parent_root,
-    };
-    result.revalidate()?;
-    Ok(result)
-}
-
 pub(crate) struct PreparedBrowserAssets {
     stage: PrivateDirectory,
     dependency: PrivateRoot,

@@ -13,7 +13,7 @@ impl Fixture {
             std::env::temp_dir().join(format!("styx-browser-admission-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-        for name in ["workspace", "profile", "output"] {
+        for name in ["workspace", "output"] {
             let path = root.join(name);
             std::fs::create_dir(&path).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -24,11 +24,9 @@ impl Fixture {
         let never_started = std::fs::canonicalize("/usr/bin/true").unwrap();
         OwnedBrowserConfig {
             node_binary: never_started.clone(),
-            worker_entry: never_started.clone(),
-            browser_binary: never_started,
-            cdp_endpoint: None,
+            worker_entry: never_started,
+            cdp_endpoint: "ws://127.0.0.1:9222/devtools/browser/fixture".to_owned(),
             workspace_dir: self.0.join("workspace"),
-            profile_dir: self.0.join("profile"),
             output_dir: self.0.join("output"),
             rpc_timeout: Duration::from_secs(1),
         }
@@ -511,46 +509,38 @@ fn frozen_tools_paths_and_snapshot_reference_policy_batch() {
 }
 
 #[test]
-fn cdp_owned_browser_config_validates_loopback_canonicality_and_disallows_browser_binary() {
+fn extension_bridge_owned_browser_config_validates_loopback_ws_canonicality() {
     let fixture = Fixture::new();
-    let mut cdp = fixture.config();
-    let saved_binary = cdp.browser_binary.clone();
-    cdp.browser_binary = PathBuf::new();
-    cdp.cdp_endpoint = Some("http://127.0.0.1:9222".to_owned());
-    cdp.validate().unwrap();
-    let ws_cdp = OwnedBrowserConfig {
-        cdp_endpoint: Some("ws://localhost:9333/devtools/browser/abc-1".to_owned()),
-        ..cdp.clone()
+    let cfg = fixture.config();
+    cfg.validate().unwrap();
+    let ws_other = OwnedBrowserConfig {
+        cdp_endpoint: "ws://localhost:9333/devtools/browser/abc-1".to_owned(),
+        ..cfg.clone()
     };
-    ws_cdp.validate().unwrap();
-    assert_ne!(cdp.digest().unwrap(), ws_cdp.digest().unwrap());
+    ws_other.validate().unwrap();
+    assert_ne!(cfg.digest().unwrap(), ws_other.digest().unwrap());
 
-    let mut bad_remote = cdp.clone();
-    bad_remote.cdp_endpoint = Some("http://192.168.1.5:9222".to_owned());
-    assert_eq!(
-        bad_remote.validate().unwrap_err(),
-        BrowserError::InvalidRequest
-    );
-
-    let mut bad_noncanonical = cdp.clone();
-    bad_noncanonical.cdp_endpoint = Some("http://LOCALHOST:9222/".to_owned());
-    assert_eq!(
-        bad_noncanonical.validate().unwrap_err(),
-        BrowserError::InvalidRequest
-    );
-
-    let mut bad_mixed = cdp;
-    bad_mixed.browser_binary = saved_binary;
-    assert_eq!(
-        bad_mixed.validate().unwrap_err(),
-        BrowserError::InvalidRequest
-    );
+    for invalid in [
+        "http://127.0.0.1:9222",
+        "http://192.168.1.5:9222",
+        "ws://LOCALHOST:9222/devtools/browser/abc-1",
+        "ws://127.0.0.1:9222/devtools/browser/../secret",
+        "wss://127.0.0.1:9222/devtools/browser",
+    ] {
+        let mut bad = cfg.clone();
+        bad.cdp_endpoint = invalid.to_owned();
+        assert_eq!(
+            bad.validate().unwrap_err(),
+            BrowserError::InvalidRequest,
+            "expected InvalidRequest for {invalid:?}"
+        );
+    }
 }
 
 #[test]
-fn native_fact_accepts_cdp_unavailable_and_rejects_unknown_reasons() {
+fn native_fact_accepts_known_reasons_and_rejects_unknown_reasons() {
     use serde_json::json;
-    for reason in ["cdp_unavailable", "stale", "invalid"] {
+    for reason in ["cdp_unavailable", "stale", "invalid", "result_unconfirmed"] {
         let value = json!({
             "isError": true,
             "content": [{"type": "text", "text": format!("browser_native_{reason}")}],
@@ -558,13 +548,13 @@ fn native_fact_accepts_cdp_unavailable_and_rejects_unknown_reasons() {
                 "schema": 1,
                 "before": 1,
                 "after": 1,
-                "dispatched": false,
+                "dispatched": reason == "result_unconfirmed",
                 "reason": reason,
             }}
         });
         let result: CallToolResult = serde_json::from_value(value).unwrap();
         let fact = references::fact(&result).unwrap();
-        assert!(!fact.dispatched);
+        assert_eq!(fact.dispatched, reason == "result_unconfirmed");
         assert_eq!(fact.before, 1);
         assert_eq!(fact.after, 1);
         assert_eq!(fact.reason.as_deref(), Some(reason));

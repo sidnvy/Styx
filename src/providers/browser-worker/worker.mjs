@@ -1,5 +1,5 @@
 // External Browser executor only. The Rust Host owns all authorization, owner /
-// profile binding, URL/ref policy, request serialization and Unknown history.
+// extension-bridge binding, URL/ref policy, request serialization and Unknown history.
 import { pathToFileURL } from 'node:url';
 import { createConnection } from '@playwright/mcp';
 import { chromium } from 'playwright';
@@ -31,28 +31,10 @@ const stateTool = {
   inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 };
-let macProcess, macProcessClose;
 let nativeEpoch = 1, nativeClosed = false, epochExhausted = false;
 let closeRequestId;
-let isCdpMode = false, attachedBrowser;
+let attachedBrowser;
 let contextPromise, context, backend, client, server, startupPromise, closing = false, cleanupPromise;
-// Fixed Playwright 1.64 adapter only: reuse its existing in-process bridge,
-// never a new BrowserServer/listener or a process selected by remote input.
-function retainMacBrowserProcess(value, executable) {
-  if (process.platform !== 'darwin') return;
-  const implementation = value?._connection?.toImpl?.(value);
-  const child = implementation?._browser?.options?.browserProcess?.process;
-  if (!child || !Number.isInteger(child.pid) || child.pid <= 0 || child.pid > 0x7fffffff
-      || child.spawnfile !== executable || child.exitCode !== null || child.signalCode !== null
-      || macProcess) throw new Error('browser_original_process_unconfirmed');
-  macProcess = { schema: 1, pid: child.pid, original_child_closed: false };
-  // The closure retains the original ChildProcess until its actual close event;
-  // it is not inferred from a later PID census or an MCP close acknowledgement.
-  macProcessClose = new Promise(resolve => child.once('close', () => {
-    macProcess.original_child_closed = true;
-    resolve();
-  }));
-}
 function advanceEpoch() {
   if (epochExhausted) return false;
   if (nativeEpoch === Number.MAX_SAFE_INTEGER) {
@@ -93,12 +75,7 @@ async function cleanup() {
   cleanupPromise = (async () => {
     await startupPromise?.catch(() => {});
     await contextPromise?.catch(() => {});
-    if (isCdpMode) {
-      await closeCdpAttachment().catch(() => {});
-    } else {
-      await context?.close();
-      await macProcessClose;
-    }
+    await closeCdpAttachment().catch(() => {});
     await client?.close();
     await backend?.close();
     await server?.close();
@@ -113,24 +90,22 @@ function fail() {
 async function main() {
   if (process.versions.node.split('.')[0] !== '22' || process.argv.length !== 4 || process.argv[2] !== '--config') throw new Error('browser_worker_start_rejected');
   const config = readConfiguration(process.argv[3]);
-  isCdpMode = Object.hasOwn(config, 'cdp_endpoint');
-  // Use the installed browser with a visible window; no debug takeover or download.
+  // Use the Host-owned Extension Bridge WS endpoint; no debug takeover or download.
   delete process.env.PWDEBUG;
   process.env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = '1';
   const observeContext = (value, browser) => {
     const pageObserved = page => {
       advanceEpoch();
       fact('browser_native_page');
-      page.on('framenavigated', () => { advanceEpoch(); fact('browser_native_navigation'); });
+      page.on('framenavigated', frame => {
+        if (frame === page.mainFrame()) {
+          advanceEpoch();
+          fact('browser_native_navigation');
+        }
+      });
       page.once('close', () => {
         advanceEpoch();
         fact('browser_native_page_closed');
-        if (!isCdpMode && value.pages().length === 0) {
-          nativeClosed = true;
-          // macOS can keep Chrome alive after its last window closes. End this
-          // owned context; an explicit close keeps its response before cleanup.
-          if (!closing && closeRequestId === undefined) void cleanup().catch(fail);
-        }
       });
     };
     for (const page of value.pages()) pageObserved(page);
@@ -150,54 +125,30 @@ async function main() {
   };
   const getOwnedContext = () => {
     if (closing) throw new Error('browser_worker_closing');
-    // Cache the one launch/attach promise after closure or failure in managed
-    // mode; CDP mode resets pre-attach connection failures so retries stay NotDispatched.
-    if (isCdpMode) {
-      contextPromise ??= chromium.connectOverCDP(config.cdp_endpoint, {
-        noDefaults: true,
-        timeout: 25000,
-      }).then(async browser => {
-        const value = browser.contexts()[0];
-        if (!value) {
-          await browser.close().catch(() => {});
-          throw new Error('browser_cdp_unavailable');
-        }
-        attachedBrowser = browser;
-        context = value;
-        if (closing) {
-          await closeCdpAttachment();
-          throw new Error('browser_worker_closing');
-        }
-        observeContext(value, browser);
-        fact('browser_native_context_open');
-        return value;
-      }, err => {
-        if (!attachedBrowser && !closing) contextPromise = undefined;
-        const wrapped = new Error('browser_cdp_unavailable');
-        wrapped.cause = err;
-        throw wrapped;
-      });
-      return contextPromise;
-    }
-    contextPromise ??= chromium.launchPersistentContext(config.profile_dir, {
-      headless: false, chromiumSandbox: true, executablePath: config.browser_executable,
-      // Chromium must stay in the Rust-owned resource/cleanup boundary instead
-      // of asking the user manager to move its PID to another scope. Keep the
-      // supervisor's real bus, but give this child an explicit non-socket address;
-      // an absent address could trigger libdbus auto-discovery instead.
-      ...(process.platform === 'linux' ? {
-        env: { ...process.env, DBUS_SESSION_BUS_ADDRESS: 'unix:path=/dev/null' },
-      } : {}),
-      acceptDownloads: true, downloadsPath: config.output_dir,
-      viewport: null,
-    }).then(async value => {
+    // Extension-Bridge mode resets pre-attach connection failures so retries stay NotDispatched.
+    contextPromise ??= chromium.connectOverCDP(config.cdp_endpoint, {
+      noDefaults: true,
+      timeout: 25000,
+    }).then(async browser => {
+      const value = browser.contexts()[0];
+      if (!value) {
+        await browser.close().catch(() => {});
+        throw new Error('browser_cdp_unavailable');
+      }
+      attachedBrowser = browser;
       context = value;
-      retainMacBrowserProcess(value, config.browser_executable);
-      if (closing) { await value.close(); throw new Error('browser_worker_closing'); }
-      observeContext(value);
-      await value.pages()[0]?.bringToFront();
+      if (closing) {
+        await closeCdpAttachment();
+        throw new Error('browser_worker_closing');
+      }
+      observeContext(value, browser);
       fact('browser_native_context_open');
       return value;
+    }, err => {
+      if (!attachedBrowser && !closing) contextPromise = undefined;
+      const wrapped = new Error('browser_cdp_unavailable');
+      wrapped.cause = err;
+      throw wrapped;
     });
     return contextPromise;
   };
@@ -230,10 +181,9 @@ async function main() {
         schema: 1, epoch: nativeEpoch,
         ready: !!context && !nativeClosed && !closing && !epochExhausted,
         closed: nativeClosed || epochExhausted,
-        ...(process.platform === 'darwin' ? { mac_process: macProcess ?? null } : {}),
       } }, nativeEpoch, false);
     }
-    // Reject known-invalid/stale calls before any avoidable native launch.
+    // Reject known-invalid/stale calls before any avoidable attach.
     if (closing || nativeClosed || epochExhausted
         || (expected !== undefined && expected !== nativeEpoch)) return refused('stale');
     // Use the exact same cached promise as upstream's context getter. Record
@@ -241,7 +191,7 @@ async function main() {
     // never retry a tool/snapshot or create a replacement context on failure.
     try { await getOwnedContext(); }
     catch (error) {
-      if (isCdpMode && !attachedBrowser && error?.message === 'browser_cdp_unavailable') {
+      if (!attachedBrowser && error?.message === 'browser_cdp_unavailable') {
         return refused('cdp_unavailable');
       }
       throw new Error('browser_native_context_unconfirmed');
@@ -260,23 +210,21 @@ async function main() {
     try {
       result = await client.callTool({ name: params.name, arguments: params.arguments ?? {} }, undefined, { signal: extra.signal });
       if (params.name === 'browser_close' || nativeClosed) {
-        // Context closure / CDP detach is not Node exit/physical process-tree cleanup.
+        // Context detach is not Node exit/physical process-tree cleanup.
         closing = true;
-        if (isCdpMode) {
-          await contextPromise?.catch(() => {});
-          await closeCdpAttachment();
-        } else {
-          const ownedContext = await contextPromise;
-          if (!ownedContext) throw new Error('browser_worker_close_unconfirmed');
-          await ownedContext.close();
-          await macProcessClose;
-        }
+        await contextPromise?.catch(() => {});
+        await closeCdpAttachment();
         result = { ...result, structuredContent: { ...result.structuredContent, styx_context_closed: true } };
       }
     } catch {
       // Bytes may already have reached the native backend: never call this
       // NotSent, replay it, or disclose upstream exception/private arguments.
-      result = { isError: true, content: [{ type: 'text', text: 'browser_native_result_unconfirmed' }] };
+      return withNativeMeta(
+        { isError: true, content: [{ type: 'text', text: 'browser_native_result_unconfirmed' }] },
+        before,
+        true,
+        'result_unconfirmed',
+      );
     }
     // Upstream cannot spoof this wrapper's dispatch/epoch facts.
     return withNativeMeta(result, before, true);

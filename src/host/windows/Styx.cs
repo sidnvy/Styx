@@ -255,17 +255,9 @@ namespace StyxNative {
    {"This computer uses the main computer's Styx connection. Configure ChatGPT on the computer that invited you.","这台电脑使用管理电脑的 Styx 连接，请在邀请你的电脑上配置 ChatGPT。"},
    {"Computer Use","操作电脑"},
    {"Browser","操作浏览器"},
-   {"Browser — visible window on this computer","操作浏览器 — 在这台电脑上打开可见窗口"},
-   {"Browser opens a separate window on this computer. Sign in or interact there, then ask ChatGPT to continue in the same session.","浏览器会在这台电脑上打开独立窗口。你可以直接登录或操作，完成后让 ChatGPT 在同一会话中继续。"},
+   {"Browser — Chrome Extension Bridge on this computer","操作浏览器 — 通过 Chrome 扩展桥接操作本机浏览器"},
+   {"Browser connects to your everyday Chrome/Edge/Chromium on this computer via the Styx Extension Bridge. Sign in or open pages directly in your browser, then ask ChatGPT to continue in the same session.","浏览器功能通过 Styx Chrome 扩展桥接连接你本机正在使用的 Chrome/Edge/Chromium。你可以直接在浏览器中登录或打开页面，再让 ChatGPT 在同一会话中继续。"},
    {"Choose the features to enable on this computer. Browser and Computer Use need an available signed-in desktop.","选择在这台电脑上启用的功能。操作浏览器和电脑需要已登录的桌面。"},
-   {"Exec","运行命令"},
-   {"Attach to existing browser (CDP, advanced)","连接现有浏览器（CDP，高级）"},
-   {"Off by default; concurrent Browser tasks still use isolated windows by default. When enabled, ChatGPT only attaches to your existing Chrome/Edge/Chromium tabs and sign-ins when explicitly selecting existing-browser. Supports chrome://inspect/#remote-debugging auto-discovery or an optional local loopback URL (such as http://127.0.0.1:9222).","默认关闭；并发浏览器任务仍默认使用独立隔离窗口。开启后，仅当显式选择 existing-browser 时才连接你本机已打开的 Chrome/Edge/Chromium 标签页与登录态。支持在浏览器打开 chrome://inspect/#remote-debugging 自动发现，或选填本机环回地址（如 http://127.0.0.1:9222）。"},
-   {"Detected local debugging endpoint: ","已检测到本机调试端口："},
-   {"Optional loopback CDP URL (blank for auto-detect, e.g. http://127.0.0.1:9222)","可选环回 CDP 地址（留空自动发现，如 http://127.0.0.1:9222）"},
-   {"Save CDP endpoint","保存 CDP 地址"},
-   {"Use CDP auto-detect","改为自动发现"},
-   {"Invalid input. Custom browser CDP endpoints only allow local loopback http:// or ws:// URLs (such as http://127.0.0.1:9222).","输入无效。自定义浏览器 CDP 地址仅支持本机环回 http:// 或 ws:// URL（如 http://127.0.0.1:9222）。"},
    {"Settings have not fully applied. Refresh to check their status.","设置尚未完全生效，请刷新状态查看。"},
    {"The setting result is unconfirmed. Refresh the status before trying again.","设置结果尚未确认，请刷新状态后重试。"}
   };
@@ -426,11 +418,10 @@ namespace StyxNative {
   internal void Verify(){var budget=Json.Obj("volumes",new object[]{Json.Obj("requiredBytes",2147483648d,"availableBytes",1073741824d)});if(!SpaceFeedback(budget,true).Contains("upgrade has not started")||SpaceFeedback(budget,false).Contains("upgrade has not started")||!SpaceFeedback(budget,true).Contains("Required:"))throw new Exception("space_feedback_failed");if(panel.Controls.Count!=1||settings.Controls.Count!=1||icon.Width<16)throw new Exception("native_shell_failed");settings.Verify();}
  }
  sealed class Settings:Form {
-  sealed class CapabilityDraft {internal string Label=Environment.MachineName,LanAddress="";internal bool Exec=true,Computer,Browser,AllowRemoteHosts;internal int Channel;}
+  sealed class CapabilityDraft {internal string Label=Environment.MachineName,LanAddress="";internal bool Exec=true,Computer,Browser,AllowRemoteHosts;}
   readonly StyxContext owner;readonly FlowLayoutPanel content,navigation;readonly TableLayoutPanel startupPanel;readonly Label startupText;readonly ProgressBar startupProgress;readonly Button retryStartup;readonly Label feedback,statusReadout,observationError;readonly Dictionary<string,CapabilityDraft> capabilityDrafts=new Dictionary<string,CapabilityDraft>();
-  string renderedRustOverviewKey="",browserCdpDraft="";
-  bool browserCdpDraftEdited;
-  string page="welcome",joinOrigin,joinCa;bool localCreationSubmitted;TextBox label,link;CheckBox exec,computer,browser;ComboBox channel;
+  string renderedRustOverviewKey="";
+  string page="welcome",joinOrigin,joinCa;bool localCreationSubmitted;TextBox label,link;CheckBox exec,computer,browser;
   internal Settings(StyxContext context,Icon icon){owner=context;Text=StyxContext.UI("Styx Settings");Icon=icon;ClientSize=new Size(590,720);MinimumSize=new Size(550,650);Font=new Font("Segoe UI",10);BackColor=Color.FromArgb(249,249,247);AutoScaleMode=AutoScaleMode.Dpi;StartPosition=FormStartPosition.CenterScreen;var outer=new TableLayoutPanel { Dock=DockStyle.Fill,RowCount=3,ColumnCount=1,Padding=new Padding(0) };outer.RowStyles.Add(new RowStyle(SizeType.Absolute,62));outer.RowStyles.Add(new RowStyle(SizeType.AutoSize));outer.RowStyles.Add(new RowStyle(SizeType.Percent,100));Controls.Add(outer);navigation=new FlowLayoutPanel { Dock=DockStyle.Fill,WrapContents=false,Padding=new Padding(15,8,0,0) };outer.Controls.Add(navigation,0,0);StyxContext.Button(navigation,"Computers",()=>{ShowPage("overview");return Task.FromResult(0);}).MinimumSize=new Size(100,32);StyxContext.Button(navigation,"ChatGPT",()=>{ShowPage("chat");return Task.FromResult(0);}).MinimumSize=new Size(100,32);StyxContext.Button(navigation,"General",()=>{ShowPage("general");return Task.FromResult(0);}).MinimumSize=new Size(100,32);foreach(Control item in navigation.Controls){item.AutoSize=false;item.Width=165;item.Height=36;}startupPanel=new TableLayoutPanel {Dock=DockStyle.Top,AutoSize=true,ColumnCount=2,RowCount=2,Padding=new Padding(26,8,26,12),Visible=false};startupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));startupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));startupText=new Label {AutoSize=true,MaximumSize=new Size(390,0),Margin=new Padding(0,0,10,8)};startupProgress=new ProgressBar {Dock=DockStyle.Top,Height=8,Style=ProgressBarStyle.Marquee,MarqueeAnimationSpeed=25};retryStartup=new Button {Text="Retry",AutoSize=true,MinimumSize=new Size(75,32)};retryStartup.Click+=async(s,e)=>await owner.InitializeCore();startupPanel.Controls.Add(startupText,0,0);startupPanel.Controls.Add(retryStartup,1,0);startupPanel.Controls.Add(startupProgress,0,1);startupPanel.SetColumnSpan(startupProgress,2);startupText.Paint+=(s,e)=>owner.RecordFirstPaint();outer.Controls.Add(startupPanel,0,1);content=new FlowLayoutPanel {Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoScroll=true,Padding=new Padding(26)};outer.Controls.Add(content,0,2);content.SizeChanged+=(sender,args)=>{foreach(Control child in content.Controls){if(child is Label||child is TextBox||child is CheckBox){child.Width=Math.Max(280,content.ClientSize.Width-content.Padding.Horizontal-22);}}};feedback=new Label {Width=490,Height=100,ForeColor=Color.FromArgb(95,70,35)};statusReadout=new Label {Width=490,Height=140};observationError=new Label {Width=490,Height=65,ForeColor=Color.FromArgb(130,65,35)};FormClosing+=(s,e)=>{if(e.CloseReason==CloseReason.UserClosing){e.Cancel=true;Hide();}};ShowPage("welcome");}
   internal bool StartupActionsGated {get{return !navigation.Enabled&&!content.Enabled;}}
   internal bool StartupRetryAvailable {get{return startupPanel.Visible&&retryStartup.Visible&&retryStartup.Enabled;}}
@@ -448,13 +439,12 @@ namespace StyxNative {
    label=Input("Computer name");label.Text=draft.Label;label.TextChanged+=(s,e)=>draft.Label=((TextBox)s).Text;
    exec=new CheckBox {Text="Exec — run commands on this computer",Checked=draft.Exec,Width=490,Height=32};
    computer=new CheckBox {Text="Computer Use — control the signed-in desktop",Checked=draft.Computer,Width=490,Height=32};
-   browser=new CheckBox {Text=StyxContext.UI("Browser — visible window on this computer"),Checked=draft.Browser,Width=490,Height=32};
+   browser=new CheckBox {Text=StyxContext.UI("Browser — Chrome Extension Bridge on this computer"),Checked=draft.Browser,Width=490,Height=32};
    content.Controls.Add(exec);content.Controls.Add(computer);content.Controls.Add(browser);
    exec.CheckedChanged+=(s,e)=>draft.Exec=((CheckBox)s).Checked;computer.CheckedChanged+=(s,e)=>draft.Computer=((CheckBox)s).Checked;browser.CheckedChanged+=(s,e)=>draft.Browser=((CheckBox)s).Checked;
-   channel=new ComboBox {DropDownStyle=ComboBoxStyle.DropDownList,Width=300,AccessibleName="Browser"};channel.Items.AddRange(new object[]{"Automatic (Chrome / Edge)","Microsoft Edge","Google Chrome"});channel.SelectedIndex=draft.Channel;channel.SelectedIndexChanged+=(s,e)=>draft.Channel=((ComboBox)s).SelectedIndex;content.Controls.Add(channel);
-   Explain("Browser opens a separate window on this computer. Sign in or interact there, then ask ChatGPT to continue in the same session.",65);
+   Explain("Browser connects to your everyday Chrome/Edge/Chromium on this computer via the Styx Extension Bridge. Sign in or open pages directly in your browser, then ask ChatGPT to continue in the same session.",65);
   }
-  Dictionary<string,object> Choice(){var values=Json.Obj("label",label.Text.Trim(),"computer",computer.Checked,"browser",browser.Checked);values["exec"]=exec.Checked;if(label.Text.Trim().Length==0)throw new InvalidOperationException();values["browserChannel"]=channel.SelectedIndex==1?"msedge":channel.SelectedIndex==2?"chrome":"auto";return values;}
+  Dictionary<string,object> Choice(){var values=Json.Obj("label",label.Text.Trim(),"computer",computer.Checked,"browser",browser.Checked);values["exec"]=exec.Checked;if(label.Text.Trim().Length==0)throw new InvalidOperationException();return values;}
   async Task ReadLogin(){ApplyLogin(await owner.Call("appLifecycle"));}
   void ApplyLogin(object response){string state=Json.Str(response,"lifecycle","status"),operation=Json.Str(response,"login","status");Feedback(!owner.LoginChangeAllowed||operation=="unknown"?"The last login startup change is unconfirmed and will not be repeated. Check Windows startup settings. Quit and reopen Styx to read the system state.":operation=="pending"?"A login startup change is awaiting its result. Styx will not repeat it.":state=="not_registered"?"Login startup is off.":state=="registered_unverified"?"Login startup is registered. Windows can disable it independently; check Windows startup settings.":state=="foreign"?"The existing Startup entry belongs to another app or installation. Styx preserved it.":"Login startup could not be observed. Check Windows startup settings; no startup entry was changed.");}
   bool NativeSetupEmpty(object data){return Json.Str(data,"mode")=="rust_host"&&!Json.Yes(data,"admission_fenced")&&Json.Get(data,"gateway")==null&&Json.Get(data,"configuration")==null&&Json.Get(data,"enrollment")==null;}
@@ -590,14 +580,14 @@ namespace StyxNative {
    }
   }
   string NativeSettingsStatus(object data){return StyxContext.ConnectionText(data);}
-  static string NativeOverviewKey(object data){return Json.Codec.Serialize(new object[]{Json.Str(data,"enrollment","status"),Json.Str(data,"foreground","error"),Json.Str(data,"foreground","status"),Json.Str(data,"foreground","execConnection"),Json.Get(data,"capabilities"),Json.Get(data,"browserCdp"),Json.Str(data,"runtimeUpdate","status"),Json.Yes(data,"runtimeUpdate","can_recover"),Json.Str(data,"runtimeUpdate","transaction_id"),Json.Get(data,"supportedOperations")});}
+  static string NativeOverviewKey(object data){return Json.Codec.Serialize(new object[]{Json.Str(data,"enrollment","status"),Json.Str(data,"foreground","error"),Json.Str(data,"foreground","status"),Json.Str(data,"foreground","execConnection"),Json.Get(data,"capabilities"),Json.Get(data,"browserExtension"),Json.Str(data,"runtimeUpdate","status"),Json.Yes(data,"runtimeUpdate","can_recover"),Json.Str(data,"runtimeUpdate","transaction_id"),Json.Get(data,"supportedOperations")});}
   sealed class NetworkChoice {
    internal string Name,Address;
    public override string ToString(){return String.IsNullOrEmpty(Address)?Name:Name+" · "+Address;}
   }
   void HostCapabilities(){
    if(!owner.Supports("hostCapabilities")){Explain("Connect this computer to change its capabilities.",45);return;}
-    Explain("Browser opens a separate window on this computer. Sign in or interact there, then ask ChatGPT to continue in the same session.",65);
+    Explain("Browser connects to your everyday Chrome/Edge/Chromium on this computer via the Styx Extension Bridge. Sign in or open pages directly in your browser, then ask ChatGPT to continue in the same session.",65);
     Explain("Turning off a capability stops its existing tasks. Other capabilities and the Gateway connection keep running.",80);
     foreach(string capability in new[]{"exec","browser","computer"}){
      string selectedCapability=capability;
@@ -605,82 +595,32 @@ namespace StyxNative {
      content.Controls.Add(toggle);
      toggle.CheckedChanged+=async(sender,args)=>{toggle.Enabled=false;try{var result=await owner.Call("hostCapabilities",Json.Obj(selectedCapability,toggle.Checked));await owner.RefreshAfterMutation();if(!Json.Yes(result,"applied"))Feedback("Settings have not fully applied. Refresh to check their status.");}catch(Exception){Feedback("The setting result is unconfirmed. Refresh the status before trying again.");}finally{if(!toggle.IsDisposed)toggle.Enabled=true;}};
     }
-    if(owner.Supports("hostBrowserCdp")&&Json.Get(owner.CurrentStatus,"browserCdp")!=null){
-     if(!browserCdpDraftEdited)browserCdpDraft=Json.Str(owner.CurrentStatus,"browserCdp","endpoint");
-     var cdpToggle=new CheckBox {Text=StyxContext.UI("Attach to existing browser (CDP, advanced)"),Checked=Json.Yes(owner.CurrentStatus,"browserCdp","enabled"),Width=490,Height=32,Margin=new Padding(0,8,0,0)};
-     content.Controls.Add(cdpToggle);
-     cdpToggle.CheckedChanged+=async(sender,args)=>{cdpToggle.Enabled=false;try{var result=await owner.Call("hostBrowserCdp",Json.Obj("enabled",cdpToggle.Checked));await owner.RefreshAfterMutation();if(!Json.Yes(result,"applied"))Feedback("Settings have not fully applied. Refresh to check their status.");}catch(Exception){Feedback("The setting result is unconfirmed. Refresh the status before trying again.");}finally{if(!cdpToggle.IsDisposed)cdpToggle.Enabled=true;}};
-     Explain("Off by default; concurrent Browser tasks still use isolated windows by default. When enabled, ChatGPT only attaches to your existing Chrome/Edge/Chromium tabs and sign-ins when explicitly selecting existing-browser. Installing the Chrome Extension bridge below avoids repeated remote debugging prompts; chrome://inspect/#remote-debugging auto-discovery and optional loopback URLs remain supported.",105);
-     if(owner.Supports("hostBrowserExtension")){
-      bool extInstalled=Json.Yes(owner.CurrentStatus,"browserCdp","extensionInstalled");
-      bool extConnected=Json.Yes(owner.CurrentStatus,"browserCdp","extensionConnected");
-      string extBrowser=Json.Str(owner.CurrentStatus,"browserCdp","extensionBrowser");
-      string extPath=Json.Str(owner.CurrentStatus,"browserCdp","extensionPath");
-      string extId=Json.Str(owner.CurrentStatus,"browserCdp","extensionId");
-      string extSummary=extConnected?"Chrome Extension bridge: Connected"+(String.IsNullOrEmpty(extBrowser)?"":" ("+extBrowser+")"):(extInstalled?"Chrome Extension bridge: Installed (load unpacked in chrome://extensions from the folder below)":"Chrome Extension bridge: Not installed");
-      StyxContext.Text(content,extSummary,45);
-      if(!String.IsNullOrEmpty(extId))StyxContext.Text(content,"Extension ID: "+extId,25);
-      if(!String.IsNullOrEmpty(extPath))StyxContext.Text(content,extPath,40);
-      Action(extInstalled?"Reinstall Chrome Extension Bridge":"Install Chrome Extension Bridge",async()=>{
-       var result=await owner.Call("hostBrowserExtension",Json.Obj("action","install"));
-       await owner.RefreshAfterMutation();
-       if(!Json.Yes(result,"applied"))Feedback("Chrome Extension bridge installation did not complete.");
-      });
-      if(!String.IsNullOrEmpty(extPath)){
-       Action("Open Extension Folder",()=>{if(Directory.Exists(extPath))Process.Start("explorer.exe",extPath);return Task.FromResult(0);},false);
-      }
-      if(extInstalled){
-       Action("Uninstall Chrome Extension Bridge",async()=>{
-        var result=await owner.Call("hostBrowserExtension",Json.Obj("action","uninstall"));
-        await owner.RefreshAfterMutation();
-        if(!Json.Yes(result,"applied"))Feedback("Chrome Extension bridge uninstall did not complete.");
-       });
-      }
-     }
-     string detected=Json.Str(owner.CurrentStatus,"browserCdp","detectedEndpoint");
-     if(!String.IsNullOrEmpty(detected))StyxContext.Text(content,StyxContext.UI("Detected local debugging endpoint: ")+detected,40);
-     StyxContext.Text(content,"Optional loopback CDP URL (blank for auto-detect, e.g. http://127.0.0.1:9222)",25);
-     var cdpEndpoint=new TextBox {Text=browserCdpDraft,Width=490,AccessibleName="Optional loopback CDP URL",Margin=new Padding(0,0,0,8)};
-     cdpEndpoint.TextChanged+=(sender,args)=>{browserCdpDraft=cdpEndpoint.Text;browserCdpDraftEdited=true;};
-     content.Controls.Add(cdpEndpoint);
-     Action("Save CDP endpoint",async()=>{
-      string trimmed=cdpEndpoint.Text.Trim();
-      object endpointValue=String.IsNullOrEmpty(trimmed)?null:(object)trimmed;
-      bool currentEnabled=Json.Yes(owner.CurrentStatus,"browserCdp","enabled");
-      NativeOperationException rejected=null;object result=null;
-      try{result=await owner.Call("hostBrowserCdp",Json.Obj("enabled",currentEnabled,"endpoint",endpointValue));}catch(NativeOperationException failure){if(failure.Code!="app_input_invalid")throw;rejected=failure;}
-      if(rejected!=null){Feedback("Invalid input. Custom browser CDP endpoints only allow local loopback http:// or ws:// URLs (such as http://127.0.0.1:9222).");return;}
-      browserCdpDraftEdited=false;
+    if(owner.Supports("hostBrowserExtension")&&Json.Get(owner.CurrentStatus,"browserExtension")!=null){
+     bool extInstalled=Json.Yes(owner.CurrentStatus,"browserExtension","installed");
+     bool extConnected=Json.Yes(owner.CurrentStatus,"browserExtension","connected");
+     string extBrowser=Json.Str(owner.CurrentStatus,"browserExtension","browser");
+     string extPath=Json.Str(owner.CurrentStatus,"browserExtension","extensionPath");
+     string extId=Json.Str(owner.CurrentStatus,"browserExtension","extensionId");
+     string extSummary=extConnected?"Chrome Extension bridge: Connected"+(String.IsNullOrEmpty(extBrowser)?"":" ("+extBrowser+")"):(extInstalled?"Chrome Extension bridge: Installed (load unpacked in chrome://extensions from the folder below)":"Chrome Extension bridge: Not installed");
+     StyxContext.Text(content,extSummary,45);
+     if(!String.IsNullOrEmpty(extId))StyxContext.Text(content,"Extension ID: "+extId,25);
+     if(!String.IsNullOrEmpty(extPath))StyxContext.Text(content,extPath,40);
+     Action(extInstalled?"Reinstall Chrome Extension Bridge":"Install Chrome Extension Bridge",async()=>{
+      var result=await owner.Call("hostBrowserExtension",Json.Obj("action","install"));
       await owner.RefreshAfterMutation();
-      if(!Json.Yes(result,"applied"))Feedback("Settings have not fully applied. Refresh to check their status.");
+      if(!Json.Yes(result,"applied"))Feedback("Chrome Extension bridge installation did not complete.");
      });
-     if(!String.IsNullOrEmpty(Json.Str(owner.CurrentStatus,"browserCdp","endpoint"))||!String.IsNullOrEmpty(browserCdpDraft)){
-      Action("Use CDP auto-detect",async()=>{
-       bool currentEnabled=Json.Yes(owner.CurrentStatus,"browserCdp","enabled");
-       var result=await owner.Call("hostBrowserCdp",Json.Obj("enabled",currentEnabled,"endpoint",(object)null));
-       browserCdpDraft="";browserCdpDraftEdited=false;
+     if(!String.IsNullOrEmpty(extPath)){
+      Action("Open Extension Folder",()=>{if(Directory.Exists(extPath))Process.Start("explorer.exe",extPath);return Task.FromResult(0);},false);
+     }
+     if(extInstalled){
+      Action("Uninstall Chrome Extension Bridge",async()=>{
+       var result=await owner.Call("hostBrowserExtension",Json.Obj("action","uninstall"));
        await owner.RefreshAfterMutation();
-       if(!Json.Yes(result,"applied"))Feedback("Settings have not fully applied. Refresh to check their status.");
+       if(!Json.Yes(result,"applied"))Feedback("Chrome Extension bridge uninstall did not complete.");
       });
      }
     }
-  }
-  static int DetectInstalledBrowserIndex(){
-   string pf86=Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
-   string pf=Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-   string local=Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-   if(File.Exists(Path.Combine(pf86,"Microsoft","Edge","Application","msedge.exe"))||File.Exists(Path.Combine(pf,"Microsoft","Edge","Application","msedge.exe")))return 1;
-   if(File.Exists(Path.Combine(pf,"Google","Chrome","Application","chrome.exe"))||File.Exists(Path.Combine(pf86,"Google","Chrome","Application","chrome.exe"))||File.Exists(Path.Combine(local,"Google","Chrome","Application","chrome.exe")))return 2;
-   return 0;
-  }
-  void WireBrowserChannelSelection(){
-   channel.Items[0]="Choose Microsoft Edge or Google Chrome";
-   if(browser.Checked&&channel.SelectedIndex==0){int detected=DetectInstalledBrowserIndex();if(detected>0)channel.SelectedIndex=detected;}
-   channel.Enabled=browser.Checked;
-   browser.CheckedChanged+=(s,e)=>{
-    channel.Enabled=browser.Checked;
-    if(browser.Checked&&channel.SelectedIndex==0){int detected=DetectInstalledBrowserIndex();if(detected>0)channel.SelectedIndex=detected;}
-   };
   }
   void ShowRustPage(string name){
    if(name=="general"){
@@ -708,7 +648,6 @@ namespace StyxNative {
     Action("Windows startup settings",()=>{Process.Start("ms-settings:startupapps");return Task.FromResult(0);},false);NativeAction("Check status","appLifecycle",ReadLogin);
    }else if(name=="create"){
     Capabilities();
-    WireBrowserChannelSelection();
     Explain("Styx sets up a local gateway and connects this computer. Computer Use is optional and controls only your signed-in desktop when it is available.",85);
     bool resuming=CanResumeLocal();
     StyxContext.Heading(content,"Connect ChatGPT (OpenAI Platform Tunnel)");
@@ -752,13 +691,12 @@ namespace StyxNative {
      if(resuming&&!CanResumeLocal())throw new IOException("app_local_checkpoint_refused");
      if(detecting){Feedback("Wait for network detection to finish before continuing.");return;}
      if(!resuming&&!NeedsNativeSetup(owner.CurrentStatus))throw new IOException("app_setup_requires_review");
-     if(browser.Checked&&channel.SelectedIndex==0){Feedback("Choose Microsoft Edge or Google Chrome before requesting Browser Automation.");return;}
      string tunnelId=setupTunnel.Text.Trim();
      if(!System.Text.RegularExpressions.Regex.IsMatch(tunnelId,@"\Atunnel_[A-Za-z0-9_-]{8,128}\z")||
         !System.Text.RegularExpressions.Regex.IsMatch(setupKey.Text,@"\Ask-[A-Za-z0-9_-]{16,512}\z")){
       Feedback("Enter the Tunnel ID and runtime API key from OpenAI Platform to create your Gateway.");return;
      }
-     var choice=Choice();if(!browser.Checked)choice["browserChannel"]=null;
+     var choice=Choice();
      if(resuming){
       var origin=new Uri(Json.Str(owner.CurrentStatus,"gateway","origin"));
       choice["port"]=origin.Port;
@@ -781,7 +719,6 @@ namespace StyxNative {
     Action("Return",()=>{ShowPage("welcome");return Task.FromResult(0);},false);
    }else if(name=="join"){
     Capabilities();
-    WireBrowserChannelSelection();
     Explain("Choose the features to enable on this computer. Browser and Computer Use need an available signed-in desktop.",85);
     joinOrigin="";joinCa="";link=Input("Gateway address and pairing code (or paste invitation)",true);
     var joinSummary=new Label {Width=490,Height=0,ForeColor=Color.FromArgb(30,70,50),BackColor=Color.FromArgb(236,244,238),Padding=new Padding(8),Visible=false};content.Controls.Add(joinSummary);
@@ -802,7 +739,7 @@ namespace StyxNative {
      },true,"Reviewing invitation…");
     }
     NativeAction("Review pairing link","inspectJoin",async()=>{string invitation=link.Text;link.Clear();await inspectLink(invitation);});
-    NativeAction("Trust this Gateway and send request","join",async()=>{if(String.IsNullOrEmpty(joinOrigin))throw new InvalidOperationException();if(String.IsNullOrEmpty(joinCa))throw new NativeOperationException("app_system_trust_not_supported");if(browser.Checked&&channel.SelectedIndex==0){Feedback("Choose Microsoft Edge or Google Chrome before requesting Browser Automation.");return;}var choice=Choice();if(!browser.Checked)choice["browserChannel"]=null;choice["approvedGatewayOrigin"]=joinOrigin;choice["approvedCaSha256"]=joinCa;joinOrigin="";joinCa="";var result=await owner.Call("join",choice);string joined=Json.Str(result,"status");if(joined!="ready_to_connect"&&joined!="awaiting_approval")throw new IOException();await owner.RefreshAfterMutation();ShowPage("overview");Feedback(joined=="ready_to_connect"?"This computer is paired.":"Waiting for approval of the original invitation.");},JoinRequestProgress);
+    NativeAction("Trust this Gateway and send request","join",async()=>{if(String.IsNullOrEmpty(joinOrigin))throw new InvalidOperationException();if(String.IsNullOrEmpty(joinCa))throw new NativeOperationException("app_system_trust_not_supported");var choice=Choice();choice["approvedGatewayOrigin"]=joinOrigin;choice["approvedCaSha256"]=joinCa;joinOrigin="";joinCa="";var result=await owner.Call("join",choice);string joined=Json.Str(result,"status");if(joined!="ready_to_connect"&&joined!="awaiting_approval")throw new IOException();await owner.RefreshAfterMutation();ShowPage("overview");Feedback(joined=="ready_to_connect"?"This computer is paired.":"Waiting for approval of the original invitation.");},JoinRequestProgress);
     Action("Return",()=>{ShowPage("welcome");return Task.FromResult(0);},false);
    }else if(name=="overview"||name=="join-waiting"){
     string enrollment=Json.Str(owner.CurrentStatus,"enrollment","status");
@@ -848,10 +785,10 @@ namespace StyxNative {
   internal void Verify(){
    owner.ApplyPreparationResult(Json.Obj("mode","rust_host","status",Json.Obj(),"supportedOperations",new object[]{"createLocal","inspectJoin"}));
    foreach(string name in new[]{"welcome","create","join","overview","general","chat","login-startup"}){ShowPage(name);if(content.Controls.Count<3)throw new Exception("native_page_failed");}
-   ShowPage("join");label.Text="Joining draft";exec.Checked=false;computer.Checked=false;browser.Checked=true;channel.SelectedIndex=1;
+   ShowPage("join");label.Text="Joining draft";exec.Checked=false;computer.Checked=false;browser.Checked=true;
    Feedback("Keep this operation failure");
    ShowStatus(owner.CurrentStatus);if(feedback.Text!="Keep this operation failure")throw new Exception("refresh_discarded_error");
-   ShowPage("general");ShowPage("join");var joining=Choice();if((string)joining["label"]!="Joining draft"||(bool)joining["exec"]||(bool)joining["computer"]||!(bool)joining["browser"]||(string)joining["browserChannel"]!="msedge")throw new Exception("joining_capability_choice_discarded");
+   ShowPage("general");ShowPage("join");var joining=Choice();if((string)joining["label"]!="Joining draft"||(bool)joining["exec"]||(bool)joining["computer"]||!(bool)joining["browser"])throw new Exception("joining_capability_choice_discarded");
    // Actual native controls: tab navigation must retain fresh setup, while
    // existing, pending and fenced roles must never offer recreation.
    object previousStatus=owner.CurrentStatus;
@@ -865,15 +802,14 @@ namespace StyxNative {
     owner.ApplyPreparationResult(existing);ShowPage("overview");
     if(page=="welcome")throw new Exception("native_retained_role_navigation_offered_fresh_setup");
    }
-   owner.ApplyPreparationResult(Json.Obj("mode","rust_host","configuration",Json.Obj("status","retained"),"status",Json.Obj(),"capabilities",Json.Obj("configured",Json.Obj("exec",true,"browser",true,"computer",false),"applied",true),"browserCdp",Json.Obj("enabled",true,"endpoint","http://127.0.0.1:9222","detectedEndpoint","ws://127.0.0.1:9333/devtools/browser/self-test","extensionInstalled",true,"extensionConnected",false,"extensionId","cncjpfhbbnibdjkcheeimdfklfiknibl","extensionPath",@"C:\temp\styx\browser-extension"),"supportedOperations",new object[]{"hostCapabilities","hostBrowserCdp","hostBrowserExtension"}));
+   owner.ApplyPreparationResult(Json.Obj("mode","rust_host","configuration",Json.Obj("status","retained"),"status",Json.Obj(),"capabilities",Json.Obj("configured",Json.Obj("exec",true,"browser",true,"computer",false),"applied",true),"browserExtension",Json.Obj("installed",true,"connected",false,"extensionId","cncjpfhbbnibdjkcheeimdfklfiknibl","extensionPath",@"C:\temp\styx\browser-extension"),"supportedOperations",new object[]{"hostCapabilities","hostBrowserExtension"}));
    ShowPage("overview");
-   bool hasCdpToggle=false,hasCdpBox=false,hasExtButton=false;
+   bool hasBrowserToggle=false,hasExtButton=false;
    foreach(Control control in content.Controls){
-    var cb=control as CheckBox;if(cb!=null&&cb.Text==StyxContext.UI("Attach to existing browser (CDP, advanced)"))hasCdpToggle=cb.Checked;
-    var tb=control as TextBox;if(tb!=null&&tb.AccessibleName=="Optional loopback CDP URL")hasCdpBox=tb.Text=="http://127.0.0.1:9222";
+    var cb=control as CheckBox;if(cb!=null&&cb.Text==StyxContext.UI("Browser"))hasBrowserToggle=cb.Checked;
     var btn=control as Button;if(btn!=null&&btn.Text=="Reinstall Chrome Extension Bridge")hasExtButton=true;
    }
-   if(!hasCdpToggle||!hasCdpBox||!hasExtButton)throw new Exception("native_browser_cdp_controls_missing");
+   if(!hasBrowserToggle||!hasExtButton)throw new Exception("native_browser_extension_controls_missing");
    owner.ApplyPreparationResult(previousStatus);
    Feedback("");ShowPage("welcome");Show();CreateControl();PerformLayout();Application.DoEvents();using(var image=new Bitmap(Width,Height)){DrawToBitmap(image,new Rectangle(0,0,Width,Height));image.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"native-settings.png"));}}
  }

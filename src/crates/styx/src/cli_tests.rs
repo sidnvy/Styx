@@ -800,9 +800,7 @@ fn plugin_details_are_owner_local_and_do_not_accept_credentials_or_conflicting_i
 
 #[cfg(not(target_os = "android"))]
 #[tokio::test]
-async fn cli_host_browser_cdp_status_enable_validate_and_disable() {
-    use styx_runtime::host::browser_cdp::BrowserCdpStore;
-
+async fn cli_host_browser_extension_status_runs() {
     struct Cleanup(PathBuf);
     impl Drop for Cleanup {
         fn drop(&mut self) {
@@ -810,7 +808,7 @@ async fn cli_host_browser_cdp_status_enable_validate_and_disable() {
         }
     }
 
-    let root_path = std::env::temp_dir().join(format!("styx-cli-cdp-test-{}", std::process::id()));
+    let root_path = std::env::temp_dir().join(format!("styx-cli-ext-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root_path);
     std::fs::create_dir(&root_path).unwrap();
     let _cleanup = Cleanup(root_path.clone());
@@ -820,84 +818,6 @@ async fn cli_host_browser_cdp_status_enable_validate_and_disable() {
         std::fs::set_permissions(&root_path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let state_arg = root_path.to_str().unwrap().to_owned();
-
-    let status_cli = Cli::try_parse_from([
-        "styx",
-        "host",
-        "browser-cdp",
-        "status",
-        "--state-dir",
-        &state_arg,
-        "--json",
-    ])
-    .unwrap();
-    assert_eq!(run(status_cli).await, ExitCode::SUCCESS);
-    assert!(
-        !BrowserCdpStore::open(&root_path)
-            .unwrap()
-            .current()
-            .unwrap()
-            .enabled
-    );
-
-    let enable_cli = Cli::try_parse_from([
-        "styx",
-        "host",
-        "browser-cdp",
-        "enable",
-        "--state-dir",
-        &state_arg,
-        "--endpoint",
-        "http://LOCALHOST:9222/",
-        "--json",
-    ])
-    .unwrap();
-    assert_eq!(run(enable_cli).await, ExitCode::SUCCESS);
-    let saved = BrowserCdpStore::open(&root_path)
-        .unwrap()
-        .current()
-        .unwrap();
-    assert!(saved.enabled);
-    assert_eq!(saved.endpoint.as_deref(), Some("http://localhost:9222"));
-
-    let bad_cli = Cli::try_parse_from([
-        "styx",
-        "host",
-        "browser-cdp",
-        "enable",
-        "--state-dir",
-        &state_arg,
-        "--endpoint",
-        "http://192.168.1.10:9222",
-    ])
-    .unwrap();
-    assert_eq!(run(bad_cli).await, ExitCode::from(2));
-    assert_eq!(
-        BrowserCdpStore::open(&root_path)
-            .unwrap()
-            .current()
-            .unwrap(),
-        saved
-    );
-
-    let disable_cli = Cli::try_parse_from([
-        "styx",
-        "host",
-        "browser-cdp",
-        "disable",
-        "--state-dir",
-        &state_arg,
-        "--clear-endpoint",
-        "--json",
-    ])
-    .unwrap();
-    assert_eq!(run(disable_cli).await, ExitCode::SUCCESS);
-    let after = BrowserCdpStore::open(&root_path)
-        .unwrap()
-        .current()
-        .unwrap();
-    assert!(!after.enabled);
-    assert!(after.endpoint.is_none());
 
     let ext_status_cli = Cli::try_parse_from([
         "styx",

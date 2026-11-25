@@ -30,8 +30,14 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
-const RPC_TIMEOUT: Duration = Duration::from_secs(20);
+const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CdpSessionScope {
+    SharedExisting,
+    TabGroup { title: String, color: String },
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct TabDescriptor {
@@ -44,6 +50,16 @@ struct TabDescriptor {
     active: bool,
     #[serde(rename = "windowId", default)]
     window_id: Option<i64>,
+    #[serde(rename = "groupId", default = "default_group_id")]
+    group_id: i64,
+    #[serde(rename = "openerTabId", default)]
+    opener_tab_id: Option<i64>,
+    #[serde(default)]
+    isolated: bool,
+}
+
+fn default_group_id() -> i64 {
+    -1
 }
 
 struct ExtensionPeer {
@@ -51,8 +67,12 @@ struct ExtensionPeer {
     user_agent: String,
     outbound: mpsc::Sender<String>,
     next_id: AtomicU64,
+    next_relay_id: AtomicU64,
     pending: StdMutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
-    events: Mutex<Option<mpsc::UnboundedSender<(String, Value)>>>,
+    event_subscribers: StdMutex<HashMap<u64, mpsc::UnboundedSender<(String, Value)>>>,
+    initial_tabs: StdMutex<Vec<TabDescriptor>>,
+    isolated_tabs: StdMutex<HashMap<i64, u64>>,
+    tab_owners: StdMutex<HashMap<i64, u64>>,
     shutdown: CancellationToken,
 }
 
@@ -102,9 +122,91 @@ impl ExtensionPeer {
         }
     }
 
-    async fn emit_event(&self, event: String, params: Value) {
-        if let Some(tx) = self.events.lock().await.as_ref() {
-            let _ = tx.send((event, params));
+    fn subscribe_events(&self) -> (u64, mpsc::UnboundedReceiver<(String, Value)>) {
+        let relay_id = self.next_relay_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = mpsc::unbounded_channel();
+        if let Ok(mut guard) = self.event_subscribers.lock() {
+            guard.insert(relay_id, tx);
+        }
+        (relay_id, rx)
+    }
+
+    fn unsubscribe_events(&self, relay_id: u64) {
+        if let Ok(mut guard) = self.event_subscribers.lock() {
+            guard.remove(&relay_id);
+        }
+    }
+
+    fn emit_event(&self, event: String, params: Value) {
+        if let Ok(mut guard) = self.event_subscribers.lock() {
+            guard.retain(|_, tx| tx.send((event.clone(), params.clone())).is_ok());
+        }
+    }
+
+    fn snapshot_initial_tabs(&self) -> Vec<TabDescriptor> {
+        self.initial_tabs
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+
+    fn claim_tab(&self, tab_id: i64, relay_id: u64, isolated: bool) -> bool {
+        if isolated && let Ok(mut iso) = self.isolated_tabs.lock() {
+            match iso.get(&tab_id) {
+                Some(&owner) if owner != relay_id => return false,
+                _ => {
+                    iso.insert(tab_id, relay_id);
+                }
+            }
+        } else if !isolated
+            && self
+                .isolated_tabs
+                .lock()
+                .is_ok_and(|iso| iso.get(&tab_id).is_some_and(|&owner| owner != relay_id))
+        {
+            return false;
+        }
+        if let Ok(mut owners) = self.tab_owners.lock() {
+            match owners.get(&tab_id) {
+                Some(&owner) if owner != relay_id => return false,
+                _ => {
+                    owners.insert(tab_id, relay_id);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn is_tab_available_for_shared(&self, tab_id: i64, relay_id: u64) -> bool {
+        let isolated = self
+            .isolated_tabs
+            .lock()
+            .is_ok_and(|iso| iso.contains_key(&tab_id));
+        if isolated {
+            return false;
+        }
+        self.tab_owners
+            .lock()
+            .is_ok_and(|owners| !owners.get(&tab_id).is_some_and(|&owner| owner != relay_id))
+    }
+
+    fn release_relay_tabs(&self, relay_id: u64, tab_ids: &[i64]) {
+        if let Ok(mut owners) = self.tab_owners.lock() {
+            for tab_id in tab_ids {
+                if owners.get(tab_id) == Some(&relay_id) {
+                    owners.remove(tab_id);
+                }
+            }
+            owners.retain(|_, &mut owner| owner != relay_id);
+        }
+        if let Ok(mut iso) = self.isolated_tabs.lock() {
+            for tab_id in tab_ids {
+                if iso.get(tab_id) == Some(&relay_id) {
+                    iso.remove(tab_id);
+                }
+            }
+            iso.retain(|_, &mut owner| owner != relay_id);
         }
     }
 
@@ -127,7 +229,7 @@ pub struct BrowserExtensionBridge {
     cancel: CancellationToken,
     peer: Mutex<Option<Arc<ExtensionPeer>>>,
     peer_info: StdMutex<Option<(String, String)>>,
-    pending_ws_tokens: StdMutex<HashSet<String>>,
+    pending_ws_tokens: StdMutex<HashMap<String, CdpSessionScope>>,
     tasks: StdMutex<Vec<JoinHandle<()>>>,
 }
 
@@ -175,7 +277,7 @@ impl BrowserExtensionBridge {
             cancel: cancel.clone(),
             peer: Mutex::new(None),
             peer_info: StdMutex::new(None),
-            pending_ws_tokens: StdMutex::new(HashSet::new()),
+            pending_ws_tokens: StdMutex::new(HashMap::new()),
             tasks: StdMutex::new(Vec::new()),
         });
 
@@ -195,6 +297,10 @@ impl BrowserExtensionBridge {
         }
 
         Ok(bridge)
+    }
+
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
     }
 
     pub fn ipc_port(&self) -> u16 {
@@ -221,6 +327,14 @@ impl BrowserExtensionBridge {
 
     /// Mints a single-use loopback CDP WebSocket endpoint for `worker.mjs`.
     pub fn open_cdp_session(&self) -> Result<String, ErrorCategory> {
+        self.open_cdp_session_with_scope(CdpSessionScope::SharedExisting)
+    }
+
+    /// Mints a single-use loopback CDP WebSocket endpoint bound to a specific tab scope.
+    pub fn open_cdp_session_with_scope(
+        &self,
+        scope: CdpSessionScope,
+    ) -> Result<String, ErrorCategory> {
         if !self.is_connected() {
             return Err(ErrorCategory::CapabilityUnsupported);
         }
@@ -229,7 +343,7 @@ impl BrowserExtensionBridge {
         self.pending_ws_tokens
             .lock()
             .map_err(|_| ErrorCategory::ResultUnknown)?
-            .insert(path.clone());
+            .insert(path.clone(), scope);
         Ok(format!("ws://127.0.0.1:{}{}", self.ws_port, path))
     }
 
@@ -355,14 +469,22 @@ impl BrowserExtensionBridge {
                             .and_then(Value::as_str)
                             .unwrap_or("Mozilla/5.0 Chrome/130.0.0.0")
                             .to_owned();
+                        let hello_tabs = serde_json::from_value::<Vec<TabDescriptor>>(
+                            params.get("tabs").cloned().unwrap_or_else(|| json!([])),
+                        )
+                        .unwrap_or_default();
                         if active_peer.is_none() {
                             let new_peer = Arc::new(ExtensionPeer {
                                 browser_label: browser_label.clone(),
                                 user_agent,
                                 outbound: out_tx.clone(),
                                 next_id: AtomicU64::new(1),
+                                next_relay_id: AtomicU64::new(1),
                                 pending: StdMutex::new(HashMap::new()),
-                                events: Mutex::new(None),
+                                event_subscribers: StdMutex::new(HashMap::new()),
+                                initial_tabs: StdMutex::new(hello_tabs),
+                                isolated_tabs: StdMutex::new(HashMap::new()),
+                                tab_owners: StdMutex::new(HashMap::new()),
                                 shutdown: peer_cancel.clone(),
                             });
                             let previous = self.peer.lock().await.replace(new_peer.clone());
@@ -374,9 +496,13 @@ impl BrowserExtensionBridge {
                                 *info = Some((browser_label, new_peer.user_agent.clone()));
                             }
                             active_peer = Some(new_peer);
+                        } else if let Some(peer) = &active_peer
+                            && let Ok(mut initial) = peer.initial_tabs.lock()
+                        {
+                            *initial = hello_tabs;
                         }
                     } else if let Some(peer) = &active_peer {
-                        peer.emit_event(event.to_owned(), params).await;
+                        peer.emit_event(event.to_owned(), params);
                     }
                 }
             }
@@ -415,16 +541,21 @@ impl BrowserExtensionBridge {
 
     #[allow(clippy::result_large_err)]
     async fn handle_ws_connection(self: Arc<Self>, stream: TcpStream) {
+        let selected_scope: Arc<StdMutex<Option<CdpSessionScope>>> = Arc::new(StdMutex::new(None));
+        let selected_for_cb = selected_scope.clone();
         let ws = accept_hdr_async(
             stream,
             |req: &Request, res: Response| -> Result<Response, ErrorResponse> {
                 let path = req.uri().path();
-                let allowed = self
+                let scope = self
                     .pending_ws_tokens
                     .lock()
                     .ok()
-                    .is_some_and(|mut set| set.remove(path));
-                if allowed {
+                    .and_then(|mut map| map.remove(path));
+                if let Some(scope) = scope {
+                    if let Ok(mut slot) = selected_for_cb.lock() {
+                        *slot = Some(scope);
+                    }
                     Ok(res)
                 } else {
                     Err(http::Response::builder()
@@ -438,11 +569,14 @@ impl BrowserExtensionBridge {
         let Ok(ws) = ws else {
             return;
         };
+        let Some(scope) = selected_scope.lock().ok().and_then(|mut s| s.take()) else {
+            return;
+        };
 
         let Some(peer) = self.peer.lock().await.clone() else {
             return;
         };
-        run_cdp_relay_session(ws, peer, self.cancel.clone()).await;
+        run_cdp_relay_session(ws, peer, self.cancel.clone(), scope).await;
     }
 }
 
@@ -455,6 +589,10 @@ struct TabSession {
 type AttachWaiter = oneshot::Sender<Result<(String, Value), String>>;
 
 struct RelayState {
+    relay_id: u64,
+    scope: CdpSessionScope,
+    group_id: Option<i64>,
+    owned_tabs: HashSet<i64>,
     peer: Arc<ExtensionPeer>,
     cdp_out: mpsc::UnboundedSender<String>,
     known_tabs: BTreeMap<i64, TabDescriptor>,
@@ -462,6 +600,7 @@ struct RelayState {
     attaching: HashMap<i64, Vec<AttachWaiter>>,
     auto_attach: bool,
     next_session_seq: u64,
+    temp_screencast_tabs: HashSet<i64>,
 }
 
 impl RelayState {
@@ -490,7 +629,8 @@ impl RelayState {
         None
     }
 
-    fn detach_tab(&mut self, tab_id: i64) {
+    fn detach_tab(&mut self, tab_id: i64) -> bool {
+        self.temp_screencast_tabs.remove(&tab_id);
         if let Some(ts) = self.tab_sessions.remove(&tab_id) {
             for child in ts.child_sessions {
                 self.emit_cdp(json!({
@@ -505,6 +645,9 @@ impl RelayState {
                     "targetId": ts.target_info.get("targetId").cloned().unwrap_or(Value::Null),
                 }
             }));
+            true
+        } else {
+            false
         }
     }
 }
@@ -513,18 +656,22 @@ async fn attach_tab(
     state: &Arc<Mutex<RelayState>>,
     tab_id: i64,
 ) -> Result<(String, Value), String> {
-    let (peer, existing_waiter) = {
+    let (peer, relay_id, isolated, existing_waiter) = {
         let mut guard = state.lock().await;
         if let Some(existing) = guard.tab_sessions.get(&tab_id) {
             return Ok((existing.session_id.clone(), existing.target_info.clone()));
         }
+        let isolated = matches!(guard.scope, CdpSessionScope::TabGroup { .. });
         if let Some(waiters) = guard.attaching.get_mut(&tab_id) {
             let (tx, rx) = oneshot::channel();
             waiters.push(tx);
-            (guard.peer.clone(), Some(rx))
+            (guard.peer.clone(), guard.relay_id, isolated, Some(rx))
         } else {
+            if !guard.peer.claim_tab(tab_id, guard.relay_id, isolated) {
+                return Err("tab_owned_by_another_session".to_owned());
+            }
             guard.attaching.insert(tab_id, Vec::new());
-            (guard.peer.clone(), None)
+            (guard.peer.clone(), guard.relay_id, isolated, None)
         }
     };
 
@@ -542,6 +689,19 @@ async fn attach_tab(
             )
             .await?;
         let target_info = info.get("targetInfo").cloned().unwrap_or_else(|| json!({}));
+        // Emulate focus on the attached tab so `active: false` background tabs
+        // maintain an active visibilityState and requestAnimationFrame loop for
+        // interactive Playwright actions without stealing Chrome OS window focus.
+        let _ = peer
+            .call(
+                "debugger.sendCommand",
+                json!({
+                    "tabId": tab_id,
+                    "method": "Emulation.setFocusEmulationEnabled",
+                    "params": { "enabled": true }
+                }),
+            )
+            .await;
         Ok::<Value, String>(target_info)
     }
     .await;
@@ -553,8 +713,9 @@ async fn attach_tab(
             if let Some(existing) = guard.tab_sessions.get(&tab_id) {
                 Ok((existing.session_id.clone(), existing.target_info.clone()))
             } else {
+                guard.owned_tabs.insert(tab_id);
                 guard.next_session_seq += 1;
-                let session_id = format!("pw-tab-{}", guard.next_session_seq);
+                let session_id = format!("pw-tab-{}-{}", guard.relay_id, guard.next_session_seq);
                 let mut emitted_info = target_info.clone();
                 if let Some(obj) = emitted_info.as_object_mut() {
                     obj.insert("attached".to_owned(), Value::Bool(true));
@@ -578,7 +739,12 @@ async fn attach_tab(
                 Ok((session_id, target_info))
             }
         }
-        Err(err) => Err(err),
+        Err(err) => {
+            if !isolated || !guard.owned_tabs.contains(&tab_id) {
+                peer.release_relay_tabs(relay_id, &[tab_id]);
+            }
+            Err(err)
+        }
     };
     drop(guard);
     for waiter in waiters {
@@ -605,39 +771,104 @@ async fn handle_cdp_request(
                     "jsVersion": "V8",
                 }));
             }
-            "Browser.setDownloadBehavior" | "Target.setDiscoverTargets" => {
+            "Browser.setDownloadBehavior"
+            | "Target.setDiscoverTargets"
+            | "Target.activateTarget"
+            | "Page.bringToFront" => {
                 return Ok(json!({}));
             }
             "Target.getTargetInfo" => {
                 return Ok(json!({}));
             }
             "Target.setAutoAttach" => {
-                let (peer, known_ids) = {
+                let (peer, relay_id, scope, existing_owned, fallback_ids) = {
                     let mut guard = state.lock().await;
                     guard.auto_attach = true;
                     (
                         guard.peer.clone(),
+                        guard.relay_id,
+                        guard.scope.clone(),
+                        guard.owned_tabs.iter().copied().collect::<Vec<_>>(),
                         guard.known_tabs.keys().copied().collect::<Vec<_>>(),
                     )
                 };
-                if let Ok(listed) = peer.call("tabs.list", json!({})).await
-                    && let Ok(tabs) = serde_json::from_value::<Vec<TabDescriptor>>(
-                        listed.get("tabs").cloned().unwrap_or_else(|| json!([])),
-                    )
-                {
-                    let mut guard = state.lock().await;
-                    guard.known_tabs.clear();
-                    for tab in tabs {
-                        guard.known_tabs.insert(tab.id, tab);
+                match scope {
+                    CdpSessionScope::TabGroup { title, color } => {
+                        let tab_ids = if existing_owned.is_empty() {
+                            let created = peer
+                                .call(
+                                    "tabs.create",
+                                    json!({
+                                        "url": "about:blank",
+                                        "active": false,
+                                        "isolated": true,
+                                        "groupTitle": title,
+                                        "groupColor": color,
+                                    }),
+                                )
+                                .await?;
+                            let tab: TabDescriptor = serde_json::from_value(
+                                created.get("tab").cloned().unwrap_or_else(|| json!({})),
+                            )
+                            .map_err(|_| "tabs.create invalid response".to_owned())?;
+                            let returned_gid = created
+                                .get("groupId")
+                                .and_then(Value::as_i64)
+                                .unwrap_or(tab.group_id);
+                            let mut guard = state.lock().await;
+                            if guard.group_id.is_none() && returned_gid >= 0 {
+                                guard.group_id = Some(returned_gid);
+                            }
+                            guard.owned_tabs.insert(tab.id);
+                            guard.known_tabs.insert(tab.id, tab.clone());
+                            guard.peer.claim_tab(tab.id, relay_id, true);
+                            vec![tab.id]
+                        } else {
+                            existing_owned
+                        };
+                        for tab_id in tab_ids {
+                            let _ = attach_tab(state, tab_id).await;
+                        }
                     }
-                }
-                let tab_ids: Vec<i64> = {
-                    let guard = state.lock().await;
-                    let ids: Vec<i64> = guard.known_tabs.keys().copied().collect();
-                    if ids.is_empty() { known_ids } else { ids }
-                };
-                for tab_id in tab_ids {
-                    let _ = attach_tab(state, tab_id).await;
+                    CdpSessionScope::SharedExisting => {
+                        if let Ok(listed) = peer
+                            .call("tabs.list", json!({ "excludeIsolated": true }))
+                            .await
+                            && let Ok(tabs) = serde_json::from_value::<Vec<TabDescriptor>>(
+                                listed.get("tabs").cloned().unwrap_or_else(|| json!([])),
+                            )
+                        {
+                            let mut guard = state.lock().await;
+                            guard.known_tabs.clear();
+                            for tab in tabs {
+                                if !tab.isolated
+                                    && peer.is_tab_available_for_shared(tab.id, relay_id)
+                                {
+                                    guard.known_tabs.insert(tab.id, tab);
+                                }
+                            }
+                        }
+                        let tab_ids: Vec<i64> = {
+                            let guard = state.lock().await;
+                            let ids: Vec<i64> = guard
+                                .known_tabs
+                                .keys()
+                                .copied()
+                                .filter(|id| peer.is_tab_available_for_shared(*id, relay_id))
+                                .collect();
+                            if ids.is_empty() {
+                                fallback_ids
+                                    .into_iter()
+                                    .filter(|id| peer.is_tab_available_for_shared(*id, relay_id))
+                                    .collect()
+                            } else {
+                                ids
+                            }
+                        };
+                        for tab_id in tab_ids {
+                            let _ = attach_tab(state, tab_id).await;
+                        }
+                    }
                 }
                 return Ok(json!({}));
             }
@@ -647,15 +878,62 @@ async fn handle_cdp_request(
                     .and_then(Value::as_str)
                     .filter(|u| !u.is_empty())
                     .unwrap_or("about:blank");
-                let peer = state.lock().await.peer.clone();
-                let created = peer.call("tabs.create", json!({ "url": url })).await?;
+                let (peer, relay_id, scope, existing_group_id) = {
+                    let guard = state.lock().await;
+                    (
+                        guard.peer.clone(),
+                        guard.relay_id,
+                        guard.scope.clone(),
+                        guard.group_id,
+                    )
+                };
+                let (is_isolated, create_params) = match scope {
+                    CdpSessionScope::TabGroup { title, color } => {
+                        let mut p = json!({
+                            "url": url,
+                            "active": false,
+                            "isolated": true,
+                        });
+                        if let Some(gid) = existing_group_id.filter(|g| *g >= 0) {
+                            p["groupId"] = json!(gid);
+                        } else {
+                            p["groupTitle"] = json!(title);
+                            p["groupColor"] = json!(color);
+                        }
+                        (true, p)
+                    }
+                    CdpSessionScope::SharedExisting => {
+                        let mut p = json!({
+                            "url": url,
+                            "active": false,
+                            "isolated": false,
+                        });
+                        if let Some(gid) = existing_group_id.filter(|g| *g >= 0) {
+                            p["groupId"] = json!(gid);
+                        } else {
+                            p["groupTitle"] = json!("Styx");
+                            p["groupColor"] = json!("blue");
+                        }
+                        (false, p)
+                    }
+                };
+                let created = peer.call("tabs.create", create_params).await?;
                 let tab: TabDescriptor = serde_json::from_value(
                     created.get("tab").cloned().unwrap_or_else(|| json!({})),
                 )
                 .map_err(|_| "tabs.create invalid response".to_owned())?;
+                let returned_gid = created
+                    .get("groupId")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(tab.group_id);
                 {
                     let mut guard = state.lock().await;
+                    if guard.group_id.is_none() && returned_gid >= 0 {
+                        guard.group_id = Some(returned_gid);
+                    }
+                    guard.owned_tabs.insert(tab.id);
                     guard.known_tabs.insert(tab.id, tab.clone());
+                    guard.peer.claim_tab(tab.id, relay_id, is_isolated);
                 }
                 let (_sid, target_info) = attach_tab(state, tab.id).await?;
                 return Ok(json!({
@@ -664,29 +942,21 @@ async fn handle_cdp_request(
             }
             "Target.closeTarget" => {
                 let target_id = params.get("targetId").and_then(Value::as_str);
-                let (peer, tab_id) = {
+                let (peer, relay_id, tab_id) = {
                     let guard = state.lock().await;
                     let found = target_id.and_then(|id| guard.find_tab_by_target(id));
-                    (guard.peer.clone(), found)
+                    (guard.peer.clone(), guard.relay_id, found)
                 };
                 let Some(tab_id) = tab_id else {
                     return Ok(json!({ "success": false }));
                 };
                 peer.call("tabs.remove", json!({ "tabId": tab_id })).await?;
+                let mut guard = state.lock().await;
+                guard.known_tabs.remove(&tab_id);
+                guard.owned_tabs.remove(&tab_id);
+                guard.detach_tab(tab_id);
+                peer.release_relay_tabs(relay_id, &[tab_id]);
                 return Ok(json!({ "success": true }));
-            }
-            "Target.activateTarget" => {
-                let target_id = params.get("targetId").and_then(Value::as_str);
-                let (peer, tab_id) = {
-                    let guard = state.lock().await;
-                    let found = target_id.and_then(|id| guard.find_tab_by_target(id));
-                    (guard.peer.clone(), found)
-                };
-                if let Some(tab_id) = tab_id {
-                    peer.call("tabs.activate", json!({ "tabId": tab_id }))
-                        .await?;
-                }
-                return Ok(json!({}));
             }
             "Target.getTargets" => {
                 let guard = state.lock().await;
@@ -724,6 +994,10 @@ async fn handle_cdp_request(
         }
     }
 
+    if method == "Page.bringToFront" {
+        return Ok(json!({}));
+    }
+
     let sid = session_id.expect("checked above");
     if method == "Target.getTargetInfo" {
         let guard = state.lock().await;
@@ -740,11 +1014,55 @@ async fn handle_cdp_request(
     let Some((tab_id, child_sid)) = target else {
         return Err(format!("No tab found for sessionId: {sid}"));
     };
+    let is_top_level_screenshot = method == "Page.captureScreenshot" && child_sid.is_none();
     let mut rpc = json!({ "tabId": tab_id, "method": method, "params": params });
     if let Some(child) = child_sid
         && let Some(obj) = rpc.as_object_mut()
     {
         obj.insert("sessionId".to_owned(), Value::String(child));
+    }
+    if is_top_level_screenshot {
+        // On `active: false` background tabs, Chromium pauses Viz surface readback
+        // unless the WebContents has an active capturer. Briefly starting a minimal
+        // screencast around the capture increments the capturer count (~250ms capture)
+        // with zero ongoing overhead and without stealing tab or OS window focus.
+        let started_screencast = peer
+            .call(
+                "debugger.sendCommand",
+                json!({
+                    "tabId": tab_id,
+                    "method": "Page.startScreencast",
+                    "params": {
+                        "format": "jpeg",
+                        "quality": 1,
+                        "maxWidth": 16,
+                        "maxHeight": 16,
+                        "everyNthFrame": 100
+                    }
+                }),
+            )
+            .await
+            .is_ok();
+        if started_screencast {
+            state.lock().await.temp_screencast_tabs.insert(tab_id);
+        }
+        let res = peer.call("debugger.sendCommand", rpc).await;
+        if started_screencast {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(1),
+                peer.call(
+                    "debugger.sendCommand",
+                    json!({
+                        "tabId": tab_id,
+                        "method": "Page.stopScreencast",
+                        "params": {}
+                    }),
+                ),
+            )
+            .await;
+            state.lock().await.temp_screencast_tabs.remove(&tab_id);
+        }
+        return res;
     }
     peer.call("debugger.sendCommand", rpc).await
 }
@@ -771,6 +1089,12 @@ async fn handle_extension_event(
             };
             let source_child = source.get("sessionId").and_then(Value::as_str);
             let mut guard = state.lock().await;
+            if cdp_method == "Page.screencastFrame"
+                && source_child.is_none()
+                && guard.temp_screencast_tabs.contains(&tab_id)
+            {
+                return;
+            }
             let Some(ts) = guard.tab_sessions.get_mut(&tab_id) else {
                 return;
             };
@@ -795,10 +1119,18 @@ async fn handle_extension_event(
             let source = arr.first();
             let reason = arr.get(1).and_then(Value::as_str);
             if let Some(tab_id) = source.and_then(|s| s.get("tabId")).and_then(Value::as_i64) {
-                state.lock().await.detach_tab(tab_id);
-            }
-            if reason == Some("canceled_by_user") {
-                cancel.cancel();
+                let mut guard = state.lock().await;
+                let removed = guard.detach_tab(tab_id);
+                let relay_id = guard.relay_id;
+                let peer = guard.peer.clone();
+                if removed {
+                    guard.owned_tabs.remove(&tab_id);
+                    peer.release_relay_tabs(relay_id, &[tab_id]);
+                }
+                drop(guard);
+                if removed && reason == Some("canceled_by_user") {
+                    cancel.cancel();
+                }
             }
         }
         "chrome.tabs.onCreated" | "chrome.tabs.onUpdated" => {
@@ -807,14 +1139,65 @@ async fn handle_extension_event(
             let Ok(tab) = serde_json::from_value::<TabDescriptor>(tab_val.clone()) else {
                 return;
             };
-            let should_attach = {
+            let (should_attach, group_params) = {
                 let mut guard = state.lock().await;
                 let id = tab.id;
-                guard.known_tabs.insert(id, tab);
-                guard.auto_attach
-                    && !guard.tab_sessions.contains_key(&id)
-                    && !guard.attaching.contains_key(&id)
+                let relay_id = guard.relay_id;
+                let peer = guard.peer.clone();
+                let scope = guard.scope.clone();
+                match scope {
+                    CdpSessionScope::TabGroup { title, color } => {
+                        let by_owner = guard.owned_tabs.contains(&id);
+                        let by_opener = tab
+                            .opener_tab_id
+                            .is_some_and(|op| guard.owned_tabs.contains(&op));
+                        let by_group = guard.group_id.is_some_and(|g| g >= 0 && tab.group_id == g);
+                        if !(by_owner || by_opener || by_group)
+                            || !peer.claim_tab(id, relay_id, true)
+                        {
+                            (false, None)
+                        } else {
+                            guard.owned_tabs.insert(id);
+                            let target_gid = guard.group_id;
+                            let needs_grouping = (by_opener || by_owner)
+                                && target_gid.is_some_and(|gid| gid >= 0 && tab.group_id != gid);
+                            let group_cfg = needs_grouping.then(|| {
+                                (
+                                    peer,
+                                    json!({
+                                        "tabId": id,
+                                        "groupId": target_gid,
+                                        "groupTitle": title,
+                                        "groupColor": color,
+                                        "isolated": true,
+                                    }),
+                                )
+                            });
+                            guard.known_tabs.insert(id, tab);
+                            let attach = guard.auto_attach
+                                && !guard.tab_sessions.contains_key(&id)
+                                && !guard.attaching.contains_key(&id);
+                            (attach, group_cfg)
+                        }
+                    }
+                    CdpSessionScope::SharedExisting => {
+                        if tab.isolated || !peer.is_tab_available_for_shared(id, relay_id) {
+                            (false, None)
+                        } else {
+                            guard.known_tabs.insert(id, tab);
+                            let attach = guard.auto_attach
+                                && !guard.tab_sessions.contains_key(&id)
+                                && !guard.attaching.contains_key(&id);
+                            (attach, None)
+                        }
+                    }
+                }
             };
+            if let Some((peer, rpc_params)) = group_params {
+                tokio::spawn(async move {
+                    let _ = peer.call("tabs.group", rpc_params).await;
+                });
+            }
             if should_attach {
                 let cloned = state.clone();
                 let id = tab_val
@@ -831,7 +1214,12 @@ async fn handle_extension_event(
             if let Some(tab_id) = arr.first().and_then(Value::as_i64) {
                 let mut guard = state.lock().await;
                 guard.known_tabs.remove(&tab_id);
-                guard.detach_tab(tab_id);
+                let had_session = guard.detach_tab(tab_id);
+                let had_owned = guard.owned_tabs.remove(&tab_id);
+                if had_session || had_owned {
+                    let relay_id = guard.relay_id;
+                    guard.peer.release_relay_tabs(relay_id, &[tab_id]);
+                }
             }
         }
         _ => {}
@@ -842,22 +1230,35 @@ async fn run_cdp_relay_session(
     ws: tokio_tungstenite::WebSocketStream<TcpStream>,
     peer: Arc<ExtensionPeer>,
     bridge_cancel: CancellationToken,
+    scope: CdpSessionScope,
 ) {
     let (mut ws_sink, mut ws_stream) = ws.split();
     let (cdp_tx, mut cdp_rx) = mpsc::unbounded_channel::<String>();
-    let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<(String, Value)>();
-
-    *peer.events.lock().await = Some(ev_tx);
+    let (relay_id, mut ev_rx) = peer.subscribe_events();
     let session_cancel = bridge_cancel.child_token();
 
+    let mut initial_known = BTreeMap::new();
+    if scope == CdpSessionScope::SharedExisting {
+        for tab in peer.snapshot_initial_tabs() {
+            if !tab.isolated && peer.is_tab_available_for_shared(tab.id, relay_id) {
+                initial_known.insert(tab.id, tab);
+            }
+        }
+    }
+
     let state = Arc::new(Mutex::new(RelayState {
+        relay_id,
+        scope,
+        group_id: None,
+        owned_tabs: HashSet::new(),
         peer: peer.clone(),
         cdp_out: cdp_tx.clone(),
-        known_tabs: BTreeMap::new(),
+        known_tabs: initial_known,
         tab_sessions: HashMap::new(),
         attaching: HashMap::new(),
         auto_attach: false,
         next_session_seq: 0,
+        temp_screencast_tabs: HashSet::new(),
     }));
 
     let writer_cancel = session_cancel.clone();
@@ -930,12 +1331,39 @@ async fn run_cdp_relay_session(
     }
 
     session_cancel.cancel();
-    *peer.events.lock().await = None;
-    let _ = tokio::time::timeout(
-        Duration::from_secs(2),
-        peer.call("debugger.detachAll", json!({})),
-    )
-    .await;
+    peer.unsubscribe_events(relay_id);
+    let (attached_tabs, release_tabs) = {
+        let mut guard = state.lock().await;
+        let attached: Vec<i64> = guard.tab_sessions.keys().copied().collect();
+        let mut release = attached.clone();
+        for id in guard.owned_tabs.drain() {
+            if !release.contains(&id) {
+                release.push(id);
+            }
+        }
+        guard.tab_sessions.clear();
+        (attached, release)
+    };
+    peer.release_relay_tabs(relay_id, &release_tabs);
+    for tab_id in attached_tabs {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(1),
+            peer.call(
+                "debugger.sendCommand",
+                json!({
+                    "tabId": tab_id,
+                    "method": "Emulation.setFocusEmulationEnabled",
+                    "params": { "enabled": false }
+                }),
+            ),
+        )
+        .await;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            peer.call("debugger.detach", json!({ "tabId": tab_id })),
+        )
+        .await;
+    }
     let _ = ws_writer.await;
     let _ = event_task.await;
 }

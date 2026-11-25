@@ -136,17 +136,6 @@ struct ForegroundBrowser {
 }
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 impl crate::host::protocol::browser::BrowserBootstrap for ForegroundBrowser {
-    fn cdp_config(
-        &self,
-    ) -> Result<crate::host::browser_cdp::BrowserCdpConfig, styx_contracts::error::ErrorCategory>
-    {
-        self.source.cdp_config()
-    }
-
-    fn saved_profiles(&self) -> Result<Vec<String>, styx_contracts::error::ErrorCategory> {
-        self.source.saved_profiles()
-    }
-
     fn release_profile(&self, owner: &styx_core::operations::OwnerLease) {
         self.source.release_profile(owner);
     }
@@ -154,9 +143,10 @@ impl crate::host::protocol::browser::BrowserBootstrap for ForegroundBrowser {
     fn prepare_profile(
         &self,
         owner: &styx_core::operations::OwnerLease,
+        scope: crate::host::browser_extension::CdpSessionScope,
     ) -> Result<crate::providers::browser::OwnedBrowserConfig, styx_contracts::error::ErrorCategory>
     {
-        self.source.prepare_profile(owner)
+        self.source.prepare_profile(owner, scope)
     }
     fn validate_before_spawn(&self) -> Result<(), styx_contracts::error::ErrorCategory> {
         self.admitted
@@ -821,24 +811,6 @@ async fn run_owned(
         }
     }
     #[cfg(not(target_os = "android"))]
-    let browser_cdp = admitted.profile.browser_cdp();
-    #[cfg(not(target_os = "android"))]
-    if let Some(cdp) = &browser_cdp {
-        let hook_host = host.clone();
-        cdp.attach_disconnect_hook(Arc::new(move || {
-            let hook_host = hook_host.clone();
-            Box::pin(async move {
-                hook_host
-                    .authority()
-                    .cleanup_browser_cdp_session(Duration::from_secs(10))
-                    .await
-            })
-        }));
-        if let Some(scope) = &settings_scope {
-            scope.publish_browser_cdp(cdp);
-        }
-    }
-    #[cfg(not(target_os = "android"))]
     let browser_extension = match crate::host::browser_extension::BrowserExtensionBridge::start(
         admitted.profile.host_base_dir(),
     )
@@ -1226,10 +1198,6 @@ async fn run_owned(
     }
     if let Some(settings) = &settings {
         settings.close().await;
-    }
-    #[cfg(not(target_os = "android"))]
-    if let Some(cdp) = &browser_cdp {
-        cdp.clear_disconnect_hook();
     }
     #[cfg(not(target_os = "android"))]
     if let Some(ext) = &browser_extension {

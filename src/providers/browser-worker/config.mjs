@@ -2,8 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const CONFIG_LIMIT = 16 * 1024;
-const managedFields = ['schema', 'profile_dir', 'output_dir', 'workspace_dir', 'browser_executable'];
-const cdpFields = ['schema', 'output_dir', 'workspace_dir', 'cdp_endpoint'];
+const requiredFields = ['schema', 'output_dir', 'workspace_dir', 'cdp_endpoint'];
 const fail = () => { throw new Error('browser_worker_configuration_rejected'); };
 function pinnedKernelFile(value) {
   return typeof value === 'string' && /^\/proc\/[1-9][0-9]*\/fd\/[0-9]+$/.test(value);
@@ -36,18 +35,14 @@ function validateCdpEndpoint(value) {
     fail();
   }
   if (parsed.username || parsed.password || parsed.search || parsed.hash) fail();
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'ws:') fail();
+  if (parsed.protocol !== 'ws:') fail();
   if (parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost' && parsed.hostname !== '[::1]') fail();
   if (!/^[1-9][0-9]*$/.test(parsed.port)) fail();
   const port = Number(parsed.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) fail();
-  if (parsed.protocol === 'http:') {
-    if (parsed.pathname !== '/') fail();
-  } else {
-    if (!/^\/devtools\/browser(?:\/[A-Za-z0-9._-]+)?$/.test(parsed.pathname)) fail();
-    const segments = parsed.pathname.split('/');
-    if (segments.includes('.') || segments.includes('..')) fail();
-  }
+  if (!/^\/devtools\/browser(?:\/[A-Za-z0-9._-]+)?$/.test(parsed.pathname)) fail();
+  const segments = parsed.pathname.split('/');
+  if (segments.includes('.') || segments.includes('..')) fail();
 }
 // Defensive shape/filesystem checks only. Rust supplies the authorized scope;
 // this function does not choose a profile, owner, URL policy or credentials.
@@ -71,23 +66,10 @@ export function readConfiguration(file) {
     if (after.size !== count || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) fail();
   } finally { fs.closeSync(fd); }
   if (!config || typeof config !== 'object' || Array.isArray(config) || config.schema !== 1) fail();
-  const isCdp = Object.hasOwn(config, 'cdp_endpoint');
-  const fields = isCdp ? cdpFields : managedFields;
-  if (Object.keys(config).length !== fields.length || fields.some(key => !Object.hasOwn(config, key))) fail();
+  if (Object.keys(config).length !== requiredFields.length || requiredFields.some(key => !Object.hasOwn(config, key))) fail();
   directory(config.output_dir);
   directory(config.workspace_dir);
   if (within(config.output_dir, config.workspace_dir) || within(config.workspace_dir, config.output_dir)) fail();
-  if (isCdp) {
-    validateCdpEndpoint(config.cdp_endpoint);
-  } else {
-    directory(config.profile_dir);
-    const executablePinned = pinnedKernelFile(config.browser_executable);
-    if (!executablePinned) canonical(config.browser_executable);
-    const executable = executablePinned ? fs.statSync(config.browser_executable) : fs.lstatSync(config.browser_executable);
-    if (!executable.isFile() || (!executablePinned && executable.isSymbolicLink()) || (process.platform !== 'win32' && !(executable.mode & 0o111))) fail();
-    for (const other of [config.output_dir, config.workspace_dir]) {
-      if (within(config.profile_dir, other) || within(other, config.profile_dir)) fail();
-    }
-  }
+  validateCdpEndpoint(config.cdp_endpoint);
   return Object.freeze(config);
 }

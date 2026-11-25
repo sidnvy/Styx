@@ -2,12 +2,13 @@
   "manifest_version": 3,
   "name": "Styx Browser Bridge",
   "short_name": "Styx Bridge",
-  "version": "0.1.0",
-  "description": "Connects your local Styx Host to your existing signed-in browser tabs without remote debugging prompts.",
+  "version": "0.2.0",
+  "description": "Connects your local Styx Host to your existing signed-in browser tabs and background Tab Groups without remote debugging prompts.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAof4Hv2ofTCqVbPXnIts0cqEVSwEHFrCFqBGHX/2JQZ0gWxen9ya4BRHATfrd3QZQlPg/dGr31yqOknTDteQRGpu7KXn73s1ckShuOVej7iG4j7M47If0uYo1IdPD72GCWQM7UJMGiI66XNKRPyjiNp30b2f6g7AmH7Zd19hMmAOYe2qe+u2ERjyz5IIA0oxzrLH+hOyprzK9Fd/XNSXP2dvpe6ptKV+nqHkwouA1eZkFVbaIcaK09WkIR/tBxQ3pGglB4UpNHJFeGzRFwwXAjjF3TPeDxAe2qvZMglEiqIpGW/ikoqOXHuUvtGe9wl4+JIwubxwwGNb3/O0TJSpocwIDAQAB",
   "permissions": [
     "debugger",
     "tabs",
+    "tabGroups",
     "nativeMessaging",
     "alarms"
   ],

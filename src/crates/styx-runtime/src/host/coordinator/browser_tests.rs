@@ -42,31 +42,19 @@ fn browser_context_cannot_be_replaced_with_exec_or_desktop_context() {
 
 #[test]
 fn profile_workspaces_cannot_expose_other_owner_private_directories() {
-    let make = |profile: &str, output: &str, workspace: &str| OwnedBrowserConfig {
+    let make = |output: &str, workspace: &str| OwnedBrowserConfig {
         node_binary: "/unused/node".into(),
         worker_entry: "/unused/worker".into(),
-        browser_binary: "/unused/browser".into(),
-        cdp_endpoint: None,
-        profile_dir: profile.into(),
+        cdp_endpoint: "ws://127.0.0.1:9222/devtools/browser/fixture".into(),
         output_dir: output.into(),
         workspace_dir: workspace.into(),
         rpc_timeout: Duration::from_secs(1),
     };
-    let a = make("/owned/a-profile", "/owned/a-output", "/owned/shared");
-    let b = make(
-        "/owned/shared/b-profile",
-        "/owned/b-output",
-        "/owned/project-b",
-    );
+    let a = make("/owned/a-output", "/owned/shared");
+    let b = make("/owned/shared/b-output", "/owned/project-b");
     assert!(!profiles_disjoint(&a, &b));
     assert!(!profiles_disjoint(&b, &a));
-    let b = make(
-        "/owned/b-profile",
-        "/owned/shared/b-output",
-        "/owned/project-b",
-    );
-    assert!(!profiles_disjoint(&a, &b));
-    let b = make("/owned/b-profile", "/owned/b-output", "/owned/shared");
+    let b = make("/owned/b-output", "/owned/shared");
     assert!(profiles_disjoint(&a, &b));
 }
 
@@ -309,12 +297,9 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
     let config = |prefix: &str| OwnedBrowserConfig {
         node_binary: std::env::var_os("STYX_TEST_BROWSER_NODE").unwrap().into(),
         worker_entry: std::env::var_os("STYX_TEST_BROWSER_WORKER").unwrap().into(),
-        browser_binary: std::env::var_os("STYX_TEST_BROWSER_EXECUTABLE")
-            .unwrap()
-            .into(),
-        cdp_endpoint: None,
+        cdp_endpoint: std::env::var("STYX_TEST_BROWSER_CDP_ENDPOINT")
+            .unwrap_or_else(|_| "ws://127.0.0.1:9222/devtools/browser/fixture".into()),
         workspace_dir: root.join(format!("{prefix}-work")),
-        profile_dir: root.join(format!("{prefix}-profile")),
         output_dir: root.join(format!("{prefix}-output")),
         rpc_timeout: Duration::from_secs(8),
     };
@@ -326,11 +311,11 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
             .register_browser_profile(&other, config("a"))
             .is_err()
     );
-    let penetration = root.join("a-work/foreign-profile");
+    let penetration = root.join("a-work/foreign-output");
     std::fs::create_dir(&penetration).unwrap();
     std::fs::set_permissions(&penetration, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut rejected = config("b");
-    rejected.profile_dir = penetration;
+    rejected.output_dir = penetration;
     assert!(
         authority
             .register_browser_profile(&other, rejected)
@@ -519,7 +504,6 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
             assert!(result.physical_complete);assert!(result.quiescent);assert_eq!(result.unreleased_records,0);assert!(result.blocked.is_empty());
         }
         assert!(host.inner.state.lock().unwrap().browser.as_ref().unwrap().profiles.is_empty());
-        assert!(root.join("a-profile").is_dir());assert!(root.join("b-profile").is_dir());
         observations["owners_physically_complete_unreleased_zero"]=serde_json::json!(true);
         observations["profile_metadata_released_bytes_preserved"]=serde_json::json!(true);
         stage = "scenario_complete";

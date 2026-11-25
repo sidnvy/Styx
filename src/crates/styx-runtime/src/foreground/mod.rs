@@ -1,8 +1,6 @@
 //! Foreground composition; CLI and later native UI share these authority ports.
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 mod browser;
-#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
-pub(crate) use browser::profile_directory;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod computer;
 #[cfg(target_os = "macos")]

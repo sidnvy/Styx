@@ -1,4 +1,5 @@
 //! Browser operation port over the existing Core and pinned executor.
+use crate::host::browser_extension::CdpSessionScope;
 use crate::host::coordinator::{
     BrowserActionSubmission, BrowserOpenSubmission, CoordinatorError, HostAuthority,
     HostCoordinator,
@@ -19,7 +20,9 @@ use styx_core::operations::OwnerLease;
 use tokio_util::task::TaskTracker;
 const SPEC_LIMIT: usize = 128 * 1024;
 pub(crate) enum BrowserCommand {
-    PrepareOpen,
+    PrepareOpen {
+        scope: CdpSessionScope,
+    },
     DispatchOpen {
         target: ResourceTarget,
     },
@@ -71,17 +74,13 @@ impl From<Reply> for BrowserReply {
     }
 }
 pub(crate) trait BrowserBootstrap: Send + Sync {
-    /// Host-local opt-in CDP configuration (default OFF).
-    fn cdp_config(&self) -> Result<crate::host::browser_cdp::BrowserCdpConfig, ErrorCategory> {
-        Ok(Default::default())
-    }
-    /// Saved local profiles, without caller identities or execution state.
-    /// Adapters must explicitly forward discovery rather than hide saved logins.
-    fn saved_profiles(&self) -> Result<Vec<String>, ErrorCategory>;
-    // Every adapter must explicitly forward or implement metadata retirement.
     fn release_profile(&self, owner: &OwnerLease);
-    /// Includes control and full worker-input validation before profile creation.
-    fn prepare_profile(&self, owner: &OwnerLease) -> Result<OwnedBrowserConfig, ErrorCategory>;
+    /// Includes control and full worker-input validation before Extension Bridge session creation.
+    fn prepare_profile(
+        &self,
+        owner: &OwnerLease,
+        scope: CdpSessionScope,
+    ) -> Result<OwnedBrowserConfig, ErrorCategory>;
     fn validate_before_spawn(&self) -> Result<(), ErrorCategory>;
     fn validate_control(&self) -> Result<(), ErrorCategory>;
 }
@@ -106,14 +105,6 @@ pub(crate) struct BrowserPort<'a> {
     pub(crate) inputs: &'a BrowserInputs,
 }
 impl BrowserPort<'_> {
-    pub(crate) async fn cdp_config(
-        &self,
-    ) -> Result<crate::host::browser_cdp::BrowserCdpConfig, ErrorCategory> {
-        self.browser_input(|source| source.cdp_config()).await
-    }
-    pub(crate) async fn saved_profiles(&self) -> Result<Vec<String>, ErrorCategory> {
-        self.browser_input(|source| source.saved_profiles()).await
-    }
     fn context(&self, revision: u64, timeout: u32) -> Result<PreparedContext, ErrorCategory> {
         if timeout == 0 || timeout > 10_000 {
             return Err(ErrorCategory::InvalidRequest);
@@ -267,7 +258,7 @@ impl BrowserPort<'_> {
             self.coordinator.now().0.saturating_add(u64::from(timeout)),
         ));
         match command {
-            BrowserCommand::PrepareOpen => {
+            BrowserCommand::PrepareOpen { scope } => {
                 let bound = owner.clone();
                 let current = self.coordinator.clone();
                 let config = match self
@@ -275,7 +266,7 @@ impl BrowserPort<'_> {
                         if !current.owner_is_active(&bound) {
                             return Err(ErrorCategory::Unauthorized);
                         }
-                        source.prepare_profile(&bound)
+                        source.prepare_profile(&bound, scope)
                     })
                     .await
                 {

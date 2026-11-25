@@ -108,13 +108,9 @@ fn overlaps(a: &std::path::Path, b: &std::path::Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 fn profiles_disjoint(a: &OwnedBrowserConfig, b: &OwnedBrowserConfig) -> bool {
-    let a_private = [&a.profile_dir, &a.output_dir];
-    let b_private = [&b.profile_dir, &b.output_dir];
-    !a_private.iter().any(|p| overlaps(p, &b.workspace_dir))
-        && !b_private.iter().any(|p| overlaps(p, &a.workspace_dir))
-        && !a_private
-            .iter()
-            .any(|p| b_private.iter().any(|q| overlaps(p, q)))
+    !overlaps(&a.output_dir, &b.workspace_dir)
+        && !overlaps(&b.output_dir, &a.workspace_dir)
+        && !overlaps(&a.output_dir, &b.output_dir)
 }
 fn handle(
     lane: &BrowserLane,
@@ -136,50 +132,6 @@ fn handle(
     Ok(handle)
 }
 impl HostAuthority {
-    pub(crate) async fn cleanup_browser_cdp_session(&self, budget: Duration) -> bool {
-        let until = tokio::time::Instant::now() + budget.min(Duration::from_secs(30));
-        let Ok(_cleanup) = tokio::time::timeout_at(until, self.inner.cleanup_lock.lock()).await
-        else {
-            return false;
-        };
-        let Ok(_quiescent) =
-            tokio::time::timeout_at(until, self.inner.execution_gate.clone().write_owned()).await
-        else {
-            return false;
-        };
-        let owners: Vec<OwnerLease> = {
-            let state = self.inner.state.lock().expect("Host state mutex");
-            let Some(lane) = &state.browser else {
-                return true;
-            };
-            lane.profiles
-                .values()
-                .filter(|binding| {
-                    binding
-                        .owner
-                        .owner_id()
-                        .as_str()
-                        .starts_with(crate::host::browser_cdp::CDP_OWNER_PREFIX)
-                })
-                .map(|binding| binding.owner.clone())
-                .collect()
-        };
-        let mut complete = true;
-        for owner in owners {
-            if let Some(report) = cleanup_browser_owner(
-                self.inner.clone(),
-                &owner,
-                until.saturating_duration_since(tokio::time::Instant::now()),
-            )
-            .await
-            {
-                complete &= report.complete;
-            }
-            let _ = collect_browser_retention(&self.inner, Some(&owner), until).await;
-        }
-        complete
-    }
-
     pub fn configure_browser(&self, facts: AdmissionFacts) -> Result<(), CoordinatorError> {
         validate_facts(&self.inner, &facts)?;
         let mut state = self.inner.state.lock().expect("Host state mutex");

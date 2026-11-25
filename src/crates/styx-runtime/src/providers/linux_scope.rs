@@ -203,62 +203,7 @@ impl ScopeCommand {
         Ok(())
     }
 }
-/// Read the ordinary desktop startup environment without requiring Computer Use.
-/// Only display-related entries are passed into the Browser's clean environment.
-pub(crate) async fn browser_desktop_environment(until: Option<Instant>) -> Result<Vec<String>> {
-    let runtime = PathBuf::from(format!(
-        "/run/user/{}",
-        nix::unistd::Uid::current().as_raw()
-    ));
-    let args = [
-        "--user",
-        "--json=short",
-        "get-property",
-        "org.freedesktop.systemd1",
-        "/org/freedesktop/systemd1",
-        "org.freedesktop.systemd1.Manager",
-        "Environment",
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect();
-    let output = tool("/usr/bin/busctl", args, &runtime, until).await?;
-    if !output.status.success() {
-        return Err(ScopeError::Unsupported);
-    }
-    parse_browser_desktop_environment(&output.stdout)
-}
-fn parse_browser_desktop_environment(bytes: &[u8]) -> Result<Vec<String>> {
-    #[derive(serde::Deserialize)]
-    struct Environment {
-        data: Vec<String>,
-    }
-    let environment: Environment =
-        serde_json::from_slice(bytes).map_err(|_| ScopeError::Unsupported)?;
-    let selected: Vec<_> = environment
-        .data
-        .into_iter()
-        .filter(|entry| {
-            entry.split_once('=').is_some_and(|(key, _)| {
-                matches!(
-                    key,
-                    "DISPLAY" | "WAYLAND_DISPLAY" | "XAUTHORITY" | "XDG_SESSION_TYPE"
-                )
-            })
-        })
-        .collect();
-    if selected.iter().any(|entry| entry.contains('\0'))
-        || !selected.iter().any(|entry| {
-            entry
-                .strip_prefix("DISPLAY=")
-                .or_else(|| entry.strip_prefix("WAYLAND_DISPLAY="))
-                .is_some_and(|value| !value.is_empty())
-        })
-    {
-        return Err(ScopeError::Unsupported);
-    }
-    Ok(selected)
-}
+
 /// Hyprland creates its XWayland listening sockets before passing them to
 /// Xwayland (upstream src/xwayland/Server.cpp). SO_PEERCRED retains the
 /// credentials at listen(), so the selected compositor is the socket peer.
@@ -1344,20 +1289,6 @@ mod tests {
             None
         );
     }
-    #[test]
-    fn browser_desktop_environment_requires_a_display() {
-        for entries in [
-            vec!["XAUTHORITY=/tmp/cookies"],
-            vec!["DISPLAY=", "WAYLAND_DISPLAY="],
-        ] {
-            let bytes =
-                serde_json::to_vec(&serde_json::json!({"type":"as","data":entries})).unwrap();
-            assert_eq!(
-                parse_browser_desktop_environment(&bytes),
-                Err(ScopeError::Unsupported)
-            );
-        }
-    }
     #[tokio::test]
     async fn browser_launch_uses_selected_desktop_environment() {
         for expected in [
@@ -1371,11 +1302,8 @@ mod tests {
                 "XDG_SESSION_TYPE=wayland",
             ],
         ] {
-            let mut entries = expected.clone();
-            entries.push("UNRELATED=manager-value");
-            let bytes =
-                serde_json::to_vec(&serde_json::json!({"type":"as","data":entries})).unwrap();
-            let desktop_environment = parse_browser_desktop_environment(&bytes).unwrap();
+            let desktop_environment: Vec<String> =
+                expected.iter().map(|entry| (*entry).to_owned()).collect();
             let input = ScopeCommand::browser(
                 "/usr/bin/env".into(),
                 "/unused/worker.mjs".into(),

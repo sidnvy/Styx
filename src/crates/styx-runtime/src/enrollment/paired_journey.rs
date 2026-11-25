@@ -1294,43 +1294,22 @@ struct CapacityBrowser {
     root: PathBuf,
 }
 impl crate::host::protocol::browser::BrowserBootstrap for CapacityBrowser {
-    fn saved_profiles(&self) -> Result<Vec<String>, styx_contracts::error::ErrorCategory> {
-        // This fixture verifies same-Host close/reopen and protocol reconnection;
-        // discovery after a new Host bootstrap has separate coverage.
-        Ok(Vec::new())
-    }
-
     // Fixture directories preserve evidence; there is no retained owner registry.
     fn release_profile(&self, _: &styx_core::operations::OwnerLease) {}
 
     fn prepare_profile(
         &self,
         owner: &styx_core::operations::OwnerLease,
+        _: crate::host::browser_extension::CdpSessionScope,
     ) -> Result<crate::providers::browser::OwnedBrowserConfig, styx_contracts::error::ErrorCategory>
     {
         let directory = self.root.join(format!(
             "browser-{}",
             Sha256Digest::of_bytes(owner.owner_id().as_str().as_bytes()).to_hex()
         ));
-        let runtime = crate::providers::browser::assets::open_or_create_private_directory(
-            &self.root,
-            "browser-runtime",
-        )
-        .map_err(|_| styx_contracts::error::ErrorCategory::IntegrityFailure)?;
-        let profiles = crate::providers::browser::assets::open_or_create_private_directory(
-            &self.root,
-            "browser-profiles",
-        )
-        .map_err(|_| styx_contracts::error::ErrorCategory::IntegrityFailure)?;
-        // Reuse the production stable profile mapping, including its fresh-owner
-        // incarnation handling. Only runtime/output fixture paths are owner-local.
-        let profile =
-            crate::foreground::profile_directory(&runtime, &profiles, owner.owner_id().as_str())?
-                .path()
-                .to_owned();
         let output = directory.join("output");
         let workspace = directory.join("workspace");
-        for path in [&directory, &profile, &output, &workspace] {
+        for path in [&directory, &output, &workspace] {
             std::fs::create_dir_all(path)
                 .map_err(|_| styx_contracts::error::ErrorCategory::IntegrityFailure)?;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
@@ -1343,12 +1322,9 @@ impl crate::host::protocol::browser::BrowserBootstrap for CapacityBrowser {
             worker_entry: std::env::var_os("STYX_TEST_BROWSER_WORKER")
                 .expect("owned worker input")
                 .into(),
-            browser_binary: std::env::var_os("STYX_TEST_BROWSER_EXECUTABLE")
-                .expect("owned browser input")
-                .into(),
-            cdp_endpoint: None,
+            cdp_endpoint: std::env::var("STYX_TEST_BROWSER_CDP_ENDPOINT")
+                .unwrap_or_else(|_| "ws://127.0.0.1:9222/devtools/browser/fixture".into()),
             workspace_dir: workspace,
-            profile_dir: profile,
             output_dir: output,
             rpc_timeout: Duration::from_secs(8),
         })
