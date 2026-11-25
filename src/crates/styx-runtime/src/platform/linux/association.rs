@@ -146,6 +146,30 @@ struct UnitFact {
     // Service.ExecStart: a(sasbttttuii), four real/monotonic start/end timestamps.
     bind_start: Option<Vec<ExecStartRow>>,
 }
+fn sorted_refs(values: &[String]) -> Vec<&str> {
+    let mut refs: Vec<&str> = values.iter().map(String::as_str).collect();
+    refs.sort_unstable();
+    refs
+}
+impl UnitFact {
+    /// Systemd unit dependency properties (`Conflicts`, `BindsTo`, `Wants`, etc.)
+    /// are sets whose D-Bus iteration order can change across `daemon-reload`.
+    fn same_source(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.path == other.path
+            && self.invocation == other.invocation
+            && self.cgroup == other.cgroup
+            && self.main_pid == other.main_pid
+            && sorted_refs(&self.binds) == sorted_refs(&other.binds)
+            && sorted_refs(&self.wants) == sorted_refs(&other.wants)
+            && sorted_refs(&self.on_success) == sorted_refs(&other.on_success)
+            && sorted_refs(&self.on_failure) == sorted_refs(&other.on_failure)
+            && sorted_refs(&self.conflicts) == sorted_refs(&other.conflicts)
+            && self.restart == other.restart
+            && self.service_type == other.service_type
+            && self.bind_start == other.bind_start
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EndpointFact {
@@ -203,10 +227,10 @@ impl AssociationFacts {
             && self.leader == other.leader
             && self.anchor == other.anchor
             && self.anchor_argv == other.anchor_argv
-            && self.bind == other.bind
-            && self.envelope == other.envelope
-            && self.wm == other.wm
-            && self.wm_env == other.wm_env
+            && self.bind.same_source(&other.bind)
+            && self.envelope.same_source(&other.envelope)
+            && self.wm.same_source(&other.wm)
+            && self.wm_env.same_source(&other.wm_env)
             && self.bind_process == other.bind_process
             && self.wm_main == other.wm_main
             && self.wayland == other.wayland
@@ -785,11 +809,20 @@ async fn unit(connection: &Connection, owner: &str, name: &str, service: bool) -
     {
         return Err(AssociationError::Changed);
     }
-    let binds = property(connection, owner, path.as_str(), UNIT, "BindsTo").await?;
-    let wants = property(connection, owner, path.as_str(), UNIT, "Wants").await?;
-    let on_success = property(connection, owner, path.as_str(), UNIT, "OnSuccess").await?;
-    let on_failure = property(connection, owner, path.as_str(), UNIT, "OnFailure").await?;
-    let conflicts = property(connection, owner, path.as_str(), UNIT, "Conflicts").await?;
+    let mut binds: Vec<String> =
+        property(connection, owner, path.as_str(), UNIT, "BindsTo").await?;
+    let mut wants: Vec<String> = property(connection, owner, path.as_str(), UNIT, "Wants").await?;
+    let mut on_success: Vec<String> =
+        property(connection, owner, path.as_str(), UNIT, "OnSuccess").await?;
+    let mut on_failure: Vec<String> =
+        property(connection, owner, path.as_str(), UNIT, "OnFailure").await?;
+    let mut conflicts: Vec<String> =
+        property(connection, owner, path.as_str(), UNIT, "Conflicts").await?;
+    binds.sort();
+    wants.sort();
+    on_success.sort();
+    on_failure.sort();
+    conflicts.sort();
     let (main_pid, cgroup, restart, service_type) = if service {
         (
             Some(property(connection, owner, path.as_str(), SERVICE, "MainPID").await?),
@@ -1452,6 +1485,13 @@ impl LinuxAssociationLease {
                 }
             )+ };
         }
+        macro_rules! check_unit {
+            ($($field:ident),+ $(,)?) => { $(
+                if !self.facts.$field.same_source(&other.facts.$field) {
+                    changed.push(stringify!($field));
+                }
+            )+ };
+        }
         check!(
             schema,
             boot,
@@ -1462,11 +1502,10 @@ impl LinuxAssociationLease {
             manager_process,
             leader,
             anchor,
-            anchor_argv,
-            bind,
-            envelope,
-            wm,
-            wm_env,
+            anchor_argv
+        );
+        check_unit!(bind, envelope, wm, wm_env);
+        check!(
             bind_process,
             wm_main,
             wayland,

@@ -17,6 +17,8 @@ Styx `0.8.3` adds the **Styx Chrome Extension Bridge** for zero-flag existing Ch
 - **Existing-browser CDP & session reliability fixes (`styx-runtime`)**:
   - Added `"cdp_unavailable"` to the browser reference fact allowlist so pre-attach CDP refusals and timeouts surface cleanly instead of triggering `ProtocolMismatch` / `Phase::Unknown`.
   - Recovered `StaleObservation` snapshots on live Chrome tabs cleanly without poisoning `Phase::Ready`, and cleaned up unattached CDP workers after `CapabilityUnsupported` retries so subsequent `existing-browser` attempts return cleanly to `Phase::Saved`.
+- **Linux Computer Use (CUA) source stability (`styx-runtime`)**:
+  - Canonicalized systemd unit dependency lists (`Conflicts`, `BindsTo`, `Wants`, `OnSuccess`, `OnFailure`) when comparing Linux desktop session leases so `systemd --user daemon-reload` hash reordering no longer triggers false `desktop_source_fenced` / `computer_not_dispatched` disconnects.
 - **Previous `0.8.2` & `0.8.x` baseline**:
   - Public MCP OAuth resilience (bounded 24-hour stale-JWKS fallback, fixed-category auth rejection telemetry, RFC 6750 `WWW-Authenticate: Bearer`), refined cross-platform brand artwork, bounded Linux `systemd` `service_scope` shutdown loop (`20s` limit), opt-in local Browser CDP alongside persistent isolated profiles, and non-destructive Google Gemini Web and ChatGPT Custom MCP compatibility.
 
