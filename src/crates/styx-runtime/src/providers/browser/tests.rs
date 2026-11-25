@@ -546,3 +546,44 @@ fn cdp_owned_browser_config_validates_loopback_canonicality_and_disallows_browse
         BrowserError::InvalidRequest
     );
 }
+
+#[test]
+fn native_fact_accepts_cdp_unavailable_and_rejects_unknown_reasons() {
+    use serde_json::json;
+    for reason in ["cdp_unavailable", "stale", "invalid"] {
+        let value = json!({
+            "isError": true,
+            "content": [{"type": "text", "text": format!("browser_native_{reason}")}],
+            "_meta": {"app.styx/browser-native": {
+                "schema": 1,
+                "before": 1,
+                "after": 1,
+                "dispatched": false,
+                "reason": reason,
+            }}
+        });
+        let result: CallToolResult = serde_json::from_value(value).unwrap();
+        let fact = references::fact(&result).unwrap();
+        assert!(!fact.dispatched);
+        assert_eq!(fact.before, 1);
+        assert_eq!(fact.after, 1);
+        assert_eq!(fact.reason.as_deref(), Some(reason));
+    }
+
+    let unknown = json!({
+        "isError": true,
+        "content": [{"type": "text", "text": "browser_native_other"}],
+        "_meta": {"app.styx/browser-native": {
+            "schema": 1,
+            "before": 1,
+            "after": 1,
+            "dispatched": false,
+            "reason": "other",
+        }}
+    });
+    let result: CallToolResult = serde_json::from_value(unknown).unwrap();
+    assert_eq!(
+        references::fact(&result).err(),
+        Some(BrowserError::ProtocolMismatch)
+    );
+}

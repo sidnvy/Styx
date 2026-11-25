@@ -535,6 +535,11 @@
       "kind": "owned_signed_app_gateway_bundle_fixture",
       "input": "STYX_TEST_APP_PREVIOUS_SELECTION, STYX_TEST_APP_CONTROL_SELECTION and fresh STYX_TEST_APP_BUNDLE_ROOT with disposable previous-runtime payload; removes only that owned old copy",
       "required_for": "Same-profile App Gateway current-bundle admission and revalidation, two clean restarts, real TLS admin/counts/invitation after old payload removal, unchanged identity and pairing; not installed desktop acceptance"
+    },
+    "host::browser_extension::tests::real_chromium_extension_bridge_e2e_with_playwright_worker": {
+      "kind": "explicit_owned_chromium_extension_bridge_e2e",
+      "input": "Real Chromium binary, compiled styx __browser-extension-bridge native host, and Node 22 Playwright browser-worker in a fresh disposable temp root",
+      "required_for": "End-to-end verification of Styx MV3 extension Native Messaging bridge, Host WS CDP relay, Playwright connectOverCDP, cookie persistence, and tab detach/cleanup without --remote-debugging-port"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints",

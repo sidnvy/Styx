@@ -1019,3 +1019,207 @@ fn cdp_session_actions_use_extended_prepare_timeout_for_interactive_attach() {
         BROWSER_WAIT_PREPARE_TIMEOUT_MS
     );
 }
+
+#[tokio::test]
+async fn cdp_not_dispatched_cleans_up_unattached_worker_and_preserves_retryable_session() {
+    use crate::host::browser_cdp::{BrowserCdpConfig, CDP_SESSION_ID};
+    let root = std::env::temp_dir().join(format!(
+        "styx-browser-cdp-not-dispatched-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for name in ["workspace", "profile", "output"] {
+        let dir = root.join(name);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let source = Arc::new(Bootstrap {
+        root,
+        prepared: AtomicUsize::new(0),
+    });
+    let (host, authority) = HostCoordinator::new_without_executor(
+        OperationLedger::new("browser-cdp-not-dispatched".try_into().unwrap()),
+        facts(CapabilityId::ExecRun),
+    )
+    .unwrap();
+    authority
+        .configure_browser(facts(CapabilityId::Browser))
+        .unwrap();
+    let inputs = host.browser_sessions().inputs(source.clone());
+    let engine = Engine {
+        port: BrowserPort {
+            coordinator: &host,
+            authority: &authority,
+            inputs: &inputs,
+        },
+    };
+    let a = named_caller("cdp-retry");
+    register_caller(&host, &authority, &a);
+
+    let mut session = engine
+        .new_session(
+            CDP_SESSION_ID,
+            SessionMode::Cdp,
+            Some(Some("http://127.0.0.1:9222".to_owned())),
+            Some(a.clone()),
+            Phase::Saved,
+        )
+        .unwrap();
+    let old_lease = session.lease.clone();
+    let config = source.prepare_profile(&old_lease).unwrap();
+    authority
+        .register_browser_profile(&old_lease, config)
+        .unwrap();
+    let context = PreparedContext {
+        device_id: host.bootstrap_identity().0.clone(),
+        grant_revision: host.grant_revision(),
+        session: None,
+        observation: None,
+        capability: CapabilityId::Browser,
+        deadline: Some(MonotonicMillis(host.now().0 + 5_000)),
+        disconnect_policy: DisconnectPolicy::RetainForOwner,
+    };
+    let open_snap = host.prepare_browser_open(&old_lease, context).unwrap();
+    let target = ResourceTarget {
+        operation_id: open_snap.id.clone(),
+        payload_digest: open_snap.payload_digest,
+    };
+    match host
+        .dispatch_browser_open(&old_lease, &target.operation_id, target.payload_digest)
+        .await
+        .unwrap()
+    {
+        crate::host::coordinator::BrowserOpenSubmission::Submitted(ticket) => {
+            let _ = ticket.wait().await.unwrap();
+        }
+        _ => panic!("expected submission"),
+    }
+    session.target = Some(target.clone());
+    session.phase = Phase::Unknown;
+
+    let op_id = OperationId {
+        host_generation: "browser-cdp-not-dispatched".try_into().unwrap(),
+        owner_epoch: "cdp-retry-epoch".try_into().unwrap(),
+        sequence: 1,
+    };
+    let digest = Sha256Digest::of_bytes(b"cdp-tabs-list");
+    let cell = Arc::new(AsyncMutex::new(session));
+    {
+        let mut registry = engine.state().registry.lock().unwrap();
+        registry
+            .sessions
+            .insert(CDP_SESSION_ID.to_owned(), cell.clone());
+        registry.cdp_endpoint = Some(Some("http://127.0.0.1:9222".to_owned()));
+    }
+
+    let res = {
+        let mut guard = cell.lock().await;
+        engine
+            .finish_action(
+                CDP_SESSION_ID,
+                &mut guard,
+                &op_id,
+                digest,
+                &target,
+                BrowserReply::Action {
+                    snapshot: Snapshot {
+                        operation_id: op_id.clone(),
+                        payload_digest: digest,
+                        target: Some(target.clone()),
+                        state: OperationState::Failed,
+                        liveness: ExecutionLiveness::Running,
+                        output_drain: OutputDrain::Open,
+                    },
+                    dispatch: "not_dispatched".into(),
+                    result: None,
+                    cause: Some(ErrorCategory::CapabilityUnsupported),
+                    cleanup_complete: Some(false),
+                },
+            )
+            .await
+    };
+    assert_eq!(error(&res)["error"], "capability_unsupported");
+    assert_eq!(error(&res)["uncertain"], false);
+
+    let guard = cell.lock().await;
+    assert!(guard.phase == Phase::Saved);
+    assert!(guard.target.is_none());
+    assert!(guard.cleanup.is_none());
+    assert_ne!(guard.lease, old_lease);
+    assert!(guard.operator.as_ref() == Some(&a));
+    drop(guard);
+
+    // Ensure BrowserCdpConfig type stays cleanly referenced alongside status check.
+    let _ = BrowserCdpConfig::default();
+}
+
+#[tokio::test]
+async fn acknowledged_stale_snapshot_returns_result_without_poisoning_session() {
+    let (host, authority, inputs) = saved_host(vec![]);
+    let engine = Engine {
+        port: BrowserPort {
+            coordinator: &host,
+            authority: &authority,
+            inputs: &inputs,
+        },
+    };
+    let a = named_caller("stale-snapshot");
+    register_caller(&host, &authority, &a);
+
+    let id = "session-stale-snapshot";
+    let mut session = engine
+        .new_session(id, SessionMode::Cdp, None, Some(a), Phase::Unknown)
+        .unwrap();
+    let target = ResourceTarget {
+        operation_id: OperationId {
+            host_generation: "stale-snap-gen".try_into().unwrap(),
+            owner_epoch: "stale-snapshot-epoch".try_into().unwrap(),
+            sequence: 1,
+        },
+        payload_digest: Sha256Digest::of_bytes(b"open"),
+    };
+    session.target = Some(target.clone());
+    let op_id = OperationId {
+        host_generation: "stale-snap-gen".try_into().unwrap(),
+        owner_epoch: "stale-snapshot-epoch".try_into().unwrap(),
+        sequence: 2,
+    };
+    let digest = Sha256Digest::of_bytes(b"snapshot");
+
+    let res = engine
+        .finish_action(
+            id,
+            &mut session,
+            &op_id,
+            digest,
+            &target,
+            BrowserReply::Action {
+                snapshot: Snapshot {
+                    operation_id: op_id.clone(),
+                    payload_digest: digest,
+                    target: Some(target.clone()),
+                    state: OperationState::Succeeded,
+                    liveness: ExecutionLiveness::Running,
+                    output_drain: OutputDrain::Open,
+                },
+                dispatch: "acknowledged".into(),
+                result: Some(json!({
+                    "isError": false,
+                    "content": [{"type": "text", "text": "- button [ref=unavailable]"}]
+                })),
+                cause: Some(ErrorCategory::StaleObservation),
+                cleanup_complete: None,
+            },
+        )
+        .await;
+    assert_ne!(res.is_error, Some(true));
+    assert!(
+        res.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("[ref=unavailable]")
+    );
+    assert!(session.phase == Phase::Ready);
+}

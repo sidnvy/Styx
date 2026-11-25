@@ -47,6 +47,7 @@ struct OwnerProfile {
 struct LocalBrowser {
     profile: Arc<LoadedProfile>,
     cdp: Arc<crate::host::browser_cdp::BrowserCdpStore>,
+    extension: Option<Arc<crate::host::browser_extension::BrowserExtensionBridge>>,
     node: Arc<PinnedExecutable>,
     node_path: PathBuf,
     browser: Option<PathBuf>,
@@ -216,6 +217,7 @@ impl BrowserPreparationError {
 /// this object. No browser is executed by preparation or validation.
 pub(crate) fn prepare_browser_bootstrap(
     profile: Arc<LoadedProfile>,
+    extension: Option<Arc<crate::host::browser_extension::BrowserExtensionBridge>>,
 ) -> std::result::Result<Option<Arc<dyn BrowserBootstrap>>, BrowserPreparationError> {
     let at = BrowserPreparationError::new;
     let cdp = match profile.browser_cdp() {
@@ -276,6 +278,7 @@ pub(crate) fn prepare_browser_bootstrap(
         browser: selection.executable,
         channel: selection.channel,
         cdp,
+        extension,
         runtime,
         profiles,
         assets: staged,
@@ -357,10 +360,17 @@ impl BrowserBootstrap for LocalBrowser {
             if !cdp.enabled {
                 return Err(ErrorCategory::PermissionDenied);
             }
-            let endpoint = crate::host::browser_cdp::resolve_cdp_endpoint(
-                cdp.endpoint.as_deref(),
-                self.channel.as_deref(),
-            )?;
+            let endpoint = if cdp.endpoint.is_none()
+                && let Some(bridge) = self.extension.as_ref()
+                && bridge.is_connected()
+            {
+                bridge.open_cdp_session()?
+            } else {
+                crate::host::browser_cdp::resolve_cdp_endpoint(
+                    cdp.endpoint.as_deref(),
+                    self.channel.as_deref(),
+                )?
+            };
             let private =
                 assets::fresh_private_directory(self.runtime.path()).map_err(map_error)?;
             (PathBuf::new(), Some(endpoint), private)

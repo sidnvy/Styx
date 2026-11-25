@@ -42,6 +42,30 @@ pub struct BrowserCdpStatus {
     pub endpoint: Option<String>,
     #[serde(rename = "detectedEndpoint", skip_serializing_if = "Option::is_none")]
     pub detected_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    #[serde(rename = "extensionInstalled", default)]
+    pub extension_installed: bool,
+    #[serde(rename = "extensionConnected", default)]
+    pub extension_connected: bool,
+    #[serde(
+        rename = "extensionId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub extension_id: Option<String>,
+    #[serde(
+        rename = "extensionPath",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub extension_path: Option<String>,
+    #[serde(
+        rename = "extensionBrowser",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub extension_browser: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -348,14 +372,36 @@ impl BrowserCdpStore {
             .expect("BrowserCdpStore disconnect hook mutex") = None;
     }
 
+    pub fn state_dir(&self) -> &Path {
+        &self.path
+    }
+
     pub fn current(&self) -> Result<BrowserCdpConfig, ErrorCategory> {
         self.read_validated()
     }
 
     pub fn status(&self, channel: Option<&str>) -> Result<BrowserCdpStatus, ErrorCategory> {
+        self.status_with_extension(channel, None)
+    }
+
+    pub fn status_with_extension(
+        &self,
+        channel: Option<&str>,
+        bridge: Option<&crate::host::browser_extension::BrowserExtensionBridge>,
+    ) -> Result<BrowserCdpStatus, ErrorCategory> {
         let cfg = self.current()?;
+        let ext = crate::host::browser_extension::status(&self.path, bridge)?;
         let detected_endpoint = if cfg.enabled {
             detect_devtools_active_port(channel)
+        } else {
+            None
+        };
+        let transport = if !cfg.enabled {
+            None
+        } else if cfg.endpoint.is_none() && ext.connected {
+            Some("extension".to_owned())
+        } else if cfg.endpoint.is_some() || detected_endpoint.is_some() {
+            Some("cdp".to_owned())
         } else {
             None
         };
@@ -363,6 +409,12 @@ impl BrowserCdpStore {
             enabled: cfg.enabled,
             endpoint: cfg.endpoint,
             detected_endpoint,
+            transport,
+            extension_installed: ext.installed,
+            extension_connected: ext.connected,
+            extension_id: Some(ext.extension_id),
+            extension_path: ext.extension_path,
+            extension_browser: ext.browser,
         })
     }
 

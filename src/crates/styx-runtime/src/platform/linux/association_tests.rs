@@ -420,3 +420,44 @@ fn complete_window_lists_use_byte_budget_not_object_count() {
         600
     );
 }
+
+#[test]
+fn unit_fact_same_source_ignores_reordered_systemd_dependency_lists() {
+    let base = UnitFact {
+        name: "wayland-wm@hyprland.desktop.service".into(),
+        path: OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/wm").unwrap(),
+        invocation: vec![1; 16],
+        cgroup: "/user.slice/wm.service".into(),
+        main_pid: Some(2608),
+        binds: vec!["a.target".into(), "b.target".into()],
+        wants: vec!["x.target".into(), "y.target".into()],
+        on_success: vec!["s1.target".into(), "s2.target".into()],
+        on_failure: vec!["f1.target".into(), "f2.target".into()],
+        conflicts: vec![
+            "wayland-session-shutdown.target".into(),
+            "shutdown.target".into(),
+        ],
+        restart: Some("no".into()),
+        service_type: Some("notify".into()),
+        bind_start: None,
+    };
+    let mut reordered = base.clone();
+    reordered.binds.reverse();
+    reordered.wants.reverse();
+    reordered.on_success.reverse();
+    reordered.on_failure.reverse();
+    reordered.conflicts.reverse();
+    assert!(base.same_source(&reordered));
+
+    let mut different_name = base.clone();
+    different_name.name = "wayland-wm@other.service".into();
+    assert!(!base.same_source(&different_name));
+
+    let mut different_invocation = base.clone();
+    different_invocation.invocation = vec![2; 16];
+    assert!(!base.same_source(&different_invocation));
+
+    let mut different_conflicts = base.clone();
+    different_conflicts.conflicts.pop();
+    assert!(!base.same_source(&different_conflicts));
+}
