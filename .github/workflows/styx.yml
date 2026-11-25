@@ -123,6 +123,7 @@ jobs:
       - name: Install independently locked provider dependencies
         run: |
           npm --prefix packages/styx-browser-provider ci --ignore-scripts --no-audit --no-fund
+          npm --prefix providers/browser-worker ci --ignore-scripts --no-audit --no-fund
       - name: Pinned native source inventory and bounded license evidence
         run: |
           python -m unittest discover -s ci/test -p test_native_inventory.py
