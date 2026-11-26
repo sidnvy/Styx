@@ -2530,7 +2530,7 @@ dependencies = [
 
 [[package]]
 name = "styx"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "clap",
  "console",
@@ -2547,7 +2547,7 @@ dependencies = [
 
 [[package]]
 name = "styx-android"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "jni",
  "serde",
@@ -2561,7 +2561,7 @@ dependencies = [
 
 [[package]]
 name = "styx-contracts"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -2572,7 +2572,7 @@ dependencies = [
 
 [[package]]
 name = "styx-core"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "serde_json",
  "styx-contracts",
@@ -2581,7 +2581,7 @@ dependencies = [
 
 [[package]]
 name = "styx-runtime"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",

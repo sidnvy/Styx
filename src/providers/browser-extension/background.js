@@ -99,7 +99,12 @@ function createExtensionController(chromeApi, env = {}) {
     const excludeIsolated = Boolean(options.excludeIsolated);
     const tabs = await chromeApi.tabs.query({});
     return tabs
-      .filter((tab) => typeof tab.id === "number" && isAttachableUrl(tab.url || tab.pendingUrl))
+      .filter(
+        (tab) =>
+          typeof tab.id === "number" &&
+          !tab.discarded &&
+          isAttachableUrl(tab.url || tab.pendingUrl),
+      )
       .filter((tab) => !excludeIsolated || !isolatedTabIds.has(tab.id))
       .map((tab) => normalizeTab(tab, isolatedTabIds.has(tab.id)));
   }
@@ -253,7 +258,17 @@ function createExtensionController(chromeApi, env = {}) {
         }
         case "debugger.attach": {
           const tabId = params.tabId;
-          await chromeApi.debugger.attach({ tabId }, "1.3");
+          try {
+            await chromeApi.debugger.attach({ tabId }, "1.3");
+          } catch (err) {
+            const msg = String(err?.message || err || "").toLowerCase();
+            if (msg.includes("already attached") && attachedTabs.has(tabId)) {
+              await detachTabSafe(tabId).catch(() => {});
+              await chromeApi.debugger.attach({ tabId }, "1.3");
+            } else {
+              throw err;
+            }
+          }
           attachedTabs.add(tabId);
           result = { ok: true };
           break;

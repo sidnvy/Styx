@@ -271,3 +271,62 @@ test('background controller connects, filters chrome:// tabs, forwards RPCs/even
   assert.equal(fake.attached.size, 0);
   assert.equal(controller.getStatus().hostConnected, false);
 });
+
+test('tabs.list excludes discarded Memory Saver tabs and debugger.attach self-heals only self-owned tabs', async () => {
+  const code = fs.readFileSync(path.join(dir, 'background.js'), 'utf8');
+  const fake = createFakeChrome([
+    { id: 10, url: 'https://example.com/active', title: 'Active', active: true, windowId: 1, discarded: false },
+    { id: 11, url: 'https://example.com/sleeping', title: 'Sleeping', active: false, windowId: 1, discarded: true },
+  ]);
+  const externalAttached = new Set([12]);
+  const origAttach = fake.chrome.debugger.attach;
+  fake.chrome.debugger.attach = async (target, version) => {
+    if (fake.attached.has(target.tabId) || externalAttached.has(target.tabId)) {
+      throw new Error('Another debugger is already attached to the tab with id: ' + target.tabId);
+    }
+    return origAttach(target, version);
+  };
+
+  const sandbox = {
+    globalThis: null,
+    chrome: undefined,
+    navigator: { userAgent: 'Mozilla/5.0 Chrome/158.0.0.0 Safari/537.36' },
+    setTimeout,
+    clearTimeout,
+  };
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(code, sandbox);
+
+  const controller = sandbox.__styxExtensionTools.createExtensionController(fake.chrome, {
+    userAgent: sandbox.navigator.userAgent,
+    setTimeout: () => 1,
+    clearTimeout() {},
+  });
+  controller.registerListeners();
+  controller.ensureConnected();
+  fake.emitPort({ type: 'bridge.status', hostConnected: true });
+  await new Promise(r => setImmediate(r));
+
+  fake.emitPort({ id: 20, method: 'tabs.list', params: { excludeIsolated: true } });
+  await new Promise(r => setImmediate(r));
+  const listReply = JSON.parse(JSON.stringify(fake.posted.at(-1)));
+  assert.deepEqual(listReply.result.tabs.map(t => t.id), [10]);
+
+  // Attach tab 10 normally, then re-attach tab 10 (self-owned) -> detaches and re-attaches cleanly.
+  fake.emitPort({ id: 21, method: 'debugger.attach', params: { tabId: 10 } });
+  await new Promise(r => setImmediate(r));
+  assert.equal(fake.posted.at(-1).id, 21);
+  assert.deepEqual(JSON.parse(JSON.stringify(fake.posted.at(-1).result)), { ok: true });
+
+  fake.emitPort({ id: 22, method: 'debugger.attach', params: { tabId: 10 } });
+  await new Promise(r => setImmediate(r));
+  assert.equal(fake.posted.at(-1).id, 22);
+  assert.deepEqual(JSON.parse(JSON.stringify(fake.posted.at(-1).result)), { ok: true });
+
+  // Unowned externally attached tab 12 MUST NOT be detached/stolen.
+  fake.emitPort({ id: 23, method: 'debugger.attach', params: { tabId: 12 } });
+  await new Promise(r => setImmediate(r));
+  assert.equal(fake.posted.at(-1).id, 23);
+  assert.match(fake.posted.at(-1).error, /already attached/);
+  assert.equal(externalAttached.has(12), true);
+});

@@ -199,7 +199,6 @@ impl ExtensionPeer {
                     owners.remove(tab_id);
                 }
             }
-            owners.retain(|_, &mut owner| owner != relay_id);
         }
         if let Ok(mut iso) = self.isolated_tabs.lock() {
             for tab_id in tab_ids {
@@ -207,6 +206,14 @@ impl ExtensionPeer {
                     iso.remove(tab_id);
                 }
             }
+        }
+    }
+
+    fn release_all_for_relay(&self, relay_id: u64) {
+        if let Ok(mut owners) = self.tab_owners.lock() {
+            owners.retain(|_, &mut owner| owner != relay_id);
+        }
+        if let Ok(mut iso) = self.isolated_tabs.lock() {
             iso.retain(|_, &mut owner| owner != relay_id);
         }
     }
@@ -1226,27 +1233,33 @@ async fn detach_and_cleanup_tab(
     favicon_script_id: Option<&str>,
     cached_context_id: Option<i64>,
     target_id: Option<&str>,
+    indicator_installed: bool,
+    focus_emulated: bool,
 ) {
-    restore_favicon_indicator(
-        peer,
-        tab_id,
-        favicon_script_id,
-        cached_context_id,
-        target_id,
-    )
-    .await;
-    let _ = tokio::time::timeout(
-        Duration::from_secs(1),
-        peer.call(
-            "debugger.sendCommand",
-            json!({
-                "tabId": tab_id,
-                "method": "Emulation.setFocusEmulationEnabled",
-                "params": { "enabled": false }
-            }),
-        ),
-    )
-    .await;
+    if indicator_installed || favicon_script_id.is_some() || cached_context_id.is_some() {
+        restore_favicon_indicator(
+            peer,
+            tab_id,
+            favicon_script_id,
+            cached_context_id,
+            target_id,
+        )
+        .await;
+    }
+    if focus_emulated {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(1),
+            peer.call(
+                "debugger.sendCommand",
+                json!({
+                    "tabId": tab_id,
+                    "method": "Emulation.setFocusEmulationEnabled",
+                    "params": { "enabled": false }
+                }),
+            ),
+        )
+        .await;
+    }
     let _ = tokio::time::timeout(
         Duration::from_secs(2),
         peer.call("debugger.detach", json!({ "tabId": tab_id })),
@@ -1307,8 +1320,10 @@ fn is_active_control_cdp_method(method: &str) -> bool {
 }
 
 async fn begin_tab_indicator_activity(state: &Arc<Mutex<RelayState>>, tab_id: i64) {
-    let (deactivated_tabs, need_activate) = {
+    let (deactivated_tabs, need_focus, need_install, need_activate, peer, target_info, accent_hex) = {
         let mut guard = state.lock().await;
+        let accent_hex = favicon_accent_hex(&guard.scope);
+        let peer = guard.peer.clone();
         let mut to_deactivate = Vec::new();
         for (&other_id, other) in &mut guard.tab_sessions {
             if other_id != tab_id && other.indicator_active && other.indicator_in_flight == 0 {
@@ -1317,16 +1332,34 @@ async fn begin_tab_indicator_activity(state: &Arc<Mutex<RelayState>>, tab_id: i6
                 to_deactivate.push(other_id);
             }
         }
-        let need_activate = if let Some(ts) = guard.tab_sessions.get_mut(&tab_id) {
-            ts.indicator_in_flight += 1;
-            ts.indicator_release_gen += 1;
-            let activate = !ts.indicator_active;
-            ts.indicator_active = true;
-            activate
-        } else {
-            false
-        };
-        (to_deactivate, need_activate)
+        let (need_focus, need_install, need_activate, target_info) =
+            if let Some(ts) = guard.tab_sessions.get_mut(&tab_id) {
+                ts.indicator_in_flight += 1;
+                ts.indicator_release_gen += 1;
+                let need_focus = !ts.focus_emulated;
+                ts.focus_emulated = true;
+                let need_install = !ts.indicator_installed;
+                ts.indicator_installed = true;
+                let activate = !ts.indicator_active;
+                ts.indicator_active = true;
+                (
+                    need_focus,
+                    need_install,
+                    activate,
+                    Some(ts.target_info.clone()),
+                )
+            } else {
+                (false, false, false, None)
+            };
+        (
+            to_deactivate,
+            need_focus,
+            need_install,
+            need_activate,
+            peer,
+            target_info,
+            accent_hex,
+        )
     };
     for other_id in deactivated_tabs {
         let cloned = state.clone();
@@ -1339,9 +1372,35 @@ async fn begin_tab_indicator_activity(state: &Arc<Mutex<RelayState>>, tab_id: i6
             .await;
         });
     }
+    if need_focus {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(1),
+            peer.call(
+                "debugger.sendCommand",
+                json!({
+                    "tabId": tab_id,
+                    "method": "Emulation.setFocusEmulationEnabled",
+                    "params": { "enabled": true }
+                }),
+            ),
+        )
+        .await;
+    }
+    if need_install && let Some(target_info) = target_info.as_ref() {
+        let (script_id, ctx_id) =
+            install_favicon_indicator(&peer, tab_id, target_info, accent_hex).await;
+        if let Some(ts) = state.lock().await.tab_sessions.get_mut(&tab_id) {
+            if ts.favicon_script_id.is_none() {
+                ts.favicon_script_id = script_id;
+            }
+            if ts.indicator_context_id.is_none() {
+                ts.indicator_context_id = ctx_id;
+            }
+        }
+    }
     if need_activate {
         let _ = tokio::time::timeout(
-            Duration::from_millis(300),
+            Duration::from_millis(400),
             eval_tab_indicator(state, tab_id, "globalThis.__styxIndicatorSetActive?.(true)"),
         )
         .await;
@@ -1397,6 +1456,8 @@ struct TabSession {
     child_sessions: HashSet<String>,
     favicon_script_id: Option<String>,
     indicator_context_id: Option<i64>,
+    indicator_installed: bool,
+    focus_emulated: bool,
     indicator_active: bool,
     indicator_in_flight: usize,
     indicator_release_gen: u64,
@@ -1406,6 +1467,7 @@ type AttachWaiter = oneshot::Sender<Result<(String, Value), String>>;
 
 struct RelayState {
     relay_id: u64,
+    session_cancel: CancellationToken,
     scope: CdpSessionScope,
     group_id: Option<i64>,
     owned_tabs: HashSet<i64>,
@@ -1479,21 +1541,23 @@ async fn attach_tab(
     state: &Arc<Mutex<RelayState>>,
     tab_id: i64,
 ) -> Result<(String, Value), String> {
-    let (peer, relay_id, isolated, accent_hex, existing_waiter) = {
+    let (peer, relay_id, session_cancel, isolated, existing_waiter) = {
         let mut guard = state.lock().await;
+        if guard.session_cancel.is_cancelled() {
+            return Err("session_closed".to_owned());
+        }
         if let Some(existing) = guard.tab_sessions.get(&tab_id) {
             return Ok((existing.session_id.clone(), existing.target_info.clone()));
         }
         let isolated = matches!(guard.scope, CdpSessionScope::TabGroup { .. });
-        let accent_hex = favicon_accent_hex(&guard.scope);
         if let Some(waiters) = guard.attaching.get_mut(&tab_id) {
             let (tx, rx) = oneshot::channel();
             waiters.push(tx);
             (
                 guard.peer.clone(),
                 guard.relay_id,
+                guard.session_cancel.clone(),
                 isolated,
-                accent_hex,
                 Some(rx),
             )
         } else {
@@ -1504,54 +1568,103 @@ async fn attach_tab(
             (
                 guard.peer.clone(),
                 guard.relay_id,
+                guard.session_cancel.clone(),
                 isolated,
-                accent_hex,
                 None,
             )
         }
     };
 
     if let Some(rx) = existing_waiter {
-        return rx.await.map_err(|_| "tab_attach_cancelled".to_owned())?;
+        return tokio::select! {
+            () = session_cancel.cancelled() => Err("session_closed".to_owned()),
+            res = rx => res.map_err(|_| "tab_attach_cancelled".to_owned())?,
+        };
     }
 
-    let attach_res = async {
-        peer.call("debugger.attach", json!({ "tabId": tab_id }))
-            .await?;
-        let info = peer
-            .call(
-                "debugger.sendCommand",
-                json!({ "tabId": tab_id, "method": "Target.getTargetInfo" }),
+    let mut debugger_attached = false;
+    let attach_res = tokio::select! {
+        () = session_cancel.cancelled() => Err("session_closed".to_owned()),
+        res = async {
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                peer.call("debugger.attach", json!({ "tabId": tab_id })),
             )
-            .await?;
-        let target_info = info.get("targetInfo").cloned().unwrap_or_else(|| json!({}));
-        // Emulate focus on the attached tab so `active: false` background tabs
-        // maintain an active visibilityState and requestAnimationFrame loop for
-        // interactive Playwright actions without stealing Chrome OS window focus.
-        let _ = peer
-            .call(
-                "debugger.sendCommand",
-                json!({
-                    "tabId": tab_id,
-                    "method": "Emulation.setFocusEmulationEnabled",
-                    "params": { "enabled": true }
-                }),
+            .await
+            .map_err(|_| "debugger_attach_timeout".to_owned())??;
+            debugger_attached = true;
+            let info = tokio::time::timeout(
+                Duration::from_secs(3),
+                peer.call(
+                    "debugger.sendCommand",
+                    json!({ "tabId": tab_id, "method": "Target.getTargetInfo" }),
+                ),
             )
-            .await;
-        let (favicon_script_id, indicator_context_id) =
-            install_favicon_indicator(&peer, tab_id, &target_info, accent_hex).await;
-        Ok::<(Value, Option<String>, Option<i64>), String>((
-            target_info,
-            favicon_script_id,
-            indicator_context_id,
-        ))
-    }
-    .await;
+            .await
+            .map_err(|_| "target_info_timeout".to_owned())??;
+            let target_info = info.get("targetInfo").cloned().unwrap_or_else(|| json!({}));
+            // For isolated Tab Group tabs, emulate focus immediately so `active: false`
+            // background tabs run rAF/visibilityState normally without stealing focus.
+            // SharedExisting attaches lazily without side effects until a tab is operated.
+            let focus_emulated = if isolated {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    peer.call(
+                        "debugger.sendCommand",
+                        json!({
+                            "tabId": tab_id,
+                            "method": "Emulation.setFocusEmulationEnabled",
+                            "params": { "enabled": true }
+                        }),
+                    ),
+                )
+                .await;
+                true
+            } else {
+                false
+            };
+            Ok::<(Value, bool), String>((target_info, focus_emulated))
+        } => res,
+    };
 
     let mut guard = state.lock().await;
     let waiters = guard.attaching.remove(&tab_id).unwrap_or_default();
+    if guard.session_cancel.is_cancelled() {
+        guard.owned_tabs.remove(&tab_id);
+        drop(guard);
+        match attach_res {
+            Ok((target_info, focus_emulated)) => {
+                detach_and_cleanup_tab(
+                    &peer,
+                    tab_id,
+                    None,
+                    None,
+                    target_info.get("targetId").and_then(Value::as_str),
+                    false,
+                    focus_emulated,
+                )
+                .await;
+            }
+            Err(_) if debugger_attached => {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    peer.call("debugger.detach", json!({ "tabId": tab_id })),
+                )
+                .await;
+            }
+            Err(_) => {}
+        }
+        peer.release_relay_tabs(relay_id, &[tab_id]);
+        let cancelled: Result<(String, Value), String> = Err("session_closed".to_owned());
+        for waiter in waiters {
+            let _ = waiter.send(cancelled.clone());
+        }
+        return cancelled;
+    }
+
+    let mut cleanup_partial_attach = false;
     let outcome = match attach_res {
-        Ok((target_info, favicon_script_id, indicator_context_id)) => {
+        Ok((target_info, focus_emulated)) => {
             if let Some(existing) = guard.tab_sessions.get(&tab_id) {
                 Ok((existing.session_id.clone(), existing.target_info.clone()))
             } else {
@@ -1568,8 +1681,10 @@ async fn attach_tab(
                         session_id: session_id.clone(),
                         target_info: target_info.clone(),
                         child_sessions: HashSet::new(),
-                        favicon_script_id,
-                        indicator_context_id,
+                        favicon_script_id: None,
+                        indicator_context_id: None,
+                        indicator_installed: false,
+                        focus_emulated,
                         indicator_active: false,
                         indicator_in_flight: 0,
                         indicator_release_gen: 0,
@@ -1601,6 +1716,7 @@ async fn attach_tab(
             }
         }
         Err(err) => {
+            cleanup_partial_attach = debugger_attached;
             if !isolated || !guard.owned_tabs.contains(&tab_id) {
                 peer.release_relay_tabs(relay_id, &[tab_id]);
             }
@@ -1608,6 +1724,13 @@ async fn attach_tab(
         }
     };
     drop(guard);
+    if cleanup_partial_attach {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            peer.call("debugger.detach", json!({ "tabId": tab_id })),
+        )
+        .await;
+    }
     for waiter in waiters {
         let _ = waiter.send(outcome.clone());
     }
@@ -1615,13 +1738,19 @@ async fn attach_tab(
 }
 
 async fn ensure_scope_tabs_ready(state: &Arc<Mutex<RelayState>>) -> Result<(), String> {
+    const MAX_CONCURRENT_SHARED_ATTACHES: usize = 6;
+
     let init_lock = state.lock().await.init_lock.clone();
     let _init_guard = init_lock.lock().await;
-    let (peer, relay_id, scope, existing_owned, fallback_ids) = {
+    let (peer, relay_id, session_cancel, scope, existing_owned, fallback_ids) = {
         let guard = state.lock().await;
+        if guard.session_cancel.is_cancelled() {
+            return Err("session_closed".to_owned());
+        }
         (
             guard.peer.clone(),
             guard.relay_id,
+            guard.session_cancel.clone(),
             guard.scope.clone(),
             guard.owned_tabs.iter().copied().collect::<Vec<_>>(),
             guard.known_tabs.keys().copied().collect::<Vec<_>>(),
@@ -1630,8 +1759,9 @@ async fn ensure_scope_tabs_ready(state: &Arc<Mutex<RelayState>>) -> Result<(), S
     match scope {
         CdpSessionScope::TabGroup { title, color } => {
             let tab_ids = if existing_owned.is_empty() {
-                let created = peer
-                    .call(
+                let created = tokio::select! {
+                    () = session_cancel.cancelled() => return Err("session_closed".to_owned()),
+                    res = peer.call(
                         "tabs.create",
                         json!({
                             "url": "about:blank",
@@ -1640,8 +1770,14 @@ async fn ensure_scope_tabs_ready(state: &Arc<Mutex<RelayState>>) -> Result<(), S
                             "groupTitle": title,
                             "groupColor": color,
                         }),
-                    )
-                    .await?;
+                    ) => res?,
+                };
+                if session_cancel.is_cancelled() {
+                    if let Some(tab_id) = created.pointer("/tab/id").and_then(Value::as_i64) {
+                        let _ = peer.call("tabs.remove", json!({ "tabId": tab_id })).await;
+                    }
+                    return Err("session_closed".to_owned());
+                }
                 let tab: TabDescriptor = serde_json::from_value(
                     created.get("tab").cloned().unwrap_or_else(|| json!({})),
                 )
@@ -1662,13 +1798,18 @@ async fn ensure_scope_tabs_ready(state: &Arc<Mutex<RelayState>>) -> Result<(), S
                 existing_owned
             };
             for tab_id in tab_ids {
+                if session_cancel.is_cancelled() {
+                    return Err("session_closed".to_owned());
+                }
                 let _ = attach_tab(state, tab_id).await;
             }
         }
         CdpSessionScope::SharedExisting => {
-            if let Ok(listed) = peer
-                .call("tabs.list", json!({ "excludeIsolated": true }))
-                .await
+            let listed_res = tokio::select! {
+                () = session_cancel.cancelled() => return Err("session_closed".to_owned()),
+                res = peer.call("tabs.list", json!({ "excludeIsolated": true })) => res,
+            };
+            if let Ok(listed) = listed_res
                 && let Ok(tabs) = serde_json::from_value::<Vec<TabDescriptor>>(
                     listed.get("tabs").cloned().unwrap_or_else(|| json!([])),
                 )
@@ -1698,8 +1839,30 @@ async fn ensure_scope_tabs_ready(state: &Arc<Mutex<RelayState>>) -> Result<(), S
                     ids
                 }
             };
+            let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SHARED_ATTACHES));
+            let mut join_set = tokio::task::JoinSet::new();
             for tab_id in tab_ids {
-                let _ = attach_tab(state, tab_id).await;
+                let state_cloned = state.clone();
+                let sem_cloned = sem.clone();
+                join_set.spawn(async move {
+                    let Ok(_permit) = sem_cloned.acquire_owned().await else {
+                        return;
+                    };
+                    let _ = attach_tab(&state_cloned, tab_id).await;
+                });
+            }
+            loop {
+                tokio::select! {
+                    () = session_cancel.cancelled() => {
+                        join_set.abort_all();
+                        return Err("session_closed".to_owned());
+                    }
+                    next = join_set.join_next() => {
+                        if next.is_none() {
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -1869,23 +2032,34 @@ async fn handle_cdp_request(
                                         .get("targetId")
                                         .and_then(Value::as_str)
                                         .map(str::to_owned),
+                                    ts.indicator_installed,
+                                    ts.focus_emulated,
                                 )
                             });
                             guard.detach_tab(tab_id);
                             guard.owned_tabs.remove(&tab_id);
                             (guard.peer.clone(), guard.relay_id, info)
                         };
-                        peer.release_relay_tabs(relay_id, &[tab_id]);
-                        if let Some((script_id, ctx_id, target_id)) = detached_info {
+                        if let Some((
+                            script_id,
+                            ctx_id,
+                            target_id,
+                            indicator_installed,
+                            focus_emulated,
+                        )) = detached_info
+                        {
                             detach_and_cleanup_tab(
                                 &peer,
                                 tab_id,
                                 script_id.as_deref(),
                                 ctx_id,
                                 target_id.as_deref(),
+                                indicator_installed,
+                                focus_emulated,
                             )
                             .await;
                         }
+                        peer.release_relay_tabs(relay_id, &[tab_id]);
                         return Ok(json!({}));
                     }
                     Some((tab_id, Some(child))) => {
@@ -2353,6 +2527,51 @@ async fn handle_extension_event(
     }
 }
 
+struct QueuedCdpRequest {
+    id: Option<Value>,
+    method: String,
+    params: Value,
+    session_id: Option<String>,
+}
+
+fn spawn_cdp_session_worker(
+    state: Arc<Mutex<RelayState>>,
+    cdp_tx: mpsc::UnboundedSender<String>,
+    cancel: CancellationToken,
+    handles: &mut Vec<JoinHandle<()>>,
+) -> mpsc::UnboundedSender<QueuedCdpRequest> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<QueuedCdpRequest>();
+    let handle = tokio::spawn(async move {
+        loop {
+            let req = tokio::select! {
+                () = cancel.cancelled() => break,
+                maybe_req = rx.recv() => match maybe_req {
+                    Some(req) => req,
+                    None => break,
+                }
+            };
+            let res = tokio::select! {
+                () = cancel.cancelled() => break,
+                out = handle_cdp_request(&state, &req.method, req.params, req.session_id.as_deref()) => out,
+            };
+            let mut reply = match res {
+                Ok(result) => json!({ "id": req.id, "result": result }),
+                Err(message) => json!({ "id": req.id, "error": { "message": message } }),
+            };
+            if let Some(sid) = req.session_id
+                && let Some(obj) = reply.as_object_mut()
+            {
+                obj.insert("sessionId".to_owned(), Value::String(sid));
+            }
+            if cdp_tx.send(reply.to_string()).is_err() {
+                break;
+            }
+        }
+    });
+    handles.push(handle);
+    tx
+}
+
 async fn run_cdp_relay_session(
     ws: tokio_tungstenite::WebSocketStream<TcpStream>,
     peer: Arc<ExtensionPeer>,
@@ -2376,6 +2595,7 @@ async fn run_cdp_relay_session(
 
     let state = Arc::new(Mutex::new(RelayState {
         relay_id,
+        session_cancel: session_cancel.clone(),
         scope,
         group_id: None,
         owned_tabs: HashSet::new(),
@@ -2431,6 +2651,12 @@ async fn run_cdp_relay_session(
         }
     });
 
+    // Enforce strict FIFO execution per CDP sessionId (matching real Chromium DevTools)
+    // while keeping different tabs independent.
+    let mut session_queues: HashMap<Option<String>, mpsc::UnboundedSender<QueuedCdpRequest>> =
+        HashMap::new();
+    let mut worker_handles: Vec<JoinHandle<()>> = Vec::new();
+
     loop {
         tokio::select! {
             () = session_cancel.cancelled() => break,
@@ -2447,21 +2673,32 @@ async fn run_cdp_relay_session(
                         };
                         let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
                         let session_id = req.get("sessionId").and_then(Value::as_str).map(ToOwned::to_owned);
-                        let req_state = state.clone();
-                        let req_out = cdp_tx.clone();
-                        tokio::spawn(async move {
-                            let res = handle_cdp_request(&req_state, &method, params, session_id.as_deref()).await;
-                            let mut reply = match res {
-                                Ok(result) => json!({ "id": id, "result": result }),
-                                Err(message) => json!({ "id": id, "error": { "message": message } }),
-                            };
-                            if let Some(sid) = session_id
-                                && let Some(obj) = reply.as_object_mut()
-                            {
-                                obj.insert("sessionId".to_owned(), Value::String(sid));
-                            }
-                            let _ = req_out.send(reply.to_string());
-                        });
+                        let queued = QueuedCdpRequest {
+                            id,
+                            method,
+                            params,
+                            session_id: session_id.clone(),
+                        };
+                        let queue_tx = session_queues
+                            .entry(session_id.clone())
+                            .or_insert_with(|| {
+                                spawn_cdp_session_worker(
+                                    state.clone(),
+                                    cdp_tx.clone(),
+                                    session_cancel.clone(),
+                                    &mut worker_handles,
+                                )
+                            });
+                        if let Err(err) = queue_tx.send(queued) {
+                            let rebuilt = spawn_cdp_session_worker(
+                                state.clone(),
+                                cdp_tx.clone(),
+                                session_cancel.clone(),
+                                &mut worker_handles,
+                            );
+                            let _ = rebuilt.send(err.0);
+                            session_queues.insert(session_id, rebuilt);
+                        }
                     }
                     Some(Ok(Message::Ping(_))) => {
                         // tungstenite queues the Pong automatically; trigger ws_sink.flush().
@@ -2475,16 +2712,25 @@ async fn run_cdp_relay_session(
     }
 
     session_cancel.cancel();
+    drop(session_queues);
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        futures_util::future::join_all(worker_handles),
+    )
+    .await;
     peer.unsubscribe_events(relay_id);
+
     struct AttachedTabCleanup {
         tab_id: i64,
         favicon_script_id: Option<String>,
         cached_ctx: Option<i64>,
         target_id: Option<String>,
+        indicator_installed: bool,
+        focus_emulated: bool,
     }
-    let (attached_tabs, release_tabs) = {
+    let attached_tabs: Vec<AttachedTabCleanup> = {
         let mut guard = state.lock().await;
-        let attached: Vec<AttachedTabCleanup> = guard
+        let attached = guard
             .tab_sessions
             .iter()
             .map(|(tab_id, ts)| AttachedTabCleanup {
@@ -2496,28 +2742,35 @@ async fn run_cdp_relay_session(
                     .get("targetId")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                indicator_installed: ts.indicator_installed,
+                focus_emulated: ts.focus_emulated,
             })
             .collect();
-        let mut release: Vec<i64> = attached.iter().map(|entry| entry.tab_id).collect();
-        for id in guard.owned_tabs.drain() {
-            if !release.contains(&id) {
-                release.push(id);
-            }
-        }
+        guard.owned_tabs.clear();
         guard.tab_sessions.clear();
-        (attached, release)
+        attached
     };
-    peer.release_relay_tabs(relay_id, &release_tabs);
-    for entry in attached_tabs {
-        detach_and_cleanup_tab(
-            &peer,
-            entry.tab_id,
-            entry.favicon_script_id.as_deref(),
-            entry.cached_ctx,
-            entry.target_id.as_deref(),
-        )
-        .await;
-    }
+    let cleanup_futs = attached_tabs.into_iter().map(|entry| {
+        let peer = peer.clone();
+        async move {
+            detach_and_cleanup_tab(
+                &peer,
+                entry.tab_id,
+                entry.favicon_script_id.as_deref(),
+                entry.cached_ctx,
+                entry.target_id.as_deref(),
+                entry.indicator_installed,
+                entry.focus_emulated,
+            )
+            .await;
+        }
+    });
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        futures_util::future::join_all(cleanup_futs),
+    )
+    .await;
+    peer.release_all_for_relay(relay_id);
     let _ = ws_writer.await;
     let _ = event_task.await;
 }

@@ -2,6 +2,7 @@ use super::*;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
+    collections::HashSet,
     io::Cursor,
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
@@ -175,6 +176,7 @@ async fn cdp_relay_authenticates_translates_targets_and_detaches_on_ws_close() {
     let recorded_clone = recorded_calls.clone();
     let detach_seen = Arc::new(tokio::sync::Notify::new());
     let detach_notify = detach_seen.clone();
+    let detach_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     let mock_ext = tokio::spawn(async move {
         let mut buf = String::new();
@@ -222,7 +224,9 @@ async fn cdp_relay_authenticates_translates_targets_and_detaches_on_ws_close() {
                     }
                 }
                 "debugger.detach" => {
-                    detach_notify.notify_one();
+                    if detach_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 >= 2 {
+                        detach_notify.notify_one();
+                    }
                     json!({ "id": id, "result": { "ok": true } })
                 }
                 _ => json!({ "id": id, "result": {} }),
@@ -733,6 +737,20 @@ async fn real_chromium_extension_bridge_e2e_with_playwright_worker() {
                                     r#"{"error":"missing_cookie"}"#.to_owned(),
                                 )
                             }
+                        } else if path == "/frame-inner" {
+                            (
+                                "200 OK",
+                                "Content-Type: text/html\r\nCache-Control: no-store".to_owned(),
+                                "<!doctype html><html><head><title>Ext Inner Frame</title></head><body><p>Inner Frame Body</p></body></html>".to_owned(),
+                            )
+                        } else if path == "/multi-frame" {
+                            (
+                                "200 OK",
+                                "Content-Type: text/html\r\nCache-Control: no-store".to_owned(),
+                                format!(
+                                    "<!doctype html><html><head><title>Ext MultiFrame {expected}</title></head><body><h1>MultiFrame Host</h1><iframe src=\"/frame-inner\"></iframe></body></html>"
+                                ),
+                            )
                         } else if path == "/large" {
                             use std::fmt::Write as _;
                             let mut body = String::from(
@@ -779,6 +797,8 @@ async fn real_chromium_extension_bridge_e2e_with_playwright_worker() {
 
     let ext_dir_str = extension_dir(&state_dir).to_string_lossy().into_owned();
     let initial_url = format!("http://127.0.0.1:{http_port}/initial");
+    let multi_frame_url = format!("http://127.0.0.1:{http_port}/multi-frame");
+    let inner_frame_url = format!("http://127.0.0.1:{http_port}/frame-inner");
     let mut chrome_cmd = std::process::Command::new(&chrome_bin);
     chrome_cmd
         .env("XDG_CONFIG_HOME", &xdg_dir)
@@ -788,6 +808,8 @@ async fn real_chromium_extension_bridge_e2e_with_playwright_worker() {
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .arg(&initial_url)
+        .arg(&multi_frame_url)
+        .arg(&inner_frame_url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -1711,6 +1733,14 @@ console.log('NODE_E2E_SUCCESS');
         assert!(
             existing_tabs_text.contains(&format!("Ext Initial {nonce}")),
             "missing initial tab: {existing_tabs_text}"
+        );
+        assert!(
+            existing_tabs_text.contains(&format!("Ext MultiFrame {nonce}")),
+            "missing multi-frame tab: {existing_tabs_text}"
+        );
+        assert!(
+            existing_tabs_text.contains("Ext Inner Frame"),
+            "missing inner-frame tab: {existing_tabs_text}"
         );
         assert!(
             !existing_tabs_text.contains("Ext Daily Form"),
@@ -3143,4 +3173,543 @@ async fn local_cdp_proxy_reconnects_across_host_bridge_restarts_and_handles_unav
     bridge2.shutdown().await;
     let _ = tokio::time::timeout(Duration::from_secs(1), peer2).await;
     proxy.shutdown().await;
+}
+
+#[tokio::test]
+async fn cdp_relay_enforces_per_session_fifo_ordering() {
+    let state_dir = private_dir();
+    let bridge = BrowserExtensionBridge::start(state_dir.path())
+        .await
+        .unwrap();
+    let (port, token) = read_bridge_endpoint(state_dir.path()).unwrap();
+
+    let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    write_half
+        .write_all(format!("{}\n", json!({ "type": "auth", "token": token })).as_bytes())
+        .await
+        .unwrap();
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.unwrap();
+    write_half
+        .write_all(
+            format!(
+                "{}\n",
+                json!({
+                    "event": "extension.hello",
+                    "params": {
+                        "extensionId": EXTENSION_ID,
+                        "browser": "Chrome/158.0.0.0",
+                        "userAgent": "Mozilla/5.0 Chrome/158.0.0.0",
+                        "tabs": [{ "id": 101, "url": "https://example.com/", "title": "Ex", "active": true }]
+                    }
+                })
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..40 {
+        if bridge.is_connected() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let mock_ext = tokio::spawn(async move {
+        let mut buf = String::new();
+        while reader.read_line(&mut buf).await.unwrap_or(0) > 0 {
+            let msg: Value = serde_json::from_str(buf.trim()).unwrap();
+            buf.clear();
+            let id = msg["id"].as_u64().unwrap();
+            let method = msg["method"].as_str().unwrap().to_owned();
+            let params = msg["params"].clone();
+            let reply = match method.as_str() {
+                "tabs.list" => json!({ "id": id, "result": { "tabs": [
+                    { "id": 101, "url": "https://example.com/", "title": "Ex", "active": true }
+                ]}}),
+                "debugger.attach" | "debugger.detach" => {
+                    json!({ "id": id, "result": { "ok": true } })
+                }
+                "debugger.sendCommand" => {
+                    let cdp_method = params["method"].as_str().unwrap();
+                    match cdp_method {
+                        "Target.getTargetInfo" => json!({ "id": id, "result": { "targetInfo": {
+                            "targetId": "target-101", "type": "page", "url": "https://example.com/"
+                        }}}),
+                        "Page.getFrameTree" => {
+                            // Slow response that previously allowed pipelined Runtime.enable to overtake it.
+                            tokio::time::sleep(Duration::from_millis(80)).await;
+                            json!({ "id": id, "result": { "frameTree": { "frame": { "id": "f1" } } } })
+                        }
+                        "Runtime.enable" => {
+                            let ev = json!({
+                                "event": "chrome.debugger.onEvent",
+                                "params": [
+                                    { "tabId": 101 },
+                                    "Runtime.executionContextCreated",
+                                    { "context": { "id": 1, "origin": "https://example.com", "name": "" } }
+                                ]
+                            });
+                            if write_half
+                                .write_all(format!("{ev}\n").as_bytes())
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                            json!({ "id": id, "result": {} })
+                        }
+                        _ => json!({ "id": id, "result": {} }),
+                    }
+                }
+                _ => json!({ "id": id, "result": {} }),
+            };
+            if write_half
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let ws_url = bridge.open_cdp_session().unwrap();
+    let mut ws = ws_connect(&ws_url).await.unwrap();
+    ws.send(Message::Text(
+        json!({"id": 1, "method": "Target.setAutoAttach", "params": {"autoAttach": true, "flatten": true}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let ev: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    assert_eq!(ev["method"], "Target.attachedToTarget");
+    let sid = ev["params"]["sessionId"].as_str().unwrap().to_owned();
+    let aa_reply: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    assert_eq!(aa_reply["id"], 1);
+
+    // Pipeline Page.enable, slow Page.getFrameTree, and fast Runtime.enable in a single burst.
+    for (id, method) in [
+        (2, "Page.enable"),
+        (3, "Page.getFrameTree"),
+        (4, "Runtime.enable"),
+    ] {
+        ws.send(Message::Text(
+            json!({ "id": id, "sessionId": sid, "method": method, "params": {} })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    let mut trace = Vec::new();
+    for _ in 0..4 {
+        let msg: Value = serde_json::from_str(
+            &tokio::time::timeout(Duration::from_secs(3), ws.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap(),
+        )
+        .unwrap();
+        if let Some(id) = msg.get("id").and_then(Value::as_u64) {
+            trace.push(format!("reply:{id}"));
+        } else if let Some(m) = msg.get("method").and_then(Value::as_str) {
+            trace.push(format!("event:{m}"));
+        }
+    }
+    assert_eq!(
+        trace,
+        vec![
+            "reply:2",
+            "reply:3",
+            "event:Runtime.executionContextCreated",
+            "reply:4",
+        ],
+        "CDP replies/events broke per-session FIFO ordering: {trace:?}"
+    );
+
+    ws.close(None).await.unwrap();
+    bridge.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), mock_ext).await;
+}
+
+#[tokio::test]
+async fn cdp_relay_disconnect_mid_attach_never_leaks_tab_owners_or_debugger() {
+    let state_dir = private_dir();
+    let bridge = BrowserExtensionBridge::start(state_dir.path())
+        .await
+        .unwrap();
+    let (port, token) = read_bridge_endpoint(state_dir.path()).unwrap();
+
+    let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    write_half
+        .write_all(format!("{}\n", json!({ "type": "auth", "token": token })).as_bytes())
+        .await
+        .unwrap();
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.unwrap();
+
+    let tabs_json: Vec<Value> = (101..=106)
+        .map(|id| json!({ "id": id, "url": format!("https://example.com/{id}"), "title": format!("Tab {id}"), "active": id == 101 }))
+        .collect();
+    write_half
+        .write_all(
+            format!(
+                "{}\n",
+                json!({
+                    "event": "extension.hello",
+                    "params": {
+                        "extensionId": EXTENSION_ID,
+                        "browser": "Chrome/158.0.0.0",
+                        "userAgent": "Mozilla/5.0 Chrome/158.0.0.0",
+                        "tabs": tabs_json
+                    }
+                })
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..40 {
+        if bridge.is_connected() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let attached_tabs = Arc::new(StdMutex::new(HashSet::<i64>::new()));
+    let attached_ref = attached_tabs.clone();
+    let out_tx = {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tokio::spawn(async move {
+            while let Some(line) = rx.recv().await {
+                if write_half
+                    .write_all(format!("{line}\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        tx
+    };
+    let mock_ext = tokio::spawn(async move {
+        let mut buf = String::new();
+        while reader.read_line(&mut buf).await.unwrap_or(0) > 0 {
+            let msg: Value = serde_json::from_str(buf.trim()).unwrap();
+            buf.clear();
+            let id = msg["id"].as_u64().unwrap();
+            let method = msg["method"].as_str().unwrap().to_owned();
+            let params = msg["params"].clone();
+            let tx = out_tx.clone();
+            let attached_clone = attached_ref.clone();
+            tokio::spawn(async move {
+                let reply = match method.as_str() {
+                    "tabs.list" => {
+                        let list: Vec<Value> = (101..=106)
+                            .map(|tid| json!({ "id": tid, "url": format!("https://example.com/{tid}"), "title": format!("Tab {tid}"), "active": tid == 101 }))
+                            .collect();
+                        json!({ "id": id, "result": { "tabs": list } })
+                    }
+                    "debugger.attach" => {
+                        let tid = params["tabId"].as_i64().unwrap();
+                        tokio::time::sleep(Duration::from_millis(60)).await;
+                        attached_clone.lock().unwrap().insert(tid);
+                        json!({ "id": id, "result": { "ok": true } })
+                    }
+                    "debugger.detach" => {
+                        let tid = params["tabId"].as_i64().unwrap();
+                        attached_clone.lock().unwrap().remove(&tid);
+                        json!({ "id": id, "result": { "ok": true } })
+                    }
+                    "debugger.sendCommand" => {
+                        let tid = params["tabId"].as_i64().unwrap();
+                        match params["method"].as_str().unwrap() {
+                            "Target.getTargetInfo" => json!({ "id": id, "result": { "targetInfo": {
+                                "targetId": format!("target-{tid}"), "type": "page", "url": format!("https://example.com/{tid}")
+                            }}}),
+                            _ => json!({ "id": id, "result": {} }),
+                        }
+                    }
+                    _ => json!({ "id": id, "result": {} }),
+                };
+                let _ = tx.send(reply.to_string());
+            });
+        }
+    });
+
+    // Session #1 starts Target.setAutoAttach and drops abruptly mid-attach!
+    let ws_url1 = bridge.open_cdp_session().unwrap();
+    let mut ws1 = ws_connect(&ws_url1).await.unwrap();
+    ws1.send(Message::Text(
+        json!({"id": 1, "method": "Target.setAutoAttach", "params": {"autoAttach": true, "flatten": true}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(ws1);
+
+    for _ in 0..40 {
+        if attached_tabs.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        attached_tabs.lock().unwrap().is_empty(),
+        "mid-attach disconnect leaked debugger attachments: {:?}",
+        *attached_tabs.lock().unwrap()
+    );
+
+    // Session #2 immediately acquires ALL 6 tabs with zero leaked tab_owners!
+    let ws_url2 = bridge.open_cdp_session().unwrap();
+    let mut ws2 = ws_connect(&ws_url2).await.unwrap();
+    ws2.send(Message::Text(
+        json!({"id": 2, "method": "Target.setAutoAttach", "params": {"autoAttach": true, "flatten": true}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let mut seen_targets = HashSet::new();
+    loop {
+        let msg: Value = serde_json::from_str(
+            &tokio::time::timeout(Duration::from_secs(3), ws2.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap(),
+        )
+        .unwrap();
+        if msg["method"] == "Target.attachedToTarget" {
+            seen_targets.insert(
+                msg["params"]["targetInfo"]["targetId"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+        } else if msg["id"] == 2 {
+            break;
+        }
+    }
+    assert_eq!(
+        seen_targets.len(),
+        6,
+        "expected all 6 tabs cleanly re-acquired, got {seen_targets:?}"
+    );
+
+    ws2.close(None).await.unwrap();
+    for _ in 0..40 {
+        if attached_tabs.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(attached_tabs.lock().unwrap().is_empty());
+
+    bridge.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), mock_ext).await;
+}
+
+#[tokio::test]
+async fn cdp_relay_lazy_indicator_does_not_inject_on_passive_attach() {
+    let state_dir = private_dir();
+    let bridge = BrowserExtensionBridge::start(state_dir.path())
+        .await
+        .unwrap();
+    let (port, token) = read_bridge_endpoint(state_dir.path()).unwrap();
+
+    let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    write_half
+        .write_all(format!("{}\n", json!({ "type": "auth", "token": token })).as_bytes())
+        .await
+        .unwrap();
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.unwrap();
+    write_half
+        .write_all(
+            format!(
+                "{}\n",
+                json!({
+                    "event": "extension.hello",
+                    "params": {
+                        "extensionId": EXTENSION_ID,
+                        "browser": "Chrome/158.0.0.0",
+                        "userAgent": "Mozilla/5.0 Chrome/158.0.0.0",
+                        "tabs": [
+                            { "id": 101, "url": "https://example.com/1", "title": "One", "active": true },
+                            { "id": 102, "url": "https://example.com/2", "title": "Two", "active": false }
+                        ]
+                    }
+                })
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..40 {
+        if bridge.is_connected() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let recorded = Arc::new(StdMutex::new(Vec::<(i64, String, Option<String>)>::new()));
+    let recorded_ref = recorded.clone();
+    let mock_ext = tokio::spawn(async move {
+        let mut buf = String::new();
+        while reader.read_line(&mut buf).await.unwrap_or(0) > 0 {
+            let msg: Value = serde_json::from_str(buf.trim()).unwrap();
+            buf.clear();
+            let id = msg["id"].as_u64().unwrap();
+            let method = msg["method"].as_str().unwrap().to_owned();
+            let params = msg["params"].clone();
+            let reply = match method.as_str() {
+                "tabs.list" => json!({ "id": id, "result": { "tabs": [
+                    { "id": 101, "url": "https://example.com/1", "title": "One", "active": true },
+                    { "id": 102, "url": "https://example.com/2", "title": "Two", "active": false }
+                ]}}),
+                "debugger.attach" | "debugger.detach" => {
+                    json!({ "id": id, "result": { "ok": true } })
+                }
+                "debugger.sendCommand" => {
+                    let tid = params["tabId"].as_i64().unwrap();
+                    let cdp_method = params["method"].as_str().unwrap().to_owned();
+                    let expr = params
+                        .pointer("/params/expression")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    recorded_ref
+                        .lock()
+                        .unwrap()
+                        .push((tid, cdp_method.clone(), expr));
+                    match cdp_method.as_str() {
+                        "Target.getTargetInfo" => json!({ "id": id, "result": { "targetInfo": {
+                            "targetId": format!("target-{tid}"), "type": "page", "url": format!("https://example.com/{tid}")
+                        }}}),
+                        "Page.addScriptToEvaluateOnNewDocument" => {
+                            json!({ "id": id, "result": { "identifier": format!("fav-{tid}") } })
+                        }
+                        "Page.getFrameTree" => {
+                            json!({ "id": id, "result": { "frameTree": { "frame": { "id": format!("f-{tid}") } } } })
+                        }
+                        "Page.createIsolatedWorld" => {
+                            json!({ "id": id, "result": { "executionContextId": tid } })
+                        }
+                        _ => json!({ "id": id, "result": {} }),
+                    }
+                }
+                _ => json!({ "id": id, "result": {} }),
+            };
+            if write_half
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let ws_url = bridge.open_cdp_session().unwrap();
+    let mut ws = ws_connect(&ws_url).await.unwrap();
+    ws.send(Message::Text(
+        json!({"id": 1, "method": "Target.setAutoAttach", "params": {"autoAttach": true, "flatten": true}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let mut sid_101 = None;
+    loop {
+        let msg: Value =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        if msg["method"] == "Target.attachedToTarget"
+            && msg["params"]["targetInfo"]["targetId"] == "target-101"
+        {
+            sid_101 = msg["params"]["sessionId"].as_str().map(str::to_owned);
+        } else if msg["id"] == 1 {
+            break;
+        }
+    }
+    let sid_101 = sid_101.unwrap();
+
+    // Passive Page.enable on tab 101 must NOT trigger focus emulation or favicon/world injection.
+    ws.send(Message::Text(
+        json!({"id": 2, "sessionId": sid_101, "method": "Page.enable", "params": {}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let _: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    {
+        let ops = recorded.lock().unwrap();
+        assert!(
+            !ops.iter().any(|(_, m, _)| {
+                matches!(
+                    m.as_str(),
+                    "Emulation.setFocusEmulationEnabled"
+                        | "Page.addScriptToEvaluateOnNewDocument"
+                        | "Page.createIsolatedWorld"
+                )
+            }),
+            "passive attach/Page.enable must not inject indicator or focus emulation: {ops:?}"
+        );
+    }
+
+    // Active command on tab 101 lazily installs + activates ONLY on tab 101; tab 102 stays untouched.
+    ws.send(Message::Text(
+        json!({"id": 3, "sessionId": sid_101, "method": "Runtime.evaluate", "params": {"expression": "1+1"}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let _: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    {
+        let ops = recorded.lock().unwrap();
+        assert!(
+            ops.iter()
+                .any(|(tid, m, _)| *tid == 101 && m == "Emulation.setFocusEmulationEnabled")
+        );
+        assert!(
+            ops.iter()
+                .any(|(tid, m, _)| *tid == 101 && m == "Page.addScriptToEvaluateOnNewDocument")
+        );
+        assert!(ops.iter().any(|(tid, m, e)| {
+            *tid == 101
+                && m == "Runtime.evaluate"
+                && e.as_deref()
+                    .is_some_and(|s| s.contains("__styxIndicatorSetActive?.(true)"))
+        }));
+        assert!(
+            !ops.iter()
+                .any(|(tid, m, _)| *tid == 102 && m != "Target.getTargetInfo")
+        );
+    }
+
+    ws.close(None).await.unwrap();
+    bridge.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), mock_ext).await;
 }
