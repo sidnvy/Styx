@@ -520,3 +520,98 @@ pub(crate) fn read_bridge_endpoint(state_dir: &Path) -> Option<(u16, String)> {
     }
     Some((parsed.port, parsed.token))
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalCdpSession {
+    #[serde(rename = "wsEndpoint")]
+    pub ws_endpoint: String,
+    #[serde(rename = "httpBaseUrl")]
+    pub http_base_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser: Option<String>,
+}
+
+/// Mints an authenticated single-use local loopback CDP endpoint from the running
+/// Host `BrowserExtensionBridge` IPC socket (e.g. for `chrome-devtools-mcp` / Antigravity).
+pub async fn request_local_cdp_session(
+    state_dir: &Path,
+    scope: Option<CdpSessionScope>,
+    group_title: Option<String>,
+    group_color: Option<String>,
+) -> Result<LocalCdpSession, ErrorCategory> {
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpStream;
+
+    let (port, token) =
+        read_bridge_endpoint(state_dir).ok_or(ErrorCategory::CapabilityUnsupported)?;
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let stream = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(addr))
+        .await
+        .map_err(|_| ErrorCategory::CapabilityUnsupported)?
+        .map_err(|_| ErrorCategory::CapabilityUnsupported)?;
+    let (read_half, mut write_half) = stream.into_split();
+
+    let (mode, resolved_title, resolved_color) = match scope {
+        Some(CdpSessionScope::SharedExisting) => ("shared_existing", None, None),
+        Some(CdpSessionScope::TabGroup { title, color }) => ("tab_group", Some(title), Some(color)),
+        None => ("tab_group", group_title, group_color),
+    };
+    let mut req = serde_json::json!({
+        "type": "open_cdp_session",
+        "token": token,
+        "mode": mode,
+    });
+    if let Some(title) = resolved_title {
+        req["groupTitle"] = serde_json::Value::String(title);
+    }
+    if let Some(color) = resolved_color {
+        req["groupColor"] = serde_json::Value::String(color);
+    }
+    let line = format!("{req}\n");
+    write_half
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|_| ErrorCategory::CapabilityUnsupported)?;
+    write_half
+        .flush()
+        .await
+        .map_err(|_| ErrorCategory::CapabilityUnsupported)?;
+
+    let mut reader = BufReader::new(read_half);
+    let mut reply_line = String::new();
+    let n = tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut reply_line))
+        .await
+        .map_err(|_| ErrorCategory::CapabilityUnsupported)?
+        .map_err(|_| ErrorCategory::CapabilityUnsupported)?;
+    if n == 0 {
+        return Err(ErrorCategory::CapabilityUnsupported);
+    }
+    let reply: serde_json::Value =
+        serde_json::from_str(reply_line.trim()).map_err(|_| ErrorCategory::ResultUnknown)?;
+    if reply.get("type").and_then(serde_json::Value::as_str) != Some("cdp_session_ok") {
+        return Err(ErrorCategory::CapabilityUnsupported);
+    }
+    let ws_raw = reply
+        .get("wsEndpoint")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ErrorCategory::ResultUnknown)?;
+    let ws_endpoint = validate_loopback_ws_endpoint(ws_raw)?;
+    let http_base_url = reply
+        .get("httpBaseUrl")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .ok_or(ErrorCategory::ResultUnknown)?;
+    let browser = reply
+        .get("browser")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    Ok(LocalCdpSession {
+        ws_endpoint,
+        http_base_url,
+        browser,
+    })
+}
