@@ -2147,9 +2147,226 @@ fn favicon_indicator_colors_and_script_generation() {
     assert!(js.contains("data-styx-orig-rel"));
     assert!(js.contains("data-styx-cursor"));
     assert!(js.contains("attachShadow"));
+    assert!(js.contains("__styxIndicatorSetActive"));
     assert!(js.contains("__styxCursorMove"));
     assert!(js.contains("__styxCursorSetHidden"));
     assert!(js.contains("__styxFaviconCleanup"));
+}
+
+#[tokio::test]
+async fn indicator_activates_on_control_and_releases_after_idle() {
+    let state_dir = private_dir();
+    let bridge = BrowserExtensionBridge::start(state_dir.path())
+        .await
+        .unwrap();
+    bridge.set_indicator_idle_timeout_for_test(Duration::from_millis(120));
+    let (port, token) = read_bridge_endpoint(state_dir.path()).unwrap();
+
+    let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    write_half
+        .write_all(format!("{}\n", json!({ "type": "auth", "token": token })).as_bytes())
+        .await
+        .unwrap();
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.unwrap();
+    write_half
+        .write_all(
+            format!(
+                "{}\n",
+                json!({
+                    "event": "extension.hello",
+                    "params": {
+                        "extensionId": EXTENSION_ID,
+                        "browser": "Chrome/158.0.0.0",
+                        "userAgent": "Mozilla/5.0 Chrome/158.0.0.0",
+                        "tabs": [
+                            { "id": 101, "url": "https://a.example/", "title": "A", "active": true },
+                            { "id": 102, "url": "https://b.example/", "title": "B", "active": false }
+                        ]
+                    }
+                })
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..40 {
+        if bridge.is_connected() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Track (tab_id, cdp_method, expression) per debugger.sendCommand.
+    let cdp_events = Arc::new(StdMutex::new(Vec::<(i64, String, Option<String>)>::new()));
+    let ev_ref = cdp_events.clone();
+    let mock_ext = tokio::spawn(async move {
+        let mut buf = String::new();
+        while reader.read_line(&mut buf).await.unwrap_or(0) > 0 {
+            let msg: Value = serde_json::from_str(buf.trim()).unwrap();
+            buf.clear();
+            let id = msg["id"].as_u64().unwrap();
+            let method = msg["method"].as_str().unwrap().to_owned();
+            let params = msg["params"].clone();
+            let reply = match method.as_str() {
+                "tabs.list" => json!({ "id": id, "result": { "tabs": [
+                    { "id": 101, "url": "https://a.example/", "title": "A", "active": true },
+                    { "id": 102, "url": "https://b.example/", "title": "B", "active": false }
+                ]}}),
+                "debugger.attach" | "debugger.detach" => {
+                    json!({ "id": id, "result": { "ok": true } })
+                }
+                "debugger.sendCommand" => {
+                    let tab_id = params["tabId"].as_i64().unwrap();
+                    let cdp_method = params["method"].as_str().unwrap().to_owned();
+                    let expr = params["params"]
+                        .get("expression")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    ev_ref
+                        .lock()
+                        .unwrap()
+                        .push((tab_id, cdp_method.clone(), expr));
+                    match cdp_method.as_str() {
+                        "Target.getTargetInfo" => json!({ "id": id, "result": { "targetInfo": {
+                            "targetId": format!("target-{tab_id}"),
+                            "type": "page",
+                            "url": "https://a.example/"
+                        }}}),
+                        "Page.addScriptToEvaluateOnNewDocument" => {
+                            json!({ "id": id, "result": { "identifier": format!("fav-{tab_id}") } })
+                        }
+                        "Page.getFrameTree" => {
+                            json!({ "id": id, "result": { "frameTree": { "frame": { "id": format!("f-{tab_id}") } } } })
+                        }
+                        "Page.createIsolatedWorld" => {
+                            json!({ "id": id, "result": { "executionContextId": tab_id + 1000 } })
+                        }
+                        _ => json!({ "id": id, "result": {} }),
+                    }
+                }
+                _ => json!({ "id": id, "result": {} }),
+            };
+            if write_half
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let ws_url = bridge.open_cdp_session().unwrap();
+    let mut ws = ws_connect(&ws_url).await.unwrap();
+    ws.send(Message::Text(
+        json!({"id": 1, "method": "Target.setAutoAttach", "params": {"autoAttach": true, "flatten": true}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let ev_a: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    let ev_b: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    let _aa: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    let sid_101 = if ev_a["params"]["targetInfo"]["targetId"] == "target-101" {
+        ev_a["params"]["sessionId"].as_str().unwrap().to_owned()
+    } else {
+        ev_b["params"]["sessionId"].as_str().unwrap().to_owned()
+    };
+    let sid_102 = if sid_101 == ev_a["params"]["sessionId"].as_str().unwrap() {
+        ev_b["params"]["sessionId"].as_str().unwrap().to_owned()
+    } else {
+        ev_a["params"]["sessionId"].as_str().unwrap().to_owned()
+    };
+
+    // Passive attach + Page.enable MUST NOT activate indicator.
+    ws.send(Message::Text(
+        json!({"id": 2, "sessionId": sid_101, "method": "Page.enable", "params": {}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let _: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    assert!(!cdp_events.lock().unwrap().iter().any(|(_, m, e)| {
+        m == "Runtime.evaluate"
+            && e.as_deref()
+                .is_some_and(|s| s.contains("__styxIndicatorSetActive?.(true)"))
+    }));
+
+    // Active control (Runtime.evaluate) MUST activate tab 101, then auto-release after 120ms idle.
+    cdp_events.lock().unwrap().clear();
+    ws.send(Message::Text(
+        json!({"id": 3, "sessionId": sid_101, "method": "Runtime.evaluate", "params": {"expression": "1+1"}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let _: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    assert!(cdp_events.lock().unwrap().iter().any(|(tid, m, e)| {
+        *tid == 101
+            && m == "Runtime.evaluate"
+            && e.as_deref()
+                .is_some_and(|s| s.contains("__styxIndicatorSetActive?.(true)"))
+    }));
+
+    tokio::time::sleep(Duration::from_millis(240)).await;
+    assert!(cdp_events.lock().unwrap().iter().any(|(tid, m, e)| {
+        *tid == 101
+            && m == "Runtime.evaluate"
+            && e.as_deref()
+                .is_some_and(|s| s.contains("__styxIndicatorSetActive?.(false)"))
+    }));
+
+    // Operating tab 102 while tab 101 is still active MUST immediately deactivate tab 101.
+    cdp_events.lock().unwrap().clear();
+    ws.send(Message::Text(
+        json!({"id": 4, "sessionId": sid_101, "method": "Runtime.evaluate", "params": {"expression": "2+2"}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let _: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    ws.send(Message::Text(
+        json!({"id": 5, "sessionId": sid_102, "method": "Runtime.evaluate", "params": {"expression": "3+3"}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let _: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    {
+        let recorded = cdp_events.lock().unwrap();
+        assert!(recorded.iter().any(|(tid, m, e)| {
+            *tid == 101
+                && m == "Runtime.evaluate"
+                && e.as_deref()
+                    .is_some_and(|s| s.contains("__styxIndicatorSetActive?.(false)"))
+        }));
+        assert!(recorded.iter().any(|(tid, m, e)| {
+            *tid == 102
+                && m == "Runtime.evaluate"
+                && e.as_deref()
+                    .is_some_and(|s| s.contains("__styxIndicatorSetActive?.(true)"))
+        }));
+    }
+
+    ws.close(None).await.unwrap();
+    bridge.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), mock_ext).await;
 }
 
 #[tokio::test]

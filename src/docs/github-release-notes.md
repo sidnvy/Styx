@@ -8,16 +8,13 @@ computer.
 
 ## Changes
 
-Styx `0.8.5` aligns Chrome tab/page focus indicators with **Codex-style stealth pointer favicons + glowing in-page virtual cursors** and adds a **direct authenticated loopback CDP bridge** for local Antigravity (`chrome-devtools-mcp`) integration on top of the `0.8.4` baseline:
+Styx `0.8.6` aligns Chrome indicator persistence with **Codex's active-only behavior** (automatically releasing the tab pointer favicon and fading out the glowing virtual cursor after 3 seconds of idle between turns) on top of the `0.8.5` baseline:
 
-- **Full Codex-style tab favicon & glowing in-page virtual cursor (`styx-runtime`)**:
-  - Attached tabs replace their tab favicon in an isolated world (`styx_favicon_indicator`) with a high-contrast stealth-pointer SVG icon over a session-colored radial halo matching the Chrome Tab Group accent, restoring original icons cleanly on detach.
-  - Added a closed-Shadow-DOM, `aria-hidden="true"` glowing virtual cursor (`[data-styx-cursor="1"]`) that tracks `Input.dispatchMouseEvent` asynchronously with smooth motion and click-ripple feedback, caches the isolated-world `executionContextId` across navigations, and automatically hides during top-level `Page.captureScreenshot` calls.
-- **Direct local loopback CDP bridge for Antigravity & `chrome-devtools-mcp` (`styx-runtime`, `styx`)**:
-  - Added authenticated `open_cdp_session` IPC minting (preserving `browser-extension-bridge.json` schema `1`), scoped HTTP `/cdp/<id>/json/version` & `/json/list` discovery that leaves single-use WebSocket tokens intact until upgrade, and Puppeteer CDP handshake compatibility (`Target.getBrowserContexts`, `Target.setDiscoverTargets`, `Target.attachToTarget`, `Target.detachFromTarget`, `Browser.close`).
-  - Added `styx host browser-extension cdp-url` CLI command (defaulting to an isolated `Antigravity` cyan Tab Group or `--shared` existing tabs) for direct zero-latency `chrome-devtools-mcp --wsEndpoint=...` wiring.
-- **Previous `0.8.4` & `0.8.3` baseline**:
-  - Codex-style Chrome Tab Groups (`Styx · 1`, `Styx · 2`, …) with non-focus-stealing parallel background automation (`Emulation.setFocusEmulationEnabled`, on-demand screencast capturer for background screenshots), retired legacy direct-CDP/managed-profile paths, and Windows/Linux Native Messaging & CUA fixes.
+- **Active-only indicator lifecycle (`styx-runtime`)**:
+  - Attaching to a tab keeps the page's real favicon and cursor dormant until an active control command (`Input.*`, `Page.navigate`/`reload`/`captureScreenshot`, `Runtime.evaluate`/`callFunctionOn`, `DOM.*`, `Accessibility.*`, `Emulation.setDeviceMetricsOverride`) runs on that tab.
+  - Moving control to another tab in the same session immediately deactivates the previous tab, and once in-flight active commands settle for 3 seconds, the tab's original favicon is restored and the virtual cursor fades out while keeping the session attached for fast follow-up turns.
+- **Previous `0.8.5` & `0.8.4` baseline**:
+  - Codex-style stealth-pointer SVG favicon with session-colored radial halo and closed-Shadow-DOM glowing virtual cursor (`[data-styx-cursor="1"]`), direct authenticated loopback CDP bridge + `styx host browser-extension cdp-url` for Antigravity / `chrome-devtools-mcp`, parallel background Chrome Tab Groups (`Styx · N`), and retired legacy direct-CDP/managed-profile browser paths.
 
 All existing Gateway MCP tool names, Host identities, device pairings, browser
 profiles, and Android/Windows/macOS release signing identities remain unchanged.
