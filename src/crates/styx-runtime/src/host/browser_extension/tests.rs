@@ -481,12 +481,14 @@ async fn parallel_tab_group_relays_isolate_tabs_and_close_independently() {
         .open_cdp_session_with_scope(CdpSessionScope::TabGroup {
             title: "Styx · 1".into(),
             color: "blue".into(),
+            session_key: None,
         })
         .unwrap();
     let ws2_url = bridge
         .open_cdp_session_with_scope(CdpSessionScope::TabGroup {
             title: "Styx · 2".into(),
             color: "cyan".into(),
+            session_key: None,
         })
         .unwrap();
     let mut ws1 = ws_connect(&ws1_url).await.unwrap();
@@ -2218,6 +2220,7 @@ fn favicon_indicator_colors_and_script_generation() {
         favicon_accent_hex(&CdpSessionScope::TabGroup {
             title: "Styx · 1".into(),
             color: "blue".into(),
+            session_key: None,
         }),
         "#1A73E8"
     );
@@ -2225,6 +2228,7 @@ fn favicon_indicator_colors_and_script_generation() {
         favicon_accent_hex(&CdpSessionScope::TabGroup {
             title: "Styx · 2".into(),
             color: "cyan".into(),
+            session_key: None,
         }),
         "#0097A7"
     );
@@ -2232,6 +2236,7 @@ fn favicon_indicator_colors_and_script_generation() {
         favicon_accent_hex(&CdpSessionScope::TabGroup {
             title: "Styx · 3".into(),
             color: "purple".into(),
+            session_key: None,
         }),
         "#9334E6"
     );
@@ -2239,6 +2244,7 @@ fn favicon_indicator_colors_and_script_generation() {
         favicon_accent_hex(&CdpSessionScope::TabGroup {
             title: "Styx · 4".into(),
             color: "green".into(),
+            session_key: None,
         }),
         "#188038"
     );
@@ -2246,6 +2252,7 @@ fn favicon_indicator_colors_and_script_generation() {
         favicon_accent_hex(&CdpSessionScope::TabGroup {
             title: "Styx · 5".into(),
             color: "orange".into(),
+            session_key: None,
         }),
         "#E37400"
     );
@@ -2253,6 +2260,7 @@ fn favicon_indicator_colors_and_script_generation() {
         favicon_accent_hex(&CdpSessionScope::TabGroup {
             title: "Styx · 6".into(),
             color: "pink".into(),
+            session_key: None,
         }),
         "#D01884"
     );
@@ -3917,6 +3925,271 @@ async fn cdp_relay_normalizes_target_id_to_main_frame_id() {
     }
 
     ws.close(None).await.unwrap();
+    bridge.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), mock_ext).await;
+}
+
+#[tokio::test]
+async fn cdp_relay_tab_group_reattaches_existing_group_after_disconnect_and_falls_back_when_closed()
+{
+    let state_dir = private_dir();
+    let bridge = BrowserExtensionBridge::start(state_dir.path())
+        .await
+        .unwrap();
+    let cfg: Value =
+        serde_json::from_slice(&std::fs::read(bridge_file_path(state_dir.path())).unwrap())
+            .unwrap();
+
+    let stream = TcpStream::connect(("127.0.0.1", cfg["port"].as_u64().unwrap() as u16))
+        .await
+        .unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    write_half
+        .write_all(format!("{}\n", json!({ "type": "auth", "token": cfg["token"] })).as_bytes())
+        .await
+        .unwrap();
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.unwrap();
+
+    write_half
+        .write_all(
+            format!(
+                "{}\n",
+                json!({
+                    "event": "extension.hello",
+                    "params": {
+                        "extensionId": "cncjpfhbbnibdjkcheeimdfklfiknibl",
+                        "userAgent": "Mozilla/5.0 Chrome/157.0.0.0",
+                        "browser": "Chrome/157.0.0.0",
+                        "tabs": []
+                    }
+                })
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    for _ in 0..40 {
+        if bridge.is_connected() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let mock_tabs = Arc::new(StdMutex::new(Vec::<Value>::new()));
+    let next_tab_num = Arc::new(std::sync::atomic::AtomicI64::new(201));
+    let next_group_num = Arc::new(std::sync::atomic::AtomicI64::new(77));
+    let recorded = Arc::new(StdMutex::new(Vec::<(String, Value)>::new()));
+    let mock_tabs_ref = mock_tabs.clone();
+    let recorded_ref = recorded.clone();
+    let mock_ext = tokio::spawn(async move {
+        let mut buf = String::new();
+        while reader.read_line(&mut buf).await.unwrap_or(0) > 0 {
+            let msg: Value = serde_json::from_str(buf.trim()).unwrap();
+            buf.clear();
+            let id = msg["id"].as_u64().unwrap();
+            let method = msg["method"].as_str().unwrap().to_owned();
+            let params = msg["params"].clone();
+            recorded_ref
+                .lock()
+                .unwrap()
+                .push((method.clone(), params.clone()));
+            let reply = match method.as_str() {
+                "tabs.create" => {
+                    let tab_id = next_tab_num.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let group_id = next_group_num.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let tab = json!({
+                        "id": tab_id,
+                        "url": params.get("url").and_then(Value::as_str).unwrap_or("about:blank"),
+                        "title": "",
+                        "active": false,
+                        "groupId": group_id,
+                        "isolated": params.get("isolated").and_then(Value::as_bool).unwrap_or(false),
+                    });
+                    mock_tabs_ref.lock().unwrap().push(tab.clone());
+                    json!({ "id": id, "result": { "tab": tab, "groupId": group_id } })
+                }
+                "tabs.list" => {
+                    let tabs = mock_tabs_ref.lock().unwrap().clone();
+                    json!({ "id": id, "result": { "tabs": tabs } })
+                }
+                "debugger.attach" | "debugger.detach" | "tabs.remove" => {
+                    json!({ "id": id, "result": { "ok": true } })
+                }
+                "debugger.sendCommand" => {
+                    let tab_id = params["tabId"].as_i64().unwrap();
+                    let target_id = format!("target-{tab_id}");
+                    match params["method"].as_str().unwrap() {
+                        "Target.getTargetInfo" => json!({ "id": id, "result": { "targetInfo": {
+                            "targetId": target_id,
+                            "type": "page",
+                            "url": "about:blank"
+                        }}}),
+                        "Page.getFrameTree" => json!({ "id": id, "result": { "frameTree": {
+                            "frame": { "id": format!("target-{tab_id}") }
+                        }}}),
+                        _ => json!({ "id": id, "result": {} }),
+                    }
+                }
+                _ => json!({ "id": id, "result": {} }),
+            };
+            if write_half
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let scope = CdpSessionScope::TabGroup {
+        title: "Styx · 1".into(),
+        color: "blue".into(),
+        session_key: Some("bg-reattach".into()),
+    };
+
+    // Session 1: creates tab 201 in group 77, then closes WS -> detaches debugger without closing tab.
+    let ws1_url = bridge.open_cdp_session_with_scope(scope.clone()).unwrap();
+    let mut ws1 = ws_connect(&ws1_url).await.unwrap();
+    ws1.send(Message::Text(
+        json!({"id": 1, "method": "Target.setAutoAttach", "params": {"autoAttach": true, "flatten": true}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let mut attached1 = None;
+    loop {
+        let msg: Value =
+            serde_json::from_str(&ws1.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        if msg["method"] == "Target.attachedToTarget" {
+            attached1 = msg["params"]["targetInfo"]["targetId"]
+                .as_str()
+                .map(str::to_owned);
+        } else if msg["id"] == 1 {
+            break;
+        }
+    }
+    assert_eq!(attached1.as_deref(), Some("target-201"));
+    ws1.close(None).await.unwrap();
+    drop(ws1);
+
+    for _ in 0..50 {
+        if recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, p)| m == "debugger.detach" && p["tabId"] == 201)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    {
+        let calls = recorded.lock().unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|(m, p)| m == "debugger.detach" && p["tabId"] == 201),
+            "expected debugger.detach after ws1 close: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|(m, _)| m == "tabs.remove"),
+            "idle park/disconnect must not close tabs: {calls:?}"
+        );
+    }
+
+    // Session 2 (after idle park): re-attaches directly to tab 201 in group 77 via tabs.list without tabs.create.
+    let offset2 = recorded.lock().unwrap().len();
+    let ws2_url = bridge.open_cdp_session_with_scope(scope.clone()).unwrap();
+    let mut ws2 = ws_connect(&ws2_url).await.unwrap();
+    ws2.send(Message::Text(
+        json!({"id": 1, "method": "Target.setAutoAttach", "params": {"autoAttach": true, "flatten": true}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let mut attached2 = None;
+    loop {
+        let msg: Value =
+            serde_json::from_str(&ws2.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        if msg["method"] == "Target.attachedToTarget" {
+            attached2 = msg["params"]["targetInfo"]["targetId"]
+                .as_str()
+                .map(str::to_owned);
+        } else if msg["id"] == 1 {
+            break;
+        }
+    }
+    assert_eq!(attached2.as_deref(), Some("target-201"));
+    {
+        let calls = recorded.lock().unwrap();
+        let slice = &calls[offset2..];
+        assert!(
+            slice
+                .iter()
+                .any(|(m, p)| m == "tabs.list" && p["excludeIsolated"] == false),
+            "expected tabs.list with excludeIsolated=false on re-attach: {slice:?}"
+        );
+        assert!(
+            !slice.iter().any(|(m, _)| m == "tabs.create"),
+            "must not open a duplicate Tab Group when group 77 still exists: {slice:?}"
+        );
+    }
+    ws2.close(None).await.unwrap();
+    drop(ws2);
+    for _ in 0..50 {
+        let detach_count = recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, p)| m == "debugger.detach" && p["tabId"] == 201)
+            .count();
+        if detach_count >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Session 3: simulate user closing the Tab Group while parked -> falls back to tabs.create (tab 202).
+    mock_tabs.lock().unwrap().clear();
+    let offset3 = recorded.lock().unwrap().len();
+    let ws3_url = bridge.open_cdp_session_with_scope(scope).unwrap();
+    let mut ws3 = ws_connect(&ws3_url).await.unwrap();
+    ws3.send(Message::Text(
+        json!({"id": 1, "method": "Target.setAutoAttach", "params": {"autoAttach": true, "flatten": true}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let mut attached3 = None;
+    loop {
+        let msg: Value =
+            serde_json::from_str(&ws3.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        if msg["method"] == "Target.attachedToTarget" {
+            attached3 = msg["params"]["targetInfo"]["targetId"]
+                .as_str()
+                .map(str::to_owned);
+        } else if msg["id"] == 1 {
+            break;
+        }
+    }
+    assert_eq!(attached3.as_deref(), Some("target-202"));
+    {
+        let calls = recorded.lock().unwrap();
+        let slice = &calls[offset3..];
+        assert!(
+            slice.iter().any(|(m, _)| m == "tabs.create"),
+            "expected fallback tabs.create when remembered Tab Group is gone: {slice:?}"
+        );
+    }
+
+    ws3.close(None).await.unwrap();
     bridge.shutdown().await;
     let _ = tokio::time::timeout(Duration::from_secs(1), mock_ext).await;
 }

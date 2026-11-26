@@ -27,6 +27,7 @@ use tokio::sync::Mutex as AsyncMutex;
 const MAX_BROWSER_RESULT_BYTES: usize = styx_contracts::DESKTOP_BROWSER_FRAME_BYTES;
 const MAX_TAB_GROUP_SESSIONS: usize = 16;
 const TAB_GROUP_COLORS: &[&str] = &["blue", "cyan", "purple", "green", "orange", "pink"];
+pub(crate) const DEFAULT_IDLE_PARK_TIMEOUT: Duration = Duration::from_secs(240);
 
 type Caller = (OwnerId, OwnerEpoch);
 type Cell = Arc<AsyncMutex<Session>>;
@@ -70,6 +71,7 @@ struct Session {
     target: Option<ResourceTarget>,
     phase: Phase,
     cleanup: Option<OwnerCleanupHandle>,
+    last_activity: std::time::Instant,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -221,6 +223,7 @@ impl Engine<'_> {
             target: None,
             phase,
             cleanup: None,
+            last_activity: std::time::Instant::now(),
         })
     }
     fn ensure_shared_existing_in(&self, registry: &mut Registry) -> Result<Cell, &'static str> {
@@ -257,7 +260,11 @@ impl Engine<'_> {
         let id = format!("bg-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
         let session = self.new_session(
             id.clone(),
-            CdpSessionScope::TabGroup { title, color },
+            CdpSessionScope::TabGroup {
+                title,
+                color,
+                session_key: Some(id.clone()),
+            },
             Some(owner.clone()),
             Phase::Saved,
         )?;
@@ -381,6 +388,46 @@ impl Engine<'_> {
         };
         success(Self::close_payload(id))
     }
+    /// Parks active `Phase::Ready` sessions that have been idle for at least
+    /// `idle_timeout`, closing their Playwright worker and CDP WebSocket (which
+    /// detaches `chrome.debugger` without closing tabs) while preserving the logical
+    /// session record, `owner_default`, and operator so the next turn re-attaches.
+    pub(crate) async fn park_idle_sessions(&self, idle_timeout: Duration) -> usize {
+        self.collect_closed().await;
+        let entries: Vec<(String, Cell)> = {
+            let registry = self.state().registry.lock().expect("Browser sessions");
+            registry
+                .sessions
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        let mut parked = 0;
+        for (id, cell) in entries {
+            let Ok(mut session) = cell.try_lock() else {
+                continue;
+            };
+            if session.phase != Phase::Ready
+                || session.cleanup.is_some()
+                || session.last_activity.elapsed() < idle_timeout
+            {
+                continue;
+            }
+            let preserved_operator = session.operator.clone();
+            let preserved_scope = session.scope.clone();
+            if self.cleanup_session_resources(&mut session).await.is_err() {
+                continue;
+            }
+            let preserved_operator = preserved_operator.filter(|op| self.active_caller(op).is_ok());
+            let Ok(saved) = self.new_session(id, preserved_scope, preserved_operator, Phase::Saved)
+            else {
+                continue;
+            };
+            *session = saved;
+            parked += 1;
+        }
+        parked
+    }
     /// Capability shutdown already proved physical exit. Reclaim exited local
     /// owners/sessions on the next request without disturbing active parallel sessions.
     async fn collect_closed(&self) {
@@ -470,7 +517,7 @@ impl Engine<'_> {
                                 CdpSessionScope::SharedExisting => {
                                     ("extension_existing", None, None)
                                 }
-                                CdpSessionScope::TabGroup { title, color } => (
+                                CdpSessionScope::TabGroup { title, color, .. } => (
                                     "extension_tab_group",
                                     Some(title.as_str()),
                                     Some(color.as_str()),
@@ -541,9 +588,10 @@ impl Engine<'_> {
                         }
                         s.operator = Some(owner.clone());
                     }
+                    s.last_activity = std::time::Instant::now();
                     let (mode, title, color) = match &s.scope {
                         CdpSessionScope::SharedExisting => ("extension_existing", None, None),
-                        CdpSessionScope::TabGroup { title, color } => (
+                        CdpSessionScope::TabGroup { title, color, .. } => (
                             "extension_tab_group",
                             Some(title.clone()),
                             Some(color.clone()),
@@ -614,6 +662,7 @@ impl Engine<'_> {
                     } else if session.operator.as_ref() != Some(&owner) {
                         return failure("browser_session_transferred", false);
                     }
+                    session.last_activity = std::time::Instant::now();
                 }
                 let mut result = if close {
                     let closed = self.close(&id, &mut session).await;
@@ -660,6 +709,9 @@ impl Engine<'_> {
                             // before its worker exited; repeating it is not safe.
                             session.operator = operator;
                         }
+                    }
+                    if !close {
+                        session.last_activity = std::time::Instant::now();
                     }
                     drop(session);
                     res

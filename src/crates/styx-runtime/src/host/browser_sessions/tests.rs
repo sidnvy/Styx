@@ -854,3 +854,282 @@ async fn acknowledged_stale_snapshot_and_clean_tool_error_do_not_poison_session(
     );
     assert!(session.phase == Phase::Ready);
 }
+
+#[tokio::test]
+async fn idle_auto_park_parks_ready_sessions_preserving_operator_and_skips_active_or_busy() {
+    struct CountingBootstrap {
+        root: PathBuf,
+        released: Arc<AtomicUsize>,
+        next_profile: AtomicUsize,
+    }
+    impl operations::BrowserBootstrap for CountingBootstrap {
+        fn release_profile(&self, _: &OwnerLease) {
+            self.released.fetch_add(1, Ordering::SeqCst);
+        }
+        fn prepare_profile(
+            &self,
+            _: &OwnerLease,
+            _: CdpSessionScope,
+        ) -> Result<OwnedBrowserConfig, ErrorCategory> {
+            let n = self.next_profile.fetch_add(1, Ordering::SeqCst);
+            let output_dir = self.root.join(format!("output-{n}"));
+            std::fs::create_dir(&output_dir).unwrap();
+            std::fs::set_permissions(&output_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let unused = std::fs::canonicalize("/usr/bin/true").unwrap();
+            Ok(OwnedBrowserConfig {
+                node_binary: unused.clone(),
+                worker_entry: unused,
+                cdp_endpoint: format!("ws://127.0.0.1:9222/devtools/browser/fixture-{n}"),
+                workspace_dir: self.root.join("workspace"),
+                output_dir,
+                rpc_timeout: Duration::from_nanos(1),
+            })
+        }
+        fn validate_before_spawn(&self) -> Result<(), ErrorCategory> {
+            Ok(())
+        }
+        fn validate_control(&self) -> Result<(), ErrorCategory> {
+            Ok(())
+        }
+    }
+    impl Drop for CountingBootstrap {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!("styx-browser-park-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let released = Arc::new(AtomicUsize::new(0));
+    let source = Arc::new(CountingBootstrap {
+        root,
+        released: released.clone(),
+        next_profile: AtomicUsize::new(0),
+    });
+    let (host, authority) = HostCoordinator::new_without_executor(
+        OperationLedger::new("browser-idle-park-gen".try_into().unwrap()),
+        facts(CapabilityId::ExecRun),
+    )
+    .unwrap();
+    authority
+        .configure_browser(facts(CapabilityId::Browser))
+        .unwrap();
+    let inputs = host.browser_sessions().inputs(source.clone());
+    let engine = Engine {
+        port: BrowserPort {
+            coordinator: &host,
+            authority: &authority,
+            inputs: &inputs,
+        },
+    };
+    let a = named_caller("park-a");
+    let b = named_caller("park-b");
+    let gone = named_caller("park-gone");
+    register_caller(&host, &authority, &a);
+    register_caller(&host, &authority, &b);
+    register_caller(&host, &authority, &gone);
+
+    async fn insert_ready_session(
+        engine: &Engine<'_>,
+        source: &CountingBootstrap,
+        id: &str,
+        scope: CdpSessionScope,
+        operator: Option<OwnerRef>,
+        idle_for: Duration,
+    ) -> (Cell, OwnerLease) {
+        let host = engine.port.coordinator;
+        let authority = engine.port.authority;
+        let mut session = engine
+            .new_session(id.to_owned(), scope.clone(), operator, Phase::Saved)
+            .unwrap();
+        let lease = session.lease.clone();
+        let config = source.prepare_profile(&lease, scope).unwrap();
+        authority.register_browser_profile(&lease, config).unwrap();
+        let context = PreparedContext {
+            device_id: host.bootstrap_identity().0.clone(),
+            grant_revision: host.grant_revision(),
+            session: None,
+            observation: None,
+            capability: CapabilityId::Browser,
+            deadline: Some(MonotonicMillis(host.now().0 + 5_000)),
+            disconnect_policy: DisconnectPolicy::RetainForOwner,
+        };
+        let open_snap = host.prepare_browser_open(&lease, context).unwrap();
+        let target = ResourceTarget {
+            operation_id: open_snap.id.clone(),
+            payload_digest: open_snap.payload_digest,
+        };
+        match host
+            .dispatch_browser_open(&lease, &target.operation_id, target.payload_digest)
+            .await
+            .unwrap()
+        {
+            crate::host::coordinator::BrowserOpenSubmission::Submitted(ticket) => {
+                let _ = ticket.wait().await.unwrap();
+            }
+            _ => panic!("expected submission"),
+        }
+        session.target = Some(target);
+        session.phase = Phase::Ready;
+        session.last_activity = std::time::Instant::now() - idle_for;
+        let cell = Arc::new(AsyncMutex::new(session));
+        engine
+            .state()
+            .registry
+            .lock()
+            .unwrap()
+            .sessions
+            .insert(id.to_owned(), cell.clone());
+        (cell, lease)
+    }
+
+    let (shared_cell, shared_lease) = insert_ready_session(
+        &engine,
+        &source,
+        BROWSER_SESSION_ID,
+        CdpSessionScope::SharedExisting,
+        Some(a.clone()),
+        Duration::from_secs(300),
+    )
+    .await;
+    let (idle_bg_cell, idle_bg_lease) = insert_ready_session(
+        &engine,
+        &source,
+        "bg-idle",
+        CdpSessionScope::TabGroup {
+            title: "Styx · 1".into(),
+            color: "blue".into(),
+            session_key: Some("bg-idle".into()),
+        },
+        Some(a.clone()),
+        Duration::from_secs(300),
+    )
+    .await;
+    let (fresh_bg_cell, _) = insert_ready_session(
+        &engine,
+        &source,
+        "bg-fresh",
+        CdpSessionScope::TabGroup {
+            title: "Styx · 2".into(),
+            color: "cyan".into(),
+            session_key: Some("bg-fresh".into()),
+        },
+        Some(a.clone()),
+        Duration::from_secs(10),
+    )
+    .await;
+    let (busy_bg_cell, _) = insert_ready_session(
+        &engine,
+        &source,
+        "bg-busy",
+        CdpSessionScope::TabGroup {
+            title: "Styx · 3".into(),
+            color: "purple".into(),
+            session_key: Some("bg-busy".into()),
+        },
+        Some(a.clone()),
+        Duration::from_secs(300),
+    )
+    .await;
+    let (takeover_bg_cell, _) = insert_ready_session(
+        &engine,
+        &source,
+        "bg-takeover",
+        CdpSessionScope::TabGroup {
+            title: "Styx · 4".into(),
+            color: "green".into(),
+            session_key: Some("bg-takeover".into()),
+        },
+        Some(a.clone()),
+        Duration::from_secs(300),
+    )
+    .await;
+    let (gone_bg_cell, gone_bg_lease) = insert_ready_session(
+        &engine,
+        &source,
+        "bg-gone",
+        CdpSessionScope::TabGroup {
+            title: "Styx · 5".into(),
+            color: "orange".into(),
+            session_key: Some("bg-gone".into()),
+        },
+        Some(gone.clone()),
+        Duration::from_secs(300),
+    )
+    .await;
+
+    engine
+        .state()
+        .registry
+        .lock()
+        .unwrap()
+        .owner_default
+        .insert(caller(&a), "bg-idle".into());
+    host.remote_access()
+        .lock()
+        .unwrap()
+        .owners
+        .remove(&caller(&gone));
+
+    // Listing does not park or refresh idle timestamps.
+    let listed = engine.handle(b.clone(), BrowserSessionCommand::List).await;
+    assert_ne!(listed.is_error, Some(true));
+    assert!(shared_cell.lock().await.phase == Phase::Ready);
+
+    // TakeOver refreshes last_activity so the session stays warm past the check.
+    let takeover = engine
+        .handle(
+            b.clone(),
+            BrowserSessionCommand::TakeOver {
+                session_id: "bg-takeover".into(),
+            },
+        )
+        .await;
+    assert_ne!(takeover.is_error, Some(true));
+
+    // Hold a lock on bg-busy to simulate an in-flight action.
+    let busy_guard = busy_bg_cell.lock().await;
+    let parked = engine.park_idle_sessions(Duration::from_secs(240)).await;
+    assert_eq!(parked, 3);
+    drop(busy_guard);
+
+    assert_eq!(released.load(Ordering::SeqCst), 3);
+
+    {
+        let shared = shared_cell.lock().await;
+        assert!(shared.phase == Phase::Saved);
+        assert!(shared.target.is_none());
+        assert!(shared.cleanup.is_none());
+        assert_ne!(shared.lease, shared_lease);
+        assert!(shared.operator.as_ref() == Some(&a));
+    }
+    {
+        let idle_bg = idle_bg_cell.lock().await;
+        assert!(idle_bg.phase == Phase::Saved);
+        assert!(idle_bg.target.is_none());
+        assert!(idle_bg.cleanup.is_none());
+        assert_ne!(idle_bg.lease, idle_bg_lease);
+        assert!(idle_bg.operator.as_ref() == Some(&a));
+    }
+    {
+        let gone_bg = gone_bg_cell.lock().await;
+        assert!(gone_bg.phase == Phase::Saved);
+        assert!(gone_bg.target.is_none());
+        assert_ne!(gone_bg.lease, gone_bg_lease);
+        assert!(gone_bg.operator.is_none());
+    }
+    assert!(fresh_bg_cell.lock().await.phase == Phase::Ready);
+    assert!(takeover_bg_cell.lock().await.phase == Phase::Ready);
+    assert!(busy_bg_cell.lock().await.phase == Phase::Ready);
+
+    let registry = engine.state().registry.lock().unwrap();
+    assert!(registry.sessions.contains_key("bg-idle"));
+    assert_eq!(
+        registry.owner_default.get(&caller(&a)).map(String::as_str),
+        Some("bg-idle")
+    );
+}

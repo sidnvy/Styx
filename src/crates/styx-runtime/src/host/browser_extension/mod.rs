@@ -558,7 +558,9 @@ pub async fn request_local_cdp_session(
 
     let (mode, resolved_title, resolved_color) = match scope {
         Some(CdpSessionScope::SharedExisting) => ("shared_existing", None, None),
-        Some(CdpSessionScope::TabGroup { title, color }) => ("tab_group", Some(title), Some(color)),
+        Some(CdpSessionScope::TabGroup { title, color, .. }) => {
+            ("tab_group", Some(title), Some(color))
+        }
         None => ("tab_group", group_title, group_color),
     };
     let mut req = serde_json::json!({
