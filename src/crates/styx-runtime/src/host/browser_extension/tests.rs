@@ -213,7 +213,8 @@ async fn cdp_relay_authenticates_translates_targets_and_detaches_on_ws_close() {
                             json!({ "id": id, "result": { "identifier": "favicon-script-1" } })
                         }
                         "Page.getFrameTree" => {
-                            json!({ "id": id, "result": { "frameTree": { "frame": { "id": "f1" } } } })
+                            let tab_id = params["tabId"].as_i64().unwrap();
+                            json!({ "id": id, "result": { "frameTree": { "frame": { "id": format!("target-{tab_id}") } } } })
                         }
                         "Page.createIsolatedWorld" => {
                             json!({ "id": id, "result": { "executionContextId": 42 } })
@@ -2358,7 +2359,7 @@ async fn indicator_activates_on_control_and_releases_after_idle() {
                             json!({ "id": id, "result": { "identifier": format!("fav-{tab_id}") } })
                         }
                         "Page.getFrameTree" => {
-                            json!({ "id": id, "result": { "frameTree": { "frame": { "id": format!("f-{tab_id}") } } } })
+                            json!({ "id": id, "result": { "frameTree": { "frame": { "id": format!("target-{tab_id}") } } } })
                         }
                         "Page.createIsolatedWorld" => {
                             json!({ "id": id, "result": { "executionContextId": tab_id + 1000 } })
@@ -2562,7 +2563,8 @@ async fn cursor_tracks_mouse_events_and_hides_during_screenshot() {
                             json!({ "id": id, "result": { "identifier": "fav-1" } })
                         }
                         "Page.getFrameTree" => {
-                            json!({ "id": id, "result": { "frameTree": { "frame": { "id": "f1" } } } })
+                            let tab_id = params["tabId"].as_i64().unwrap();
+                            json!({ "id": id, "result": { "frameTree": { "frame": { "id": format!("target-{tab_id}") } } } })
                         }
                         "Page.createIsolatedWorld" => {
                             json!({ "id": id, "result": { "executionContextId": 42 } })
@@ -3609,7 +3611,7 @@ async fn cdp_relay_lazy_indicator_does_not_inject_on_passive_attach() {
                             json!({ "id": id, "result": { "identifier": format!("fav-{tid}") } })
                         }
                         "Page.getFrameTree" => {
-                            json!({ "id": id, "result": { "frameTree": { "frame": { "id": format!("f-{tid}") } } } })
+                            json!({ "id": id, "result": { "frameTree": { "frame": { "id": format!("target-{tid}") } } } })
                         }
                         "Page.createIsolatedWorld" => {
                             json!({ "id": id, "result": { "executionContextId": tid } })
@@ -3703,9 +3705,214 @@ async fn cdp_relay_lazy_indicator_does_not_inject_on_passive_attach() {
                 && e.as_deref()
                     .is_some_and(|s| s.contains("__styxIndicatorSetActive?.(true)"))
         }));
+        assert!(!ops.iter().any(|(tid, m, _)| *tid == 102
+            && m != "Target.getTargetInfo"
+            && m != "Page.getFrameTree"));
+    }
+
+    ws.close(None).await.unwrap();
+    bridge.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), mock_ext).await;
+}
+
+#[tokio::test]
+async fn cdp_relay_normalizes_target_id_to_main_frame_id() {
+    let state_dir = private_dir();
+    let bridge = BrowserExtensionBridge::start(state_dir.path())
+        .await
+        .unwrap();
+    let cfg: Value =
+        serde_json::from_slice(&std::fs::read(bridge_file_path(state_dir.path())).unwrap())
+            .unwrap();
+
+    let stream = TcpStream::connect(("127.0.0.1", cfg["port"].as_u64().unwrap() as u16))
+        .await
+        .unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    write_half
+        .write_all(format!("{}\n", json!({ "type": "auth", "token": cfg["token"] })).as_bytes())
+        .await
+        .unwrap();
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.unwrap();
+
+    write_half
+        .write_all(
+            format!(
+                "{}\n",
+                json!({
+                    "event": "extension.hello",
+                    "params": {
+                        "extensionId": "cncjpfhbbnibdjkcheeimdfklfiknibl",
+                        "userAgent": "Mozilla/5.0 Chrome/157.0.0.0",
+                        "browser": "Chrome/157.0.0.0",
+                        "tabs": [
+                            { "id": 101, "url": "https://ipcheck.ing/", "title": "IPCheck", "active": true }
+                        ]
+                    }
+                })
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    for _ in 0..40 {
+        if bridge.is_connected() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let recorded = Arc::new(StdMutex::new(Vec::<(String, Value)>::new()));
+    let recorded_ref = recorded.clone();
+    let mock_ext = tokio::spawn(async move {
+        let mut buf = String::new();
+        while reader.read_line(&mut buf).await.unwrap_or(0) > 0 {
+            let msg: Value = serde_json::from_str(buf.trim()).unwrap();
+            buf.clear();
+            let id = msg["id"].as_u64().unwrap();
+            let method = msg["method"].as_str().unwrap().to_owned();
+            let params = msg["params"].clone();
+            recorded_ref
+                .lock()
+                .unwrap()
+                .push((method.clone(), params.clone()));
+            let reply = match method.as_str() {
+                "tabs.list" => json!({ "id": id, "result": { "tabs": [
+                    { "id": 101, "url": "https://ipcheck.ing/", "title": "IPCheck", "active": true }
+                ]}}),
+                "debugger.attach" | "debugger.detach" | "tabs.remove" => {
+                    json!({ "id": id, "result": { "ok": true } })
+                }
+                "debugger.sendCommand" => {
+                    let cdp_method = params["method"].as_str().unwrap();
+                    match cdp_method {
+                        "Target.getTargetInfo" => json!({ "id": id, "result": { "targetInfo": {
+                            "targetId": "stale-webcontents-target-101",
+                            "type": "page",
+                            "url": "https://ipcheck.ing/"
+                        }}}),
+                        "Page.getFrameTree" => json!({ "id": id, "result": { "frameTree": {
+                            "frame": { "id": "swapped-main-frame-101" }
+                        }}}),
+                        _ => json!({ "id": id, "result": {} }),
+                    }
+                }
+                _ => json!({ "id": id, "result": {} }),
+            };
+            if write_half
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let ws_url = bridge.open_cdp_session().unwrap();
+    let mut ws = ws_connect(&ws_url).await.unwrap();
+    ws.send(Message::Text(
+        json!({"id": 1, "method": "Target.setAutoAttach", "params": {"autoAttach": true, "flatten": true}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+
+    let mut attached_target_id = None;
+    let mut session_id = None;
+    loop {
+        let msg: Value =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        if msg["method"] == "Target.attachedToTarget" {
+            attached_target_id = msg["params"]["targetInfo"]["targetId"]
+                .as_str()
+                .map(str::to_owned);
+            session_id = msg["params"]["sessionId"].as_str().map(str::to_owned);
+        } else if msg["id"] == 1 {
+            break;
+        }
+    }
+    assert_eq!(
+        attached_target_id.as_deref(),
+        Some("swapped-main-frame-101")
+    );
+    let session_id = session_id.unwrap();
+
+    // Target.getTargets reports normalized main frame targetId.
+    ws.send(Message::Text(
+        json!({"id": 2, "method": "Target.getTargets", "params": {}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let targets_reply: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    assert_eq!(targets_reply["id"], 2);
+    assert_eq!(
+        targets_reply["result"]["targetInfos"][0]["targetId"],
+        "swapped-main-frame-101"
+    );
+
+    // Target.getTargetInfo (by normalized targetId and by sessionId) resolves cleanly.
+    ws.send(Message::Text(
+        json!({"id": 3, "method": "Target.getTargetInfo", "params": {"targetId": "swapped-main-frame-101"}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let info_reply: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    assert_eq!(info_reply["id"], 3);
+    assert_eq!(
+        info_reply["result"]["targetInfo"]["targetId"],
+        "swapped-main-frame-101"
+    );
+
+    ws.send(Message::Text(
+        json!({"id": 4, "sessionId": session_id, "method": "Target.getTargetInfo", "params": {}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let session_info_reply: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    assert_eq!(session_info_reply["id"], 4);
+    assert_eq!(
+        session_info_reply["result"]["targetInfo"]["targetId"],
+        "swapped-main-frame-101"
+    );
+
+    // Target.closeTarget matches the normalized targetId and removes tab 101.
+    ws.send(Message::Text(
+        json!({"id": 5, "method": "Target.closeTarget", "params": {"targetId": "swapped-main-frame-101"}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let close_reply: Value = loop {
+        let msg: Value =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        if msg["id"] == 5 {
+            break msg;
+        }
+    };
+    assert_eq!(close_reply["id"], 5);
+    assert_eq!(close_reply["result"]["success"], true);
+    {
+        let calls = recorded.lock().unwrap();
         assert!(
-            !ops.iter()
-                .any(|(tid, m, _)| *tid == 102 && m != "Target.getTargetInfo")
+            calls
+                .iter()
+                .any(|(m, p)| m == "tabs.remove" && p["tabId"] == 101),
+            "expected tabs.remove for normalized targetId: {calls:?}"
         );
     }
 

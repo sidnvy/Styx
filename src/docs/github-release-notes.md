@@ -8,17 +8,12 @@ computer.
 
 ## Changes
 
-Styx `0.8.8` hardens the Chrome Extension CDP relay around strict structural invariants on top of the `0.8.7` baseline:
+Styx `0.8.9` adds the CDP `Page` target identity invariant on top of the `0.8.8` baseline:
 
-- **Strict per-session FIFO CDP ordering (`cdp_relay`)**:
-  - Replaces unordered per-message task spawning with dedicated per-`sessionId` FIFO workers so protocol sequences such as `Page.getFrameTree` and `Runtime.enable` never reorder on heavy or multi-frame tabs.
-- **Cancellation-safe RAII tab ownership & bounded teardown (`cdp_relay`)**:
-  - Cancels in-flight `attach_tab` work immediately on relay disconnect, rolls back partial attachments, and runs concurrent `detach_and_cleanup_tab` calls before releasing `ExtensionPeer` ownership so interrupted connects never leak `chrome.debugger` sessions.
-- **Lazy non-blocking indicator & focus emulation + extension hardening**:
-  - Defers visual indicator injection and `SharedExisting` focus emulation off passive attach onto active CDP commands so `browser_tabs(action="list")` / `list_pages` never stalls behind hung tab scripts.
-  - Excludes Chrome Memory Saver `tab.discarded` tabs from attachable tab lists and self-recovers only self-owned `"already attached"` `chrome.debugger` states.
-- **Previous `0.8.7` & `0.8.6` baseline**:
-  - Reconnecting local CDP discovery proxy (`styx host browser-extension cdp-proxy`), idle WebSocket keepalive `Pong` flushing, active-only Chrome indicator persistence, direct authenticated loopback CDP bridge, and parallel Chrome Tab Groups (`Styx · N`).
+- **CDP `targetInfo.targetId == frameTree.frame.id` identity invariant (`cdp_relay`)**:
+  - Queries `Page.getFrameTree` during `attach_tab` and normalizes `targetInfo.targetId` to the current main `frameTree.frame.id` (falling back safely to `Target.getTargetInfo` if unavailable) so Chrome COOP / RenderFrameHost-swapped tabs never trigger Playwright `"Frame has been detached."` initialization aborts or `browser_tabs(action="list")` hangs.
+- **Previous `0.8.8` & `0.8.7` baseline**:
+  - Strict per-`sessionId` FIFO CDP ordering, cancellation-safe RAII tab ownership and bounded concurrent teardown, lazy non-blocking indicator/focus emulation, Memory Saver `tab.discarded` filtering and self-owned `debugger.attach` recovery, reconnecting local `cdp-proxy`, and idle WebSocket `Pong` flushing.
 
 All existing Gateway MCP tool names, Host identities, device pairings, browser
 profiles, and Android/Windows/macOS release signing identities remain unchanged.

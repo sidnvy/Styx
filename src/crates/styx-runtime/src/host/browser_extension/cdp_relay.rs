@@ -1602,7 +1602,25 @@ async fn attach_tab(
             )
             .await
             .map_err(|_| "target_info_timeout".to_owned())??;
-            let target_info = info.get("targetInfo").cloned().unwrap_or_else(|| json!({}));
+            let mut target_info = info.get("targetInfo").cloned().unwrap_or_else(|| json!({}));
+            // Normalize `targetId` to the page's current main frame ID so COOP/RenderFrameHost
+            // swaps (`Page.getFrameTree().frameTree.frame.id`) match `targetInfo.targetId`.
+            if let Ok(Ok(ft)) = tokio::time::timeout(
+                Duration::from_secs(2),
+                peer.call(
+                    "debugger.sendCommand",
+                    json!({ "tabId": tab_id, "method": "Page.getFrameTree", "params": {} }),
+                ),
+            )
+            .await
+                && let Some(main_frame_id) = ft
+                    .pointer("/frameTree/frame/id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                && let Some(obj) = target_info.as_object_mut()
+            {
+                obj.insert("targetId".to_owned(), Value::String(main_frame_id.to_owned()));
+            }
             // For isolated Tab Group tabs, emulate focus immediately so `active: false`
             // background tabs run rAF/visibilityState normally without stealing focus.
             // SharedExisting attaches lazily without side effects until a tab is operated.
