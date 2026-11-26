@@ -1,10 +1,12 @@
 //! Host-owned Chrome Extension (MV3) + Native Messaging bridge for zero-prompt
 //! attachment to the user's everyday signed-in Chrome/Edge/Chromium profile.
+pub mod cdp_proxy;
 pub mod cdp_relay;
 pub mod native_host;
 #[cfg(test)]
 mod tests;
 
+pub use cdp_proxy::{LocalCdpProxy, LocalCdpProxyConfig};
 pub use cdp_relay::{BrowserExtensionBridge, CdpSessionScope};
 
 use crate::store::PrivateRoot;

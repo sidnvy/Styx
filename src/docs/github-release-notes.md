@@ -8,13 +8,15 @@ computer.
 
 ## Changes
 
-Styx `0.8.6` aligns Chrome indicator persistence with **Codex's active-only behavior** (automatically releasing the tab pointer favicon and fading out the glowing virtual cursor after 3 seconds of idle between turns) on top of the `0.8.5` baseline:
+Styx `0.8.7` adds automatic Antigravity / `chrome-devtools-mcp` reconnection across Styx Host restarts and upgrades on top of the `0.8.6` baseline:
 
-- **Active-only indicator lifecycle (`styx-runtime`)**:
-  - Attaching to a tab keeps the page's real favicon and cursor dormant until an active control command (`Input.*`, `Page.navigate`/`reload`/`captureScreenshot`, `Runtime.evaluate`/`callFunctionOn`, `DOM.*`, `Accessibility.*`, `Emulation.setDeviceMetricsOverride`) runs on that tab.
-  - Moving control to another tab in the same session immediately deactivates the previous tab, and once in-flight active commands settle for 3 seconds, the tab's original favicon is restored and the virtual cursor fades out while keeping the session attached for fast follow-up turns.
-- **Previous `0.8.5` & `0.8.4` baseline**:
-  - Codex-style stealth-pointer SVG favicon with session-colored radial halo and closed-Shadow-DOM glowing virtual cursor (`[data-styx-cursor="1"]`), direct authenticated loopback CDP bridge + `styx host browser-extension cdp-url` for Antigravity / `chrome-devtools-mcp`, parallel background Chrome Tab Groups (`Styx · N`), and retired legacy direct-CDP/managed-profile browser paths.
+- **Reconnecting local CDP discovery proxy (`styx host browser-extension cdp-proxy`)**:
+  - Provides a persistent loopback HTTP `/json/version` + `/json/list` discovery endpoint (`--browserUrl`) that dynamically reads `browser-extension-bridge.json` on every connect or reconnect to mint a fresh CDP WebSocket session from whichever local Styx Host is active (returning `503 Service Unavailable` while a restart is in progress).
+  - Supports both wrapper mode (`styx host browser-extension cdp-proxy ... -- <cmd> ...`, passing `--browserUrl=http://127.0.0.1:<port>` cleanly and forwarding signals) and standalone mode so long-lived Antigravity MCP sessions no longer hit stale `ECONNREFUSED` ports after Styx updates or restarts.
+- **Idle WebSocket keepalive `Pong` flushing (`styx-runtime`)**:
+  - Triggers an immediate `ws_sink.flush()` when `Message::Ping` frames arrive so clients using WebSocket keepalive (`wsOptions: { keepAlive: true }`) receive prompt `Pong` replies on idle tabs.
+- **Previous `0.8.6` & `0.8.5` baseline**:
+  - Codex-aligned active-only Chrome indicator persistence (pointer SVG favicon + closed-Shadow-DOM glowing virtual cursor activating on CDP control commands and releasing after 3 seconds of idle), direct authenticated loopback CDP bridge + `styx host browser-extension cdp-url`, and parallel background Chrome Tab Groups (`Styx · N`).
 
 All existing Gateway MCP tool names, Host identities, device pairings, browser
 profiles, and Android/Windows/macOS release signing identities remain unchanged.

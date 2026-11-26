@@ -2394,6 +2394,7 @@ async fn run_cdp_relay_session(
         indicator_idle_timeout,
     }));
 
+    let (pong_flush_tx, mut pong_flush_rx) = mpsc::unbounded_channel::<()>();
     let writer_cancel = session_cancel.clone();
     let ws_writer = tokio::spawn(async move {
         loop {
@@ -2402,6 +2403,12 @@ async fn run_cdp_relay_session(
                 msg = cdp_rx.recv() => {
                     let Some(text) = msg else { break };
                     if ws_sink.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                flush_req = pong_flush_rx.recv() => {
+                    let Some(()) = flush_req else { break };
+                    if ws_sink.flush().await.is_err() {
                         break;
                     }
                 }
@@ -2456,7 +2463,11 @@ async fn run_cdp_relay_session(
                             let _ = req_out.send(reply.to_string());
                         });
                     }
-                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Ping(_))) => {
+                        // tungstenite queues the Pong automatically; trigger ws_sink.flush().
+                        let _ = pong_flush_tx.send(());
+                    }
+                    Some(Ok(Message::Pong(_))) => {}
                     _ => break,
                 }
             }
