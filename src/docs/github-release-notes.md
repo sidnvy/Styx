@@ -8,15 +8,17 @@ computer.
 
 ## Changes
 
-Styx `0.8.7` adds automatic Antigravity / `chrome-devtools-mcp` reconnection across Styx Host restarts and upgrades on top of the `0.8.6` baseline:
+Styx `0.8.8` hardens the Chrome Extension CDP relay around strict structural invariants on top of the `0.8.7` baseline:
 
-- **Reconnecting local CDP discovery proxy (`styx host browser-extension cdp-proxy`)**:
-  - Provides a persistent loopback HTTP `/json/version` + `/json/list` discovery endpoint (`--browserUrl`) that dynamically reads `browser-extension-bridge.json` on every connect or reconnect to mint a fresh CDP WebSocket session from whichever local Styx Host is active (returning `503 Service Unavailable` while a restart is in progress).
-  - Supports both wrapper mode (`styx host browser-extension cdp-proxy ... -- <cmd> ...`, passing `--browserUrl=http://127.0.0.1:<port>` cleanly and forwarding signals) and standalone mode so long-lived Antigravity MCP sessions no longer hit stale `ECONNREFUSED` ports after Styx updates or restarts.
-- **Idle WebSocket keepalive `Pong` flushing (`styx-runtime`)**:
-  - Triggers an immediate `ws_sink.flush()` when `Message::Ping` frames arrive so clients using WebSocket keepalive (`wsOptions: { keepAlive: true }`) receive prompt `Pong` replies on idle tabs.
-- **Previous `0.8.6` & `0.8.5` baseline**:
-  - Codex-aligned active-only Chrome indicator persistence (pointer SVG favicon + closed-Shadow-DOM glowing virtual cursor activating on CDP control commands and releasing after 3 seconds of idle), direct authenticated loopback CDP bridge + `styx host browser-extension cdp-url`, and parallel background Chrome Tab Groups (`Styx · N`).
+- **Strict per-session FIFO CDP ordering (`cdp_relay`)**:
+  - Replaces unordered per-message task spawning with dedicated per-`sessionId` FIFO workers so protocol sequences such as `Page.getFrameTree` and `Runtime.enable` never reorder on heavy or multi-frame tabs.
+- **Cancellation-safe RAII tab ownership & bounded teardown (`cdp_relay`)**:
+  - Cancels in-flight `attach_tab` work immediately on relay disconnect, rolls back partial attachments, and runs concurrent `detach_and_cleanup_tab` calls before releasing `ExtensionPeer` ownership so interrupted connects never leak `chrome.debugger` sessions.
+- **Lazy non-blocking indicator & focus emulation + extension hardening**:
+  - Defers visual indicator injection and `SharedExisting` focus emulation off passive attach onto active CDP commands so `browser_tabs(action="list")` / `list_pages` never stalls behind hung tab scripts.
+  - Excludes Chrome Memory Saver `tab.discarded` tabs from attachable tab lists and self-recovers only self-owned `"already attached"` `chrome.debugger` states.
+- **Previous `0.8.7` & `0.8.6` baseline**:
+  - Reconnecting local CDP discovery proxy (`styx host browser-extension cdp-proxy`), idle WebSocket keepalive `Pong` flushing, active-only Chrome indicator persistence, direct authenticated loopback CDP bridge, and parallel Chrome Tab Groups (`Styx · N`).
 
 All existing Gateway MCP tool names, Host identities, device pairings, browser
 profiles, and Android/Windows/macOS release signing identities remain unchanged.
