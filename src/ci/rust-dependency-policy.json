@@ -540,6 +540,11 @@
       "kind": "explicit_owned_chromium_extension_bridge_e2e",
       "input": "Real Chromium binary, compiled styx __browser-extension-bridge native host, and Node 22 Playwright browser-worker in a fresh disposable temp root",
       "required_for": "End-to-end verification of Styx MV3 extension Native Messaging bridge, Host WS CDP relay, Playwright connectOverCDP, cookie persistence, and tab detach/cleanup without --remote-debugging-port"
+    },
+    "host::browser_extension::tests::real_chromium_extension_bridge_e2e_with_chrome_devtools_mcp": {
+      "kind": "explicit_owned_chromium_extension_bridge_e2e",
+      "input": "Real Chromium binary, compiled styx __browser-extension-bridge and host browser-extension cdp-url, and npx chrome-devtools-mcp in a fresh disposable temp root",
+      "required_for": "End-to-end verification of Antigravity/chrome-devtools-mcp connecting to Styx Chrome Extension Bridge via cdp-url with Codex-style tab favicon and glowing virtual cursor"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints",

@@ -198,15 +198,27 @@ async fn cdp_relay_authenticates_translates_targets_and_detaches_on_ws_close() {
                 "debugger.attach" => json!({ "id": id, "result": { "ok": true } }),
                 "debugger.sendCommand" => {
                     let cdp_method = params["method"].as_str().unwrap();
-                    if cdp_method == "Target.getTargetInfo" {
-                        let tab_id = params["tabId"].as_i64().unwrap();
-                        json!({ "id": id, "result": { "targetInfo": {
-                            "targetId": format!("target-{tab_id}"),
-                            "type": "page",
-                            "url": "https://dash.cloudflare.com/"
-                        }}})
-                    } else {
-                        json!({ "id": id, "result": { "frameId": "f1", "cdpMethod": cdp_method } })
+                    match cdp_method {
+                        "Target.getTargetInfo" => {
+                            let tab_id = params["tabId"].as_i64().unwrap();
+                            json!({ "id": id, "result": { "targetInfo": {
+                                "targetId": format!("target-{tab_id}"),
+                                "type": "page",
+                                "url": "https://dash.cloudflare.com/"
+                            }}})
+                        }
+                        "Page.addScriptToEvaluateOnNewDocument" => {
+                            json!({ "id": id, "result": { "identifier": "favicon-script-1" } })
+                        }
+                        "Page.getFrameTree" => {
+                            json!({ "id": id, "result": { "frameTree": { "frame": { "id": "f1" } } } })
+                        }
+                        "Page.createIsolatedWorld" => {
+                            json!({ "id": id, "result": { "executionContextId": 42 } })
+                        }
+                        _ => {
+                            json!({ "id": id, "result": { "frameId": "f1", "cdpMethod": cdp_method } })
+                        }
                     }
                 }
                 "debugger.detach" => {
@@ -311,18 +323,33 @@ async fn cdp_relay_authenticates_translates_targets_and_detaches_on_ws_close() {
             .any(|(m, p)| m == "tabs.activate" || p["method"] == "Page.bringToFront")
     );
 
-    // 6. Closing WS detaches only this relay's tabs without calling debugger.detachAll.
+    // 6. Closing WS detaches only this relay's tabs and restores favicon indicator cleanly.
     ws.close(None).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), detach_seen.notified())
         .await
         .unwrap();
-    assert!(
-        recorded_calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(m, _)| m == "debugger.detach")
-    );
+    {
+        let calls = recorded_calls.lock().unwrap();
+        assert!(calls.iter().any(|(m, _)| m == "debugger.detach"));
+        assert!(calls.iter().any(|(m, p)| {
+            m == "debugger.sendCommand"
+                && p["method"] == "Page.addScriptToEvaluateOnNewDocument"
+                && p["params"]["worldName"] == "styx_favicon_indicator"
+        }));
+        assert!(calls.iter().any(|(m, p)| {
+            m == "debugger.sendCommand"
+                && p["method"] == "Page.removeScriptToEvaluateOnNewDocument"
+                && p["params"]["identifier"] == "favicon-script-1"
+        }));
+        assert!(calls.iter().any(|(m, p)| {
+            m == "debugger.sendCommand"
+                && p["method"] == "Runtime.evaluate"
+                && p["params"]["contextId"] == 42
+                && p["params"]["expression"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("__styxFaviconCleanup"))
+        }));
+    }
 
     bridge.shutdown().await;
     assert!(!bridge_file_path(state_dir.path()).exists());
@@ -647,7 +674,9 @@ async fn real_chromium_extension_bridge_e2e_with_playwright_worker() {
                             (
                                 "200 OK",
                                 "Content-Type: text/html\r\nCache-Control: no-store".to_owned(),
-                                "<!doctype html><html><head><title>Ext Daily Form</title></head><body>\
+                                "<!doctype html><html><head><title>Ext Daily Form</title>\
+                                <link id=\"site-icon\" rel=\"icon\" href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23222'/%3E%3C/svg%3E\" />\
+                                </head><body>\
                                 <h1>Daily Browser Operations Form</h1>\
                                 <label>Username <input id=\"username\" aria-label=\"Username\" type=\"text\" /></label>\
                                 <label>Note <input id=\"note\" aria-label=\"Note\" type=\"text\" /></label>\
@@ -1374,7 +1403,7 @@ console.log('NODE_E2E_SUCCESS');
                         session_id: None,
                         name: "browser_evaluate".into(),
                         arguments: serde_json::from_value(json!({
-                            "function": "() => ({ title: document.title, result: document.getElementById('result').textContent, key: document.getElementById('key-out').textContent, asyncOut: document.getElementById('async-out').textContent })",
+                            "function": "() => ({ title: document.title, result: document.getElementById('result').textContent, key: document.getElementById('key-out').textContent, asyncOut: document.getElementById('async-out').textContent, styxFaviconHref: document.querySelector('link[data-styx-favicon=\"1\"]')?.getAttribute('href') || null, origIconRel: document.getElementById('site-icon')?.getAttribute('rel') ?? null, origIconSaved: document.getElementById('site-icon')?.getAttribute('data-styx-orig-rel') ?? null, mainWorldClean: typeof window.__styxFaviconCleanup === 'undefined' })",
                         }))
                         .unwrap(),
                     },
@@ -1393,6 +1422,19 @@ console.log('NODE_E2E_SUCCESS');
             );
             assert!(eval_text.contains("Key F8 Observed"), "{eval_text}");
             assert!(eval_text.contains("Async Ready"), "{eval_text}");
+            assert!(
+                eval_text.contains("\"styxFaviconHref\": \"data:image/"),
+                "missing tab favicon indicator: {eval_text}"
+            );
+            assert!(
+                eval_text.contains("\"origIconRel\": null")
+                    && eval_text.contains("\"origIconSaved\": \"icon\""),
+                "original icon link should be preserved for restore: {eval_text}"
+            );
+            assert!(
+                eval_text.contains("\"mainWorldClean\": true"),
+                "favicon helper leaked into page main world: {eval_text}"
+            );
 
             let shot_res = engine
                 .handle(
@@ -1734,6 +1776,36 @@ console.log('NODE_E2E_SUCCESS');
         );
         assert!(all_text(&snap_b).contains(&format!("Ext Initial {nonce}")));
 
+        let existing_favicon = engine
+            .handle(
+                caller_b.clone(),
+                BrowserSessionCommand::Action {
+                    session_id: Some(BROWSER_SESSION_ID.into()),
+                    name: "browser_evaluate".into(),
+                    arguments: serde_json::from_value(json!({
+                        "function": "() => ({ href: document.querySelector('link[data-styx-favicon=\"1\"]')?.getAttribute('href') || null, hasCursor: Boolean(document.querySelector('[data-styx-cursor=\"1\"]')) })",
+                    }))
+                    .unwrap(),
+                },
+            )
+            .await;
+        assert_ne!(
+            existing_favicon.is_error,
+            Some(true),
+            "existing-browser favicon eval failed: {}",
+            all_text(&existing_favicon)
+        );
+        assert!(
+            all_text(&existing_favicon).contains("\"href\": \"data:image/svg+xml"),
+            "existing-browser missing Codex SVG tab favicon indicator: {}",
+            all_text(&existing_favicon)
+        );
+        assert!(
+            all_text(&existing_favicon).contains("\"hasCursor\": true"),
+            "existing-browser missing virtual cursor host: {}",
+            all_text(&existing_favicon)
+        );
+
         // `browser_close` detaches cleanly and leaves Chrome open and `existing-browser` reusable (`saved`).
         let close_b = engine
             .handle(
@@ -1782,6 +1854,727 @@ console.log('NODE_E2E_SUCCESS');
     http_stop.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(2), http_task).await;
     bridge.shutdown().await;
+}
+
+#[ignore = "requires local Chromium, compiled styx binary, Node 22 + MCP SDK, and chrome-devtools-mcp"]
+#[tokio::test]
+async fn real_chromium_extension_bridge_e2e_with_chrome_devtools_mcp() {
+    use tokio::io::AsyncReadExt;
+    use tokio_util::sync::CancellationToken;
+
+    let styx_bin = PathBuf::from(std::env::var_os("STYX_TEST_BIN").expect("STYX_TEST_BIN"));
+    let chrome_bin = PathBuf::from(std::env::var_os("STYX_TEST_CHROME").expect("STYX_TEST_CHROME"));
+    let node22_bin = PathBuf::from(std::env::var_os("STYX_TEST_NODE22").expect("STYX_TEST_NODE22"));
+    let node_modules =
+        PathBuf::from(std::env::var_os("STYX_TEST_NODE_MODULES").expect("STYX_TEST_NODE_MODULES"));
+
+    let root = private_dir();
+    let state_dir = root.path().join("host-state");
+    let xdg_dir = root.path().join("xdg");
+    let user_data_dir = root.path().join("chrome-profile");
+    let driver_stage = root.path().join("driver-stage");
+    for d in [&state_dir, &xdg_dir, &user_data_dir, &driver_stage] {
+        ensure_private_dir(d).unwrap();
+    }
+
+    let nm_dirs = vec![
+        (user_data_dir.join("NativeMessagingHosts"), true),
+        (xdg_dir.join("chromium/NativeMessagingHosts"), true),
+        (xdg_dir.join("google-chrome/NativeMessagingHosts"), true),
+    ];
+    install_with_manifest_dirs(&state_dir, &styx_bin, &nm_dirs).unwrap();
+
+    let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_port = http_listener.local_addr().unwrap().port();
+    let http_stop = CancellationToken::new();
+    let http_cancel = http_stop.clone();
+    let http_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = http_cancel.cancelled() => break,
+                accepted = http_listener.accept() => {
+                    let Ok((mut sock, _)) = accepted else { break };
+                    tokio::spawn(async move {
+                        let mut buf = [0_u8; 4096];
+                        let n = sock.read(&mut buf).await.unwrap_or(0);
+                        let req_text = String::from_utf8_lossy(&buf[..n]);
+                        let path = req_text
+                            .lines()
+                            .next()
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .unwrap_or("/");
+                        let body = if path == "/target" {
+                            "<!doctype html><html><head><title>DevTools MCP Target</title></head><body><h1>Antigravity DevTools MCP Test</h1><button id=\"btn\" onclick=\"document.getElementById('status').textContent='Clicked OK'\">Click Me</button><p id=\"status\">Pending</p></body></html>"
+                        } else {
+                            "<!doctype html><html><head><title>Initial User Tab</title></head><body><h1>User Open Tab</h1></body></html>"
+                        };
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                    });
+                }
+            }
+        }
+    });
+
+    let bridge = BrowserExtensionBridge::start(&state_dir).await.unwrap();
+    struct ChromeGuard(Option<std::process::Child>);
+    impl Drop for ChromeGuard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    let ext_dir_str = extension_dir(&state_dir).to_string_lossy().into_owned();
+    let mut chrome_cmd = std::process::Command::new(&chrome_bin);
+    chrome_cmd
+        .env("XDG_CONFIG_HOME", &xdg_dir)
+        .arg(format!("--user-data-dir={}", user_data_dir.display()))
+        .arg(format!("--load-extension={ext_dir_str}"))
+        .arg(format!("--disable-extensions-except={ext_dir_str}"))
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg(format!("http://127.0.0.1:{http_port}/"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut chrome_guard = ChromeGuard(Some(chrome_cmd.spawn().expect("spawn chromium")));
+
+    for _ in 0..200 {
+        if bridge.is_connected() {
+            break;
+        }
+        assert!(
+            chrome_guard
+                .0
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none(),
+            "Chromium exited prematurely"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(bridge.is_connected(), "extension did not connect");
+
+    // Verify `styx host browser-extension cdp-url` CLI mints single-use local wsEndpoint.
+    let cdp_out = tokio::process::Command::new(&styx_bin)
+        .args([
+            "host",
+            "browser-extension",
+            "cdp-url",
+            "--state-dir",
+            state_dir.to_str().unwrap(),
+            "--group-title",
+            "Antigravity",
+            "--group-color",
+            "cyan",
+        ])
+        .output()
+        .await
+        .expect("run styx cdp-url");
+    assert!(
+        cdp_out.status.success(),
+        "styx cdp-url failed: stderr={}",
+        String::from_utf8_lossy(&cdp_out.stderr)
+    );
+    let ws_url = String::from_utf8(cdp_out.stdout).unwrap().trim().to_owned();
+    assert!(
+        ws_url.starts_with("ws://127.0.0.1:"),
+        "unexpected cdp-url output: {ws_url:?}"
+    );
+    eprintln!("E2E: Minted Antigravity CLI cdp-url={ws_url}");
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&node_modules, driver_stage.join("node_modules")).unwrap();
+    let driver_script = driver_stage.join("devtools-mcp-driver.mjs");
+    std::fs::write(
+        &driver_script,
+        r#"
+import assert from 'node:assert/strict';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+
+const wsUrl = process.env.STYX_CDP_WS_URL;
+const baseUrl = process.env.STYX_E2E_BASE_URL;
+
+const transport = new StdioClientTransport({
+  command: 'npx',
+  args: ['-y', 'chrome-devtools-mcp@latest', `--wsEndpoint=${wsUrl}`],
+  stderr: 'pipe',
+});
+let stderrLog = '';
+transport.stderr.on('data', chunk => { stderrLog += chunk.toString(); });
+
+const client = new Client({ name: 'styx-devtools-e2e', version: '1.0.0' });
+await client.connect(transport);
+
+const textOf = res => (res.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+const toolsRes = await client.listTools();
+const toolSchemas = new Map(toolsRes.tools.map(t => [t.name, t.inputSchema?.properties || {}]));
+
+async function call(name, args = {}) {
+  const res = await client.callTool({ name, arguments: args }, undefined, { timeout: 30000 });
+  assert.notEqual(res.isError, true, `${name} failed: ${textOf(res)}\nstderr=${stderrLog}`);
+  return res;
+}
+
+const listed = textOf(await call('list_pages', {}));
+assert.ok(listed.length > 0, `list_pages returned empty: ${listed}`);
+const pageIdMatch = listed.match(/(?:^|\n)\s*(\d+)\s*:/);
+const pageId = pageIdMatch ? Number(pageIdMatch[1]) : 1;
+const withPageId = (name, args) =>
+  toolSchemas.get(name)?.pageId ? { pageId, ...args } : args;
+
+await call('navigate_page', withPageId('navigate_page', { type: 'url', url: `${baseUrl}/target` }));
+const snap1 = textOf(await call('take_snapshot', withPageId('take_snapshot', {})));
+assert.match(snap1, /Click Me/, `missing Click Me in snapshot:\n${snap1}`);
+
+const uidMatch = snap1.match(/uid=([^\s]+)[^\n]*button[^\n]*Click Me/i)
+  || snap1.match(/uid="([^"]+)"[^\n]*Click Me/i);
+assert.ok(uidMatch, `could not extract uid from chrome-devtools-mcp snapshot:\n${snap1}`);
+
+await call('click', withPageId('click', { uid: uidMatch[1] }));
+const snap2 = textOf(await call('take_snapshot', withPageId('take_snapshot', {})));
+assert.match(snap2, /Clicked OK/, `click did not update DOM in snapshot:\n${snap2}`);
+
+if (toolSchemas.has('evaluate_script')) {
+  const evalOut = textOf(await call('evaluate_script', withPageId('evaluate_script', {
+    function: '() => ({ favicon: document.querySelector("link[data-styx-favicon]")?.getAttribute("href") || null, hasCursor: Boolean(document.querySelector("[data-styx-cursor]")) })',
+  })));
+  assert.match(evalOut, /data:image\/svg\+xml/, `missing Codex SVG favicon: ${evalOut}`);
+  assert.match(evalOut, /"hasCursor":\s*true/, `missing virtual cursor host: ${evalOut}`);
+}
+
+const shot = await call('take_screenshot', withPageId('take_screenshot', {}));
+assert.ok((shot.content || []).some(c => c.type === 'image'), `screenshot missing image: ${JSON.stringify(shot)}`);
+
+await transport.close();
+console.log('DEVTOOLS_MCP_E2E_SUCCESS');
+"#,
+    )
+    .unwrap();
+
+    let mut driver = tokio::process::Command::new(&node22_bin);
+    driver
+        .arg(&driver_script)
+        .env("STYX_CDP_WS_URL", &ws_url)
+        .env("STYX_E2E_BASE_URL", format!("http://127.0.0.1:{http_port}"))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let output = tokio::time::timeout(Duration::from_secs(90), driver.output())
+        .await
+        .expect("devtools-mcp driver timed out")
+        .expect("run devtools-mcp driver");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("DEVTOOLS_MCP_E2E_SUCCESS"),
+        "chrome-devtools-mcp E2E failed (status={:?}):\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
+    );
+
+    drop(chrome_guard);
+    http_stop.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(2), http_task).await;
+    bridge.shutdown().await;
+}
+
+#[test]
+fn favicon_indicator_colors_and_script_generation() {
+    use cdp_relay::{CdpSessionScope, favicon_accent_hex, favicon_install_script};
+
+    assert_eq!(
+        favicon_accent_hex(&CdpSessionScope::SharedExisting),
+        "#1A73E8"
+    );
+    assert_eq!(
+        favicon_accent_hex(&CdpSessionScope::TabGroup {
+            title: "Styx · 1".into(),
+            color: "blue".into(),
+        }),
+        "#1A73E8"
+    );
+    assert_eq!(
+        favicon_accent_hex(&CdpSessionScope::TabGroup {
+            title: "Styx · 2".into(),
+            color: "cyan".into(),
+        }),
+        "#0097A7"
+    );
+    assert_eq!(
+        favicon_accent_hex(&CdpSessionScope::TabGroup {
+            title: "Styx · 3".into(),
+            color: "purple".into(),
+        }),
+        "#9334E6"
+    );
+    assert_eq!(
+        favicon_accent_hex(&CdpSessionScope::TabGroup {
+            title: "Styx · 4".into(),
+            color: "green".into(),
+        }),
+        "#188038"
+    );
+    assert_eq!(
+        favicon_accent_hex(&CdpSessionScope::TabGroup {
+            title: "Styx · 5".into(),
+            color: "orange".into(),
+        }),
+        "#E37400"
+    );
+    assert_eq!(
+        favicon_accent_hex(&CdpSessionScope::TabGroup {
+            title: "Styx · 6".into(),
+            color: "pink".into(),
+        }),
+        "#D01884"
+    );
+
+    let js = favicon_install_script("#9334E6");
+    assert!(js.contains("\"#9334E6\""));
+    assert!(js.contains("M12 8 L54 25 L35 34 L25 54 Z"));
+    assert!(js.contains("#0B0F19"));
+    assert!(js.contains("#FFFFFF"));
+    assert!(js.contains("radialGradient"));
+    assert!(js.contains("data-styx-favicon"));
+    assert!(js.contains("data-styx-orig-rel"));
+    assert!(js.contains("data-styx-cursor"));
+    assert!(js.contains("attachShadow"));
+    assert!(js.contains("__styxCursorMove"));
+    assert!(js.contains("__styxCursorSetHidden"));
+    assert!(js.contains("__styxFaviconCleanup"));
+}
+
+#[tokio::test]
+async fn cursor_tracks_mouse_events_and_hides_during_screenshot() {
+    let state_dir = private_dir();
+    let bridge = BrowserExtensionBridge::start(state_dir.path())
+        .await
+        .unwrap();
+    let (port, token) = read_bridge_endpoint(state_dir.path()).unwrap();
+
+    let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    write_half
+        .write_all(format!("{}\n", json!({ "type": "auth", "token": token })).as_bytes())
+        .await
+        .unwrap();
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.unwrap();
+    write_half
+        .write_all(
+            format!(
+                "{}\n",
+                json!({
+                    "event": "extension.hello",
+                    "params": {
+                        "extensionId": EXTENSION_ID,
+                        "browser": "Chrome/158.0.0.0",
+                        "userAgent": "Mozilla/5.0 Chrome/158.0.0.0",
+                        "tabs": [{ "id": 101, "url": "https://example.com/", "title": "Ex", "active": true }]
+                    }
+                })
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..40 {
+        if bridge.is_connected() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let cdp_sequence = Arc::new(StdMutex::new(Vec::<(String, Value)>::new()));
+    let seq_ref = cdp_sequence.clone();
+    let mock_ext = tokio::spawn(async move {
+        let mut buf = String::new();
+        while reader.read_line(&mut buf).await.unwrap_or(0) > 0 {
+            let msg: Value = serde_json::from_str(buf.trim()).unwrap();
+            buf.clear();
+            let id = msg["id"].as_u64().unwrap();
+            let method = msg["method"].as_str().unwrap().to_owned();
+            let params = msg["params"].clone();
+            let reply = match method.as_str() {
+                "tabs.list" => json!({ "id": id, "result": { "tabs": [
+                    { "id": 101, "url": "https://example.com/", "title": "Ex", "active": true }
+                ]}}),
+                "debugger.attach" | "debugger.detach" => {
+                    json!({ "id": id, "result": { "ok": true } })
+                }
+                "debugger.sendCommand" => {
+                    let cdp_method = params["method"].as_str().unwrap().to_owned();
+                    let cdp_params = params["params"].clone();
+                    seq_ref
+                        .lock()
+                        .unwrap()
+                        .push((cdp_method.clone(), cdp_params));
+                    match cdp_method.as_str() {
+                        "Target.getTargetInfo" => json!({ "id": id, "result": { "targetInfo": {
+                            "targetId": "target-101", "type": "page", "url": "https://example.com/"
+                        }}}),
+                        "Page.addScriptToEvaluateOnNewDocument" => {
+                            json!({ "id": id, "result": { "identifier": "fav-1" } })
+                        }
+                        "Page.getFrameTree" => {
+                            json!({ "id": id, "result": { "frameTree": { "frame": { "id": "f1" } } } })
+                        }
+                        "Page.createIsolatedWorld" => {
+                            json!({ "id": id, "result": { "executionContextId": 42 } })
+                        }
+                        "Page.captureScreenshot" => {
+                            json!({ "id": id, "result": { "data": "AA==" } })
+                        }
+                        _ => json!({ "id": id, "result": {} }),
+                    }
+                }
+                _ => json!({ "id": id, "result": {} }),
+            };
+            if write_half
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let ws_url = bridge.open_cdp_session().unwrap();
+    let mut ws = ws_connect(&ws_url).await.unwrap();
+    ws.send(Message::Text(
+        json!({"id": 1, "method": "Target.setAutoAttach", "params": {"autoAttach": true, "flatten": true}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let attached: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    let _aa: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    let sid = attached["params"]["sessionId"].as_str().unwrap().to_owned();
+
+    ws.send(Message::Text(
+        json!({"id": 2, "sessionId": sid, "method": "Input.dispatchMouseEvent", "params": {"type": "mouseMoved", "x": 120, "y": 240}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let _: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+
+    ws.send(Message::Text(
+        json!({"id": 3, "sessionId": sid, "method": "Input.dispatchMouseEvent", "params": {"type": "mousePressed", "x": 120, "y": 240, "button": "left"}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let _: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+
+    // Give spawned cursor eval tasks a moment before taking screenshot.
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    ws.send(Message::Text(
+        json!({"id": 4, "sessionId": sid, "method": "Page.captureScreenshot", "params": {}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let shot_reply: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    assert_eq!(shot_reply["result"]["data"], "AA==");
+
+    let recorded = cdp_sequence.lock().unwrap().clone();
+    assert!(recorded.iter().any(|(m, p)| {
+        m == "Runtime.evaluate"
+            && p["contextId"] == 42
+            && p["expression"]
+                .as_str()
+                .is_some_and(|e| e.contains("__styxCursorMove?.(120,240,\"move\")"))
+    }));
+    assert!(recorded.iter().any(|(m, p)| {
+        m == "Runtime.evaluate"
+            && p["contextId"] == 42
+            && p["expression"]
+                .as_str()
+                .is_some_and(|e| e.contains("__styxCursorMove?.(120,240,\"down\")"))
+    }));
+
+    let hide_idx = recorded
+        .iter()
+        .position(|(m, p)| {
+            m == "Runtime.evaluate"
+                && p["expression"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("__styxCursorSetHidden?.(true)"))
+        })
+        .expect("missing pre-screenshot cursor hide");
+    let shot_idx = recorded
+        .iter()
+        .position(|(m, _)| m == "Page.captureScreenshot")
+        .expect("missing screenshot");
+    let unhide_idx = recorded
+        .iter()
+        .rposition(|(m, p)| {
+            m == "Runtime.evaluate"
+                && p["expression"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("__styxCursorSetHidden?.(false)"))
+        })
+        .expect("missing post-screenshot cursor unhide");
+    assert!(hide_idx < shot_idx && shot_idx < unhide_idx);
+
+    ws.close(None).await.unwrap();
+    bridge.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), mock_ext).await;
+}
+
+#[tokio::test]
+async fn local_cdp_session_ipc_http_discovery_and_puppeteer_handshake() {
+    use tokio::io::AsyncReadExt;
+
+    let state_dir = private_dir();
+    let bridge = BrowserExtensionBridge::start(state_dir.path())
+        .await
+        .unwrap();
+
+    // Disconnected bridge refuses local CDP session minting cleanly.
+    assert!(
+        request_local_cdp_session(state_dir.path(), None, Some("Antigravity".into()), None)
+            .await
+            .is_err()
+    );
+
+    let (port, token) = read_bridge_endpoint(state_dir.path()).unwrap();
+    let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    write_half
+        .write_all(format!("{}\n", json!({ "type": "auth", "token": token })).as_bytes())
+        .await
+        .unwrap();
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.unwrap();
+    write_half
+        .write_all(
+            format!(
+                "{}\n",
+                json!({
+                    "event": "extension.hello",
+                    "params": {
+                        "extensionId": EXTENSION_ID,
+                        "browser": "Chrome/158.0.0.0",
+                        "userAgent": "Mozilla/5.0 Chrome/158.0.0.0",
+                        "tabs": []
+                    }
+                })
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..40 {
+        if bridge.is_connected() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let rpc_calls = Arc::new(StdMutex::new(Vec::<(String, Value)>::new()));
+    let calls_ref = rpc_calls.clone();
+    let mock_ext = tokio::spawn(async move {
+        let mut buf = String::new();
+        while reader.read_line(&mut buf).await.unwrap_or(0) > 0 {
+            let msg: Value = serde_json::from_str(buf.trim()).unwrap();
+            buf.clear();
+            let id = msg["id"].as_u64().unwrap();
+            let method = msg["method"].as_str().unwrap().to_owned();
+            let params = msg["params"].clone();
+            calls_ref
+                .lock()
+                .unwrap()
+                .push((method.clone(), params.clone()));
+            let reply = match method.as_str() {
+                "tabs.create" => json!({ "id": id, "result": {
+                    "tab": { "id": 301, "url": params["url"], "title": "", "active": false, "groupId": 900, "isolated": true },
+                    "groupId": 900
+                }}),
+                "debugger.attach" | "debugger.detach" => {
+                    json!({ "id": id, "result": { "ok": true } })
+                }
+                "debugger.sendCommand" => {
+                    let cdp_method = params["method"].as_str().unwrap();
+                    match cdp_method {
+                        "Target.getTargetInfo" => json!({ "id": id, "result": { "targetInfo": {
+                            "targetId": "target-301", "type": "page", "url": "about:blank"
+                        }}}),
+                        _ => json!({ "id": id, "result": {} }),
+                    }
+                }
+                _ => json!({ "id": id, "result": {} }),
+            };
+            if write_half
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let session = request_local_cdp_session(
+        state_dir.path(),
+        None,
+        Some("Antigravity".to_owned()),
+        Some("cyan".to_owned()),
+    )
+    .await
+    .unwrap();
+    assert!(session.ws_endpoint.starts_with("ws://127.0.0.1:"));
+    assert!(session.http_base_url.starts_with("http://127.0.0.1:"));
+    assert_eq!(session.browser.as_deref(), Some("Chrome/158.0.0.0"));
+
+    let http_get = |path: String| {
+        let ws_port = bridge.ws_port();
+        async move {
+            let mut tcp = TcpStream::connect(("127.0.0.1", ws_port)).await.unwrap();
+            let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{ws_port}\r\n\r\n");
+            tcp.write_all(req.as_bytes()).await.unwrap();
+            let mut out = Vec::new();
+            tcp.read_to_end(&mut out).await.unwrap();
+            String::from_utf8(out).unwrap()
+        }
+    };
+
+    // Unauthenticated /json/version MUST be rejected.
+    let unauth = http_get("/json/version".to_owned()).await;
+    assert!(unauth.starts_with("HTTP/1.1 404 "));
+
+    // Scoped /cdp/<id>/json/version and /json/list succeed without consuming the WS token.
+    let session_id_slug = session.ws_endpoint.rsplit('/').next().unwrap().to_owned();
+    let ver_resp = http_get(format!("/cdp/{session_id_slug}/json/version")).await;
+    assert!(ver_resp.starts_with("HTTP/1.1 200 OK"));
+    let (_, ver_body) = ver_resp.split_once("\r\n\r\n").unwrap();
+    let ver_json: Value = serde_json::from_str(ver_body).unwrap();
+    assert_eq!(ver_json["webSocketDebuggerUrl"], session.ws_endpoint);
+
+    let list_resp = http_get(format!("/cdp/{session_id_slug}/json/list")).await;
+    assert!(list_resp.starts_with("HTTP/1.1 200 OK"));
+    let (_, list_body) = list_resp.split_once("\r\n\r\n").unwrap();
+    assert_eq!(serde_json::from_str::<Value>(list_body).unwrap(), json!([]));
+
+    // Now Puppeteer / chrome-devtools-mcp connects via WebSocket and uses the minted token.
+    let mut ws = ws_connect(&session.ws_endpoint).await.unwrap();
+    // Token is single-use: second WS attempt and subsequent /json/version return 404.
+    assert!(ws_connect(&session.ws_endpoint).await.is_err());
+    let spent_ver = http_get(format!("/cdp/{session_id_slug}/json/version")).await;
+    assert!(spent_ver.starts_with("HTTP/1.1 404 "));
+
+    ws.send(Message::Text(
+        json!({"id": 1, "method": "Target.getBrowserContexts", "params": {}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let ctx_rep: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    assert_eq!(ctx_rep["result"]["browserContextIds"], json!([]));
+
+    // Puppeteer issues setDiscoverTargets + setAutoAttach back-to-back.
+    ws.send(Message::Text(
+        json!({"id": 2, "method": "Target.setDiscoverTargets", "params": {"discover": true}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Text(
+        json!({"id": 3, "method": "Target.setAutoAttach", "params": {"autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+
+    let mut msgs = Vec::new();
+    for _ in 0..4 {
+        let txt = ws.next().await.unwrap().unwrap().into_text().unwrap();
+        msgs.push(serde_json::from_str::<Value>(&txt).unwrap());
+    }
+    assert!(msgs.iter().any(|m| m["method"] == "Target.targetCreated"));
+    let attached_ev = msgs
+        .iter()
+        .find(|m| m["method"] == "Target.attachedToTarget")
+        .expect("missing Target.attachedToTarget");
+    let attached_sid = attached_ev["params"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(msgs.iter().any(|m| m["id"] == 2));
+    assert!(msgs.iter().any(|m| m["id"] == 3));
+
+    // Only ONE tabs.create should have occurred, with groupTitle=Antigravity and groupColor=cyan.
+    let create_calls: Vec<_> = rpc_calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, _)| m == "tabs.create")
+        .cloned()
+        .collect();
+    assert_eq!(create_calls.len(), 1);
+    assert_eq!(create_calls[0].1["groupTitle"], "Antigravity");
+    assert_eq!(create_calls[0].1["groupColor"], "cyan");
+
+    // Target.detachFromTarget + Browser.close succeed cleanly.
+    ws.send(Message::Text(
+        json!({"id": 4, "method": "Target.detachFromTarget", "params": {"sessionId": attached_sid}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let mut detach_msgs = Vec::new();
+    for _ in 0..2 {
+        let txt = ws.next().await.unwrap().unwrap().into_text().unwrap();
+        detach_msgs.push(serde_json::from_str::<Value>(&txt).unwrap());
+    }
+    assert!(
+        detach_msgs
+            .iter()
+            .any(|m| m["method"] == "Target.detachedFromTarget")
+    );
+    assert!(detach_msgs.iter().any(|m| m["id"] == 4));
+
+    ws.send(Message::Text(
+        json!({"id": 5, "method": "Browser.close", "params": {}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let close_rep: Value =
+        serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    assert_eq!(close_rep["id"], 5);
+
+    ws.close(None).await.unwrap();
+    bridge.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), mock_ext).await;
 }
 
 #[test]

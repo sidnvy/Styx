@@ -830,4 +830,21 @@ async fn cli_host_browser_extension_status_runs() {
     ])
     .unwrap();
     assert_eq!(run(ext_status_cli).await, ExitCode::SUCCESS);
+
+    let ext_cdp_cli = Cli::try_parse_from([
+        "styx",
+        "host",
+        "browser-extension",
+        "cdp-url",
+        "--state-dir",
+        &state_arg,
+        "--group-title",
+        "Antigravity",
+        "--group-color",
+        "cyan",
+        "--json",
+    ])
+    .unwrap();
+    // Bridge is not running in this state_dir, so cdp-url refuses cleanly without panicking.
+    assert_eq!(run(ext_cdp_cli).await, ExitCode::from(2));
 }
