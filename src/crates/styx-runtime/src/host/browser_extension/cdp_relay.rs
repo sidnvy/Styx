@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(3);
+const DEFAULT_INDICATOR_IDLE_TIMEOUT_MS: u64 = 3_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CdpSessionScope {
@@ -231,6 +232,7 @@ pub struct BrowserExtensionBridge {
     peer_info: StdMutex<Option<(String, String)>>,
     pending_ws_tokens: StdMutex<HashMap<String, CdpSessionScope>>,
     next_external_group_seq: AtomicU64,
+    indicator_idle_ms: AtomicU64,
     tasks: StdMutex<Vec<JoinHandle<()>>>,
 }
 
@@ -280,6 +282,7 @@ impl BrowserExtensionBridge {
             peer_info: StdMutex::new(None),
             pending_ws_tokens: StdMutex::new(HashMap::new()),
             next_external_group_seq: AtomicU64::new(1),
+            indicator_idle_ms: AtomicU64::new(DEFAULT_INDICATOR_IDLE_TIMEOUT_MS),
             tasks: StdMutex::new(Vec::new()),
         });
 
@@ -793,7 +796,14 @@ impl BrowserExtensionBridge {
         let Some(peer) = self.peer.lock().await.clone() else {
             return;
         };
-        run_cdp_relay_session(ws, peer, self.cancel.clone(), scope).await;
+        let idle_timeout = Duration::from_millis(self.indicator_idle_ms.load(Ordering::Relaxed));
+        run_cdp_relay_session(ws, peer, self.cancel.clone(), scope, idle_timeout).await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_indicator_idle_timeout_for_test(&self, duration: Duration) {
+        self.indicator_idle_ms
+            .store(duration.as_millis() as u64, Ordering::Relaxed);
     }
 }
 
@@ -819,6 +829,7 @@ pub(crate) fn favicon_install_script(accent_hex: &str) -> String {
         r##"(() => {{
   const COLOR = {color_json};
   const CLEANUP_KEY = '__styxFaviconCleanup';
+  const ACTIVE_KEY = '__styxIndicatorSetActive';
   const MOVE_KEY = '__styxCursorMove';
   const HIDDEN_KEY = '__styxCursorSetHidden';
   if (typeof globalThis[CLEANUP_KEY] === 'function') {{
@@ -837,6 +848,7 @@ pub(crate) fn favicon_install_script(accent_hex: &str) -> String {
     '</svg>'
   );
 
+  let active = false;
   let observer = null;
   let applying = false;
   let readyListener = null;
@@ -856,7 +868,24 @@ pub(crate) fn favicon_install_script(accent_hex: &str) -> String {
     badge.setAttribute('href', faviconSvg);
   }}
 
+  function restoreHeadIcons() {{
+    const head = document.head;
+    if (!head) return;
+    applying = true;
+    try {{
+      for (const el of head.querySelectorAll('link[data-styx-favicon="1"]')) el.remove();
+      for (const el of head.querySelectorAll('link[data-styx-orig-rel]')) {{
+        const origRel = el.getAttribute('data-styx-orig-rel');
+        if (origRel) el.setAttribute('rel', origRel);
+        el.removeAttribute('data-styx-orig-rel');
+      }}
+    }} finally {{
+      applying = false;
+    }}
+  }}
+
   function applyFavicon() {{
+    if (!active) return;
     const head = document.head;
     if (!head || applying) return;
     applying = true;
@@ -879,7 +908,7 @@ pub(crate) fn favicon_install_script(accent_hex: &str) -> String {
     }}
     if (!observer && typeof MutationObserver === 'function') {{
       observer = new MutationObserver(() => {{
-        if (!applying) applyFavicon();
+        if (active && !applying) applyFavicon();
       }});
       observer.observe(head, {{ childList: true, attributes: true, attributeFilter: ['href', 'rel'] }});
     }}
@@ -936,7 +965,40 @@ pub(crate) fn favicon_install_script(accent_hex: &str) -> String {
     return cursorWrap;
   }}
 
+  function setActive(nextActive) {{
+    active = Boolean(nextActive);
+    if (active) {{
+      if (document.head) {{
+        applyFavicon();
+      }} else if (!readyListener) {{
+        readyListener = () => {{
+          readyListener = null;
+          if (active) applyFavicon();
+        }};
+        document.addEventListener('DOMContentLoaded', readyListener, {{ once: true }});
+      }}
+      if (document.documentElement) ensureCursor();
+    }} else {{
+      if (readyListener) {{
+        document.removeEventListener('DOMContentLoaded', readyListener);
+        readyListener = null;
+      }}
+      if (observer) {{
+        observer.disconnect();
+        observer = null;
+      }}
+      restoreHeadIcons();
+      if (cursorWrap) {{
+        cursorWrap.classList.remove('v');
+        cursorWrap.classList.remove('d');
+      }}
+    }}
+  }}
+
+  globalThis[ACTIVE_KEY] = setActive;
+
   globalThis[MOVE_KEY] = (x, y, state) => {{
+    if (!active) setActive(true);
     const wrap = ensureCursor();
     if (!wrap) return;
     if (typeof x === 'number' && typeof y === 'number' && Number.isFinite(x) && Number.isFinite(y)) {{
@@ -956,30 +1018,14 @@ pub(crate) fn favicon_install_script(accent_hex: &str) -> String {
   }};
 
   globalThis[HIDDEN_KEY] = (hidden) => {{
-    const wrap = ensureCursor();
+    const wrap = cursorWrap;
     if (!wrap) return;
     if (hidden) wrap.classList.add('h');
     else wrap.classList.remove('h');
   }};
 
   function cleanup() {{
-    if (readyListener) {{
-      document.removeEventListener('DOMContentLoaded', readyListener);
-      readyListener = null;
-    }}
-    if (observer) {{
-      observer.disconnect();
-      observer = null;
-    }}
-    const head = document.head;
-    if (head) {{
-      for (const el of head.querySelectorAll('link[data-styx-favicon="1"]')) el.remove();
-      for (const el of head.querySelectorAll('link[data-styx-orig-rel]')) {{
-        const origRel = el.getAttribute('data-styx-orig-rel');
-        if (origRel) el.setAttribute('rel', origRel);
-        el.removeAttribute('data-styx-orig-rel');
-      }}
-    }}
+    setActive(false);
     if (cursorHost) {{
       cursorHost.remove();
       cursorHost = null;
@@ -991,22 +1037,12 @@ pub(crate) fn favicon_install_script(accent_hex: &str) -> String {
       for (const el of root.querySelectorAll('[data-styx-cursor="1"]')) el.remove();
     }}
     if (globalThis[CLEANUP_KEY] === cleanup) delete globalThis[CLEANUP_KEY];
+    delete globalThis[ACTIVE_KEY];
     delete globalThis[MOVE_KEY];
     delete globalThis[HIDDEN_KEY];
   }}
 
   globalThis[CLEANUP_KEY] = cleanup;
-  if (document.head && document.documentElement) {{
-    applyFavicon();
-    ensureCursor();
-  }} else {{
-    readyListener = () => {{
-      readyListener = null;
-      applyFavicon();
-      ensureCursor();
-    }};
-    document.addEventListener('DOMContentLoaded', readyListener, {{ once: true }});
-  }}
 }})()"##
     )
 }
@@ -1029,6 +1065,7 @@ const FAVICON_RESTORE_SCRIPT: &str = r#"(() => {
   if (root) {
     for (const el of root.querySelectorAll('[data-styx-cursor="1"]')) el.remove();
   }
+  delete globalThis.__styxIndicatorSetActive;
   delete globalThis.__styxCursorMove;
   delete globalThis.__styxCursorSetHidden;
 })()"#;
@@ -1248,12 +1285,121 @@ async fn eval_tab_indicator(state: &Arc<Mutex<RelayState>>, tab_id: i64, script:
     }
 }
 
+fn is_active_control_cdp_method(method: &str) -> bool {
+    method.starts_with("Input.")
+        || matches!(
+            method,
+            "Page.navigate"
+                | "Page.reload"
+                | "Page.navigateToHistoryEntry"
+                | "Page.captureScreenshot"
+                | "Page.printToPDF"
+                | "Page.handleJavaScriptDialog"
+                | "Runtime.evaluate"
+                | "Runtime.callFunctionOn"
+                | "Runtime.awaitPromise"
+                | "Accessibility.getFullAXTree"
+                | "Accessibility.getPartialAXTree"
+                | "Accessibility.queryAXTree"
+                | "Emulation.setDeviceMetricsOverride"
+        )
+        || (method.starts_with("DOM.") && !matches!(method, "DOM.enable" | "DOM.disable"))
+}
+
+async fn begin_tab_indicator_activity(state: &Arc<Mutex<RelayState>>, tab_id: i64) {
+    let (deactivated_tabs, need_activate) = {
+        let mut guard = state.lock().await;
+        let mut to_deactivate = Vec::new();
+        for (&other_id, other) in &mut guard.tab_sessions {
+            if other_id != tab_id && other.indicator_active && other.indicator_in_flight == 0 {
+                other.indicator_active = false;
+                other.indicator_release_gen += 1;
+                to_deactivate.push(other_id);
+            }
+        }
+        let need_activate = if let Some(ts) = guard.tab_sessions.get_mut(&tab_id) {
+            ts.indicator_in_flight += 1;
+            ts.indicator_release_gen += 1;
+            let activate = !ts.indicator_active;
+            ts.indicator_active = true;
+            activate
+        } else {
+            false
+        };
+        (to_deactivate, need_activate)
+    };
+    for other_id in deactivated_tabs {
+        let cloned = state.clone();
+        tokio::spawn(async move {
+            eval_tab_indicator(
+                &cloned,
+                other_id,
+                "globalThis.__styxIndicatorSetActive?.(false)",
+            )
+            .await;
+        });
+    }
+    if need_activate {
+        let _ = tokio::time::timeout(
+            Duration::from_millis(300),
+            eval_tab_indicator(state, tab_id, "globalThis.__styxIndicatorSetActive?.(true)"),
+        )
+        .await;
+    }
+}
+
+async fn end_tab_indicator_activity(state: &Arc<Mutex<RelayState>>, tab_id: i64) {
+    let schedule = {
+        let mut guard = state.lock().await;
+        let delay = guard.indicator_idle_timeout;
+        guard.tab_sessions.get_mut(&tab_id).and_then(|ts| {
+            ts.indicator_in_flight = ts.indicator_in_flight.saturating_sub(1);
+            if ts.indicator_in_flight == 0 {
+                ts.indicator_release_gen += 1;
+                Some((ts.indicator_release_gen, delay))
+            } else {
+                None
+            }
+        })
+    };
+    if let Some((release_gen, delay)) = schedule {
+        let cloned = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let should_deactivate = {
+                let mut guard = cloned.lock().await;
+                if let Some(ts) = guard.tab_sessions.get_mut(&tab_id)
+                    && ts.indicator_active
+                    && ts.indicator_in_flight == 0
+                    && ts.indicator_release_gen == release_gen
+                {
+                    ts.indicator_active = false;
+                    true
+                } else {
+                    false
+                }
+            };
+            if should_deactivate {
+                eval_tab_indicator(
+                    &cloned,
+                    tab_id,
+                    "globalThis.__styxIndicatorSetActive?.(false)",
+                )
+                .await;
+            }
+        });
+    }
+}
+
 struct TabSession {
     session_id: String,
     target_info: Value,
     child_sessions: HashSet<String>,
     favicon_script_id: Option<String>,
     indicator_context_id: Option<i64>,
+    indicator_active: bool,
+    indicator_in_flight: usize,
+    indicator_release_gen: u64,
 }
 
 type AttachWaiter = oneshot::Sender<Result<(String, Value), String>>;
@@ -1275,6 +1421,7 @@ struct RelayState {
     attached_emitted: HashSet<String>,
     next_session_seq: u64,
     temp_screencast_tabs: HashSet<i64>,
+    indicator_idle_timeout: Duration,
 }
 
 impl RelayState {
@@ -1423,6 +1570,9 @@ async fn attach_tab(
                         child_sessions: HashSet::new(),
                         favicon_script_id,
                         indicator_context_id,
+                        indicator_active: false,
+                        indicator_in_flight: 0,
+                        indicator_release_gen: 0,
                     },
                 );
                 if guard.discover_targets
@@ -1906,6 +2056,10 @@ async fn handle_cdp_request(
     let Some((tab_id, child_sid)) = target else {
         return Err(format!("No tab found for sessionId: {sid}"));
     };
+    let track_activity = child_sid.is_none() && is_active_control_cdp_method(method);
+    if track_activity {
+        begin_tab_indicator_activity(state, tab_id).await;
+    }
     if method == "Input.dispatchMouseEvent"
         && child_sid.is_none()
         && let (Some(x), Some(y)) = (
@@ -1941,7 +2095,7 @@ async fn handle_cdp_request(
     {
         obj.insert("sessionId".to_owned(), Value::String(child));
     }
-    if is_top_level_screenshot {
+    let res = if is_top_level_screenshot {
         let _ = tokio::time::timeout(
             Duration::from_millis(400),
             eval_tab_indicator(state, tab_id, "globalThis.__styxCursorSetHidden?.(true)"),
@@ -1971,7 +2125,7 @@ async fn handle_cdp_request(
         if started_screencast {
             state.lock().await.temp_screencast_tabs.insert(tab_id);
         }
-        let res = peer.call("debugger.sendCommand", rpc).await;
+        let shot_res = peer.call("debugger.sendCommand", rpc).await;
         if started_screencast {
             let _ = tokio::time::timeout(
                 Duration::from_secs(1),
@@ -1992,9 +2146,14 @@ async fn handle_cdp_request(
             eval_tab_indicator(state, tab_id, "globalThis.__styxCursorSetHidden?.(false)"),
         )
         .await;
-        return res;
+        shot_res
+    } else {
+        peer.call("debugger.sendCommand", rpc).await
+    };
+    if track_activity {
+        end_tab_indicator_activity(state, tab_id).await;
     }
-    peer.call("debugger.sendCommand", rpc).await
+    res
 }
 
 async fn handle_extension_event(
@@ -2028,12 +2187,16 @@ async fn handle_extension_event(
             let Some(ts) = guard.tab_sessions.get_mut(&tab_id) else {
                 return;
             };
-            if source_child.is_none()
-                && ((cdp_method == "Page.frameNavigated"
-                    && cdp_params.pointer("/frame/parentId").is_none())
-                    || cdp_method == "Runtime.executionContextsCleared")
-            {
-                ts.indicator_context_id = None;
+            let mut reactivate_tab = false;
+            if source_child.is_none() {
+                let is_main_frame_nav = cdp_method == "Page.frameNavigated"
+                    && cdp_params.pointer("/frame/parentId").is_none();
+                if is_main_frame_nav || cdp_method == "Runtime.executionContextsCleared" {
+                    ts.indicator_context_id = None;
+                }
+                if is_main_frame_nav && ts.indicator_active {
+                    reactivate_tab = true;
+                }
             }
             if cdp_method == "Target.attachedToTarget"
                 && let Some(child) = cdp_params.get("sessionId").and_then(Value::as_str)
@@ -2050,6 +2213,18 @@ async fn handle_extension_event(
                 "method": cdp_method,
                 "params": cdp_params,
             }));
+            drop(guard);
+            if reactivate_tab {
+                let cloned = state.clone();
+                tokio::spawn(async move {
+                    eval_tab_indicator(
+                        &cloned,
+                        tab_id,
+                        "globalThis.__styxIndicatorSetActive?.(true)",
+                    )
+                    .await;
+                });
+            }
         }
         "chrome.debugger.onDetach" => {
             let Some(arr) = params.as_array() else { return };
@@ -2183,6 +2358,7 @@ async fn run_cdp_relay_session(
     peer: Arc<ExtensionPeer>,
     bridge_cancel: CancellationToken,
     scope: CdpSessionScope,
+    indicator_idle_timeout: Duration,
 ) {
     let (mut ws_sink, mut ws_stream) = ws.split();
     let (cdp_tx, mut cdp_rx) = mpsc::unbounded_channel::<String>();
@@ -2215,6 +2391,7 @@ async fn run_cdp_relay_session(
         attached_emitted: HashSet::new(),
         next_session_seq: 0,
         temp_screencast_tabs: HashSet::new(),
+        indicator_idle_timeout,
     }));
 
     let writer_cancel = session_cancel.clone();
