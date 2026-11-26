@@ -517,6 +517,29 @@ enum HostBrowserExtensionCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Run a local reconnecting CDP discovery proxy (or wrap chrome-devtools-mcp with --browserUrl).
+    CdpProxy {
+        #[arg(long)]
+        state_dir: PathBuf,
+        /// Tab group title for the isolated Chrome Tab Group (default: Antigravity).
+        #[arg(long)]
+        group_title: Option<String>,
+        /// Tab group color (blue, cyan, purple, green, orange, pink); auto-rotates if omitted.
+        #[arg(long)]
+        group_color: Option<String>,
+        /// Attach to existing non-isolated tabs instead of creating an isolated Tab Group.
+        #[arg(long)]
+        shared: bool,
+        /// Loopback port for the discovery proxy (0 selects an ephemeral port).
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        #[arg(long)]
+        json: bool,
+        /// Optional child command + args (e.g. `-- npx -y chrome-devtools-mcp@latest`).
+        /// Receives `--browserUrl=http://127.0.0.1:<port>` appended cleanly.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<OsString>,
+    },
 }
 #[derive(Subcommand)]
 enum HostJoinCommand {
@@ -2344,6 +2367,92 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 }
                 return ExitCode::SUCCESS;
             }
+            if let HostBrowserExtensionCommand::CdpProxy {
+                state_dir,
+                group_title,
+                group_color,
+                shared,
+                port,
+                json,
+                command,
+            } = command
+            {
+                use styx_runtime::host::browser_extension::{LocalCdpProxy, LocalCdpProxyConfig};
+                let (scope, resolved_title) = if shared {
+                    (Some(CdpSessionScope::SharedExisting), None)
+                } else {
+                    (
+                        None,
+                        Some(group_title.unwrap_or_else(|| "Antigravity".to_owned())),
+                    )
+                };
+                let Ok(proxy) = LocalCdpProxy::start(LocalCdpProxyConfig {
+                    state_dir,
+                    scope,
+                    group_title: resolved_title,
+                    group_color,
+                    bind_port: port,
+                })
+                .await
+                else {
+                    return error("host_browser_extension_unavailable");
+                };
+                let browser_url = proxy.browser_url();
+                if command.is_empty() {
+                    if json {
+                        let body = serde_json::json!({ "browserUrl": browser_url });
+                        if write_json(&body).is_err() {
+                            proxy.shutdown().await;
+                            return error("output_unavailable");
+                        }
+                    } else {
+                        println!("{browser_url}");
+                    }
+                    let _ = io::stdout().flush();
+                    let signal = stop_signal().await;
+                    proxy.shutdown().await;
+                    if signal.is_err() {
+                        return error("signal_listener_failed");
+                    }
+                    return ExitCode::SUCCESS;
+                }
+
+                let mut cmd = tokio::process::Command::new(&command[0]);
+                cmd.args(&command[1..])
+                    .arg(format!("--browserUrl={browser_url}"))
+                    .stdin(std::process::Stdio::inherit())
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit())
+                    .kill_on_drop(true);
+                let Ok(mut child) = cmd.spawn() else {
+                    proxy.shutdown().await;
+                    return error("host_browser_extension_unavailable");
+                };
+                let exit_code = tokio::select! {
+                    status = child.wait() => {
+                        proxy.shutdown().await;
+                        match status {
+                            Ok(status) if status.success() => ExitCode::SUCCESS,
+                            Ok(status) => {
+                                let code = status.code().and_then(|c| u8::try_from(c).ok()).unwrap_or(1);
+                                ExitCode::from(if code == 0 { 1 } else { code })
+                            }
+                            Err(_) => ExitCode::from(1),
+                        }
+                    }
+                    sig = stop_signal() => {
+                        let _ = child.start_kill();
+                        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
+                        proxy.shutdown().await;
+                        if sig.is_err() {
+                            error("signal_listener_failed")
+                        } else {
+                            ExitCode::SUCCESS
+                        }
+                    }
+                };
+                return exit_code;
+            }
             let (state_dir, op, json) = match command {
                 HostBrowserExtensionCommand::Status { state_dir, json } => (state_dir, None, json),
                 HostBrowserExtensionCommand::Install { state_dir, json } => {
@@ -2352,7 +2461,8 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 HostBrowserExtensionCommand::Uninstall { state_dir, json } => {
                     (state_dir, Some(false), json)
                 }
-                HostBrowserExtensionCommand::CdpUrl { .. } => unreachable!(),
+                HostBrowserExtensionCommand::CdpUrl { .. }
+                | HostBrowserExtensionCommand::CdpProxy { .. } => unreachable!(),
             };
             let result = match op {
                 None => ext_status(&state_dir, None),

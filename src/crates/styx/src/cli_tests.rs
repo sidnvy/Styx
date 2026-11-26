@@ -847,4 +847,87 @@ async fn cli_host_browser_extension_status_runs() {
     .unwrap();
     // Bridge is not running in this state_dir, so cdp-url refuses cleanly without panicking.
     assert_eq!(run(ext_cdp_cli).await, ExitCode::from(2));
+
+    let ext_proxy_cli = Cli::try_parse_from([
+        "styx",
+        "host",
+        "browser-extension",
+        "cdp-proxy",
+        "--state-dir",
+        &state_arg,
+        "--group-title",
+        "Antigravity",
+        "--group-color",
+        "cyan",
+        "--",
+        "npx",
+        "-y",
+        "chrome-devtools-mcp@latest",
+    ])
+    .unwrap();
+    let Command::Host {
+        command:
+            HostCommand::BrowserExtension {
+                command:
+                    HostBrowserExtensionCommand::CdpProxy {
+                        group_title,
+                        group_color,
+                        shared,
+                        port,
+                        command,
+                        ..
+                    },
+            },
+    } = ext_proxy_cli.command
+    else {
+        panic!("expected browser-extension cdp-proxy")
+    };
+    assert_eq!(group_title.as_deref(), Some("Antigravity"));
+    assert_eq!(group_color.as_deref(), Some("cyan"));
+    assert!(!shared);
+    assert_eq!(port, 0);
+    assert_eq!(
+        command,
+        vec![
+            OsString::from("npx"),
+            OsString::from("-y"),
+            OsString::from("chrome-devtools-mcp@latest")
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cli_host_browser_extension_cdp_proxy_wraps_child_with_browser_url() {
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!("styx-cli-cdp-proxy-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let _cleanup = Cleanup(dir.clone());
+    let state_arg = dir.to_string_lossy().into_owned();
+    let cli = Cli::try_parse_from([
+        "styx",
+        "host",
+        "browser-extension",
+        "cdp-proxy",
+        "--state-dir",
+        &state_arg,
+        "--group-title",
+        "Antigravity",
+        "--group-color",
+        "cyan",
+        "--",
+        "/bin/sh",
+        "-c",
+        r#"case "$1" in --browserUrl=http://127.0.0.1:*) exit 0 ;; *) echo "bad=$1" >&2; exit 3 ;; esac"#,
+        "_",
+    ])
+    .unwrap();
+    assert_eq!(run(cli).await, ExitCode::SUCCESS);
 }

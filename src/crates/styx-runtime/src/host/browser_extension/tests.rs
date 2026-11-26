@@ -1963,7 +1963,7 @@ async fn real_chromium_extension_bridge_e2e_with_chrome_devtools_mcp() {
     }
     assert!(bridge.is_connected(), "extension did not connect");
 
-    // Verify `styx host browser-extension cdp-url` CLI mints single-use local wsEndpoint.
+    // Verify `styx host browser-extension cdp-url` CLI still mints single-use local wsEndpoint.
     let cdp_out = tokio::process::Command::new(&styx_bin)
         .args([
             "host",
@@ -1994,19 +1994,33 @@ async fn real_chromium_extension_bridge_e2e_with_chrome_devtools_mcp() {
     #[cfg(unix)]
     std::os::unix::fs::symlink(&node_modules, driver_stage.join("node_modules")).unwrap();
     let driver_script = driver_stage.join("devtools-mcp-driver.mjs");
+    let phase1_done = driver_stage.join("phase1.done");
+    let phase2_ready = driver_stage.join("phase2.ready");
     std::fs::write(
         &driver_script,
         r#"
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
-const wsUrl = process.env.STYX_CDP_WS_URL;
+const styxBin = process.env.STYX_TEST_BIN;
+const stateDir = process.env.STYX_STATE_DIR;
+const stageDir = process.env.STYX_STAGE_DIR;
 const baseUrl = process.env.STYX_E2E_BASE_URL;
 
 const transport = new StdioClientTransport({
-  command: 'npx',
-  args: ['-y', 'chrome-devtools-mcp@latest', `--wsEndpoint=${wsUrl}`],
+  command: styxBin,
+  args: [
+    'host', 'browser-extension', 'cdp-proxy',
+    '--state-dir', stateDir,
+    '--group-title', 'Antigravity',
+    '--group-color', 'cyan',
+    '--',
+    'npx', '-y', 'chrome-devtools-mcp@latest',
+  ],
   stderr: 'pipe',
 });
 let stderrLog = '';
@@ -2055,6 +2069,33 @@ if (toolSchemas.has('evaluate_script')) {
 const shot = await call('take_screenshot', withPageId('take_screenshot', {}));
 assert.ok((shot.content || []).some(c => c.type === 'image'), `screenshot missing image: ${JSON.stringify(shot)}`);
 
+// Phase 2: Wait for Host bridge restart on a new port and keep reusing the same MCP server.
+fs.writeFileSync(path.join(stageDir, 'phase1.done'), 'ok');
+const readyPath = path.join(stageDir, 'phase2.ready');
+for (let i = 0; i < 300; i++) {
+  if (fs.existsSync(readyPath)) break;
+  await delay(100);
+}
+assert.ok(fs.existsSync(readyPath), 'timed out waiting for Host bridge restart signal');
+await delay(150);
+
+const listedAfter = textOf(await call('list_pages', {}));
+assert.ok(listedAfter.length > 0, `list_pages after bridge restart returned empty: ${listedAfter}`);
+const pageIdAfterMatch = listedAfter.match(/(?:^|\n)\s*(\d+)\s*:/);
+const pageIdAfter = pageIdAfterMatch ? Number(pageIdAfterMatch[1]) : 1;
+const withPageIdAfter = (name, args) =>
+  toolSchemas.get(name)?.pageId ? { pageId: pageIdAfter, ...args } : args;
+
+await call('navigate_page', withPageIdAfter('navigate_page', { type: 'url', url: `${baseUrl}/target` }));
+const snap3 = textOf(await call('take_snapshot', withPageIdAfter('take_snapshot', {})));
+assert.match(snap3, /Click Me/, `missing Click Me after bridge restart:\n${snap3}`);
+const uidAfterMatch = snap3.match(/uid=([^\s]+)[^\n]*button[^\n]*Click Me/i)
+  || snap3.match(/uid="([^"]+)"[^\n]*Click Me/i);
+assert.ok(uidAfterMatch, `could not extract uid after bridge restart:\n${snap3}`);
+await call('click', withPageIdAfter('click', { uid: uidAfterMatch[1] }));
+const snap4 = textOf(await call('take_snapshot', withPageIdAfter('take_snapshot', {})));
+assert.match(snap4, /Clicked OK/, `click after bridge restart did not update DOM:\n${snap4}`);
+
 await transport.close();
 console.log('DEVTOOLS_MCP_E2E_SUCCESS');
 "#,
@@ -2064,14 +2105,62 @@ console.log('DEVTOOLS_MCP_E2E_SUCCESS');
     let mut driver = tokio::process::Command::new(&node22_bin);
     driver
         .arg(&driver_script)
-        .env("STYX_CDP_WS_URL", &ws_url)
+        .env("STYX_TEST_BIN", &styx_bin)
+        .env("STYX_STATE_DIR", &state_dir)
+        .env("STYX_STAGE_DIR", &driver_stage)
         .env("STYX_E2E_BASE_URL", format!("http://127.0.0.1:{http_port}"))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let output = tokio::time::timeout(Duration::from_secs(90), driver.output())
+    let mut child = driver.spawn().expect("spawn devtools-mcp driver");
+
+    for _ in 0..450 {
+        if phase1_done.exists() {
+            break;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            let out = child.wait_with_output().await.unwrap();
+            panic!(
+                "devtools-mcp driver exited before phase1.done (status={status}):\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        phase1_done.exists(),
+        "devtools-mcp phase1 did not finish in time"
+    );
+
+    // Simulate Host restart: tear down bridge #1 and start bridge #2 on new ephemeral ports.
+    let old_ws_port = bridge.ws_port();
+    bridge.shutdown().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let bridge2 = BrowserExtensionBridge::start(&state_dir)
         .await
-        .expect("devtools-mcp driver timed out")
-        .expect("run devtools-mcp driver");
+        .expect("start second extension bridge");
+    assert_ne!(bridge2.ws_port(), old_ws_port);
+    for _ in 0..200 {
+        if bridge2.is_connected() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        bridge2.is_connected(),
+        "real Chrome extension did not auto-reconnect to bridge2"
+    );
+    eprintln!(
+        "E2E: Restarted Host bridge ws_port {} -> {}, extension reconnected",
+        old_ws_port,
+        bridge2.ws_port()
+    );
+    std::fs::write(&phase2_ready, b"ok").unwrap();
+
+    let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+        .await
+        .expect("devtools-mcp driver phase2 timed out")
+        .expect("wait devtools-mcp driver");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -2083,7 +2172,7 @@ console.log('DEVTOOLS_MCP_E2E_SUCCESS');
     drop(chrome_guard);
     http_stop.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(2), http_task).await;
-    bridge.shutdown().await;
+    bridge2.shutdown().await;
 }
 
 #[test]
@@ -2854,4 +2943,204 @@ fn validate_loopback_ws_endpoint_accepts_canonical_ws_and_rejects_http_or_remote
             "expected invalid endpoint refusal for {invalid:?}"
         );
     }
+}
+
+async fn http_get_local(port: u16, path: &str) -> (u16, String) {
+    use tokio::io::AsyncReadExt;
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    let text = String::from_utf8(raw).unwrap();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap();
+    let status = head
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse::<u16>()
+        .unwrap();
+    (status, body.to_owned())
+}
+
+async fn spawn_mock_extension_peer(bridge: &BrowserExtensionBridge) -> tokio::task::JoinHandle<()> {
+    let (ipc_port, token) = read_bridge_endpoint(bridge.state_dir()).unwrap();
+    let stream = TcpStream::connect(("127.0.0.1", ipc_port)).await.unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    write_half
+        .write_all(format!("{}\n", json!({ "type": "auth", "token": token })).as_bytes())
+        .await
+        .unwrap();
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&line).unwrap()["type"],
+        "auth_ok"
+    );
+    write_half
+        .write_all(
+            format!(
+                "{}\n",
+                json!({
+                    "event": "extension.hello",
+                    "params": {
+                        "extensionId": EXTENSION_ID,
+                        "browser": "Chrome/158.0.0.0",
+                        "userAgent": "Mozilla/5.0 Chrome/158.0.0.0",
+                        "tabs": []
+                    }
+                })
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..40 {
+        if bridge.is_connected() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(bridge.is_connected());
+    tokio::spawn(async move {
+        let mut buf = String::new();
+        while reader.read_line(&mut buf).await.unwrap_or(0) > 0 {
+            let msg: Value = serde_json::from_str(buf.trim()).unwrap();
+            buf.clear();
+            let id = msg["id"].as_u64().unwrap();
+            let reply = match msg["method"].as_str().unwrap() {
+                "tabs.list" => json!({ "id": id, "result": { "tabs": [] } }),
+                _ => json!({ "id": id, "result": {} }),
+            };
+            if write_half
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
+}
+
+#[tokio::test]
+async fn local_cdp_proxy_reconnects_across_host_bridge_restarts_and_handles_unavailable() {
+    let state_dir = private_dir();
+    let proxy = LocalCdpProxy::start(LocalCdpProxyConfig {
+        state_dir: state_dir.path().to_path_buf(),
+        scope: None,
+        group_title: Some("Antigravity".to_owned()),
+        group_color: Some("cyan".to_owned()),
+        bind_port: 0,
+    })
+    .await
+    .unwrap();
+    let proxy_port = proxy.port();
+    assert_eq!(
+        proxy.browser_url(),
+        format!("http://127.0.0.1:{proxy_port}")
+    );
+
+    // Before any Host bridge is started, /json/version returns 503 and /json/list returns [].
+    let (status_down, _) = http_get_local(proxy_port, "/json/version").await;
+    assert_eq!(status_down, 503);
+    let (list_status, list_body) = http_get_local(proxy_port, "/json/list").await;
+    assert_eq!(list_status, 200);
+    assert_eq!(list_body, "[]");
+
+    // Start Host bridge #1 and connect through the proxy + verify Ping->Pong and CDP RPC.
+    let bridge1 = BrowserExtensionBridge::start(state_dir.path())
+        .await
+        .unwrap();
+    let peer1 = spawn_mock_extension_peer(&bridge1).await;
+    let (status1, body1) = http_get_local(proxy_port, "/json/version").await;
+    assert_eq!(status1, 200);
+    let v1: Value = serde_json::from_str(&body1).unwrap();
+    let ws_url1 = v1["webSocketDebuggerUrl"].as_str().unwrap();
+    assert!(
+        ws_url1.starts_with(&format!(
+            "ws://127.0.0.1:{}/devtools/browser/",
+            bridge1.ws_port()
+        )),
+        "unexpected ws_url1: {ws_url1}"
+    );
+
+    let mut ws1 = ws_connect(ws_url1).await.unwrap();
+    ws1.send(Message::Ping(vec![9, 8, 7].into())).await.unwrap();
+    let pong = tokio::time::timeout(Duration::from_secs(3), ws1.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(pong, Message::Pong(vec![9, 8, 7].into()));
+
+    ws1.send(Message::Text(
+        json!({ "id": 1, "method": "Browser.getVersion" })
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let ver1: Value =
+        serde_json::from_str(&ws1.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    assert_eq!(ver1["id"], 1);
+    assert_eq!(ver1["result"]["product"], "Chrome/158.0.0.0");
+
+    // Shut down bridge #1: existing WS closes cleanly and /json/version reports 503.
+    let port1 = bridge1.ws_port();
+    bridge1.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), peer1).await;
+    let closed_frame = tokio::time::timeout(Duration::from_secs(3), ws1.next())
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            closed_frame,
+            None | Some(Ok(Message::Close(_))) | Some(Err(_))
+        ),
+        "expected clean close on bridge1 shutdown, got {closed_frame:?}"
+    );
+    let (status_between, _) = http_get_local(proxy_port, "/json/version").await;
+    assert_eq!(status_between, 503);
+
+    // Start Host bridge #2 on a new ephemeral port; same proxy seamlessly mints bridge2 URL.
+    let bridge2 = BrowserExtensionBridge::start(state_dir.path())
+        .await
+        .unwrap();
+    let peer2 = spawn_mock_extension_peer(&bridge2).await;
+    let (status2, body2) = http_get_local(proxy_port, "/json/version").await;
+    assert_eq!(status2, 200);
+    let v2: Value = serde_json::from_str(&body2).unwrap();
+    let ws_url2 = v2["webSocketDebuggerUrl"].as_str().unwrap();
+    assert_ne!(bridge2.ws_port(), port1);
+    assert!(
+        ws_url2.starts_with(&format!(
+            "ws://127.0.0.1:{}/devtools/browser/",
+            bridge2.ws_port()
+        )),
+        "unexpected ws_url2: {ws_url2}"
+    );
+
+    let mut ws2 = ws_connect(ws_url2).await.unwrap();
+    ws2.send(Message::Text(
+        json!({ "id": 2, "method": "Browser.getVersion" })
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let ver2: Value =
+        serde_json::from_str(&ws2.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    assert_eq!(ver2["id"], 2);
+    assert_eq!(ver2["result"]["product"], "Chrome/158.0.0.0");
+
+    drop(ws2);
+    bridge2.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), peer2).await;
+    proxy.shutdown().await;
 }
