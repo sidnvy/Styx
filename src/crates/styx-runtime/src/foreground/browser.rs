@@ -277,6 +277,11 @@ impl BrowserBootstrap for LocalBrowser {
     fn validate_control(&self) -> Result<()> {
         self.validate_inputs(false)
     }
+    fn extension_bridge(
+        &self,
+    ) -> Option<Arc<crate::host::browser_extension::BrowserExtensionBridge>> {
+        self.extension.clone()
+    }
 }
 
 fn map_error(error: crate::providers::browser::BrowserError) -> ErrorCategory {

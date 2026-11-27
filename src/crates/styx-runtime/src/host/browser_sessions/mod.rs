@@ -3,7 +3,9 @@
 //! Transfers reuse a session's Core resource identity.
 pub(crate) mod operations;
 use crate::host::{
-    browser_extension::{BROWSER_OWNER_PREFIX, BROWSER_SESSION_ID, CdpSessionScope},
+    browser_extension::{
+        BROWSER_OWNER_PREFIX, BROWSER_SESSION_ID, CdpSessionScope, TabGroupCloseOutcome,
+    },
     coordinator::OwnerCleanupHandle,
     protocol::wire::*,
 };
@@ -28,6 +30,8 @@ const MAX_BROWSER_RESULT_BYTES: usize = styx_contracts::DESKTOP_BROWSER_FRAME_BY
 const MAX_TAB_GROUP_SESSIONS: usize = 16;
 const TAB_GROUP_COLORS: &[&str] = &["blue", "cyan", "purple", "green", "orange", "pink"];
 pub(crate) const DEFAULT_IDLE_PARK_TIMEOUT: Duration = Duration::from_secs(240);
+pub(crate) const DEFAULT_PARKED_TAB_GROUP_TTL: Duration = Duration::from_secs(2 * 60 * 60);
+pub(crate) const MAX_PARKED_TAB_GROUPS: usize = 3;
 
 type Caller = (OwnerId, OwnerEpoch);
 type Cell = Arc<AsyncMutex<Session>>;
@@ -419,14 +423,81 @@ impl Engine<'_> {
                 continue;
             }
             let preserved_operator = preserved_operator.filter(|op| self.active_caller(op).is_ok());
+            let park_tab_group_key = match &preserved_scope {
+                CdpSessionScope::TabGroup { session_key, .. } => session_key.clone(),
+                CdpSessionScope::SharedExisting => None,
+            };
             let Ok(saved) = self.new_session(id, preserved_scope, preserved_operator, Phase::Saved)
             else {
                 continue;
             };
             *session = saved;
+            drop(session);
+            if let (Some(key), Some(bridge)) =
+                (park_tab_group_key, self.port.inputs.extension_bridge())
+            {
+                let _ = bridge.park_tab_group(&key).await;
+            }
             parked += 1;
         }
         parked
+    }
+    /// Reaps parked `bg-...` Tab Group sessions that exceed `max_parked_groups`
+    /// (oldest-first) or have stayed parked longer than `parked_ttl`. Never touches
+    /// `existing-browser` or any group containing an actively viewed Chrome tab.
+    pub(crate) async fn reap_parked_tab_groups(
+        &self,
+        parked_ttl: Duration,
+        max_parked_groups: usize,
+    ) -> usize {
+        let entries: Vec<(String, Cell)> = {
+            let registry = self.state().registry.lock().expect("Browser sessions");
+            registry
+                .sessions
+                .iter()
+                .filter(|(k, _)| k.as_str() != BROWSER_SESSION_ID)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        let mut candidates = Vec::new();
+        for (id, cell) in entries {
+            let Ok(session) = cell.try_lock() else {
+                continue;
+            };
+            if session.phase != Phase::Saved || session.cleanup.is_some() {
+                continue;
+            }
+            let session_key = match &session.scope {
+                CdpSessionScope::TabGroup { session_key, .. } => session_key.clone(),
+                CdpSessionScope::SharedExisting => continue,
+            };
+            candidates.push((id, cell.clone(), session.last_activity, session_key));
+        }
+        candidates.sort_by_key(|(_, _, last_activity, _)| *last_activity);
+        let excess = candidates.len().saturating_sub(max_parked_groups);
+        let mut reaped = 0;
+        for (idx, (id, cell, last_activity, session_key)) in candidates.into_iter().enumerate() {
+            if idx >= excess && last_activity.elapsed() < parked_ttl {
+                continue;
+            }
+            let Ok(mut session) = cell.try_lock() else {
+                continue;
+            };
+            if session.phase != Phase::Saved || session.cleanup.is_some() {
+                continue;
+            }
+            if let (Some(key), Some(bridge)) =
+                (session_key.as_deref(), self.port.inputs.extension_bridge())
+                && bridge.close_tab_group(key, true).await == TabGroupCloseOutcome::SkippedActive
+            {
+                session.last_activity = std::time::Instant::now();
+                continue;
+            }
+            drop(session);
+            self.remove_session_entry(&id);
+            reaped += 1;
+        }
+        reaped
     }
     /// Capability shutdown already proved physical exit. Reclaim exited local
     /// owners/sessions on the next request without disturbing active parallel sessions.
@@ -665,10 +736,19 @@ impl Engine<'_> {
                     session.last_activity = std::time::Instant::now();
                 }
                 let mut result = if close {
+                    let close_tab_group_key = match &session.scope {
+                        CdpSessionScope::TabGroup { session_key, .. } => session_key.clone(),
+                        CdpSessionScope::SharedExisting => None,
+                    };
                     let closed = self.close(&id, &mut session).await;
                     drop(session);
                     if closed.is_error != Some(true) && id != BROWSER_SESSION_ID {
                         self.remove_session_entry(&id);
+                        if let (Some(key), Some(bridge)) =
+                            (close_tab_group_key, self.port.inputs.extension_bridge())
+                        {
+                            let _ = bridge.close_tab_group(&key, false).await;
+                        }
                     }
                     closed
                 } else {

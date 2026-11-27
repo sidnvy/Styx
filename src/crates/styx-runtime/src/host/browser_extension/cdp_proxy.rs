@@ -123,9 +123,28 @@ async fn handle_http_client(mut stream: TcpStream, config: Arc<LocalCdpProxyConf
             r#"{"error":"method_not_allowed"}"#.to_owned(),
         )
     } else if matches!(path, "/json/version" | "/json/version/") {
+        let resolved_scope = match config.scope.clone() {
+            Some(scope) => Some(scope),
+            None => {
+                let title = config
+                    .group_title
+                    .clone()
+                    .unwrap_or_else(|| "Antigravity".to_owned());
+                let color = config
+                    .group_color
+                    .clone()
+                    .unwrap_or_else(|| "cyan".to_owned());
+                let session_key = Some(format!("cdp-proxy:{title}"));
+                Some(CdpSessionScope::TabGroup {
+                    title,
+                    color,
+                    session_key,
+                })
+            }
+        };
         match super::request_local_cdp_session(
             &config.state_dir,
-            config.scope.clone(),
+            resolved_scope,
             config.group_title.clone(),
             config.group_color.clone(),
         )

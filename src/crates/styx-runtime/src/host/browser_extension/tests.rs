@@ -4193,3 +4193,386 @@ async fn cdp_relay_tab_group_reattaches_existing_group_after_disconnect_and_fall
     bridge.shutdown().await;
     let _ = tokio::time::timeout(Duration::from_secs(1), mock_ext).await;
 }
+
+#[tokio::test]
+async fn cdp_relay_tab_group_park_collapses_removes_blank_and_close_respects_active() {
+    let state_dir = private_dir();
+    let bridge = BrowserExtensionBridge::start(state_dir.path())
+        .await
+        .unwrap();
+    let cfg: Value =
+        serde_json::from_slice(&std::fs::read(bridge_file_path(state_dir.path())).unwrap())
+            .unwrap();
+
+    let stream = TcpStream::connect(("127.0.0.1", cfg["port"].as_u64().unwrap() as u16))
+        .await
+        .unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    write_half
+        .write_all(format!("{}\n", json!({ "type": "auth", "token": cfg["token"] })).as_bytes())
+        .await
+        .unwrap();
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.unwrap();
+
+    write_half
+        .write_all(
+            format!(
+                "{}\n",
+                json!({
+                    "event": "extension.hello",
+                    "params": {
+                        "extensionId": "cncjpfhbbnibdjkcheeimdfklfiknibl",
+                        "userAgent": "Mozilla/5.0 Chrome/158.0.0.0",
+                        "browser": "Chrome/158.0.0.0",
+                        "tabs": []
+                    }
+                })
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    for _ in 0..40 {
+        if bridge.is_connected() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let mock_tabs = Arc::new(StdMutex::new(Vec::<Value>::new()));
+    let next_tab_num = Arc::new(std::sync::atomic::AtomicI64::new(301));
+    let next_group_num = Arc::new(std::sync::atomic::AtomicI64::new(88));
+    let recorded = Arc::new(StdMutex::new(Vec::<(String, Value)>::new()));
+    let mock_tabs_ref = mock_tabs.clone();
+    let recorded_ref = recorded.clone();
+    let mock_ext = tokio::spawn(async move {
+        let mut buf = String::new();
+        while reader.read_line(&mut buf).await.unwrap_or(0) > 0 {
+            let msg: Value = serde_json::from_str(buf.trim()).unwrap();
+            buf.clear();
+            let id = msg["id"].as_u64().unwrap();
+            let method = msg["method"].as_str().unwrap().to_owned();
+            let params = msg["params"].clone();
+            recorded_ref
+                .lock()
+                .unwrap()
+                .push((method.clone(), params.clone()));
+            let reply = match method.as_str() {
+                "tabs.create" => {
+                    let tab_id = next_tab_num.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let group_id = next_group_num.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let tab = json!({
+                        "id": tab_id,
+                        "url": params.get("url").and_then(Value::as_str).unwrap_or("about:blank"),
+                        "title": "",
+                        "active": false,
+                        "groupId": group_id,
+                        "isolated": true,
+                    });
+                    mock_tabs_ref.lock().unwrap().push(tab.clone());
+                    json!({ "id": id, "result": { "tab": tab, "groupId": group_id } })
+                }
+                "tabs.list" => {
+                    let tabs = mock_tabs_ref.lock().unwrap().clone();
+                    json!({ "id": id, "result": { "tabs": tabs } })
+                }
+                "tabs.remove" => {
+                    let remove_id = params["tabId"].as_i64().unwrap();
+                    mock_tabs_ref
+                        .lock()
+                        .unwrap()
+                        .retain(|t| t["id"].as_i64() != Some(remove_id));
+                    json!({ "id": id, "result": { "ok": true } })
+                }
+                "debugger.attach" | "debugger.detach" | "tabGroups.collapse" => {
+                    json!({ "id": id, "result": { "ok": true } })
+                }
+                "debugger.sendCommand" => {
+                    let tab_id = params["tabId"].as_i64().unwrap();
+                    let target_id = format!("target-{tab_id}");
+                    match params["method"].as_str().unwrap() {
+                        "Target.getTargetInfo" => json!({ "id": id, "result": { "targetInfo": {
+                            "targetId": target_id,
+                            "type": "page",
+                            "url": "about:blank"
+                        }}}),
+                        "Page.getFrameTree" => json!({ "id": id, "result": { "frameTree": {
+                            "frame": { "id": target_id }
+                        }}}),
+                        _ => json!({ "id": id, "result": {} }),
+                    }
+                }
+                _ => json!({ "id": id, "result": {} }),
+            };
+            if write_half
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    async fn open_and_attach_once(bridge: &BrowserExtensionBridge, key: &str, title: &str) {
+        let ws_url = bridge
+            .open_cdp_session_with_scope(CdpSessionScope::TabGroup {
+                title: title.into(),
+                color: "blue".into(),
+                session_key: Some(key.into()),
+            })
+            .unwrap();
+        let mut ws = ws_connect(&ws_url).await.unwrap();
+        ws.send(Message::Text(
+            json!({"id": 1, "method": "Target.setAutoAttach", "params": {"autoAttach": true, "flatten": true}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        loop {
+            let msg: Value =
+                serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
+                    .unwrap();
+            if msg["id"] == 1 {
+                break;
+            }
+        }
+        ws.close(None).await.unwrap();
+    }
+
+    // 1. Blank inactive group -> park_tab_group removes the blank tab & returns Removed.
+    open_and_attach_once(&bridge, "bg-blank", "Styx · 1").await;
+    assert_eq!(
+        bridge.park_tab_group("bg-blank").await,
+        TabGroupParkOutcome::Removed
+    );
+    assert!(mock_tabs.lock().unwrap().is_empty());
+
+    // 2. Navigated inactive group -> park_tab_group collapses it; wake uncollapses it.
+    open_and_attach_once(&bridge, "bg-nav", "Styx · 2").await;
+    {
+        let mut tabs = mock_tabs.lock().unwrap();
+        tabs[0]["url"] = json!("https://example.org/work");
+    }
+    assert_eq!(
+        bridge.park_tab_group("bg-nav").await,
+        TabGroupParkOutcome::Collapsed
+    );
+    assert!(
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, p)| m == "tabGroups.collapse"
+                && p["groupId"] == 89
+                && p["collapsed"] == true)
+    );
+
+    let wake_offset = recorded.lock().unwrap().len();
+    open_and_attach_once(&bridge, "bg-nav", "Styx · 2").await;
+    assert!(
+        recorded.lock().unwrap()[wake_offset..]
+            .iter()
+            .any(|(m, p)| m == "tabGroups.collapse"
+                && p["groupId"] == 89
+                && p["collapsed"] == false)
+    );
+
+    // 3. Active tab in group -> park does NOT collapse; close(skip_if_active=true) returns SkippedActive; close(skip_if_active=false) closes it.
+    {
+        let mut tabs = mock_tabs.lock().unwrap();
+        tabs[0]["active"] = json!(true);
+    }
+    let collapse_offset = recorded.lock().unwrap().len();
+    assert_eq!(
+        bridge.park_tab_group("bg-nav").await,
+        TabGroupParkOutcome::Collapsed
+    );
+    assert!(
+        !recorded.lock().unwrap()[collapse_offset..]
+            .iter()
+            .any(|(m, _)| m == "tabGroups.collapse"),
+        "must not collapse an actively viewed Tab Group"
+    );
+    assert_eq!(
+        bridge.close_tab_group("bg-nav", true).await,
+        TabGroupCloseOutcome::SkippedActive
+    );
+    assert_eq!(mock_tabs.lock().unwrap().len(), 1);
+    assert_eq!(
+        bridge.close_tab_group("bg-nav", false).await,
+        TabGroupCloseOutcome::Closed
+    );
+    assert!(mock_tabs.lock().unwrap().is_empty());
+    assert_eq!(
+        bridge.close_tab_group("bg-nav", false).await,
+        TabGroupCloseOutcome::NotFound
+    );
+
+    bridge.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), mock_ext).await;
+}
+
+#[tokio::test]
+async fn local_cdp_proxy_reuses_stable_tab_group_across_reconnects() {
+    let state_dir = private_dir();
+    let proxy = LocalCdpProxy::start(LocalCdpProxyConfig {
+        state_dir: state_dir.path().to_path_buf(),
+        scope: None,
+        group_title: Some("Antigravity".to_owned()),
+        group_color: Some("cyan".to_owned()),
+        bind_port: 0,
+    })
+    .await
+    .unwrap();
+    let proxy_port = proxy.port();
+    let bridge = BrowserExtensionBridge::start(state_dir.path())
+        .await
+        .unwrap();
+    let (ipc_port, token) = read_bridge_endpoint(state_dir.path()).unwrap();
+
+    let stream = TcpStream::connect(("127.0.0.1", ipc_port)).await.unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    write_half
+        .write_all(format!("{}\n", json!({ "type": "auth", "token": token })).as_bytes())
+        .await
+        .unwrap();
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.unwrap();
+    write_half
+        .write_all(
+            format!(
+                "{}\n",
+                json!({
+                    "event": "extension.hello",
+                    "params": {
+                        "extensionId": EXTENSION_ID,
+                        "browser": "Chrome/158.0.0.0",
+                        "userAgent": "Mozilla/5.0 Chrome/158.0.0.0",
+                        "tabs": []
+                    }
+                })
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..40 {
+        if bridge.is_connected() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let mock_tabs = Arc::new(StdMutex::new(Vec::<Value>::new()));
+    let recorded = Arc::new(StdMutex::new(Vec::<String>::new()));
+    let mock_tabs_ref = mock_tabs.clone();
+    let recorded_ref = recorded.clone();
+    let mock_ext = tokio::spawn(async move {
+        let mut buf = String::new();
+        while reader.read_line(&mut buf).await.unwrap_or(0) > 0 {
+            let msg: Value = serde_json::from_str(buf.trim()).unwrap();
+            buf.clear();
+            let id = msg["id"].as_u64().unwrap();
+            let method = msg["method"].as_str().unwrap().to_owned();
+            let params = msg["params"].clone();
+            recorded_ref.lock().unwrap().push(method.clone());
+            let reply = match method.as_str() {
+                "tabs.create" => {
+                    let tab = json!({
+                        "id": 401,
+                        "url": "about:blank",
+                        "title": "",
+                        "active": false,
+                        "groupId": 99,
+                        "isolated": true,
+                    });
+                    mock_tabs_ref.lock().unwrap().push(tab.clone());
+                    json!({ "id": id, "result": { "tab": tab, "groupId": 99 } })
+                }
+                "tabs.list" => {
+                    let tabs = mock_tabs_ref.lock().unwrap().clone();
+                    json!({ "id": id, "result": { "tabs": tabs } })
+                }
+                "debugger.attach" | "debugger.detach" | "tabGroups.collapse" => {
+                    json!({ "id": id, "result": { "ok": true } })
+                }
+                "debugger.sendCommand" => match params["method"].as_str().unwrap() {
+                    "Target.getTargetInfo" => json!({ "id": id, "result": { "targetInfo": {
+                        "targetId": "target-401",
+                        "type": "page",
+                        "url": "about:blank"
+                    }}}),
+                    "Page.getFrameTree" => json!({ "id": id, "result": { "frameTree": {
+                        "frame": { "id": "target-401" }
+                    }}}),
+                    _ => json!({ "id": id, "result": {} }),
+                },
+                _ => json!({ "id": id, "result": {} }),
+            };
+            if write_half
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    for _ in 0..2 {
+        let (status, body) = http_get_local(proxy_port, "/json/version").await;
+        assert_eq!(status, 200);
+        let ver: Value = serde_json::from_str(&body).unwrap();
+        let mut ws = ws_connect(ver["webSocketDebuggerUrl"].as_str().unwrap())
+            .await
+            .unwrap();
+        ws.send(Message::Text(
+            json!({"id": 1, "method": "Target.setAutoAttach", "params": {"autoAttach": true, "flatten": true}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        loop {
+            let msg: Value =
+                serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
+                    .unwrap();
+            if msg["id"] == 1 {
+                break;
+            }
+        }
+        ws.close(None).await.unwrap();
+        drop(ws);
+        for _ in 0..50 {
+            if !bridge.is_connected()
+                || recorded
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m == "debugger.detach")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let create_count = recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| m.as_str() == "tabs.create")
+        .count();
+    assert_eq!(create_count, 1, "proxy reconnects must reuse one Tab Group");
+
+    bridge.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), mock_ext).await;
+    proxy.shutdown().await;
+}

@@ -160,6 +160,11 @@ impl crate::host::protocol::browser::BrowserBootstrap for ForegroundBrowser {
             .map_err(|_| styx_contracts::error::ErrorCategory::StateConflict)?;
         self.source.validate_control()
     }
+    fn extension_bridge(
+        &self,
+    ) -> Option<Arc<crate::host::browser_extension::BrowserExtensionBridge>> {
+        self.source.extension_bridge()
+    }
 }
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 struct ForegroundComputer {

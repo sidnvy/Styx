@@ -1133,3 +1133,311 @@ async fn idle_auto_park_parks_ready_sessions_preserving_operator_and_skips_activ
         Some("bg-idle")
     );
 }
+
+#[tokio::test]
+async fn reap_parked_tab_groups_enforces_lru_and_ttl_and_never_touches_shared_or_active() {
+    use crate::host::browser_extension::{BrowserExtensionBridge, EXTENSION_ID, bridge_file_path};
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        net::TcpStream,
+    };
+
+    struct BridgeBootstrap {
+        bridge: Arc<BrowserExtensionBridge>,
+    }
+    impl operations::BrowserBootstrap for BridgeBootstrap {
+        fn release_profile(&self, _: &OwnerLease) {}
+        fn prepare_profile(
+            &self,
+            _: &OwnerLease,
+            _: CdpSessionScope,
+        ) -> Result<OwnedBrowserConfig, ErrorCategory> {
+            Err(ErrorCategory::CapabilityUnsupported)
+        }
+        fn validate_before_spawn(&self) -> Result<(), ErrorCategory> {
+            Ok(())
+        }
+        fn validate_control(&self) -> Result<(), ErrorCategory> {
+            Ok(())
+        }
+        fn extension_bridge(&self) -> Option<Arc<BrowserExtensionBridge>> {
+            Some(self.bridge.clone())
+        }
+    }
+
+    let state_dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(state_dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let bridge = BrowserExtensionBridge::start(state_dir.path())
+        .await
+        .unwrap();
+    let cfg: Value =
+        serde_json::from_slice(&std::fs::read(bridge_file_path(state_dir.path())).unwrap())
+            .unwrap();
+    let stream = TcpStream::connect(("127.0.0.1", cfg["port"].as_u64().unwrap() as u16))
+        .await
+        .unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    write_half
+        .write_all(format!("{}\n", json!({ "type": "auth", "token": cfg["token"] })).as_bytes())
+        .await
+        .unwrap();
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.unwrap();
+    write_half
+        .write_all(
+            format!(
+                "{}\n",
+                json!({
+                    "event": "extension.hello",
+                    "params": {
+                        "extensionId": EXTENSION_ID,
+                        "userAgent": "Mozilla/5.0 Chrome/158.0.0.0",
+                        "browser": "Chrome/158.0.0.0",
+                        "tabs": []
+                    }
+                })
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..40 {
+        if bridge.is_connected() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Track 4 Tab Groups + 1 personal tab (id 1). Seed remembered groupIds by opening & closing once,
+    // or directly via tabs.create in mock when opening WS sessions.
+    let mock_tabs = Arc::new(Mutex::new(vec![json!({
+        "id": 1,
+        "url": "https://personal.example/",
+        "title": "Personal",
+        "active": false,
+        "groupId": -1,
+        "isolated": false,
+    })]));
+    let next_tab = Arc::new(std::sync::atomic::AtomicI64::new(501));
+    let next_group = Arc::new(std::sync::atomic::AtomicI64::new(51));
+    let removed_tabs = Arc::new(Mutex::new(Vec::<i64>::new()));
+    let tabs_ref = mock_tabs.clone();
+    let removed_ref = removed_tabs.clone();
+    let mock_ext = tokio::spawn(async move {
+        let mut buf = String::new();
+        while reader.read_line(&mut buf).await.unwrap_or(0) > 0 {
+            let msg: Value = serde_json::from_str(buf.trim()).unwrap();
+            buf.clear();
+            let id = msg["id"].as_u64().unwrap();
+            let method = msg["method"].as_str().unwrap().to_owned();
+            let params = msg["params"].clone();
+            let reply = match method.as_str() {
+                "tabs.create" => {
+                    let tab_id = next_tab.fetch_add(1, Ordering::SeqCst);
+                    let group_id = next_group.fetch_add(1, Ordering::SeqCst);
+                    let tab = json!({
+                        "id": tab_id,
+                        "url": "https://example.org/",
+                        "title": "Styx",
+                        "active": false,
+                        "groupId": group_id,
+                        "isolated": true,
+                    });
+                    tabs_ref.lock().unwrap().push(tab.clone());
+                    json!({ "id": id, "result": { "tab": tab, "groupId": group_id } })
+                }
+                "tabs.list" => {
+                    let tabs = tabs_ref.lock().unwrap().clone();
+                    json!({ "id": id, "result": { "tabs": tabs } })
+                }
+                "tabs.remove" => {
+                    let tab_id = params["tabId"].as_i64().unwrap();
+                    removed_ref.lock().unwrap().push(tab_id);
+                    tabs_ref
+                        .lock()
+                        .unwrap()
+                        .retain(|t| t["id"].as_i64() != Some(tab_id));
+                    json!({ "id": id, "result": { "ok": true } })
+                }
+                "debugger.sendCommand" => {
+                    let tab_id = params["tabId"].as_i64().unwrap();
+                    let target_id = format!("target-{tab_id}");
+                    match params["method"].as_str().unwrap() {
+                        "Target.getTargetInfo" => json!({ "id": id, "result": { "targetInfo": {
+                            "targetId": target_id,
+                            "type": "page",
+                            "url": "https://example.org/"
+                        }}}),
+                        "Page.getFrameTree" => json!({ "id": id, "result": { "frameTree": {
+                            "frame": { "id": target_id }
+                        }}}),
+                        _ => json!({ "id": id, "result": {} }),
+                    }
+                }
+                _ => json!({ "id": id, "result": { "ok": true } }),
+            };
+            if write_half
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    async fn seed_remembered_group(bridge: &BrowserExtensionBridge, key: &str) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::{client_async, tungstenite::Message};
+        let ws_url = bridge
+            .open_cdp_session_with_scope(CdpSessionScope::TabGroup {
+                title: key.to_owned(),
+                color: "blue".to_owned(),
+                session_key: Some(key.to_owned()),
+            })
+            .unwrap();
+        let parsed = url::Url::parse(&ws_url).unwrap();
+        let tcp = TcpStream::connect(("127.0.0.1", parsed.port().unwrap()))
+            .await
+            .unwrap();
+        let (mut ws, _) = client_async(&ws_url, tcp).await.unwrap();
+        ws.send(Message::Text(
+            json!({"id": 1, "method": "Target.setAutoAttach", "params": {"autoAttach": true, "flatten": true}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        loop {
+            let msg: Value =
+                serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
+                    .unwrap();
+            if msg["id"] == 1 {
+                break;
+            }
+        }
+        ws.close(None).await.unwrap();
+    }
+
+    for key in ["bg-1", "bg-2", "bg-3", "bg-4", "bg-explicit"] {
+        seed_remembered_group(&bridge, key).await;
+    }
+    // Mark bg-1 (tab 501) active so reaping must skip it even though it's the oldest!
+    mock_tabs.lock().unwrap()[1]["active"] = json!(true);
+
+    let source = Arc::new(BridgeBootstrap {
+        bridge: bridge.clone(),
+    });
+    let (host, authority) = HostCoordinator::new_without_executor(
+        OperationLedger::new("browser-reap-gen".try_into().unwrap()),
+        facts(CapabilityId::ExecRun),
+    )
+    .unwrap();
+    authority
+        .configure_browser(facts(CapabilityId::Browser))
+        .unwrap();
+    let inputs = host.browser_sessions().inputs(source);
+    let engine = Engine {
+        port: BrowserPort {
+            coordinator: &host,
+            authority: &authority,
+            inputs: &inputs,
+        },
+    };
+    let a = named_caller("reap-a");
+    register_caller(&host, &authority, &a);
+
+    {
+        let mut reg = engine.state().registry.lock().unwrap();
+        let shared = engine
+            .new_session(
+                BROWSER_SESSION_ID.to_owned(),
+                CdpSessionScope::SharedExisting,
+                Some(a.clone()),
+                Phase::Saved,
+            )
+            .unwrap();
+        reg.sessions.insert(
+            BROWSER_SESSION_ID.to_owned(),
+            Arc::new(AsyncMutex::new(shared)),
+        );
+
+        for (key, age_secs) in [
+            ("bg-1", 10_000_u64),
+            ("bg-2", 9_000),
+            ("bg-3", 60),
+            ("bg-4", 10),
+            ("bg-explicit", 5),
+        ] {
+            let mut s = engine
+                .new_session(
+                    key.to_owned(),
+                    CdpSessionScope::TabGroup {
+                        title: key.to_owned(),
+                        color: "blue".to_owned(),
+                        session_key: Some(key.to_owned()),
+                    },
+                    Some(a.clone()),
+                    Phase::Saved,
+                )
+                .unwrap();
+            s.last_activity = std::time::Instant::now() - Duration::from_secs(age_secs);
+            reg.sessions
+                .insert(key.to_owned(), Arc::new(AsyncMutex::new(s)));
+        }
+    }
+
+    // Explicit browser_close on bg-explicit closes tab 505; on existing-browser leaves tab 1 untouched.
+    let closed_bg = engine
+        .handle(
+            a.clone(),
+            BrowserSessionCommand::Action {
+                session_id: Some("bg-explicit".into()),
+                name: "browser_close".into(),
+                arguments: Default::default(),
+            },
+        )
+        .await;
+    assert_ne!(closed_bg.is_error, Some(true));
+    let closed_shared = engine
+        .handle(
+            a.clone(),
+            BrowserSessionCommand::Action {
+                session_id: Some(BROWSER_SESSION_ID.into()),
+                name: "browser_close".into(),
+                arguments: Default::default(),
+            },
+        )
+        .await;
+    assert_ne!(closed_shared.is_error, Some(true));
+    assert!(removed_tabs.lock().unwrap().contains(&505));
+    assert!(!removed_tabs.lock().unwrap().contains(&1));
+
+    // Reap with TTL=7200s and max=3 over remaining 4 parked groups (bg-1..bg-4):
+    // bg-1 (oldest, >TTL, active=true) -> SkippedActive & kept;
+    // bg-2 (second oldest, >TTL, inactive) -> reaped & closes tab 502;
+    // bg-3 & bg-4 (fresh) -> kept; existing-browser -> untouched.
+    let reaped = engine
+        .reap_parked_tab_groups(Duration::from_secs(7200), 3)
+        .await;
+    assert_eq!(reaped, 1);
+
+    {
+        let reg = engine.state().registry.lock().unwrap();
+        assert!(reg.sessions.contains_key(BROWSER_SESSION_ID));
+        assert!(reg.sessions.contains_key("bg-1"));
+        assert!(!reg.sessions.contains_key("bg-2"));
+        assert!(reg.sessions.contains_key("bg-3"));
+        assert!(reg.sessions.contains_key("bg-4"));
+        assert!(!reg.sessions.contains_key("bg-explicit"));
+    }
+
+    let removed = removed_tabs.lock().unwrap().clone();
+    assert!(removed.contains(&502));
+    assert!(!removed.contains(&501));
+    assert!(!removed.contains(&1));
+
+    bridge.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), mock_ext).await;
+}

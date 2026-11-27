@@ -44,6 +44,20 @@ pub enum CdpSessionScope {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabGroupParkOutcome {
+    Collapsed,
+    Removed,
+    Missing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabGroupCloseOutcome {
+    Closed,
+    SkippedActive,
+    NotFound,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct TabDescriptor {
     id: i64,
@@ -404,6 +418,7 @@ impl BrowserExtensionBridge {
         &self,
         title: Option<String>,
         color: Option<String>,
+        session_key: Option<String>,
     ) -> CdpSessionScope {
         const PALETTE: [&str; 6] = ["cyan", "purple", "green", "orange", "pink", "blue"];
         let seq = self.next_external_group_seq.fetch_add(1, Ordering::Relaxed);
@@ -428,8 +443,106 @@ impl BrowserExtensionBridge {
         CdpSessionScope::TabGroup {
             title: chosen_title,
             color: chosen_color,
-            session_key: None,
+            session_key,
         }
+    }
+
+    pub async fn park_tab_group(&self, session_key: &str) -> TabGroupParkOutcome {
+        let Some(peer) = self.peer.lock().await.clone() else {
+            return TabGroupParkOutcome::Missing;
+        };
+        let Some(gid) = peer.remembered_tab_group_id(session_key) else {
+            return TabGroupParkOutcome::Missing;
+        };
+        let Ok(Ok(listed)) = tokio::time::timeout(
+            Duration::from_secs(3),
+            peer.call("tabs.list", json!({ "excludeIsolated": false })),
+        )
+        .await
+        else {
+            return TabGroupParkOutcome::Missing;
+        };
+        let Ok(tabs) = serde_json::from_value::<Vec<TabDescriptor>>(
+            listed.get("tabs").cloned().unwrap_or_else(|| json!([])),
+        ) else {
+            return TabGroupParkOutcome::Missing;
+        };
+        let group_tabs: Vec<TabDescriptor> =
+            tabs.into_iter().filter(|t| t.group_id == gid).collect();
+        if group_tabs.is_empty() {
+            peer.forget_tab_group_id(session_key);
+            return TabGroupParkOutcome::Removed;
+        }
+        let any_active = group_tabs.iter().any(|t| t.active);
+        let all_blank = group_tabs
+            .iter()
+            .all(|t| t.url.is_empty() || t.url == "about:blank");
+        if all_blank && !any_active {
+            for tab in group_tabs {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    peer.call("tabs.remove", json!({ "tabId": tab.id })),
+                )
+                .await;
+            }
+            peer.forget_tab_group_id(session_key);
+            return TabGroupParkOutcome::Removed;
+        }
+        if !any_active {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3),
+                peer.call(
+                    "tabGroups.collapse",
+                    json!({ "groupId": gid, "collapsed": true }),
+                ),
+            )
+            .await;
+        }
+        TabGroupParkOutcome::Collapsed
+    }
+
+    pub async fn close_tab_group(
+        &self,
+        session_key: &str,
+        skip_if_active: bool,
+    ) -> TabGroupCloseOutcome {
+        let Some(peer) = self.peer.lock().await.clone() else {
+            return TabGroupCloseOutcome::NotFound;
+        };
+        let Some(gid) = peer.remembered_tab_group_id(session_key) else {
+            return TabGroupCloseOutcome::NotFound;
+        };
+        let Ok(Ok(listed)) = tokio::time::timeout(
+            Duration::from_secs(3),
+            peer.call("tabs.list", json!({ "excludeIsolated": false })),
+        )
+        .await
+        else {
+            return TabGroupCloseOutcome::NotFound;
+        };
+        let Ok(tabs) = serde_json::from_value::<Vec<TabDescriptor>>(
+            listed.get("tabs").cloned().unwrap_or_else(|| json!([])),
+        ) else {
+            return TabGroupCloseOutcome::NotFound;
+        };
+        let group_tabs: Vec<TabDescriptor> =
+            tabs.into_iter().filter(|t| t.group_id == gid).collect();
+        if group_tabs.is_empty() {
+            peer.forget_tab_group_id(session_key);
+            return TabGroupCloseOutcome::NotFound;
+        }
+        if skip_if_active && group_tabs.iter().any(|t| t.active) {
+            return TabGroupCloseOutcome::SkippedActive;
+        }
+        for tab in group_tabs {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3),
+                peer.call("tabs.remove", json!({ "tabId": tab.id })),
+            )
+            .await;
+        }
+        peer.forget_tab_group_id(session_key);
+        TabGroupCloseOutcome::Closed
     }
 
     pub async fn shutdown(&self) {
@@ -505,7 +618,13 @@ impl BrowserExtensionBridge {
                         .get("groupColor")
                         .and_then(Value::as_str)
                         .map(str::to_owned);
-                    self.next_auto_tab_group_scope(title, color)
+                    let session_key = auth
+                        .get("sessionKey")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.chars().take(64).collect::<String>());
+                    self.next_auto_tab_group_scope(title, color, session_key)
                 };
                 let reply = match self.open_cdp_session_with_details(scope) {
                     Ok((ws_endpoint, http_base_url)) => json!({
@@ -1831,13 +1950,23 @@ async fn ensure_scope_tabs_ready(state: &Arc<Mutex<RelayState>>) -> Result<(), S
                             }
                         }
                         if !matched.is_empty() {
-                            let mut guard = state.lock().await;
-                            guard.group_id = Some(gid);
-                            for tab in matched {
-                                reattached_ids.push(tab.id);
-                                guard.owned_tabs.insert(tab.id);
-                                guard.known_tabs.insert(tab.id, tab);
+                            {
+                                let mut guard = state.lock().await;
+                                guard.group_id = Some(gid);
+                                for tab in matched {
+                                    reattached_ids.push(tab.id);
+                                    guard.owned_tabs.insert(tab.id);
+                                    guard.known_tabs.insert(tab.id, tab);
+                                }
                             }
+                            let _ = tokio::time::timeout(
+                                Duration::from_secs(2),
+                                peer.call(
+                                    "tabGroups.collapse",
+                                    json!({ "groupId": gid, "collapsed": false }),
+                                ),
+                            )
+                            .await;
                         } else {
                             peer.forget_tab_group_id(key);
                         }

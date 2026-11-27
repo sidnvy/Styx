@@ -192,6 +192,66 @@ function createExtensionController(chromeApi, env = {}) {
     return { detached };
   }
 
+  async function listStyxIsolatedTabIds() {
+    const tabs = await chromeApi.tabs.query({}).catch(() => []);
+    const openTabIds = new Set();
+    for (const tab of tabs) {
+      if (typeof tab?.id === "number") {
+        openTabIds.add(tab.id);
+      }
+    }
+    for (const tracked of Array.from(isolatedTabIds)) {
+      if (!openTabIds.has(tracked)) {
+        isolatedTabIds.delete(tracked);
+      }
+    }
+    const resultIds = new Set(isolatedTabIds);
+    if (typeof chromeApi.tabGroups?.query === "function") {
+      const groups = await chromeApi.tabGroups.query({}).catch(() => []);
+      const styxGroupIds = new Set();
+      for (const group of groups) {
+        const title = typeof group?.title === "string" ? group.title : "";
+        if (
+          typeof group?.id === "number" &&
+          group.id >= 0 &&
+          (title === "Styx" || title.startsWith("Styx · "))
+        ) {
+          styxGroupIds.add(group.id);
+        }
+      }
+      if (styxGroupIds.size > 0) {
+        for (const tab of tabs) {
+          if (
+            typeof tab?.id === "number" &&
+            typeof tab?.groupId === "number" &&
+            styxGroupIds.has(tab.groupId)
+          ) {
+            resultIds.add(tab.id);
+          }
+        }
+      }
+    }
+    return Array.from(resultIds);
+  }
+
+  async function closeStyxTabs() {
+    const tabIds = await listStyxIsolatedTabIds();
+    let closed = 0;
+    for (const tabId of tabIds) {
+      if (attachedTabs.has(tabId)) {
+        await detachTabSafe(tabId).catch(() => {});
+      }
+      isolatedTabIds.delete(tabId);
+      try {
+        await chromeApi.tabs.remove(tabId);
+        closed += 1;
+      } catch {
+        // Tab may already be closed.
+      }
+    }
+    return { closed };
+  }
+
   async function handleRpc(id, method, params = {}) {
     try {
       let result;
@@ -240,6 +300,19 @@ function createExtensionController(chromeApi, env = {}) {
           }
           const groupId = await assignTabGroup(params.tabId, params);
           result = { groupId };
+          break;
+        }
+        case "tabGroups.collapse": {
+          if (
+            typeof params.groupId === "number" &&
+            params.groupId >= 0 &&
+            typeof chromeApi.tabGroups?.update === "function"
+          ) {
+            await chromeApi.tabGroups
+              .update(params.groupId, { collapsed: Boolean(params.collapsed) })
+              .catch(() => {});
+          }
+          result = { ok: true };
           break;
         }
         case "tabs.remove": {
@@ -389,6 +462,7 @@ function createExtensionController(chromeApi, env = {}) {
       hostConnected,
       attachedTabCount: attachedTabs.size,
       attachedTabIds: Array.from(attachedTabs),
+      isolatedTabCount: isolatedTabIds.size,
       extensionId: chromeApi.runtime.id || "",
       lastError,
     };
@@ -434,11 +508,22 @@ function createExtensionController(chromeApi, env = {}) {
     chromeApi.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (msg?.type === "styx.popup.getStatus") {
         ensureConnected();
-        sendResponse(getStatus());
-        return false;
+        void listStyxIsolatedTabIds()
+          .then((ids) => sendResponse({ ...getStatus(), isolatedTabCount: ids.length }))
+          .catch(() => sendResponse(getStatus()));
+        return true;
       }
       if (msg?.type === "styx.popup.detachAll") {
-        void detachAllTabs().then(() => sendResponse(getStatus()));
+        void detachAllTabs().then(async () => {
+          const ids = await listStyxIsolatedTabIds().catch(() => []);
+          sendResponse({ ...getStatus(), isolatedTabCount: ids.length });
+        });
+        return true;
+      }
+      if (msg?.type === "styx.popup.closeStyxTabs") {
+        void closeStyxTabs().then(() =>
+          sendResponse({ ...getStatus(), isolatedTabCount: 0 }),
+        );
         return true;
       }
       if (msg?.type === "styx.popup.reconnect") {
@@ -480,6 +565,7 @@ function createExtensionController(chromeApi, env = {}) {
     ensureConnected,
     handlePortMessage,
     detachAllTabs,
+    closeStyxTabs,
     getStatus,
     registerListeners,
   };
