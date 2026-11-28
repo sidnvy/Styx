@@ -98,8 +98,28 @@ impl AndroidPlatform for FakeAndroid {
             }
             "release_caller" => Ok(json!({"ok":true})),
             "android_list_displays" => Ok(
-                json!({"ok":true,"displays":[{"display_id":0,"width":1080,"height":2340},{"display_id":7,"width":1080,"height":1920}]}),
+                json!({"ok":true,"displays":[{"display_id":0,"width":1080,"height":2340},{"display_id":7,"width":1080,"height":1920,"managed":true}]}),
             ),
+            "android_create_display" => Ok(json!({
+                "ok":true,
+                "display_id":9,
+                "name":arguments.get("name").and_then(Value::as_str).unwrap_or("styx-agent"),
+                "width":arguments.get("width").and_then(Value::as_u64).unwrap_or(1080),
+                "height":arguments.get("height").and_then(Value::as_u64).unwrap_or(2340),
+                "density_dpi":arguments.get("density_dpi").and_then(Value::as_u64).unwrap_or(420),
+                "managed":true
+            })),
+            "android_launch_app" => Ok(json!({
+                "ok":true,
+                "package_name":arguments["package_name"],
+                "display_id":arguments.get("display_id").and_then(Value::as_u64).unwrap_or(0),
+                "launched":true
+            })),
+            "android_destroy_display" => Ok(json!({
+                "ok":true,
+                "display_id":arguments["display_id"],
+                "destroyed":true
+            })),
             "android_observe" => {
                 assert!(
                     arguments["__caller_id"]
@@ -467,6 +487,39 @@ async fn independent_android_pairing_wss_images_reconnect_disable_and_revoke() {
         .unwrap(),
     );
     assert_eq!(displays["displays"][1]["display_id"], 7);
+    let created_display = data(
+        mcp.call_tool(call(
+            "android_create_display",
+            json!({"environment_id":device,"name":"agent-1","width":1080,"height":2340,"density_dpi":420}),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert_eq!(created_display["environment_id"], device.as_str());
+    assert!(created_display["operation_id"]["host_generation"].as_str().is_some_and(|id| !id.is_empty()));
+    assert_eq!(created_display["display_id"], 9);
+    let launched = data(
+        mcp.call_tool(call(
+            "android_launch_app",
+            json!({"environment_id":device,"package_name":"com.android.settings","display_id":9}),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert_eq!(launched["environment_id"], device.as_str());
+    assert!(launched["operation_id"]["host_generation"].as_str().is_some_and(|id| !id.is_empty()));
+    assert_eq!(launched["display_id"], 9);
+    let destroyed = data(
+        mcp.call_tool(call(
+            "android_destroy_display",
+            json!({"environment_id":device,"display_id":9}),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert_eq!(destroyed["environment_id"], device.as_str());
+    assert!(destroyed["operation_id"]["host_generation"].as_str().is_some_and(|id| !id.is_empty()));
+    assert_eq!(destroyed["display_id"], 9);
     let secondary = data(
         mcp.call_tool(call(
             "android_observe",

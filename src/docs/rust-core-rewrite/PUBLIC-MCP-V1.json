@@ -1495,6 +1495,127 @@
       }
     },
     {
+      "name": "android_create_display",
+      "description": "Create a managed Android virtual display on the selected Host when its Tier 2 vdisplay helper is connected. Returns the new display_id and geometry so apps can be launched and observed without disturbing the physical display.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "environment_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. An offline selected Host never falls back to another device."
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 48,
+            "default": "styx-agent",
+            "description": "Display label (1-48 ASCII characters matching [a-zA-Z0-9._-])."
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 320,
+            "maximum": 2160,
+            "default": 1080
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 480,
+            "maximum": 3840,
+            "default": 2340
+          },
+          "density_dpi": {
+            "type": "integer",
+            "minimum": 120,
+            "maximum": 640,
+            "default": 420
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "android_destroy_display",
+      "description": "Destroy a Styx-managed Android virtual display created by android_create_display and release its cached observations.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "environment_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. An offline selected Host never falls back to another device."
+          },
+          "display_id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Non-default display_id returned by android_create_display."
+          }
+        },
+        "required": [
+          "display_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "android_launch_app",
+      "description": "Launch an installed Android application by package name (and optional activity class) onto a target display_id (default 0).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "environment_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Device from list_execution_environments. Omit only when exactly one Host is paired. An offline selected Host never falls back to another device."
+          },
+          "package_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Target Android application package name (e.g. com.android.settings)."
+          },
+          "activity": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional explicit Activity class name within package_name."
+          },
+          "display_id": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "Target Android display ID (default 0)."
+          },
+          "clear_task": {
+            "type": "boolean",
+            "default": false,
+            "description": "Whether to clear any existing task stack when launching."
+          }
+        },
+        "required": [
+          "package_name"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
       "name": "android_observe",
       "description": "Read the selected Android Host screen and permission state. Return an accessibility tree with observation_id and node_id values; optionally return a screenshot directly as MCP image content. Use fresh observations for actions. The Host must have its Android capability and AccessibilityService enabled.",
       "inputSchema": {

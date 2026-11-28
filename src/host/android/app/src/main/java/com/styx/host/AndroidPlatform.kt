@@ -47,6 +47,7 @@ class AndroidPlatform(context: Context) {
                 context.getSystemService(PowerManager::class.java)
                     .isIgnoringBatteryOptimizations(context.packageName)
             )
+            .put("vdisplay_helper", com.styx.host.vdisplay.VDisplayClient.isConnected)
         fun failure(code: String, message: String, uncertain: Boolean = false): JSONObject = JSONObject()
             .put("ok", false)
             .put("error", JSONObject().put("code", code).put("message", message).put("uncertain", uncertain))

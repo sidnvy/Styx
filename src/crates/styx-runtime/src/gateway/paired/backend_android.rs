@@ -5,7 +5,13 @@ use crate::host::protocol::wire::AndroidCommand;
 pub(super) fn is_public_android_tool(name: &str) -> bool {
     matches!(
         name,
-        "android_list_displays" | "android_observe" | "android_act" | "android_run_steps"
+        "android_list_displays"
+            | "android_create_display"
+            | "android_destroy_display"
+            | "android_launch_app"
+            | "android_observe"
+            | "android_act"
+            | "android_run_steps"
     )
 }
 

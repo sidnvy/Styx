@@ -5,7 +5,7 @@ fn args(v: Value) -> Option<Map<String, Value>> {
 }
 #[test]
 fn frozen_tools_and_exec_arguments_preserve_legacy_edges() {
-    assert_eq!(PUBLIC.len(), 39);
+    assert_eq!(PUBLIC.len(), 42);
     for name in ["list_apps", "list_windows", "click", "press_key", "scroll"] {
         assert!(!PUBLIC.iter().any(|tool| tool.name == name));
     }
@@ -16,7 +16,7 @@ fn frozen_tools_and_exec_arguments_preserve_legacy_edges() {
         .iter()
         .filter(|tool| tool.name.starts_with("android_"))
         .collect();
-    assert_eq!(display_tools.len(), 4);
+    assert_eq!(display_tools.len(), 7);
     let list = display_tools
         .iter()
         .find(|tool| tool.name == "android_list_displays")
@@ -27,7 +27,59 @@ fn frozen_tools_and_exec_arguments_preserve_legacy_edges() {
             .unwrap()
             .is_valid(&json!({"environment_id":"pixel"}))
     );
-    for name in ["android_observe", "android_act", "android_run_steps"] {
+    let create_schema = serde_json::to_value(
+        display_tools
+            .iter()
+            .find(|tool| tool.name == "android_create_display")
+            .unwrap(),
+    )
+    .unwrap();
+    let create_validator = jsonschema::validator_for(&create_schema["inputSchema"]).unwrap();
+    assert!(create_validator.is_valid(&json!({})));
+    assert!(
+        create_validator.is_valid(&json!({
+            "environment_id":"pixel",
+            "name":"styx-agent",
+            "width":1080,
+            "height":2340,
+            "density_dpi":420
+        }))
+    );
+    assert!(!create_validator.is_valid(&json!({"width":100})));
+    let destroy_schema = serde_json::to_value(
+        display_tools
+            .iter()
+            .find(|tool| tool.name == "android_destroy_display")
+            .unwrap(),
+    )
+    .unwrap();
+    let destroy_validator = jsonschema::validator_for(&destroy_schema["inputSchema"]).unwrap();
+    assert!(destroy_validator.is_valid(&json!({"display_id":7})));
+    assert!(!destroy_validator.is_valid(&json!({"display_id":0})));
+    assert!(!destroy_validator.is_valid(&json!({})));
+    let launch_schema = serde_json::to_value(
+        display_tools
+            .iter()
+            .find(|tool| tool.name == "android_launch_app")
+            .unwrap(),
+    )
+    .unwrap();
+    let launch_validator = jsonschema::validator_for(&launch_schema["inputSchema"]).unwrap();
+    assert!(launch_validator.is_valid(&json!({"package_name":"com.android.settings"})));
+    assert!(
+        launch_validator.is_valid(&json!({
+            "package_name":"com.android.settings",
+            "display_id":7,
+            "clear_task":true
+        }))
+    );
+    assert!(!launch_validator.is_valid(&json!({"display_id":7})));
+    for name in [
+        "android_launch_app",
+        "android_observe",
+        "android_act",
+        "android_run_steps",
+    ] {
         let tool = display_tools.iter().find(|tool| tool.name == name).unwrap();
         let schema = serde_json::to_value(tool).unwrap();
         let props = &schema["inputSchema"]["properties"];

@@ -16,12 +16,22 @@ match the observation. A caller can retain a fresh observation per display,
 without invalidating the others. Omitting `display_id` continues to target 0.
 
 Node actions and touch gestures are routed to the observed display. Global
-navigation (`back`, `home`, `recents`) remains limited to display 0 because
-Android's accessibility global-action API has no display selector. A missing
-virtual display invalidates its observation. Screenshots use the platform
-Accessibility screenshot API, and can return `screenshot_error` if Android
-blocks capture. Virtual displays are provisioned externally (for example by
-scrcpy); the app itself requires no ADB or Root permission.
+navigation (`back`, `home`, `recents`) on secondary displays, virtual display
+lifecycle (`android_create_display`, `android_destroy_display`), and launching
+apps onto a display (`android_launch_app`) are powered by the optional Tier 2
+`vdisplay-helper` running via `app_process` under `UID 2000 (shell)`:
+
+```bash
+STYX_ANDROID_DEVICE=<serial> src/host/android/vdisplay-helper.sh selftest
+STYX_ANDROID_DEVICE=<serial> src/host/android/vdisplay-helper.sh start
+```
+
+When `vdisplay-helper` is active, secondary display captures prefer its
+per-display `ImageReader` over `SharedMemory`, and `android_act` routes
+secondary-display navigation keys and gestures through `InputManager`. Without
+the helper, `android_list_displays`, `android_observe`, `android_act`, and
+`android_run_steps` still work with externally provisioned displays (for example
+by `scrcpy`). The app never requires Root permissions.
 
 ## Development build
 

@@ -2,7 +2,9 @@ package com.styx.host
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.app.ActivityOptions
 import android.app.KeyguardManager
+import android.content.Intent
 import android.hardware.display.DisplayManager
 import android.graphics.Point
 import android.graphics.Bitmap
@@ -16,9 +18,11 @@ import android.os.SystemClock
 import android.util.Base64
 import android.util.DisplayMetrics
 import android.view.Display
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import com.styx.host.vdisplay.VDisplayClient
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -36,9 +40,16 @@ class StyxAccessibilityService : AccessibilityService() {
     private val main = Handler(Looper.getMainLooper())
     private data class ObservationKey(val caller: String, val displayId: Int)
     private val observations = ConcurrentHashMap<ObservationKey, Observation>()
-    private val screenEvents = java.lang.Object()
-    private var screenEventSequence = 0L
-    private var lastScreenEventAt = 0L
+
+    private class DisplayEventState {
+        val lock = java.lang.Object()
+        var sequence = 0L
+        var lastEventAt = 0L
+    }
+
+    private val screenEventsByDisplay = ConcurrentHashMap<Int, DisplayEventState>()
+    private fun eventState(displayId: Int): DisplayEventState =
+        screenEventsByDisplay.computeIfAbsent(displayId) { DisplayEventState() }
 
     // Constructor-owned identity copies stay immutable. Dropping an observation releases
     // its references; recycling a copy could race an action that still references it.
@@ -53,28 +64,56 @@ class StyxAccessibilityService : AccessibilityService() {
         if (kind != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             kind != AccessibilityEvent.TYPE_WINDOWS_CHANGED &&
             kind != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) return
-        synchronized(screenEvents) {
-            screenEventSequence++
-            lastScreenEventAt = SystemClock.elapsedRealtime()
-            screenEvents.notifyAll()
+        val sourceDisplayId = event.source?.let { src ->
+            try { src.window?.displayId } catch (_: Throwable) { null } finally { src.recycle() }
+        }
+        val displayId = sourceDisplayId ?: run {
+            val windowId = event.windowId
+            if (windowId >= 0 && screenEventsByDisplay.isNotEmpty()) {
+                val all = windowsOnAllDisplays
+                var found: Int? = null
+                for (i in 0 until all.size()) {
+                    if (all.valueAt(i).any { it.id == windowId }) {
+                        found = all.keyAt(i)
+                        break
+                    }
+                }
+                found
+            } else {
+                null
+            }
+        }
+        val targets = if (displayId != null) {
+            listOf(eventState(displayId))
+        } else {
+            screenEventsByDisplay.values.toList()
+        }
+        val now = SystemClock.elapsedRealtime()
+        for (state in targets) {
+            synchronized(state.lock) {
+                state.sequence++
+                state.lastEventAt = now
+                state.lock.notifyAll()
+            }
         }
     }
 
     // Actions acknowledge dispatch, not that the next Activity or view is ready.
     // Wait for real Accessibility changes and a short quiet interval, never replay input.
-    private fun awaitScreenUpdate(afterSequence: Long) {
+    private fun awaitScreenUpdate(displayId: Int, afterSequence: Long) {
+        val state = eventState(displayId)
         val deadline = SystemClock.elapsedRealtime() + 900L
-        synchronized(screenEvents) {
+        synchronized(state.lock) {
             while (true) {
                 val now = SystemClock.elapsedRealtime()
                 val remaining = deadline - now
                 if (remaining <= 0) return
-                val seenChange = screenEventSequence > afterSequence
-                val quietRemaining = lastScreenEventAt + 90L - now
+                val seenChange = state.sequence > afterSequence
+                val quietRemaining = state.lastEventAt + 90L - now
                 if (seenChange && quietRemaining <= 0) return
                 val waitMs = if (seenChange) minOf(remaining, quietRemaining) else remaining
                 try {
-                    screenEvents.wait(waitMs.coerceAtLeast(1L))
+                    state.lock.wait(waitMs.coerceAtLeast(1L))
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                     return
@@ -140,6 +179,9 @@ class StyxAccessibilityService : AccessibilityService() {
         if (method == "release_caller") { releaseCaller(caller); return ok() }
         return when (method) {
             "android_list_displays" -> listDisplays()
+            "android_create_display" -> createDisplay(params)
+            "android_destroy_display" -> destroyDisplay(params)
+            "android_launch_app" -> launchApp(params)
             "android_observe" -> observe(caller, params)
             "android_act" -> act(caller, params.getString("observation_id"), params.getJSONObject("action"),
                 if (params.has("display_id")) params.getInt("display_id") else null)
@@ -151,6 +193,8 @@ class StyxAccessibilityService : AccessibilityService() {
     private fun listDisplays(): JSONObject {
         if (getSystemService(KeyguardManager::class.java).isKeyguardLocked)
             return fail("device_locked", "Unlock the phone before inspecting its displays.")
+        val helperConnected = VDisplayClient.isConnected
+        val managedIds = if (helperConnected) VDisplayClient.listManagedDisplayIds() else emptySet()
         val displays = JSONArray()
         val allWindows = windowsOnAllDisplays
         for (target in getSystemService(DisplayManager::class.java).displays) {
@@ -176,9 +220,78 @@ class StyxAccessibilityService : AccessibilityService() {
                 .put("name", target.name)
                 .put("width", size.x).put("height", size.y)
                 .put("density", metrics.density)
+                .put("managed", target.displayId in managedIds)
                 .put("windows", windows))
         }
-        return ok().put("displays", displays)
+        return ok().put("vdisplay_helper_connected", helperConnected).put("displays", displays)
+    }
+
+    private fun createDisplay(params: JSONObject): JSONObject {
+        if (getSystemService(KeyguardManager::class.java).isKeyguardLocked)
+            return fail("device_locked", "Unlock the phone before creating a virtual display.")
+        val name = params.optString("name", "styx-agent").ifBlank { "styx-agent" }
+        val width = params.optInt("width", 1080)
+        val height = params.optInt("height", 2340)
+        val densityDpi = params.optInt("density_dpi", 420)
+        return VDisplayClient.createDisplay(name, width, height, densityDpi)
+    }
+
+    private fun destroyDisplay(params: JSONObject): JSONObject {
+        if (getSystemService(KeyguardManager::class.java).isKeyguardLocked)
+            return fail("device_locked", "Unlock the phone before destroying a virtual display.")
+        val displayId = params.getInt("display_id")
+        if (displayId <= 0) return fail("invalid_arguments", "display_id must be positive.")
+        val result = VDisplayClient.destroyDisplay(displayId)
+        if (result.optBoolean("ok", false)) {
+            observations.keys.removeIf { it.displayId == displayId }
+            screenEventsByDisplay.remove(displayId)
+        }
+        return result
+    }
+
+    private fun launchApp(params: JSONObject): JSONObject {
+        if (getSystemService(KeyguardManager::class.java).isKeyguardLocked)
+            return fail("device_locked", "Unlock the phone before launching apps.")
+        val pkg = params.optString("package_name", "")
+        if (pkg.isBlank()) return fail("invalid_arguments", "package_name is required.")
+        val displayId = params.optInt("display_id", Display.DEFAULT_DISPLAY)
+        if (displayId < 0) return fail("invalid_arguments", "display_id must be nonnegative.")
+        if (display(displayId) == null) {
+            return fail("display_not_found", "The selected Android display no longer exists.")
+        }
+        val activity = if (params.has("activity")) params.optString("activity").takeIf { it.isNotBlank() } else null
+        val clearTask = params.optBoolean("clear_task", false)
+        val state = eventState(displayId)
+        val seq = synchronized(state.lock) { state.sequence }
+        val result = if (VDisplayClient.isConnected) {
+            VDisplayClient.launchApp(pkg, activity, displayId, clearTask)
+        } else {
+            val launchIntent = if (activity != null) {
+                val cls = when {
+                    activity.contains('/') -> activity.substringAfter('/')
+                    activity.startsWith(".") -> "$pkg$activity"
+                    activity.contains('.') -> activity
+                    else -> "$pkg.$activity"
+                }
+                Intent(Intent.ACTION_MAIN).setClassName(pkg, cls)
+            } else {
+                packageManager.getLaunchIntentForPackage(pkg)
+            } ?: return fail("package_not_launchable", "No launchable launcher activity found for $pkg.")
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or if (clearTask) Intent.FLAG_ACTIVITY_CLEAR_TASK else 0)
+            val options = ActivityOptions.makeBasic().setLaunchDisplayId(displayId).toBundle()
+            try {
+                startActivity(launchIntent, options)
+                ok().put("package_name", pkg).put("display_id", displayId).put("launched", true)
+            } catch (error: SecurityException) {
+                fail("vdisplay_helper_unavailable", "Launching apps on this display requires Styx vdisplay helper.")
+            } catch (error: Exception) {
+                fail("launch_failed", "Android could not launch $pkg on display $displayId.")
+            }
+        }
+        if (result.optBoolean("ok", false)) {
+            awaitScreenUpdate(displayId, seq)
+        }
+        return result
     }
 
     private fun observe(caller: String, params: JSONObject): JSONObject {
@@ -245,7 +358,12 @@ class StyxAccessibilityService : AccessibilityService() {
             .put("truncated", truncated)
         if (params.optBoolean("include_tree", true)) result.put("nodes", nodes)
         if (params.optBoolean("screenshot", false)) {
-            val capture = screenshot(displayId, maxDimension)
+            val helperCapture = if (VDisplayClient.isManagedDisplay(displayId)) {
+                VDisplayClient.captureDisplay(displayId, maxDimension).takeIf { it.optBoolean("ok", false) }
+            } else {
+                null
+            }
+            val capture = helperCapture ?: screenshot(displayId, maxDimension)
             if (capture.optBoolean("ok", false)) result.put("screenshot", capture.getJSONObject("screenshot"))
             else result.put("screenshot_error", capture.getJSONObject("error"))
         }
@@ -266,11 +384,18 @@ class StyxAccessibilityService : AccessibilityService() {
             }
             return when (action.getString("type")) {
                 "back", "home", "recents" -> {
-                    // performGlobalAction has no display target: never accidentally navigate
-                    // the physical screen when a secondary display was requested.
-                    if (observed.displayId != Display.DEFAULT_DISPLAY)
-                        fail("unsupported_action", "Global navigation is only supported on the default display.")
-                    else when (action.getString("type")) {
+                    if (observed.displayId != Display.DEFAULT_DISPLAY) {
+                        if (!VDisplayClient.isConnected) {
+                            fail("unsupported_action", "Global navigation on secondary displays requires Styx vdisplay helper.")
+                        } else {
+                            val keyCode = when (action.getString("type")) {
+                                "back" -> KeyEvent.KEYCODE_BACK
+                                "home" -> KeyEvent.KEYCODE_HOME
+                                else -> KeyEvent.KEYCODE_APP_SWITCH
+                            }
+                            VDisplayClient.injectKey(observed.displayId, keyCode)
+                        }
+                    } else when (action.getString("type")) {
                         "back" -> globalAction(GLOBAL_ACTION_BACK)
                         "home" -> globalAction(GLOBAL_ACTION_HOME)
                         else -> globalAction(GLOBAL_ACTION_RECENTS)
@@ -338,6 +463,9 @@ class StyxAccessibilityService : AccessibilityService() {
         }
         val duration = action.optLong("duration_ms", if (swipe) 300 else 50)
         if (duration <= 0 || duration > GestureDescription.getMaxGestureDuration()) return fail("invalid_arguments", "Unsupported gesture duration.")
+        if (observed.displayId != Display.DEFAULT_DISPLAY && VDisplayClient.isConnected) {
+            return VDisplayClient.injectTouch(observed.displayId, x, y, endX, endY, duration)
+        }
         val path = Path().apply { moveTo(x, y); if (swipe) lineTo(endX, endY) }
         val gesture = GestureDescription.Builder().setDisplayId(observed.displayId)
             .addStroke(GestureDescription.StrokeDescription(path, 0, duration)).build()
@@ -408,12 +536,13 @@ class StyxAccessibilityService : AccessibilityService() {
         var completed = 0
         var failure: JSONObject? = null
         var lastActionEventSequence: Long? = null
+        val displayEvents = eventState(displayId)
         for (index in 0 until steps.length()) {
             val result = try {
                 val step = steps.getJSONObject(index)
                 if (observeAfter && index == steps.length() - 1 &&
                     step.optString("type") in setOf("click", "long_click", "back", "home", "recents")) {
-                    lastActionEventSequence = synchronized(screenEvents) { screenEventSequence }
+                    lastActionEventSequence = synchronized(displayEvents.lock) { displayEvents.sequence }
                 }
                 act(caller, id, step, displayId)
             } catch (error: JSONException) {
@@ -431,7 +560,7 @@ class StyxAccessibilityService : AccessibilityService() {
         val response = JSONObject().put("ok", failure == null).put("completed_steps", completed).put("results", results)
         if (failure != null) response.put("error", failure).put("failed_step", completed)
         if (observeAfter) {
-            if (failure == null) lastActionEventSequence?.let(::awaitScreenUpdate)
+            if (failure == null) lastActionEventSequence?.let { awaitScreenUpdate(displayId, it) }
             response.put("observation", observe(caller, JSONObject().put("display_id", displayId)))
         }
         return response

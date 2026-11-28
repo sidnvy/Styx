@@ -339,6 +339,9 @@ impl AndroidCommand {
         match self.name.as_str() {
             "android_list_displays" => Ok(CapabilityId::AndroidObserve),
             "android_observe" => Ok(CapabilityId::AndroidObserve),
+            "android_create_display" | "android_destroy_display" | "android_launch_app" => {
+                Ok(CapabilityId::AndroidAct)
+            }
             "android_act" => Ok(CapabilityId::AndroidAct),
             "android_run_steps" => Ok(CapabilityId::AndroidRunSteps),
             _ => Err(ErrorCategory::CapabilityUnsupported),
