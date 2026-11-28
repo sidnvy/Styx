@@ -45,9 +45,11 @@ case "$cmd" in
           sleep 1
         fi
       fi
-      pkill -f '[s]tyx-vdisplay' 2>/dev/null || true
+      for p in \$(pgrep -x styx-vdisplay 2>/dev/null || true); do
+        [ \"\$p\" != \"\$\$\" ] && kill \"\$p\" 2>/dev/null || true
+      done
       rm -f /data/local/tmp/styx-vdisplay.pid
-      nohup env CLASSPATH='$apk' app_process / com.styx.host.vdisplay.VDisplayHelperMain </dev/null >/data/local/tmp/styx-vdisplay.log 2>&1 &
+      setsid nohup env CLASSPATH='$apk' app_process / com.styx.host.vdisplay.VDisplayHelperMain </dev/null >/data/local/tmp/styx-vdisplay.log 2>&1 &
       echo \$! > /data/local/tmp/styx-vdisplay.pid
     "
     sleep 2
@@ -70,7 +72,9 @@ case "$cmd" in
         fi
         rm -f /data/local/tmp/styx-vdisplay.pid
       fi
-      pkill -f '[s]tyx-vdisplay' 2>/dev/null || true
+      for p in \$(pgrep -x styx-vdisplay 2>/dev/null || true); do
+        [ \"\$p\" != \"\$\$\" ] && kill \"\$p\" 2>/dev/null || true
+      done
     "
     ;;
   status)
