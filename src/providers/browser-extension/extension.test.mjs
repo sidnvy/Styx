@@ -38,6 +38,7 @@ function createFakeChrome(tabsList) {
   const windowUpdates = [];
   const tabUpdates = [];
   const groupUpdates = [];
+  const groups = new Map();
   let nextTabId = 99;
   let nextGroupId = 500;
   let failOnDisconnect = null;
@@ -93,6 +94,9 @@ function createFakeChrome(tabsList) {
       },
       async group(opts) {
         const groupId = typeof opts.groupId === 'number' ? opts.groupId : nextGroupId++;
+        if (!groups.has(groupId)) {
+          groups.set(groupId, { id: groupId, title: '', color: 'grey', collapsed: false });
+        }
         for (const tabId of opts.tabIds || []) {
           const tab = tabsList.find(t => t.id === tabId);
           if (tab) tab.groupId = groupId;
@@ -105,9 +109,15 @@ function createFakeChrome(tabsList) {
       onActivated: { addListener() {} },
     },
     tabGroups: {
+      async query() {
+        return Array.from(groups.values());
+      },
       async update(groupId, props) {
         groupUpdates.push({ groupId, props });
-        return { id: groupId, ...props };
+        const prev = groups.get(groupId) || { id: groupId, title: '', color: 'grey', collapsed: false };
+        const updated = { ...prev, ...props };
+        groups.set(groupId, updated);
+        return updated;
       },
     },
     windows: {
@@ -149,6 +159,7 @@ function createFakeChrome(tabsList) {
     tabUpdates,
     groupUpdates,
     listeners,
+    groups,
     emitPort(msg) {
       for (const cb of listeners.portMessage) cb(msg);
     },
@@ -329,4 +340,77 @@ test('tabs.list excludes discarded Memory Saver tabs and debugger.attach self-he
   assert.equal(fake.posted.at(-1).id, 23);
   assert.match(fake.posted.at(-1).error, /already attached/);
   assert.equal(externalAttached.has(12), true);
+});
+
+test('tabGroups.collapse and popup getStatus/closeStyxTabs manage Styx Tab Groups without touching personal tabs', async () => {
+  const code = fs.readFileSync(path.join(dir, 'background.js'), 'utf8');
+  const tabsList = [
+    { id: 1, url: 'https://personal.example/', title: 'Personal', active: true, windowId: 1, groupId: -1 },
+    { id: 50, url: 'https://stale-styx.example/', title: 'Stale Styx', active: false, windowId: 1, groupId: 900 },
+  ];
+  const fake = createFakeChrome(tabsList);
+  fake.groups.set(900, { id: 900, title: 'Styx · 9', color: 'cyan', collapsed: false });
+
+  const sandbox = {
+    globalThis: null,
+    chrome: undefined,
+    navigator: { userAgent: 'Mozilla/5.0 Chrome/158.0.0.0 Safari/537.36' },
+    setTimeout,
+    clearTimeout,
+  };
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(code, sandbox);
+
+  const controller = sandbox.__styxExtensionTools.createExtensionController(fake.chrome, {
+    userAgent: sandbox.navigator.userAgent,
+    setTimeout: () => 1,
+    clearTimeout() {},
+  });
+  controller.registerListeners();
+  controller.ensureConnected();
+  fake.emitPort({ type: 'bridge.status', hostConnected: true });
+  await new Promise(r => setImmediate(r));
+
+  // Create a fresh isolated tab in a new group and attach it.
+  fake.emitPort({
+    id: 30,
+    method: 'tabs.create',
+    params: { url: 'https://styx-new.example/', isolated: true, groupTitle: 'Styx · 10', groupColor: 'blue' },
+  });
+  await new Promise(r => setImmediate(r));
+  const newTabId = fake.posted.at(-1).result.tab.id;
+  const newGroupId = fake.posted.at(-1).result.groupId;
+
+  fake.emitPort({ id: 31, method: 'debugger.attach', params: { tabId: newTabId } });
+  await new Promise(r => setImmediate(r));
+  assert.ok(fake.attached.has(newTabId));
+
+  // tabGroups.collapse toggles Chrome Tab Group collapse state.
+  fake.emitPort({ id: 32, method: 'tabGroups.collapse', params: { groupId: newGroupId, collapsed: true } });
+  await new Promise(r => setImmediate(r));
+  assert.equal(fake.groups.get(newGroupId).collapsed, true);
+
+  fake.emitPort({ id: 33, method: 'tabGroups.collapse', params: { groupId: newGroupId, collapsed: false } });
+  await new Promise(r => setImmediate(r));
+  assert.equal(fake.groups.get(newGroupId).collapsed, false);
+
+  async function sendRuntimeMessage(msg) {
+    return new Promise((resolve) => {
+      let handledAsync = false;
+      for (const cb of fake.listeners.runtimeMessage) {
+        if (cb(msg, {}, resolve) === true) handledAsync = true;
+      }
+      assert.equal(handledAsync, true);
+    });
+  }
+
+  // getStatus discovers both the freshly tracked tab and the pre-existing "Styx · 9" tab (2 total), excluding personal tab 1.
+  const statusBefore = await sendRuntimeMessage({ type: 'styx.popup.getStatus' });
+  assert.equal(statusBefore.isolatedTabCount, 2);
+
+  // closeStyxTabs detaches and removes both Styx tabs, leaving only personal tab 1.
+  const statusAfter = await sendRuntimeMessage({ type: 'styx.popup.closeStyxTabs' });
+  assert.equal(statusAfter.isolatedTabCount, 0);
+  assert.equal(fake.attached.has(newTabId), false);
+  assert.deepEqual(tabsList.map(t => t.id), [1]);
 });

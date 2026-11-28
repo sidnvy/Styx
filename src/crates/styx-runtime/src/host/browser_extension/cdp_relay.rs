@@ -37,7 +37,25 @@ const DEFAULT_INDICATOR_IDLE_TIMEOUT_MS: u64 = 3_000;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CdpSessionScope {
     SharedExisting,
-    TabGroup { title: String, color: String },
+    TabGroup {
+        title: String,
+        color: String,
+        session_key: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabGroupParkOutcome {
+    Collapsed,
+    Removed,
+    Missing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabGroupCloseOutcome {
+    Closed,
+    SkippedActive,
+    NotFound,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -74,6 +92,7 @@ struct ExtensionPeer {
     initial_tabs: StdMutex<Vec<TabDescriptor>>,
     isolated_tabs: StdMutex<HashMap<i64, u64>>,
     tab_owners: StdMutex<HashMap<i64, u64>>,
+    tab_group_ids: StdMutex<HashMap<String, i64>>,
     shutdown: CancellationToken,
 }
 
@@ -223,6 +242,29 @@ impl ExtensionPeer {
             for (_, tx) in guard.drain() {
                 let _ = tx.send(Err("extension_disconnected".to_owned()));
             }
+        }
+    }
+
+    fn remembered_tab_group_id(&self, key: &str) -> Option<i64> {
+        self.tab_group_ids
+            .lock()
+            .ok()
+            .and_then(|guard| guard.get(key).copied())
+            .filter(|gid| *gid >= 0)
+    }
+
+    fn remember_tab_group_id(&self, key: &str, group_id: i64) {
+        if group_id < 0 {
+            return;
+        }
+        if let Ok(mut guard) = self.tab_group_ids.lock() {
+            guard.insert(key.to_owned(), group_id);
+        }
+    }
+
+    fn forget_tab_group_id(&self, key: &str) {
+        if let Ok(mut guard) = self.tab_group_ids.lock() {
+            guard.remove(key);
         }
     }
 }
@@ -376,6 +418,7 @@ impl BrowserExtensionBridge {
         &self,
         title: Option<String>,
         color: Option<String>,
+        session_key: Option<String>,
     ) -> CdpSessionScope {
         const PALETTE: [&str; 6] = ["cyan", "purple", "green", "orange", "pink", "blue"];
         let seq = self.next_external_group_seq.fetch_add(1, Ordering::Relaxed);
@@ -400,7 +443,106 @@ impl BrowserExtensionBridge {
         CdpSessionScope::TabGroup {
             title: chosen_title,
             color: chosen_color,
+            session_key,
         }
+    }
+
+    pub async fn park_tab_group(&self, session_key: &str) -> TabGroupParkOutcome {
+        let Some(peer) = self.peer.lock().await.clone() else {
+            return TabGroupParkOutcome::Missing;
+        };
+        let Some(gid) = peer.remembered_tab_group_id(session_key) else {
+            return TabGroupParkOutcome::Missing;
+        };
+        let Ok(Ok(listed)) = tokio::time::timeout(
+            Duration::from_secs(3),
+            peer.call("tabs.list", json!({ "excludeIsolated": false })),
+        )
+        .await
+        else {
+            return TabGroupParkOutcome::Missing;
+        };
+        let Ok(tabs) = serde_json::from_value::<Vec<TabDescriptor>>(
+            listed.get("tabs").cloned().unwrap_or_else(|| json!([])),
+        ) else {
+            return TabGroupParkOutcome::Missing;
+        };
+        let group_tabs: Vec<TabDescriptor> =
+            tabs.into_iter().filter(|t| t.group_id == gid).collect();
+        if group_tabs.is_empty() {
+            peer.forget_tab_group_id(session_key);
+            return TabGroupParkOutcome::Removed;
+        }
+        let any_active = group_tabs.iter().any(|t| t.active);
+        let all_blank = group_tabs
+            .iter()
+            .all(|t| t.url.is_empty() || t.url == "about:blank");
+        if all_blank && !any_active {
+            for tab in group_tabs {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    peer.call("tabs.remove", json!({ "tabId": tab.id })),
+                )
+                .await;
+            }
+            peer.forget_tab_group_id(session_key);
+            return TabGroupParkOutcome::Removed;
+        }
+        if !any_active {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3),
+                peer.call(
+                    "tabGroups.collapse",
+                    json!({ "groupId": gid, "collapsed": true }),
+                ),
+            )
+            .await;
+        }
+        TabGroupParkOutcome::Collapsed
+    }
+
+    pub async fn close_tab_group(
+        &self,
+        session_key: &str,
+        skip_if_active: bool,
+    ) -> TabGroupCloseOutcome {
+        let Some(peer) = self.peer.lock().await.clone() else {
+            return TabGroupCloseOutcome::NotFound;
+        };
+        let Some(gid) = peer.remembered_tab_group_id(session_key) else {
+            return TabGroupCloseOutcome::NotFound;
+        };
+        let Ok(Ok(listed)) = tokio::time::timeout(
+            Duration::from_secs(3),
+            peer.call("tabs.list", json!({ "excludeIsolated": false })),
+        )
+        .await
+        else {
+            return TabGroupCloseOutcome::NotFound;
+        };
+        let Ok(tabs) = serde_json::from_value::<Vec<TabDescriptor>>(
+            listed.get("tabs").cloned().unwrap_or_else(|| json!([])),
+        ) else {
+            return TabGroupCloseOutcome::NotFound;
+        };
+        let group_tabs: Vec<TabDescriptor> =
+            tabs.into_iter().filter(|t| t.group_id == gid).collect();
+        if group_tabs.is_empty() {
+            peer.forget_tab_group_id(session_key);
+            return TabGroupCloseOutcome::NotFound;
+        }
+        if skip_if_active && group_tabs.iter().any(|t| t.active) {
+            return TabGroupCloseOutcome::SkippedActive;
+        }
+        for tab in group_tabs {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3),
+                peer.call("tabs.remove", json!({ "tabId": tab.id })),
+            )
+            .await;
+        }
+        peer.forget_tab_group_id(session_key);
+        TabGroupCloseOutcome::Closed
     }
 
     pub async fn shutdown(&self) {
@@ -476,7 +618,13 @@ impl BrowserExtensionBridge {
                         .get("groupColor")
                         .and_then(Value::as_str)
                         .map(str::to_owned);
-                    self.next_auto_tab_group_scope(title, color)
+                    let session_key = auth
+                        .get("sessionKey")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.chars().take(64).collect::<String>());
+                    self.next_auto_tab_group_scope(title, color, session_key)
                 };
                 let reply = match self.open_cdp_session_with_details(scope) {
                     Ok((ws_endpoint, http_base_url)) => json!({
@@ -578,6 +726,7 @@ impl BrowserExtensionBridge {
                                 initial_tabs: StdMutex::new(hello_tabs),
                                 isolated_tabs: StdMutex::new(HashMap::new()),
                                 tab_owners: StdMutex::new(HashMap::new()),
+                                tab_group_ids: StdMutex::new(HashMap::new()),
                                 shutdown: peer_cancel.clone(),
                             });
                             let previous = self.peer.lock().await.replace(new_peer.clone());
@@ -1775,43 +1924,98 @@ async fn ensure_scope_tabs_ready(state: &Arc<Mutex<RelayState>>) -> Result<(), S
         )
     };
     match scope {
-        CdpSessionScope::TabGroup { title, color } => {
+        CdpSessionScope::TabGroup {
+            title,
+            color,
+            session_key,
+        } => {
             let tab_ids = if existing_owned.is_empty() {
-                let created = tokio::select! {
-                    () = session_cancel.cancelled() => return Err("session_closed".to_owned()),
-                    res = peer.call(
-                        "tabs.create",
-                        json!({
-                            "url": "about:blank",
-                            "active": false,
-                            "isolated": true,
-                            "groupTitle": title,
-                            "groupColor": color,
-                        }),
-                    ) => res?,
-                };
-                if session_cancel.is_cancelled() {
-                    if let Some(tab_id) = created.pointer("/tab/id").and_then(Value::as_i64) {
-                        let _ = peer.call("tabs.remove", json!({ "tabId": tab_id })).await;
+                let mut reattached_ids = Vec::new();
+                if let Some(ref key) = session_key
+                    && let Some(gid) = peer.remembered_tab_group_id(key)
+                {
+                    let listed_res = tokio::select! {
+                        () = session_cancel.cancelled() => return Err("session_closed".to_owned()),
+                        res = peer.call("tabs.list", json!({ "excludeIsolated": false })) => res,
+                    };
+                    if let Ok(listed) = listed_res
+                        && let Ok(tabs) = serde_json::from_value::<Vec<TabDescriptor>>(
+                            listed.get("tabs").cloned().unwrap_or_else(|| json!([])),
+                        )
+                    {
+                        let mut matched = Vec::new();
+                        for tab in tabs {
+                            if tab.group_id == gid && peer.claim_tab(tab.id, relay_id, true) {
+                                matched.push(tab);
+                            }
+                        }
+                        if !matched.is_empty() {
+                            {
+                                let mut guard = state.lock().await;
+                                guard.group_id = Some(gid);
+                                for tab in matched {
+                                    reattached_ids.push(tab.id);
+                                    guard.owned_tabs.insert(tab.id);
+                                    guard.known_tabs.insert(tab.id, tab);
+                                }
+                            }
+                            let _ = tokio::time::timeout(
+                                Duration::from_secs(2),
+                                peer.call(
+                                    "tabGroups.collapse",
+                                    json!({ "groupId": gid, "collapsed": false }),
+                                ),
+                            )
+                            .await;
+                        } else {
+                            peer.forget_tab_group_id(key);
+                        }
+                    } else {
+                        peer.forget_tab_group_id(key);
                     }
-                    return Err("session_closed".to_owned());
                 }
-                let tab: TabDescriptor = serde_json::from_value(
-                    created.get("tab").cloned().unwrap_or_else(|| json!({})),
-                )
-                .map_err(|_| "tabs.create invalid response".to_owned())?;
-                let returned_gid = created
-                    .get("groupId")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(tab.group_id);
-                let mut guard = state.lock().await;
-                if guard.group_id.is_none() && returned_gid >= 0 {
-                    guard.group_id = Some(returned_gid);
+                if !reattached_ids.is_empty() {
+                    reattached_ids
+                } else {
+                    let created = tokio::select! {
+                        () = session_cancel.cancelled() => return Err("session_closed".to_owned()),
+                        res = peer.call(
+                            "tabs.create",
+                            json!({
+                                "url": "about:blank",
+                                "active": false,
+                                "isolated": true,
+                                "groupTitle": title,
+                                "groupColor": color,
+                            }),
+                        ) => res?,
+                    };
+                    if session_cancel.is_cancelled() {
+                        if let Some(tab_id) = created.pointer("/tab/id").and_then(Value::as_i64) {
+                            let _ = peer.call("tabs.remove", json!({ "tabId": tab_id })).await;
+                        }
+                        return Err("session_closed".to_owned());
+                    }
+                    let tab: TabDescriptor = serde_json::from_value(
+                        created.get("tab").cloned().unwrap_or_else(|| json!({})),
+                    )
+                    .map_err(|_| "tabs.create invalid response".to_owned())?;
+                    let returned_gid = created
+                        .get("groupId")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(tab.group_id);
+                    let mut guard = state.lock().await;
+                    if guard.group_id.is_none() && returned_gid >= 0 {
+                        guard.group_id = Some(returned_gid);
+                        if let Some(ref key) = session_key {
+                            guard.peer.remember_tab_group_id(key, returned_gid);
+                        }
+                    }
+                    guard.owned_tabs.insert(tab.id);
+                    guard.known_tabs.insert(tab.id, tab.clone());
+                    guard.peer.claim_tab(tab.id, relay_id, true);
+                    vec![tab.id]
                 }
-                guard.owned_tabs.insert(tab.id);
-                guard.known_tabs.insert(tab.id, tab.clone());
-                guard.peer.claim_tab(tab.id, relay_id, true);
-                vec![tab.id]
             } else {
                 existing_owned
             };
@@ -2112,7 +2316,7 @@ async fn handle_cdp_request(
                     )
                 };
                 let (is_isolated, create_params) = match scope {
-                    CdpSessionScope::TabGroup { title, color } => {
+                    CdpSessionScope::TabGroup { title, color, .. } => {
                         let mut p = json!({
                             "url": url,
                             "active": false,
@@ -2154,6 +2358,13 @@ async fn handle_cdp_request(
                     let mut guard = state.lock().await;
                     if guard.group_id.is_none() && returned_gid >= 0 {
                         guard.group_id = Some(returned_gid);
+                        if let CdpSessionScope::TabGroup {
+                            session_key: Some(ref key),
+                            ..
+                        } = guard.scope
+                        {
+                            guard.peer.remember_tab_group_id(key, returned_gid);
+                        }
                     }
                     guard.owned_tabs.insert(tab.id);
                     guard.known_tabs.insert(tab.id, tab.clone());
@@ -2450,7 +2661,7 @@ async fn handle_extension_event(
                 let peer = guard.peer.clone();
                 let scope = guard.scope.clone();
                 match scope {
-                    CdpSessionScope::TabGroup { title, color } => {
+                    CdpSessionScope::TabGroup { title, color, .. } => {
                         let by_owner = guard.owned_tabs.contains(&id);
                         let by_opener = tab
                             .opener_tab_id

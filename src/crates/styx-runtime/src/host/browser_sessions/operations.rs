@@ -83,6 +83,11 @@ pub(crate) trait BrowserBootstrap: Send + Sync {
     ) -> Result<OwnedBrowserConfig, ErrorCategory>;
     fn validate_before_spawn(&self) -> Result<(), ErrorCategory>;
     fn validate_control(&self) -> Result<(), ErrorCategory>;
+    fn extension_bridge(
+        &self,
+    ) -> Option<Arc<crate::host::browser_extension::BrowserExtensionBridge>> {
+        None
+    }
 }
 pub(crate) struct BrowserInputs {
     source: Arc<dyn BrowserBootstrap>,
@@ -97,6 +102,11 @@ impl BrowserInputs {
 
             gate: Arc::new(tokio::sync::RwLock::new(())),
         }
+    }
+    pub(crate) fn extension_bridge(
+        &self,
+    ) -> Option<Arc<crate::host::browser_extension::BrowserExtensionBridge>> {
+        self.source.extension_bridge()
     }
 }
 pub(crate) struct BrowserPort<'a> {

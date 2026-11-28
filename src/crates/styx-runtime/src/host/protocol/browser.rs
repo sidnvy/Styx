@@ -35,6 +35,23 @@ impl HostProtocol<'_> {
             port.drain_browser_inputs().await;
         }
     }
+    pub(crate) async fn park_idle_browser_sessions(&self) -> usize {
+        if let Some(port) = self.browser_port() {
+            let engine = crate::host::browser_sessions::Engine { port };
+            let parked = engine
+                .park_idle_sessions(crate::host::browser_sessions::DEFAULT_IDLE_PARK_TIMEOUT)
+                .await;
+            let reaped = engine
+                .reap_parked_tab_groups(
+                    crate::host::browser_sessions::DEFAULT_PARKED_TAB_GROUP_TTL,
+                    crate::host::browser_sessions::MAX_PARKED_TAB_GROUPS,
+                )
+                .await;
+            parked + reaped
+        } else {
+            0
+        }
+    }
 }
 #[cfg(all(test, target_os = "linux"))]
 #[path = "browser_history_tests.rs"]

@@ -1,6 +1,8 @@
 function render(status) {
   const hostEl = document.getElementById("host-status");
   const countEl = document.getElementById("attached-count");
+  const styxTabsEl = document.getElementById("styx-tabs-count");
+  const closeStyxBtn = document.getElementById("close-styx-btn");
   const errEl = document.getElementById("error-box");
   const idEl = document.getElementById("ext-id");
 
@@ -21,7 +23,12 @@ function render(status) {
     hostEl.className = "badge err";
   }
 
+  const styxTabCount = Number(status.isolatedTabCount ?? 0);
   countEl.textContent = String(status.attachedTabCount ?? 0);
+  styxTabsEl.textContent = String(styxTabCount);
+  closeStyxBtn.textContent =
+    styxTabCount > 0 ? `Close Styx tabs (${styxTabCount})` : "Close Styx tabs";
+  closeStyxBtn.disabled = styxTabCount === 0;
   idEl.textContent = status.extensionId || chrome.runtime.id || "";
   errEl.textContent = status.lastError ? `Last error: ${status.lastError}` : "";
 }
@@ -38,6 +45,10 @@ document.getElementById("reconnect-btn").addEventListener("click", () => {
 
 document.getElementById("detach-btn").addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "styx.popup.detachAll" }, render);
+});
+
+document.getElementById("close-styx-btn").addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "styx.popup.closeStyxTabs" }, render);
 });
 
 refresh();

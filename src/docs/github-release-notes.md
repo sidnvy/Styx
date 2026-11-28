@@ -8,12 +8,18 @@ computer.
 
 ## Changes
 
-Styx `0.8.9` adds the CDP `Page` target identity invariant on top of the `0.8.8` baseline:
+Styx `0.8.10` adds Host-side idle auto-park and layered Chrome Tab Group cleanup on top of the `0.8.9` baseline:
 
-- **CDP `targetInfo.targetId == frameTree.frame.id` identity invariant (`cdp_relay`)**:
-  - Queries `Page.getFrameTree` during `attach_tab` and normalizes `targetInfo.targetId` to the current main `frameTree.frame.id` (falling back safely to `Target.getTargetInfo` if unavailable) so Chrome COOP / RenderFrameHost-swapped tabs never trigger Playwright `"Frame has been detached."` initialization aborts or `browser_tabs(action="list")` hangs.
-- **Previous `0.8.8` & `0.8.7` baseline**:
-  - Strict per-`sessionId` FIFO CDP ordering, cancellation-safe RAII tab ownership and bounded concurrent teardown, lazy non-blocking indicator/focus emulation, Memory Saver `tab.discarded` filtering and self-owned `debugger.attach` recovery, reconnecting local `cdp-proxy`, and idle WebSocket `Pong` flushing.
+- **4-minute idle auto-park & Tab Group continuity (`browser_sessions` / `cdp_relay`)**:
+  - Automatically parks idle browser sessions after 240 seconds (`DEFAULT_IDLE_PARK_TIMEOUT`), cleanly closing the Playwright worker and CDP WebSocket so `chrome.debugger` detaches without closing user tabs, while preserving `browser_session_id`, `owner_default`, and operator ownership.
+  - Remembers Chrome `groupId` per session key so waking a parked `bg-...` Tab Group re-attaches directly to the existing group instead of opening a duplicate.
+- **Layered Styx Tab Group cleanup (`browser_extension` / `cdp_proxy`)**:
+  - Explicit `browser_close` on an isolated `bg-...` Tab Group closes its Styx-owned tabs while leaving `existing-browser` detach-only.
+  - Idle parking automatically removes untouched `about:blank`-only Tab Groups and collapses inactive navigated Tab Groups (`tabGroups.collapse`), expanding them again on wake.
+  - Reaps abandoned parked `bg-...` Tab Groups beyond the 3 most recent or 2-hour TTL while skipping any group with an active tab.
+  - Local `cdp-proxy` uses a stable `sessionKey` so IDE reconnects reuse the same Tab Group, and extension `0.2.1` adds a **Close Styx tabs (N)** popup button.
+- **Previous `0.8.9` & `0.8.8` baseline**:
+  - CDP `targetInfo.targetId == frameTree.frame.id` identity normalization, strict per-`sessionId` FIFO CDP ordering, cancellation-safe RAII tab ownership, lazy non-blocking indicator/focus emulation, Memory Saver `tab.discarded` filtering, and idle WebSocket `Pong` flushing.
 
 All existing Gateway MCP tool names, Host identities, device pairings, browser
 profiles, and Android/Windows/macOS release signing identities remain unchanged.

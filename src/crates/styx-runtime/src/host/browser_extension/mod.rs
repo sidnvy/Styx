@@ -7,7 +7,9 @@ pub mod native_host;
 mod tests;
 
 pub use cdp_proxy::{LocalCdpProxy, LocalCdpProxyConfig};
-pub use cdp_relay::{BrowserExtensionBridge, CdpSessionScope};
+pub use cdp_relay::{
+    BrowserExtensionBridge, CdpSessionScope, TabGroupCloseOutcome, TabGroupParkOutcome,
+};
 
 use crate::store::PrivateRoot;
 use serde::{Deserialize, Serialize};
@@ -556,10 +558,14 @@ pub async fn request_local_cdp_session(
         .map_err(|_| ErrorCategory::CapabilityUnsupported)?;
     let (read_half, mut write_half) = stream.into_split();
 
-    let (mode, resolved_title, resolved_color) = match scope {
-        Some(CdpSessionScope::SharedExisting) => ("shared_existing", None, None),
-        Some(CdpSessionScope::TabGroup { title, color }) => ("tab_group", Some(title), Some(color)),
-        None => ("tab_group", group_title, group_color),
+    let (mode, resolved_title, resolved_color, resolved_session_key) = match scope {
+        Some(CdpSessionScope::SharedExisting) => ("shared_existing", None, None, None),
+        Some(CdpSessionScope::TabGroup {
+            title,
+            color,
+            session_key,
+        }) => ("tab_group", Some(title), Some(color), session_key),
+        None => ("tab_group", group_title, group_color, None),
     };
     let mut req = serde_json::json!({
         "type": "open_cdp_session",
@@ -571,6 +577,9 @@ pub async fn request_local_cdp_session(
     }
     if let Some(color) = resolved_color {
         req["groupColor"] = serde_json::Value::String(color);
+    }
+    if let Some(session_key) = resolved_session_key {
+        req["sessionKey"] = serde_json::Value::String(session_key);
     }
     let line = format!("{req}\n");
     write_half

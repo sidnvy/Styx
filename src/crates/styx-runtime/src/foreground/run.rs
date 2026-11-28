@@ -160,6 +160,11 @@ impl crate::host::protocol::browser::BrowserBootstrap for ForegroundBrowser {
             .map_err(|_| styx_contracts::error::ErrorCategory::StateConflict)?;
         self.source.validate_control()
     }
+    fn extension_bridge(
+        &self,
+    ) -> Option<Arc<crate::host::browser_extension::BrowserExtensionBridge>> {
+        self.source.extension_bridge()
+    }
 }
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 struct ForegroundComputer {
@@ -1038,6 +1043,12 @@ async fn run_owned(
                                             }
                                         }
                                     }
+                                    #[cfg(any(
+                                        target_os = "linux",
+                                        target_os = "windows",
+                                        target_os = "macos"
+                                    ))]
+                                    let _ = session.park_idle_browser_sessions().await;
                                     let _ = host
                                         .authority()
                                         .collect_provider_retention(Duration::from_secs(1))
@@ -1128,6 +1139,12 @@ async fn run_owned(
                             if cancel.is_cancelled() {
                                 break;
                             }
+                            #[cfg(any(
+                                target_os = "linux",
+                                target_os = "windows",
+                                target_os = "macos"
+                            ))]
+                            let _ = session.park_idle_browser_sessions().await;
                             if let Err(error) = validate(&admitted).await {
                                 if error.code() == "native_service_configuration_pending" {
                                     event(&events, &cancel, "configuration_pending", &device, None);

@@ -55,6 +55,18 @@
     button:hover {
       background: #f3f4f6;
     }
+    button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+    .danger {
+      color: #b91c1c;
+      border-color: #fecaca;
+      background: #fef2f2;
+    }
+    .danger:hover:not(:disabled) {
+      background: #fee2e2;
+    }
   </style>
 </head>
 <body>
@@ -67,11 +79,18 @@
     <span class="label">Attached tabs</span>
     <span id="attached-count" class="badge">0</span>
   </div>
+  <div class="row">
+    <span class="label">Styx tabs</span>
+    <span id="styx-tabs-count" class="badge">0</span>
+  </div>
   <div id="error-box" class="meta"></div>
   <div class="meta">ID: <span id="ext-id"></span></div>
   <div class="actions">
     <button id="reconnect-btn" type="button">Reconnect</button>
     <button id="detach-btn" type="button">Detach tabs</button>
+  </div>
+  <div class="actions">
+    <button id="close-styx-btn" class="danger" type="button">Close Styx tabs</button>
   </div>
   <script src="popup.js"></script>
 </body>
