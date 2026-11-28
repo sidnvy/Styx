@@ -170,40 +170,58 @@ object VDisplayHelperMain {
         }
         val amClass = Class.forName("android.app.ActivityManager")
         val am = amClass.getDeclaredMethod("getService").invoke(null)
-        val getExternal = amClass.getMethod(
-            "getContentProviderExternal",
-            String::class.java,
-            Int::class.javaPrimitiveType,
-            IBinder::class.java,
-            String::class.java,
-        )
-        val holder = getExternal.invoke(
-            am,
-            VDisplayProtocol.PROVIDER_AUTHORITY,
-            0,
-            selfToken,
-            "styx-vdisplay",
-        ) ?: throw IllegalStateException("$STYX_HOST_PACKAGE provider unavailable")
-
-        try {
-            val providerField = holder.javaClass.getField("provider")
-            val provider = providerField.get(holder)
-                ?: throw IllegalStateException("$STYX_HOST_PACKAGE provider binder null")
-            val resultBundle = invokeProviderCall(provider, extras)
-            val appToken = resultBundle?.getBinder(VDisplayProtocol.EXTRA_APP_TOKEN)
-                ?: throw IllegalStateException("Host did not return app_token")
-            return appToken
-        } finally {
-            runCatching {
-                val removeExternal = amClass.getMethod(
-                    "removeContentProviderExternalAsUser",
-                    String::class.java,
-                    IBinder::class.java,
-                    Int::class.javaPrimitiveType,
-                )
-                removeExternal.invoke(am, VDisplayProtocol.PROVIDER_AUTHORITY, selfToken, 0)
+        if (am != null) {
+            val iamClass = am.javaClass
+            val getExternal = iamClass.getMethod(
+                "getContentProviderExternal",
+                String::class.java,
+                Int::class.javaPrimitiveType,
+                IBinder::class.java,
+                String::class.java,
+            )
+            val holder = getExternal.invoke(
+                am,
+                VDisplayProtocol.PROVIDER_AUTHORITY,
+                0,
+                selfToken,
+                "styx-vdisplay",
+            )
+            if (holder != null) {
+                try {
+                    val providerField = holder.javaClass.getField("provider")
+                    val provider = providerField.get(holder)
+                        ?: throw IllegalStateException("$STYX_HOST_PACKAGE provider binder null")
+                    val resultBundle = invokeProviderCall(provider, extras)
+                    return resultBundle?.getBinder(VDisplayProtocol.EXTRA_APP_TOKEN)
+                        ?: throw IllegalStateException("Host did not return app_token")
+                } finally {
+                    runCatching {
+                        iamClass.getMethod(
+                            "removeContentProviderExternalAsUser",
+                            String::class.java,
+                            IBinder::class.java,
+                            Int::class.javaPrimitiveType,
+                        ).invoke(am, VDisplayProtocol.PROVIDER_AUTHORITY, selfToken, 0)
+                    }.onFailure {
+                        runCatching {
+                            iamClass.getMethod(
+                                "removeContentProviderExternal",
+                                String::class.java,
+                                IBinder::class.java,
+                            ).invoke(am, VDisplayProtocol.PROVIDER_AUTHORITY, selfToken)
+                        }
+                    }
+                }
             }
         }
+        val resultBundle = shellContext.contentResolver.call(
+            VDisplayProtocol.PROVIDER_AUTHORITY,
+            VDisplayProtocol.METHOD_REGISTER_BINDER,
+            null,
+            extras,
+        )
+        return resultBundle?.getBinder(VDisplayProtocol.EXTRA_APP_TOKEN)
+            ?: throw IllegalStateException("$STYX_HOST_PACKAGE provider unavailable")
     }
 
     @SuppressLint("PrivateApi")
